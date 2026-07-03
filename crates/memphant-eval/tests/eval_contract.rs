@@ -12,12 +12,12 @@ fn oracle_suite_runs_and_verifies_load_bearing_labels() {
     let suite = root.join("examples/evals/golden.yaml");
 
     let report = run_eval_file(&suite, EvalRunOptions::default()).expect("golden run");
-    assert_eq!(report.total_cases, 12);
+    assert_eq!(report.total_cases, 13);
     assert_eq!(report.passed_cases, report.total_cases);
     assert!(report.case_results.iter().all(|case| case.passed));
 
     let verify = verify_golden_file(&suite).expect("verify golden");
-    assert_eq!(verify.verified_cases, 12);
+    assert_eq!(verify.verified_cases, 13);
     assert!(verify.case_results.iter().all(|case| case.load_bearing));
 }
 
@@ -26,7 +26,7 @@ fn verify_golden_accepts_whole_corpus_directory() {
     let verify =
         verify_golden_file(&repo_root().join("examples/evals")).expect("verify golden directory");
 
-    assert_eq!(verify.verified_cases, 12);
+    assert_eq!(verify.verified_cases, 13);
     assert!(verify.case_results.iter().all(|case| case.load_bearing));
 }
 
@@ -333,6 +333,31 @@ fn rung12_l4_exhaustive_suite_proves_raw_episode_delta() {
             .case_results
             .iter()
             .all(|case| !case.missing_units.is_empty())
+    );
+}
+
+#[test]
+fn rung13_state_style_suite_proves_learned_rerank_delta() {
+    let suite = repo_root().join("benchmarks/rung13-learned-rerank-sampled.yaml");
+    let with_learned =
+        run_eval_file(&suite, EvalRunOptions::default()).expect("with learned rerank");
+    assert_eq!(with_learned.passed_cases, with_learned.total_cases);
+
+    let without_learned = run_eval_file(
+        &suite,
+        EvalRunOptions {
+            learned_rerank_enabled: false,
+            ..EvalRunOptions::default()
+        },
+    )
+    .expect("without learned rerank");
+    assert_eq!(without_learned.total_cases, with_learned.total_cases);
+    assert_eq!(without_learned.passed_cases, 0);
+    assert!(
+        without_learned
+            .case_results
+            .iter()
+            .all(|case| !case.missing_units.is_empty() || !case.forbidden_present.is_empty())
     );
 }
 

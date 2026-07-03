@@ -167,6 +167,7 @@ impl McpRuntime {
                             .context_packing_abstention_enabled
                             .unwrap_or(true),
                         rerank_enabled: request.rerank_enabled.unwrap_or(true),
+                        learned_rerank_profile: None,
                         query_decomposition_enabled: request
                             .query_decomposition_enabled
                             .unwrap_or(true),

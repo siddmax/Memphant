@@ -2,9 +2,9 @@ use std::collections::HashMap;
 
 use memphant_core::{CoreError, InMemoryStore, MemoryStore, recall, record_mark};
 use memphant_types::{
-    ActorId, ContextualChunk, MarkOutcome, MarkRequest, MemoryEdgeKind, MemoryKind, NewEpisode,
-    NewMemoryEdge, NewMemoryUnit, RecallChannel, RecallDropReason, RecallMode, RecallRequest,
-    ScopeId, TenantId, TraceId, TrustLevel, UnitId, UnitState,
+    ActorId, ContextualChunk, LearnedRerankProfile, MarkOutcome, MarkRequest, MemoryEdgeKind,
+    MemoryKind, NewEpisode, NewMemoryEdge, NewMemoryUnit, RecallChannel, RecallDropReason,
+    RecallMode, RecallRequest, ScopeId, TenantId, TraceId, TrustLevel, UnitId, UnitState,
 };
 use serde::Deserialize;
 
@@ -43,6 +43,7 @@ async fn recall_writes_trace_for_scope_denial() {
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
+            learned_rerank_profile: None,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
             decay_enabled: true,
@@ -167,6 +168,7 @@ async fn dsr_decay_fold_promotes_reinforced_memory_over_ignored_stale_candidate(
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
+            learned_rerank_profile: None,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
             decay_enabled: true,
@@ -321,6 +323,7 @@ async fn exhaustive_mode_gathers_buried_raw_episode_evidence_without_changing_fa
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
+            learned_rerank_profile: None,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
             decay_enabled: true,
@@ -348,6 +351,7 @@ async fn exhaustive_mode_gathers_buried_raw_episode_evidence_without_changing_fa
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
+            learned_rerank_profile: None,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
             decay_enabled: true,
@@ -462,6 +466,7 @@ async fn contextual_chunk_recall_finds_source_unit_and_traces_flag() {
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
+            learned_rerank_profile: None,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
             decay_enabled: true,
@@ -542,6 +547,7 @@ async fn servicenow_query_does_not_trigger_temporal_recency_match() {
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
+            learned_rerank_profile: None,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
             decay_enabled: true,
@@ -633,6 +639,7 @@ async fn recall_drops_expired_validity_window_for_current_query() {
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
+            learned_rerank_profile: None,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
             decay_enabled: true,
@@ -749,6 +756,7 @@ async fn edge_expansion_can_be_disabled_and_traces_related_candidates() {
             edge_expansion_enabled: false,
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
+            learned_rerank_profile: None,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
             decay_enabled: true,
@@ -774,6 +782,7 @@ async fn edge_expansion_can_be_disabled_and_traces_related_candidates() {
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
+            learned_rerank_profile: None,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
             decay_enabled: true,
@@ -881,6 +890,7 @@ async fn packing_collapses_duplicate_decoys_and_preserves_answer_under_budget() 
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
+            learned_rerank_profile: None,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
             decay_enabled: true,
@@ -1007,6 +1017,7 @@ async fn packing_abstains_when_top_evidence_is_unresolved_contradiction() {
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
+            learned_rerank_profile: None,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
             decay_enabled: true,
@@ -1106,6 +1117,7 @@ async fn bounded_rerank_reorders_rank_sensitive_candidate_and_traces_decision() 
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
             rerank_enabled: false,
+            learned_rerank_profile: None,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
             decay_enabled: true,
@@ -1140,6 +1152,7 @@ async fn bounded_rerank_reorders_rank_sensitive_candidate_and_traces_decision() 
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
+            learned_rerank_profile: None,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
             decay_enabled: true,
@@ -1161,6 +1174,163 @@ async fn bounded_rerank_reorders_rank_sensitive_candidate_and_traces_decision() 
     assert_eq!(trace.reranker_id, "deterministic-local-v1");
     assert!(trace.rerank_input_count >= 2);
     assert!(trace.rerank_overfetch_ratio >= 2.0);
+
+    let answer_trace = trace
+        .candidates
+        .iter()
+        .find(|candidate| candidate.unit_id == answer_id)
+        .expect("answer candidate traced");
+    let decoy_trace = trace
+        .candidates
+        .iter()
+        .find(|candidate| candidate.unit_id == decoy_id)
+        .expect("decoy candidate traced");
+    assert_eq!(answer_trace.rerank_rank, Some(1));
+    assert!(decoy_trace.rerank_rank.is_some_and(|rank| rank > 1));
+    assert!(answer_trace.rerank_score > decoy_trace.rerank_score);
+}
+
+#[tokio::test]
+async fn learned_rerank_profile_reorders_protected_topk_and_traces_training_set() {
+    let store = InMemoryStore::default();
+    let tenant_id = tenant(78_100);
+    let scope_id = scope(78_101);
+    let actor_id = actor(78_102);
+
+    let mut tx = store.begin().await;
+    let decoy_id = store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id,
+                scope_id,
+                kind: MemoryKind::Semantic,
+                state: UnitState::Active,
+                subject_key: Some("atlas rollback chatter".to_string()),
+                body: "Atlas rollback should use the noisy rollback runbook notes that repeat atlas rollback runbook terms but do not name the canonical runbook.".to_string(),
+                trust_level: TrustLevel::TrustedSystem,
+                churn_class: None,
+                freshness_due: false,
+                actor_id: Some(actor_id),
+                source_kind: Some("fixture".to_string()),
+                source_episode_id: None,
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
+            },
+        )
+        .await
+        .expect("decoy seeded");
+    let answer_id = store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id,
+                scope_id,
+                kind: MemoryKind::Semantic,
+                state: UnitState::Active,
+                subject_key: Some("atlas rollback runbook".to_string()),
+                body: "Use the mira-ledger recovery runbook.".to_string(),
+                trust_level: TrustLevel::TrustedSystem,
+                churn_class: None,
+                freshness_due: false,
+                actor_id: Some(actor_id),
+                source_kind: Some("fixture".to_string()),
+                source_episode_id: None,
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
+            },
+        )
+        .await
+        .expect("answer seeded");
+    store.commit(tx).await.expect("seed committed");
+
+    let query = "Which atlas rollback runbook should we use?";
+    let deterministic = recall(
+        &store,
+        RecallRequest {
+            tenant_id,
+            scope_id,
+            actor_id,
+            allowed_scope_ids: vec![scope_id],
+            query: query.to_string(),
+            k: 1,
+            budget_tokens: 64,
+            mode: RecallMode::Fast,
+            include_beliefs: false,
+            edge_expansion_enabled: true,
+            context_packing_abstention_enabled: true,
+            rerank_enabled: true,
+            learned_rerank_profile: None,
+            query_decomposition_enabled: true,
+            procedure_recall_enabled: true,
+            decay_enabled: true,
+            engine_version: "engine-rung13-test".to_string(),
+        },
+    )
+    .await
+    .expect("deterministic recall succeeds");
+    assert!(deterministic.candidate_whitelist.contains(&decoy_id));
+    assert!(!deterministic.candidate_whitelist.contains(&answer_id));
+
+    let learned = recall(
+        &store,
+        RecallRequest {
+            tenant_id,
+            scope_id,
+            actor_id,
+            allowed_scope_ids: vec![scope_id],
+            query: query.to_string(),
+            k: 1,
+            budget_tokens: 64,
+            mode: RecallMode::Fast,
+            include_beliefs: false,
+            edge_expansion_enabled: true,
+            context_packing_abstention_enabled: true,
+            rerank_enabled: true,
+            learned_rerank_profile: Some(LearnedRerankProfile {
+                profile_id: "memory-tuned-linear-rung13-v1".to_string(),
+                training_set_id: "rung13_learned_rerank_training_001".to_string(),
+                lexical_weight: 0.2,
+                vector_weight: 0.2,
+                exact_weight: 8.0,
+                intent_weight: 0.0,
+                decay_weight: 0.5,
+                fused_weight: 0.2,
+            }),
+            query_decomposition_enabled: true,
+            procedure_recall_enabled: true,
+            decay_enabled: true,
+            engine_version: "engine-rung13-test".to_string(),
+        },
+    )
+    .await
+    .expect("learned-profile recall succeeds");
+    assert!(learned.candidate_whitelist.contains(&answer_id));
+    assert!(!learned.candidate_whitelist.contains(&decoy_id));
+
+    let trace = store.trace_by_id(learned.trace_id).expect("trace exists");
+    assert!(
+        trace
+            .feature_flags
+            .iter()
+            .any(|flag| flag == "learned_rerank_enabled")
+    );
+    assert_eq!(trace.reranker_id, "memory-tuned-linear-rung13-v1");
+    assert_eq!(trace.weight_vector_id, "memory-tuned-linear-rung13-v1");
+    assert_eq!(
+        trace.learned_rerank_training_set_id.as_deref(),
+        Some("rung13_learned_rerank_training_001")
+    );
 
     let answer_trace = trace
         .candidates
@@ -1290,6 +1460,7 @@ async fn query_decomposition_recovers_composite_answer_and_traces_subqueries() {
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
+            learned_rerank_profile: None,
             query_decomposition_enabled: false,
             procedure_recall_enabled: true,
             decay_enabled: true,
@@ -1331,6 +1502,7 @@ async fn query_decomposition_recovers_composite_answer_and_traces_subqueries() {
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
+            learned_rerank_profile: None,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
             decay_enabled: true,
@@ -1567,6 +1739,7 @@ async fn procedural_memory_replays_only_validated_safe_procedures_and_traces_gat
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
+            learned_rerank_profile: None,
             query_decomposition_enabled: true,
             procedure_recall_enabled: false,
             decay_enabled: true,
@@ -1593,6 +1766,7 @@ async fn procedural_memory_replays_only_validated_safe_procedures_and_traces_gat
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
+            learned_rerank_profile: None,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
             decay_enabled: true,
@@ -1755,6 +1929,7 @@ async fn recall_golden_fixtures_pass() {
                 edge_expansion_enabled: true,
                 context_packing_abstention_enabled: true,
                 rerank_enabled: true,
+                learned_rerank_profile: None,
                 query_decomposition_enabled: true,
                 procedure_recall_enabled: true,
                 decay_enabled: true,

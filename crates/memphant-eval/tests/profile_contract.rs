@@ -643,3 +643,92 @@ fn rung12_promotion_requires_l4_sample_and_no_l4_control() {
     assert!(text.contains("rung_decision:12:missing_l4_exhaustive_sample"));
     assert!(text.contains("rung_decision:12:missing_no_l4_control"));
 }
+
+#[test]
+fn rung13_profile_archives_learned_rerank_promotion() {
+    let archive_dir = tempfile::tempdir().expect("tempdir");
+    let archive_path = archive_dir.path().join("rung13-profile.json");
+    let report = run_profile_file(
+        &repo_root().join("examples/evals/rung13-learned-rerank-profile.yaml"),
+        "rungs-0-12-baseline",
+        Some(archive_path.clone()),
+    )
+    .expect("rung13 profile should pass");
+
+    let decision = report
+        .rung_decisions
+        .iter()
+        .find(|decision| decision.rung == 13)
+        .expect("rung 13 decision");
+    assert_eq!(decision.item, "learned reranker");
+    assert_eq!(decision.status, "promoted");
+    assert_eq!(decision.axes, ["outcome", "interactive"]);
+    assert!(decision.delta_vs_baseline >= 0.03);
+    assert!(decision.ci[0] >= 0.03);
+    assert!(
+        decision
+            .benchmark_sample_refs
+            .iter()
+            .any(|sample| sample.contains("learned_rerank_memory_tuned_runbook"))
+    );
+    assert!(
+        decision
+            .benchmark_sample_refs
+            .iter()
+            .any(|sample| sample.contains("no-learned-rerank"))
+    );
+    assert!(
+        decision
+            .benchmark_sample_refs
+            .iter()
+            .any(|sample| sample.contains("training-set:rung13_learned_rerank_training_001"))
+    );
+    assert!(
+        report
+            .activated_levers
+            .iter()
+            .any(|item| item == "Learned reranker")
+    );
+    assert!(
+        report
+            .dormant_levers
+            .iter()
+            .any(|item| item == "Learned DSR/FSRS fitter")
+    );
+
+    let archived: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&archive_path).expect("read archive"))
+            .expect("archive json");
+    assert_eq!(archived["rung_decisions"][0]["rung"], 13);
+}
+
+#[test]
+fn rung13_promotion_requires_learned_sample_control_and_training_set() {
+    let source =
+        fs::read_to_string(repo_root().join("examples/evals/rung13-learned-rerank-profile.yaml"))
+            .expect("read fixture");
+    let bad = source
+        .replace(
+            "      - memphant:examples/evals/golden/learned_rerank_memory_tuned_runbook.yaml\n",
+            "",
+        )
+        .replace(
+            "      - no-learned-rerank:benchmarks/rung13-baseline-sampled.yaml\n",
+            "",
+        )
+        .replace(
+            "      - training-set:rung13_learned_rerank_training_001\n",
+            "",
+        );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("bad-rung13-profile.yaml");
+    fs::write(&path, bad).expect("write fixture");
+
+    let error = run_profile_file(&path, "rungs-0-12-baseline", None)
+        .expect_err("rung13 promotion without sample/control/training proof should fail");
+
+    let text = error.to_string();
+    assert!(text.contains("rung_decision:13:missing_learned_rerank_sample"));
+    assert!(text.contains("rung_decision:13:missing_no_learned_rerank_control"));
+    assert!(text.contains("rung_decision:13:missing_training_set_ref"));
+}

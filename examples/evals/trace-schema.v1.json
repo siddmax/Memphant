@@ -466,6 +466,13 @@
       "minimum": 0,
       "type": "integer"
     },
+    "learned_rerank_training_set_id": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "mode_executed": {
       "$ref": "#/$defs/RecallMode"
     },

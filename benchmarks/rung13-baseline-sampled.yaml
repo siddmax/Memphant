@@ -1,0 +1,3 @@
+id: rung13-baseline-sampled
+cases:
+  - ../examples/evals/golden/learned_rerank_memory_tuned_runbook.yaml

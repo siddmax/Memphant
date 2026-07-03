@@ -6,6 +6,7 @@ cases:
   - golden/procedural_memory_replay_validation.yaml
   - golden/dsr_decay_fold_review_event.yaml
   - golden/l4_exhaustive_raw_episode_buried.yaml
+  - golden/learned_rerank_memory_tuned_runbook.yaml
   - golden/checkout_region.yaml
   - golden/contextual_chunk_breaker.yaml
   - golden/deleted_secret_filter.yaml

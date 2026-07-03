@@ -4,6 +4,7 @@ golden:
   - procedural_memory_replay_validation
   - dsr_decay_fold_review_event
   - l4_exhaustive_raw_episode_buried
+  - learned_rerank_memory_tuned_runbook
   - checkout_region
   - contextual_chunk_breaker
   - deleted_secret_filter

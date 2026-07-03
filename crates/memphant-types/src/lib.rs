@@ -120,7 +120,7 @@ pub enum RecallDropReason {
     Irrelevant,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RecallRequest {
     pub tenant_id: TenantId,
     pub scope_id: ScopeId,
@@ -137,6 +137,8 @@ pub struct RecallRequest {
     pub context_packing_abstention_enabled: bool,
     #[serde(default = "default_true")]
     pub rerank_enabled: bool,
+    #[serde(default)]
+    pub learned_rerank_profile: Option<LearnedRerankProfile>,
     #[serde(default = "default_true")]
     pub query_decomposition_enabled: bool,
     #[serde(default = "default_true")]
@@ -144,6 +146,18 @@ pub struct RecallRequest {
     #[serde(default = "default_true")]
     pub decay_enabled: bool,
     pub engine_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct LearnedRerankProfile {
+    pub profile_id: String,
+    pub training_set_id: String,
+    pub lexical_weight: f32,
+    pub vector_weight: f32,
+    pub exact_weight: f32,
+    pub intent_weight: f32,
+    pub decay_weight: f32,
+    pub fused_weight: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -234,6 +248,8 @@ pub struct RetrievalTrace {
     pub reranker_id: String,
     pub rerank_input_count: usize,
     pub rerank_overfetch_ratio: f32,
+    #[serde(default)]
+    pub learned_rerank_training_set_id: Option<String>,
     #[serde(default)]
     pub subquery_ids: Vec<String>,
     pub decomposition_reason: String,

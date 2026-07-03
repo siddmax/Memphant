@@ -5,14 +5,14 @@ use async_trait::async_trait;
 use fsrs::{FSRS, FSRS6_DEFAULT_DECAY, MemoryState, current_retrievability};
 use memphant_types::{
     AdmissionAction, CorrectRequest, CorrectResult, DedupOutcome, EdgeId, EpisodeId, ForgetRequest,
-    ForgetResult, JobId, MarkOutcome, MarkRequest, MarkResult, MemoryEdgeKind, MemoryKind,
-    NewEpisode, NewMemoryEdge, NewMemoryUnit, ProcedureTraceFact, QueuedReflectJob,
-    RecallCandidateTrace, RecallChannel, RecallCitation, RecallContextItem, RecallDropReason,
-    RecallDroppedItem, RecallMode, RecallPolicyFilter, RecallRequest, RecallResponse, ReflectInput,
-    ReflectJob, ReflectJobKind, ReflectStageFact, ReflectTrace, RetainInput, RetainOutcome,
-    RetainRequest, RetainResourceOutcome, RetainResourceRequest, RetainResult, RetrievalTrace,
-    ReviewEvent, ScopeId, StoredEpisode, StoredMemoryEdge, StoredMemoryUnit, StoredResource,
-    TenantId, TraceId, TrustLevel, UnitId, UnitState,
+    ForgetResult, JobId, LearnedRerankProfile, MarkOutcome, MarkRequest, MarkResult,
+    MemoryEdgeKind, MemoryKind, NewEpisode, NewMemoryEdge, NewMemoryUnit, ProcedureTraceFact,
+    QueuedReflectJob, RecallCandidateTrace, RecallChannel, RecallCitation, RecallContextItem,
+    RecallDropReason, RecallDroppedItem, RecallMode, RecallPolicyFilter, RecallRequest,
+    RecallResponse, ReflectInput, ReflectJob, ReflectJobKind, ReflectStageFact, ReflectTrace,
+    RetainInput, RetainOutcome, RetainRequest, RetainResourceOutcome, RetainResourceRequest,
+    RetainResult, RetrievalTrace, ReviewEvent, ScopeId, StoredEpisode, StoredMemoryEdge,
+    StoredMemoryUnit, StoredResource, TenantId, TraceId, TrustLevel, UnitId, UnitState,
 };
 use memphant_types::{NewResource, ResourceExtractorState, ResourceId};
 
@@ -737,6 +737,8 @@ pub async fn recall(
     store: &InMemoryStore,
     request: RecallRequest,
 ) -> Result<RecallResponse, CoreError> {
+    validate_learned_rerank_profile(request.learned_rerank_profile.as_ref())?;
+
     let mut state = store.inner.lock().map_err(|_| StoreError::Poisoned)?;
     let allowed = request.allowed_scope_ids.contains(&request.scope_id);
 
@@ -772,6 +774,7 @@ pub async fn recall(
             reranker_id: "none".to_string(),
             rerank_input_count: 0,
             rerank_overfetch_ratio: 0.0,
+            learned_rerank_training_set_id: None,
             subquery_ids: Vec::new(),
             decomposition_reason: "none".to_string(),
             procedure_ids: Vec::new(),
@@ -1119,13 +1122,14 @@ pub async fn recall(
         filter_selectivity,
         iterative_scan_depth: Some(iterative_scan_depth as u32),
         consolidation_lag_ms: 0,
-        weight_vector_id: "default".to_string(),
+        weight_vector_id: rerank.weight_vector_id,
         mode_requested: request.mode,
         mode_executed: request.mode,
         escalation_reason: "none".to_string(),
         reranker_id: rerank.reranker_id,
         rerank_input_count: rerank.input_count,
         rerank_overfetch_ratio: rerank.overfetch_ratio,
+        learned_rerank_training_set_id: rerank.training_set_id,
         subquery_ids: decomposition
             .subqueries
             .iter()
@@ -1447,14 +1451,17 @@ fn rerank_candidates(
     if !request.rerank_enabled {
         return RerankTraceFacts {
             reranker_id: "none".to_string(),
+            weight_vector_id: "default".to_string(),
+            training_set_id: None,
             input_count: 0,
             overfetch_ratio: 0.0,
         };
     }
 
+    let profile = request.learned_rerank_profile.as_ref();
     let input_count = fused.len().min(rerank_input_cap(request));
     for candidate in fused.iter_mut().take(input_count) {
-        candidate.rerank_score = deterministic_rerank_score(candidate, query_tokens);
+        candidate.rerank_score = rerank_score(candidate, query_tokens, profile);
     }
     fused[..input_count].sort_by(|left, right| {
         right
@@ -1474,7 +1481,13 @@ fn rerank_candidates(
     }
 
     RerankTraceFacts {
-        reranker_id: "deterministic-local-v1".to_string(),
+        reranker_id: profile
+            .map(|profile| profile.profile_id.clone())
+            .unwrap_or_else(|| "deterministic-local-v1".to_string()),
+        weight_vector_id: profile
+            .map(|profile| profile.profile_id.clone())
+            .unwrap_or_else(|| "default".to_string()),
+        training_set_id: profile.map(|profile| profile.training_set_id.clone()),
         input_count,
         overfetch_ratio: input_count as f32 / request.k.max(1) as f32,
     }
@@ -1488,13 +1501,29 @@ fn rerank_input_cap(request: &RecallRequest) -> usize {
     (request.k.saturating_mul(10)).min(mode_cap).max(request.k)
 }
 
-fn deterministic_rerank_score(candidate: &CandidateAccumulator, query_tokens: &[String]) -> f32 {
-    (3.0 * lexical_score(&candidate.unit, query_tokens))
-        + (2.0 * vector_score(&candidate.unit, query_tokens))
-        + exact_score(&candidate.unit, query_tokens)
-        + (2.0 * rerank_intent_anchor_score(&candidate.unit, query_tokens))
-        + (3.0 * candidate.decay.retrievability)
-        + candidate.fused_score
+fn rerank_score(
+    candidate: &CandidateAccumulator,
+    query_tokens: &[String],
+    profile: Option<&LearnedRerankProfile>,
+) -> f32 {
+    let lexical = lexical_score(&candidate.unit, query_tokens);
+    let vector = vector_score(&candidate.unit, query_tokens);
+    let exact = exact_score(&candidate.unit, query_tokens);
+    let intent = rerank_intent_anchor_score(&candidate.unit, query_tokens);
+    let decay = candidate.decay.retrievability;
+    let fused = candidate.fused_score;
+
+    match profile {
+        Some(profile) => {
+            (profile.lexical_weight * lexical)
+                + (profile.vector_weight * vector)
+                + (profile.exact_weight * exact)
+                + (profile.intent_weight * intent)
+                + (profile.decay_weight * decay)
+                + (profile.fused_weight * fused)
+        }
+        None => (3.0 * lexical) + (2.0 * vector) + exact + (2.0 * intent) + (3.0 * decay) + fused,
+    }
 }
 
 fn rerank_intent_anchor_score(unit: &StoredMemoryUnit, query_tokens: &[String]) -> f32 {
@@ -1567,8 +1596,42 @@ impl DecayScore {
 
 struct RerankTraceFacts {
     reranker_id: String,
+    weight_vector_id: String,
+    training_set_id: Option<String>,
     input_count: usize,
     overfetch_ratio: f32,
+}
+
+fn validate_learned_rerank_profile(
+    profile: Option<&LearnedRerankProfile>,
+) -> Result<(), CoreError> {
+    let Some(profile) = profile else {
+        return Ok(());
+    };
+    if profile.profile_id.trim().is_empty() {
+        return Err(CoreError::Invalid(
+            "learned_rerank_profile.profile_id cannot be empty".to_string(),
+        ));
+    }
+    if profile.training_set_id.trim().is_empty() {
+        return Err(CoreError::Invalid(
+            "learned_rerank_profile.training_set_id cannot be empty".to_string(),
+        ));
+    }
+    let weights = [
+        profile.lexical_weight,
+        profile.vector_weight,
+        profile.exact_weight,
+        profile.intent_weight,
+        profile.decay_weight,
+        profile.fused_weight,
+    ];
+    if weights.iter().any(|weight| !weight.is_finite()) {
+        return Err(CoreError::Invalid(
+            "learned_rerank_profile weights must be finite".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 struct QueryDecompositionFacts {
@@ -2346,6 +2409,9 @@ fn recall_feature_flags(request: &RecallRequest) -> Vec<String> {
     }
     if request.rerank_enabled {
         flags.push("rerank_enabled".to_string());
+    }
+    if request.rerank_enabled && request.learned_rerank_profile.is_some() {
+        flags.push("learned_rerank_enabled".to_string());
     }
     if request.query_decomposition_enabled {
         flags.push("query_decomposition_enabled".to_string());

@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use memphant_core::{InMemoryStore, MemoryStore, forget_memory, recall, record_mark};
 use memphant_types::{
-    ActorId, ContextualChunk, ENGINE_VERSION, ForgetRequest, ForgetSelector, MarkOutcome,
-    MarkRequest, MemoryEdgeKind, MemoryKind, NewEpisode, NewMemoryEdge, NewMemoryUnit,
+    ActorId, ContextualChunk, ENGINE_VERSION, ForgetRequest, ForgetSelector, LearnedRerankProfile,
+    MarkOutcome, MarkRequest, MemoryEdgeKind, MemoryKind, NewEpisode, NewMemoryEdge, NewMemoryUnit,
     RecallDropReason, RecallMode, RecallRequest, ScopeId, StoredMemoryUnit, TRACE_SCHEMA_VERSION,
     TenantId, TraceId, TrustLevel, UnitId, UnitState,
 };
@@ -52,6 +52,7 @@ pub struct EvalRunOptions {
     pub edge_expansion_enabled: bool,
     pub context_packing_abstention_enabled: bool,
     pub rerank_enabled: bool,
+    pub learned_rerank_enabled: bool,
     pub query_decomposition_enabled: bool,
     pub procedure_recall_enabled: bool,
     pub decay_enabled: bool,
@@ -69,6 +70,7 @@ impl Default for EvalRunOptions {
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
+            learned_rerank_enabled: true,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
             decay_enabled: true,
@@ -298,6 +300,8 @@ struct GoldenCase {
     #[serde(default)]
     mode: Option<RecallMode>,
     #[serde(default)]
+    learned_rerank_profile: Option<LearnedRerankProfile>,
+    #[serde(default)]
     include_beliefs: bool,
     seed: GoldenSeed,
     expect: GoldenExpect,
@@ -366,6 +370,10 @@ struct GoldenExpect {
     trace_feature_flags_include: Vec<String>,
     #[serde(default)]
     reranker_id: Option<String>,
+    #[serde(default)]
+    rerank_training_set_id: Option<String>,
+    #[serde(default)]
+    weight_vector_id: Option<String>,
     #[serde(default)]
     rerank_input_count_min: Option<usize>,
     #[serde(default)]
@@ -492,6 +500,7 @@ struct GoldenRunControls {
     edge_expansion_enabled: bool,
     context_packing_abstention_enabled: bool,
     rerank_enabled: bool,
+    learned_rerank_enabled: bool,
     query_decomposition_enabled: bool,
     procedure_recall_enabled: bool,
     decay_enabled: bool,
@@ -507,6 +516,7 @@ impl Default for GoldenRunControls {
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
+            learned_rerank_enabled: true,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
             decay_enabled: true,
@@ -524,6 +534,7 @@ impl From<&EvalRunOptions> for GoldenRunControls {
             edge_expansion_enabled: options.edge_expansion_enabled,
             context_packing_abstention_enabled: options.context_packing_abstention_enabled,
             rerank_enabled: options.rerank_enabled,
+            learned_rerank_enabled: options.learned_rerank_enabled,
             query_decomposition_enabled: options.query_decomposition_enabled,
             procedure_recall_enabled: options.procedure_recall_enabled,
             decay_enabled: options.decay_enabled,
@@ -579,6 +590,7 @@ pub fn run_eval_file(path: &Path, options: EvalRunOptions) -> EvalResult<EvalRep
                 "edge_expansion_enabled": options.edge_expansion_enabled,
                 "context_packing_abstention_enabled": options.context_packing_abstention_enabled,
                 "rerank_enabled": options.rerank_enabled,
+                "learned_rerank_enabled": options.learned_rerank_enabled,
                 "query_decomposition_enabled": options.query_decomposition_enabled,
                 "procedure_recall_enabled": options.procedure_recall_enabled,
                 "decay_enabled": options.decay_enabled,
@@ -1072,6 +1084,9 @@ fn validate_rung_decision(
     if decision.rung == 12 && decision.status == "promoted" {
         validate_rung12_l4_exhaustive_promotion(decision, axes, &prefix, findings);
     }
+    if decision.rung == 13 && decision.status == "promoted" {
+        validate_rung13_learned_rerank_promotion(decision, axes, &prefix, findings);
+    }
 }
 
 fn validate_rung4_contextual_chunk_promotion(
@@ -1467,6 +1482,59 @@ fn validate_rung12_l4_exhaustive_promotion(
     }
 }
 
+fn validate_rung13_learned_rerank_promotion(
+    decision: &RungDecision,
+    axes: &BTreeMap<String, SotaAxisResult>,
+    prefix: &str,
+    findings: &mut Vec<String>,
+) {
+    if decision.item != "learned reranker" {
+        findings.push(format!("{prefix}:invalid_item:{}", decision.item));
+    }
+    for required_axis in ["outcome", "interactive"] {
+        if !decision.axes.iter().any(|axis| axis == required_axis) {
+            findings.push(format!("{prefix}:missing_{required_axis}_axis"));
+        }
+    }
+    if !decision
+        .benchmark_sample_refs
+        .iter()
+        .any(|sample| sample.contains("learned_rerank_memory_tuned_runbook"))
+    {
+        findings.push(format!("{prefix}:missing_learned_rerank_sample"));
+    }
+    if !decision
+        .benchmark_sample_refs
+        .iter()
+        .any(|sample| sample.contains("no-learned-rerank"))
+    {
+        findings.push(format!("{prefix}:missing_no_learned_rerank_control"));
+    }
+    if !decision
+        .benchmark_sample_refs
+        .iter()
+        .any(|sample| sample.contains("training-set:rung13_learned_rerank_training_001"))
+    {
+        findings.push(format!("{prefix}:missing_training_set_ref"));
+    }
+    if !decision.before_trace_ref.contains("rung13-baseline") {
+        findings.push(format!("{prefix}:missing_rung13_baseline_trace"));
+    }
+    if !decision.after_trace_ref.contains("rung13-learned-rerank") {
+        findings.push(format!("{prefix}:missing_rung13_learned_trace"));
+    }
+    if decision.delta_vs_baseline < 0.03 || decision.ci[0] < 0.03 {
+        findings.push(format!("{prefix}:delta_below_three_point_gate"));
+    }
+    for axis in ["outcome", "interactive"] {
+        match axes.get(axis) {
+            Some(result) if result.delta_vs_baseline.unwrap_or_default() > 0.0 => {}
+            Some(_) => findings.push(format!("{prefix}:{axis}:non_positive_axis_delta")),
+            None => {}
+        }
+    }
+}
+
 fn validate_ci(prefix: &str, delta: Option<f64>, ci: Option<[f64; 2]>, findings: &mut Vec<String>) {
     let Some(delta) = delta else {
         findings.push(format!("{prefix}:missing_delta"));
@@ -1540,6 +1608,7 @@ async fn run_syndai_trace_compare(
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
+            learned_rerank_profile: None,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
             decay_enabled: true,
@@ -1648,6 +1717,10 @@ async fn run_golden_case_inner(
             edge_expansion_enabled: recall_edge_expansion_enabled,
             context_packing_abstention_enabled: controls.context_packing_abstention_enabled,
             rerank_enabled: controls.rerank_enabled,
+            learned_rerank_profile: case
+                .learned_rerank_profile
+                .clone()
+                .filter(|_| controls.learned_rerank_enabled),
             query_decomposition_enabled: controls.query_decomposition_enabled,
             procedure_recall_enabled: controls.procedure_recall_enabled,
             decay_enabled: controls.decay_enabled,
@@ -1749,6 +1822,25 @@ async fn run_golden_case_inner(
         dropped_mismatches.push(format!(
             "reranker_id:expected={expected}:actual={}",
             trace.reranker_id
+        ));
+    }
+    if let Some(expected) = &case.expect.rerank_training_set_id
+        && trace.learned_rerank_training_set_id.as_deref() != Some(expected.as_str())
+    {
+        dropped_mismatches.push(format!(
+            "rerank_training_set_id:expected={expected}:actual={}",
+            trace
+                .learned_rerank_training_set_id
+                .as_deref()
+                .unwrap_or("none")
+        ));
+    }
+    if let Some(expected) = &case.expect.weight_vector_id
+        && trace.weight_vector_id != *expected
+    {
+        dropped_mismatches.push(format!(
+            "weight_vector_id:expected={expected}:actual={}",
+            trace.weight_vector_id
         ));
     }
     if let Some(minimum) = case.expect.rerank_input_count_min
@@ -1864,6 +1956,7 @@ async fn run_fixture_security_lane(lane: &SecurityLane) -> EvalResult<String> {
         k: None,
         budget_tokens: None,
         mode: None,
+        learned_rerank_profile: None,
         include_beliefs: false,
         seed: lane.seed.clone(),
         expect: lane.expect.clone(),
@@ -1908,6 +2001,7 @@ async fn run_high_risk_lane(lane: &SecurityLane) -> EvalResult<String> {
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
+            learned_rerank_profile: None,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
             decay_enabled: true,
@@ -1996,6 +2090,7 @@ async fn run_deletion_lane(lane: &SecurityLane) -> EvalResult<String> {
         k: None,
         budget_tokens: None,
         mode: None,
+        learned_rerank_profile: None,
         include_beliefs: false,
         seed: GoldenSeed::default(),
         expect: lane.expect.clone(),
@@ -2015,6 +2110,7 @@ async fn run_deletion_lane(lane: &SecurityLane) -> EvalResult<String> {
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
+            learned_rerank_profile: None,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
             decay_enabled: true,
