@@ -1,0 +1,50 @@
+id: inferred_belief_composition
+query: "Does the user prefer keyboard-first quiet review surfaces?"
+k: 3
+budget_tokens: 64
+include_beliefs: true
+second_author_confirmed: true
+seed:
+  units:
+    - name: quiet_review_preference
+      episode_body: "Direct user note: the user prefers quiet review surfaces."
+      kind: semantic
+      state: active
+      subject_key: "quiet review preference"
+      body: "The user prefers quiet review surfaces."
+      trust_level: trusted_user
+    - name: keyboard_review_preference
+      episode_body: "Trusted system note: the user prefers keyboard-first review surfaces."
+      kind: semantic
+      state: active
+      subject_key: "keyboard review preference"
+      body: "The user prefers keyboard-first review surfaces."
+      trust_level: trusted_system
+    - name: composed_review_preference
+      source_kind: composition
+      episode_body: "Reflect composed two trusted preference observations into one belief-tier abstraction."
+      kind: belief
+      state: active
+      subject_key: "user_preference:review surfaces"
+      body: "The user prefers keyboard-first and quiet review surfaces."
+      trust_level: agent_output
+  edges:
+    - src: composed_review_preference
+      dst: quiet_review_preference
+      kind: derived_from
+    - src: composed_review_preference
+      dst: keyboard_review_preference
+      kind: derived_from
+expect:
+  answer_bearing_ids:
+    - composed_review_preference
+  top_k_contains:
+    - composed_review_preference
+  citations_include:
+    - composed_review_preference
+  trace_feature_flags_include:
+    - inferred_belief_composition_enabled
+  trace_candidate_derived_by:
+    composed_review_preference: composition
+  context_derived_by:
+    composed_review_preference: composition

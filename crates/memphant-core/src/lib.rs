@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -638,6 +638,7 @@ pub async fn correct_memory(
             dst_id: old_id,
             kind: MemoryEdgeKind::Supersedes,
         });
+    expire_composed_dependents(&mut state, request.tenant_id, &[old_id]);
 
     Ok(CorrectResult {
         correction_id: format!("cor_{}", new_id.as_uuid()),
@@ -676,7 +677,7 @@ pub async fn forget_memory(
     };
 
     let selector_scope = request.selector.scope_id.unwrap_or(request.scope_id);
-    let invalidated_units = units
+    let mut invalidated_units: Vec<_> = units
         .iter_mut()
         .filter(|unit| {
             if unit.tenant_id != request.tenant_id {
@@ -694,6 +695,12 @@ pub async fn forget_memory(
             unit.id
         })
         .collect();
+    invalidated_units.extend(delete_composed_dependents(
+        &mut state,
+        request.tenant_id,
+        &invalidated_units,
+        deletion_generation,
+    ));
 
     Ok(ForgetResult {
         deletion_generation,
@@ -884,6 +891,7 @@ pub async fn recall(
                 channel,
                 channel_rank,
                 channel_score: score,
+                derived_by: derived_by_for_unit(&unit).to_string(),
                 fused_rank: None,
                 fused_score: None,
                 rerank_rank: None,
@@ -950,6 +958,7 @@ pub async fn recall(
                         channel,
                         channel_rank,
                         channel_score: score,
+                        derived_by: derived_by_for_unit(&unit).to_string(),
                         fused_rank: None,
                         fused_score: None,
                         rerank_rank: None,
@@ -1015,6 +1024,7 @@ pub async fn recall(
                 channel: RecallChannel::Exhaustive,
                 channel_rank,
                 channel_score: score,
+                derived_by: derived_by_for_unit(&unit).to_string(),
                 fused_rank: None,
                 fused_score: None,
                 rerank_rank: None,
@@ -1104,7 +1114,14 @@ pub async fn recall(
         .collect::<Vec<_>>();
     let procedure_validation_states = procedure_trace_facts(&tenant_units, &request);
     let trace_id = TraceId::new();
-    let feature_flags = recall_feature_flags(&request);
+    let mut feature_flags = recall_feature_flags(&request);
+    if candidate_traces
+        .iter()
+        .any(|candidate| candidate.derived_by == "composition")
+        || items.iter().any(|item| item.derived_by == "composition")
+    {
+        feature_flags.push("inferred_belief_composition_enabled".to_string());
+    }
     let trace = RetrievalTrace {
         id: trace_id,
         tenant_id: request.tenant_id,
@@ -1876,6 +1893,7 @@ fn context_item_for(
     query_tokens: &[String],
 ) -> RecallContextItem {
     let suppression_labels = suppression_labels_for(&candidate.unit, tenant_edges);
+    let derived_by = derived_by_for_unit(&candidate.unit).to_string();
     let matched_contextual_chunk = contextual_chunk_score(&candidate.unit, query_tokens) > 0.0;
     let inclusion_reason = if candidate.unit.kind == MemoryKind::Procedural
         && procedure_signal_kind(&candidate.unit) == "failure"
@@ -1894,6 +1912,7 @@ fn context_item_for(
         unit_id: candidate.unit.id,
         body: candidate.unit.body,
         kind: candidate.unit.kind,
+        derived_by,
         inclusion_reason: inclusion_reason.to_string(),
         citation_episode_id: candidate.unit.source_episode_id,
         citation_resource_id: candidate.unit.source_resource_id,
@@ -2474,10 +2493,7 @@ pub async fn reflect_recorded(
                     && unit.state != UnitState::Deleted
                     && unit.state != UnitState::Invalidated
             }) {
-                if !high_trust
-                    && units[existing_index].kind == MemoryKind::Belief
-                    && is_independent_source(&units[existing_index], &candidate)
-                {
+                if can_promote_belief(&units[existing_index], &candidate) {
                     let belief_id = units[existing_index].id;
                     let semantic_id = UnitId::new();
                     units.push(StoredMemoryUnit {
@@ -2683,6 +2699,13 @@ pub async fn reflect_recorded(
             .extend(edges);
         actions.push(action);
     }
+    actions.extend(compose_inferred_beliefs(
+        &mut state,
+        input.tenant_id,
+        input.scope_id,
+        input.actor_id,
+        input.episode_id,
+    ));
 
     let trace = ReflectTrace {
         tenant_id: input.tenant_id,
@@ -2730,4 +2753,278 @@ fn is_independent_source(
 ) -> bool {
     existing.actor_id != Some(candidate.actor_id)
         && existing.source_kind.as_deref() != Some(candidate.source_kind.as_str())
+}
+
+fn can_promote_belief(
+    existing: &StoredMemoryUnit,
+    candidate: &memphant_types::ReflectCandidate,
+) -> bool {
+    if existing.kind != MemoryKind::Belief || candidate.source_kind == "composition" {
+        return false;
+    }
+    matches!(
+        candidate.trust_level,
+        TrustLevel::TrustedUser | TrustLevel::TrustedSystem
+    ) || is_independent_source(existing, candidate)
+}
+
+fn compose_inferred_beliefs(
+    state: &mut InMemoryState,
+    tenant_id: TenantId,
+    scope_id: ScopeId,
+    actor_id: memphant_types::ActorId,
+    episode_id: EpisodeId,
+) -> Vec<AdmissionAction> {
+    let Some(units) = state.memory_units.get(&tenant_id) else {
+        return Vec::new();
+    };
+
+    let existing_composed_bodies = units
+        .iter()
+        .filter(|unit| unit.scope_id == scope_id && derived_by_for_unit(unit) == "composition")
+        .filter(|unit| {
+            !matches!(
+                unit.state,
+                UnitState::Deleted | UnitState::Invalidated | UnitState::Expired
+            ) && unit.transaction_to.is_none()
+        })
+        .map(|unit| normalize_component(&unit.body))
+        .collect::<Vec<_>>();
+    let mut grouped: BTreeMap<String, Vec<(String, StoredMemoryUnit)>> = BTreeMap::new();
+    for unit in units
+        .iter()
+        .filter(|unit| unit.scope_id == scope_id && composable_source_unit(unit))
+    {
+        let Some(preference) = parse_preference_observation(&unit.body) else {
+            continue;
+        };
+        grouped
+            .entry(preference.object)
+            .or_default()
+            .push((preference.descriptor, unit.clone()));
+    }
+
+    let mut new_units = Vec::new();
+    let mut new_edges = Vec::new();
+    let mut actions = Vec::new();
+    for (object, mut observations) in grouped {
+        observations.sort_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.1.body.cmp(&right.1.body))
+        });
+        observations.dedup_by(|left, right| left.0 == right.0);
+        if observations.len() < 2 {
+            continue;
+        }
+        let body = format!(
+            "The user prefers {} and {} {}.",
+            observations[0].0, observations[1].0, object
+        );
+        if existing_composed_bodies.contains(&normalize_component(&body))
+            || new_units.iter().any(|unit: &StoredMemoryUnit| {
+                normalize_component(&unit.body) == normalize_component(&body)
+            })
+        {
+            continue;
+        }
+        let Some(subject_key) = derive_subject_key(Some("user preference"), Some(&object)) else {
+            continue;
+        };
+        let composed_id = UnitId::new();
+        new_units.push(StoredMemoryUnit {
+            id: composed_id,
+            tenant_id,
+            scope_id,
+            kind: MemoryKind::Belief,
+            state: UnitState::Candidate,
+            subject_key: Some(subject_key),
+            body,
+            trust_level: TrustLevel::AgentOutput,
+            freshness_due: false,
+            churn_class: None,
+            actor_id: Some(actor_id),
+            source_kind: Some("composition".to_string()),
+            source_episode_id: Some(episode_id),
+            source_resource_id: None,
+            deletion_generation: None,
+            contextual_chunks: Vec::new(),
+            valid_from: None,
+            valid_to: None,
+            transaction_from: Some(CURRENT_VALIDITY_CUTOFF.to_string()),
+            transaction_to: None,
+            difficulty: None,
+            stability_days: None,
+            last_reinforced_at: None,
+            reinforcement_count: 0,
+        });
+        for (_, source) in observations.iter().take(2) {
+            new_edges.push(StoredMemoryEdge {
+                id: EdgeId::new(),
+                tenant_id,
+                scope_id,
+                src_id: composed_id,
+                dst_id: source.id,
+                kind: MemoryEdgeKind::DerivedFrom,
+            });
+        }
+        actions.push(AdmissionAction::Append);
+    }
+
+    if !new_units.is_empty() {
+        state
+            .memory_units
+            .entry(tenant_id)
+            .or_default()
+            .extend(new_units);
+        state
+            .memory_edges
+            .entry(tenant_id)
+            .or_default()
+            .extend(new_edges);
+    }
+    actions
+}
+
+fn composable_source_unit(unit: &StoredMemoryUnit) -> bool {
+    matches!(unit.kind, MemoryKind::Semantic | MemoryKind::Belief)
+        && matches!(unit.state, UnitState::Active | UnitState::Candidate)
+        && unit.transaction_to.is_none()
+        && unit.deletion_generation.is_none()
+        && derived_by_for_unit(unit) != "composition"
+        && matches!(
+            unit.trust_level,
+            TrustLevel::TrustedUser | TrustLevel::TrustedSystem | TrustLevel::VerifiedTool
+        )
+}
+
+struct PreferenceObservation {
+    descriptor: String,
+    object: String,
+}
+
+fn parse_preference_observation(body: &str) -> Option<PreferenceObservation> {
+    let normalized = normalize_component(body).trim_end_matches('.').to_string();
+    let preference = normalized
+        .strip_prefix("the user prefers ")
+        .or_else(|| normalized.strip_prefix("user prefers "))?;
+    if contains_composition_risk(preference) {
+        return None;
+    }
+    let tokens = preference
+        .split_whitespace()
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    if tokens.len() < 3 {
+        return None;
+    }
+    let object = tokens[tokens.len() - 2..].join(" ");
+    let descriptor = tokens[..tokens.len() - 2].join(" ");
+    if descriptor.is_empty() || object.is_empty() {
+        return None;
+    }
+    Some(PreferenceObservation { descriptor, object })
+}
+
+fn contains_composition_risk(value: &str) -> bool {
+    [
+        "always agree",
+        "agree with me",
+        "tell me i am right",
+        "ignore evidence",
+        "ignore policy",
+        "bypass",
+        "admin",
+        "password",
+        "secret",
+        "token",
+        "delete production",
+        "force push",
+        "force-push",
+        "exfiltrat",
+        "curl ",
+        "rm -rf",
+    ]
+    .iter()
+    .any(|phrase| value.contains(phrase))
+}
+
+fn derived_by_for_unit(unit: &StoredMemoryUnit) -> &'static str {
+    if unit.source_kind.as_deref() == Some("composition") {
+        "composition"
+    } else {
+        "extraction"
+    }
+}
+
+fn expire_composed_dependents(
+    state: &mut InMemoryState,
+    tenant_id: TenantId,
+    source_ids: &[UnitId],
+) {
+    let dependent_ids = composed_dependent_ids(state, tenant_id, source_ids);
+    if let Some(units) = state.memory_units.get_mut(&tenant_id) {
+        for unit in units
+            .iter_mut()
+            .filter(|unit| dependent_ids.contains(&unit.id))
+        {
+            if unit.state != UnitState::Deleted && unit.transaction_to.is_none() {
+                unit.state = UnitState::Expired;
+                unit.transaction_to = Some(CURRENT_VALIDITY_CUTOFF.to_string());
+            }
+        }
+    }
+}
+
+fn delete_composed_dependents(
+    state: &mut InMemoryState,
+    tenant_id: TenantId,
+    source_ids: &[UnitId],
+    deletion_generation: u64,
+) -> Vec<UnitId> {
+    let dependent_ids = composed_dependent_ids(state, tenant_id, source_ids);
+    let mut deleted = Vec::new();
+    if let Some(units) = state.memory_units.get_mut(&tenant_id) {
+        for unit in units
+            .iter_mut()
+            .filter(|unit| dependent_ids.contains(&unit.id))
+        {
+            if unit.state != UnitState::Deleted {
+                unit.state = UnitState::Deleted;
+                unit.deletion_generation = Some(deletion_generation);
+                deleted.push(unit.id);
+            }
+        }
+    }
+    deleted
+}
+
+fn composed_dependent_ids(
+    state: &InMemoryState,
+    tenant_id: TenantId,
+    source_ids: &[UnitId],
+) -> Vec<UnitId> {
+    let Some(edges) = state.memory_edges.get(&tenant_id) else {
+        return Vec::new();
+    };
+    let Some(units) = state.memory_units.get(&tenant_id) else {
+        return Vec::new();
+    };
+    edges
+        .iter()
+        .filter(|edge| {
+            edge.kind == MemoryEdgeKind::DerivedFrom && source_ids.contains(&edge.dst_id)
+        })
+        .filter_map(|edge| {
+            units
+                .iter()
+                .find(|unit| unit.id == edge.src_id && derived_by_for_unit(unit) == "composition")
+                .map(|unit| unit.id)
+        })
+        .fold(Vec::new(), |mut ids, id| {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+            ids
+        })
 }

@@ -60,6 +60,9 @@
           "format": "float",
           "type": "number"
         },
+        "derived_by": {
+          "type": "string"
+        },
         "discard_reason": {
           "anyOf": [
             {
@@ -141,6 +144,7 @@
         "channel",
         "channel_rank",
         "channel_score",
+        "derived_by",
         "rerank_score",
         "trust_level",
         "state"
@@ -214,6 +218,9 @@
             }
           ]
         },
+        "derived_by": {
+          "type": "string"
+        },
         "inclusion_reason": {
           "type": "string"
         },
@@ -234,6 +241,7 @@
         "unit_id",
         "body",
         "kind",
+        "derived_by",
         "inclusion_reason",
         "suppression_labels"
       ],

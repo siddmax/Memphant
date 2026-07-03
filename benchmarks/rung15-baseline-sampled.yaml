@@ -1,0 +1,3 @@
+id: rung15-baseline-sampled
+cases:
+  - ../examples/evals/golden/inferred_belief_composition_control.yaml

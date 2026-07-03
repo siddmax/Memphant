@@ -1,0 +1,358 @@
+id: rung15_inferred_belief_composition_profile_001
+profile_version: sota-profile-0.2.0
+benchmark_version: op-bench-style-inferred-belief-composition-2026-07-03
+compare_to: rungs-0-14-baseline
+harness_pin:
+  answer_model: retrieval-only-oracle
+  embedding_profile: deterministic-local
+  reranker: memory-tuned-linear-rung13-v1
+  learned_rerank_training_set: rung13_learned_rerank_training_001
+  query_decomposer: deterministic-structural-v1
+  decay_model: fixed-prior-dsr-v1
+  l4_mode: deterministic-local-l4-v1
+  composition_model: deterministic-preference-abstraction-v1
+  memphant_commit_scope: rung15-inferred-belief-composition
+axes:
+  outcome:
+    benchmark: memphant-golden
+    metric: pass_rate
+    source_status: internal_golden
+    trace_ref: docs/build-log/artifacts/rung15-inferred-belief-sampled-traces.json
+    score: 1.0
+    baseline_score: 0.0
+    delta_vs_baseline: 1.0
+    ci: [1.0, 1.0]
+    gate: pass
+  long_horizon:
+    benchmark: lme-v2-raw-episode-style
+    metric: buried_answer_bearing_top_k
+    source_status: sampled_public_style
+    trace_ref: docs/build-log/artifacts/rung12-l4-exhaustive-sampled-traces.json
+    score: 1.0
+    baseline_score: 0.0
+    delta_vs_baseline: 1.0
+    ci: [1.0, 1.0]
+    gate: pass
+  scale:
+    benchmark: beam-raw-episode-style
+    metric: buried_answer_bearing_top_k
+    source_status: sampled_public_style
+    trace_ref: docs/build-log/artifacts/rung12-l4-exhaustive-sampled-traces.json
+    score: 1.0
+    baseline_score: 0.0
+    delta_vs_baseline: 1.0
+    ci: [1.0, 1.0]
+    gate: pass
+  longitudinal:
+    benchmark: memorystress-style
+    metric: degradation_auc
+    source_status: sampled_public_style
+    trace_ref: docs/build-log/artifacts/rung11-memorystress-sampled-traces.json
+    score: 1.0
+    baseline_score: 1.0
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    gate: pass
+  restraint:
+    benchmark: op-bench-style
+    metric: over_personalization_regression
+    source_status: internal_mimic
+    trace_ref: docs/build-log/artifacts/rung15-inferred-belief-sampled-traces.json
+    score: 1.0
+    baseline_score: 1.0
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    gate: pass
+  interactive:
+    benchmark: inferred-belief-composition
+    metric: corroborated_belief_precision
+    source_status: internal_mimic
+    trace_ref: docs/build-log/artifacts/rung15-inferred-belief-sampled-traces.json
+    score: 1.0
+    baseline_score: 0.0
+    delta_vs_baseline: 1.0
+    ci: [1.0, 1.0]
+    gate: pass
+  embedding_selection:
+    benchmark: lmeb
+    metric: mean_n_at_10
+    source_status: not_run
+    trace_ref: not-run
+    gate: external_profile_required
+  procedural:
+    benchmark: skillos-state-style
+    metric: pass_k
+    source_status: sampled_public_style
+    trace_ref: docs/build-log/artifacts/rung10-state-style-sampled-traces.json
+    score: 1.0
+    baseline_score: 1.0
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    gate: pass
+  systems_cost:
+    benchmark: local-static
+    metric: packaging_contract
+    source_status: local_static
+    trace_ref: docs/build-log/2026-07-03-wsh-progress.md
+    score: 1.0
+    baseline_score: 1.0
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    gate: pass
+  internal_syndai:
+    benchmark: syndai-agent-file-memory
+    metric: answer_bearing_recall
+    source_status: internal_trace_compare
+    trace_ref: docs/build-log/artifacts/syndai_agent_file_memory_001-trace-compare.json
+    score: 1.0
+    baseline_score: 1.0
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    gate: pass
+rung_decisions:
+  - rung: 15
+    item: inferred-belief composition
+    status: promoted
+    gate_met: true
+    decision: promote_guardrailed_preference_composition
+    reason: The composition fixture recovers a belief-tier abstraction with explicit derived_by=composition provenance while the no-composition control misses it, and the OP-Bench-style restraint axis records no over-personalization regression.
+    axes: [outcome, interactive, restraint]
+    benchmark_sample_refs:
+      - memphant:examples/evals/golden/inferred_belief_composition.yaml
+      - composition:benchmarks/rung15-inferred-belief-sampled.yaml
+      - no-composition:benchmarks/rung15-baseline-sampled.yaml
+      - op-bench-style:no-regression:docs/build-log/artifacts/rung15-inferred-belief-sampled-traces.json
+    before_trace_ref: docs/build-log/artifacts/rung15-baseline-sampled-traces.json
+    after_trace_ref: docs/build-log/artifacts/rung15-inferred-belief-sampled-traces.json
+    delta_vs_baseline: 1.0
+    ci: [1.0, 1.0]
+    p95_ms: 1.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+activation_decisions:
+  - item: L4 exhaustive recall behavior
+    status: activated
+    gate_met: true
+    decision: keep_explicit_exhaustive_raw_episode_scan
+    reason: Rung 12 remains active and independent of Rung 15 composition.
+    before_trace_ref: docs/build-log/artifacts/rung12-baseline-sampled-traces.json
+    after_trace_ref: docs/build-log/artifacts/rung12-l4-exhaustive-sampled-traces.json
+    delta_vs_baseline: 1.0
+    ci: [1.0, 1.0]
+    p95_ms: 1.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: fast
+    exhaustive_mode: deterministic-local-l4-v1
+  - item: Learned reranker
+    status: activated
+    gate_met: true
+    decision: keep_archived_memory_tuned_linear_profile
+    reason: Rung 13 remains active; Rung 15 does not add learned ranking state.
+    before_trace_ref: docs/build-log/artifacts/rung13-baseline-sampled-traces.json
+    after_trace_ref: docs/build-log/artifacts/rung13-learned-rerank-sampled-traces.json
+    delta_vs_baseline: 1.0
+    ci: [1.0, 1.0]
+    p95_ms: 1.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: deterministic-local-v1
+    exhaustive_mode: memory-tuned-linear-rung13-v1
+  - item: Learned DSR/FSRS fitter
+    status: dormant
+    gate_met: false
+    decision: keep_fixed_priors
+    reason: No many-card MemPhant-native review-history floor exists for learned DSR fitting.
+    before_trace_ref: docs/build-log/artifacts/rung11-baseline-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: fixed-prior-dsr
+    exhaustive_mode: fixed-prior-dsr
+  - item: DSR decay fold
+    status: activated
+    gate_met: true
+    decision: keep_fixed_prior_fold
+    reason: Rung 11 remains active and independent of composition.
+    before_trace_ref: docs/build-log/artifacts/rung11-baseline-sampled-traces.json
+    after_trace_ref: docs/build-log/artifacts/rung11-memorystress-sampled-traces.json
+    delta_vs_baseline: 1.0
+    ci: [1.0, 1.0]
+    p95_ms: 1.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: fixed-prior-dsr
+    exhaustive_mode: fixed-prior-dsr
+  - item: Procedural replay-validation harness
+    status: activated
+    gate_met: true
+    decision: keep_validated_replay_gate
+    reason: Rung 10 remains active and independent of composition.
+    before_trace_ref: docs/build-log/artifacts/rung10-baseline-sampled-traces.json
+    after_trace_ref: docs/build-log/artifacts/rung10-state-style-sampled-traces.json
+    delta_vs_baseline: 1.0
+    ci: [1.0, 1.0]
+    p95_ms: 1.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: validated-procedure-recall
+    exhaustive_mode: validated-procedure-recall
+  - item: 3-tier DEK envelope encryption
+    status: dormant
+    gate_met: false
+    decision: keep_customer_gated
+    reason: No BYOC enterprise customer-held KEK contract is present.
+    before_trace_ref: docs/build-log/2026-07-03-wsh-progress.md
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: provider-sse
+    exhaustive_mode: disabled
+  - item: Ablation-voting recall
+    status: dormant
+    gate_met: false
+    decision: keep_disabled
+    reason: No containment-gain profile justifies multiplied read cost.
+    before_trace_ref: docs/build-log/artifacts/rung12-baseline-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: single-profile-recall
+    exhaustive_mode: disabled
+  - item: Delta recall
+    status: dormant
+    gate_met: false
+    decision: keep_disabled
+    reason: No paired ablation proves delta recall improves a target axis.
+    before_trace_ref: docs/build-log/artifacts/rung12-baseline-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: full-pack
+    exhaustive_mode: full-pack
+  - item: Miss-repair re-extraction
+    status: dormant
+    gate_met: false
+    decision: keep_disabled
+    reason: No query-conditioned re-extraction gate fired.
+    before_trace_ref: docs/build-log/artifacts/rung12-baseline-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: retained-episode-recall
+    exhaustive_mode: retained-episode-recall
+  - item: Retrievability probe
+    status: dormant
+    gate_met: false
+    decision: keep_disabled
+    reason: No retrievability-probe miss-repair gate fired.
+    before_trace_ref: docs/build-log/artifacts/rung12-baseline-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: disabled
+    exhaustive_mode: disabled
+  - item: Consolidation event delivery
+    status: dormant
+    gate_met: false
+    decision: keep_outbox_shape_only
+    reason: Event taxonomy and outbox shape are present; no consumer activation gate has fired.
+    before_trace_ref: docs/build-log/2026-07-03-wsb-progress.md
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: outbox-capture
+    exhaustive_mode: outbox-capture
+  - item: Hermes memory-provider adapter
+    status: dormant
+    gate_met: false
+    decision: keep_disabled
+    reason: No Hermes design partner or launch-window demand is present.
+    before_trace_ref: docs/build-log/artifacts/wsi-local-sota-profile.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: mcp-rest
+    exhaustive_mode: disabled
+  - item: External graph DB / dedicated vector engine
+    status: retired
+    gate_met: false
+    decision: keep_retired
+    reason: Rung 14 retired the external graph/vector escape hatch for the current public architecture.
+    before_trace_ref: docs/build-log/artifacts/wsi-local-sota-profile.json
+    after_trace_ref: docs/build-log/artifacts/rung13-learned-rerank-profile.json
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 1.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: postgres-pgvector
+    exhaustive_mode: retired
+  - item: Cache cluster
+    status: dormant
+    gate_met: false
+    decision: keep_disabled
+    reason: No hot-path SLO proof requires a cache cluster yet.
+    before_trace_ref: docs/build-log/artifacts/wsi-local-sota-profile.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: direct-postgres
+    exhaustive_mode: direct-postgres
+  - item: TypeScript SDK
+    status: dormant
+    gate_met: false
+    decision: keep_disabled
+    reason: No first TS consumer or launch-window requirement is present.
+    before_trace_ref: docs/build-log/artifacts/wsi-local-sota-profile.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: rest-python-cli
+    exhaustive_mode: disabled

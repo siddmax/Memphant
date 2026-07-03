@@ -1,0 +1,3 @@
+id: rung15-inferred-belief-sampled
+cases:
+  - ../examples/evals/golden/inferred_belief_composition.yaml

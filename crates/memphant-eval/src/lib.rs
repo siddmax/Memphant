@@ -322,6 +322,8 @@ struct GoldenUnit {
     tenant: String,
     #[serde(default = "primary_name")]
     scope: String,
+    #[serde(default = "fixture_source_kind")]
+    source_kind: String,
     episode_body: String,
     kind: MemoryKind,
     state: UnitState,
@@ -386,6 +388,10 @@ struct GoldenExpect {
     packed_context_contains: Vec<String>,
     #[serde(default)]
     packed_position_max: BTreeMap<String, usize>,
+    #[serde(default)]
+    trace_candidate_derived_by: BTreeMap<String, String>,
+    #[serde(default)]
+    context_derived_by: BTreeMap<String, String>,
     #[serde(default)]
     dedup_collapsed_ids_min: Option<usize>,
     #[serde(default)]
@@ -1090,6 +1096,9 @@ fn validate_rung_decision(
     if decision.rung == 14 && decision.status == "retired" {
         validate_rung14_external_engine_retirement(decision, axes, &prefix, findings);
     }
+    if decision.rung == 15 && decision.status == "promoted" {
+        validate_rung15_inferred_belief_composition_promotion(decision, axes, &prefix, findings);
+    }
 }
 
 fn validate_rung4_contextual_chunk_promotion(
@@ -1592,6 +1601,66 @@ fn validate_rung14_external_engine_retirement(
     }
 }
 
+fn validate_rung15_inferred_belief_composition_promotion(
+    decision: &RungDecision,
+    axes: &BTreeMap<String, SotaAxisResult>,
+    prefix: &str,
+    findings: &mut Vec<String>,
+) {
+    if decision.item != "inferred-belief composition" {
+        findings.push(format!("{prefix}:invalid_item:{}", decision.item));
+    }
+    for required_axis in ["outcome", "interactive", "restraint"] {
+        if !decision.axes.iter().any(|axis| axis == required_axis) {
+            findings.push(format!("{prefix}:missing_{required_axis}_axis"));
+        }
+    }
+    if !decision
+        .benchmark_sample_refs
+        .iter()
+        .any(|sample| sample.contains("inferred_belief_composition"))
+    {
+        findings.push(format!("{prefix}:missing_inferred_belief_sample"));
+    }
+    if !decision
+        .benchmark_sample_refs
+        .iter()
+        .any(|sample| sample.contains("no-composition"))
+    {
+        findings.push(format!("{prefix}:missing_no_composition_control"));
+    }
+    if !decision
+        .benchmark_sample_refs
+        .iter()
+        .any(|sample| sample.contains("op-bench"))
+    {
+        findings.push(format!("{prefix}:missing_op_bench_restraint_ref"));
+    }
+    if !decision.before_trace_ref.contains("rung15-baseline") {
+        findings.push(format!("{prefix}:missing_rung15_baseline_trace"));
+    }
+    if !decision.after_trace_ref.contains("rung15-inferred-belief") {
+        findings.push(format!("{prefix}:missing_rung15_composition_trace"));
+    }
+    if decision.delta_vs_baseline < 0.03 || decision.ci[0] < 0.03 {
+        findings.push(format!("{prefix}:delta_below_three_point_gate"));
+    }
+    for axis in ["outcome", "interactive"] {
+        match axes.get(axis) {
+            Some(result) if result.delta_vs_baseline.unwrap_or_default() > 0.0 => {}
+            Some(_) => findings.push(format!("{prefix}:{axis}:non_positive_axis_delta")),
+            None => {}
+        }
+    }
+    match axes.get("restraint") {
+        Some(result)
+            if result.gate.as_deref() == Some("pass")
+                && result.delta_vs_baseline.unwrap_or_default() >= 0.0 => {}
+        Some(_) => findings.push(format!("{prefix}:restraint_regressed")),
+        None => {}
+    }
+}
+
 fn validate_ci(prefix: &str, delta: Option<f64>, ci: Option<[f64; 2]>, findings: &mut Vec<String>) {
     let Some(delta) = delta else {
         findings.push(format!("{prefix}:missing_delta"));
@@ -1633,6 +1702,7 @@ async fn run_syndai_trace_compare(
                 name: file.id.clone(),
                 tenant: primary_name(),
                 scope: primary_name(),
+                source_kind: fixture_source_kind(),
                 episode_body: format!("{}: {}", file.path, file.content),
                 kind: MemoryKind::Resource,
                 state: UnitState::Active,
@@ -1938,6 +2008,36 @@ async fn run_golden_case_inner(
                 actual_position
                     .map(|position| position.to_string())
                     .unwrap_or_else(|| "missing".to_string())
+            ));
+        }
+    }
+    for (name, expected) in &case.expect.trace_candidate_derived_by {
+        let actual = context.named_units.get(name).and_then(|unit_id| {
+            trace
+                .candidates
+                .iter()
+                .find(|candidate| candidate.unit_id == *unit_id)
+                .map(|candidate| candidate.derived_by.as_str())
+        });
+        if actual != Some(expected.as_str()) {
+            dropped_mismatches.push(format!(
+                "trace_candidate_derived_by:{name}:expected={expected}:actual={}",
+                actual.unwrap_or("missing")
+            ));
+        }
+    }
+    for (name, expected) in &case.expect.context_derived_by {
+        let actual = context.named_units.get(name).and_then(|unit_id| {
+            response
+                .items
+                .iter()
+                .find(|item| item.unit_id == *unit_id)
+                .map(|item| item.derived_by.as_str())
+        });
+        if actual != Some(expected.as_str()) {
+            dropped_mismatches.push(format!(
+                "context_derived_by:{name}:expected={expected}:actual={}",
+                actual.unwrap_or("missing")
             ));
         }
     }
@@ -2321,7 +2421,7 @@ async fn seed_store(
                     tenant_id: unit_tenant_id,
                     scope_id: unit_scope_id,
                     actor_id,
-                    source_kind: "fixture".to_string(),
+                    source_kind: unit.source_kind.clone(),
                     source_trust: unit.trust_level,
                     dedup_key: format!("{}:{}", unit.name, unit.episode_body),
                     body: unit.episode_body.clone(),
@@ -2343,7 +2443,7 @@ async fn seed_store(
                     churn_class: unit.churn_class.clone(),
                     freshness_due: unit.churn_class.as_deref() == Some("volatile"),
                     actor_id: Some(actor_id),
-                    source_kind: Some("fixture".to_string()),
+                    source_kind: Some(unit.source_kind.clone()),
                     source_episode_id: Some(episode.episode_id),
                     source_resource_id: None,
                     deletion_generation: unit.deletion_generation,
@@ -2486,6 +2586,10 @@ fn required_ops_checks() -> [&'static str; 3] {
 
 fn primary_name() -> String {
     "primary".to_string()
+}
+
+fn fixture_source_kind() -> String {
+    "fixture".to_string()
 }
 
 fn read_yaml<T>(path: &Path) -> EvalResult<T>

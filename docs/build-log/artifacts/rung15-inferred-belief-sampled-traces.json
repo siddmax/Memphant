@@ -1,0 +1,33 @@
+{
+  "case_results": [
+    {
+      "dropped_mismatches": [],
+      "error": null,
+      "forbidden_present": [],
+      "id": "inferred_belief_composition",
+      "missing_citations": [],
+      "missing_trace_stages": [],
+      "missing_units": [],
+      "passed": true,
+      "trace_id": "019f2831-af4e-72c2-8fab-52bc43251670"
+    }
+  ],
+  "eval_id": "rung15-inferred-belief-sampled",
+  "metrics": {
+    "context_packing_abstention_enabled": true,
+    "contextual_chunks_enabled": true,
+    "decay_enabled": true,
+    "edge_expansion_enabled": true,
+    "filesystem_control_enabled": false,
+    "l4_exhaustive_enabled": true,
+    "learned_rerank_enabled": true,
+    "passed_cases": 1,
+    "procedure_recall_enabled": true,
+    "query_decomposition_enabled": true,
+    "rerank_enabled": true,
+    "temporal_validity_enabled": true,
+    "total_cases": 1
+  },
+  "runner": "memphant-eval",
+  "trace_schema_version": "trace-0.1.0-ws0"
+}

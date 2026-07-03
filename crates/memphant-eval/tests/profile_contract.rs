@@ -817,3 +817,82 @@ fn rung14_retirement_requires_relational_edge_control_and_pgvector_evidence() {
     assert!(text.contains("rung_decision:14:missing_no_edges_control"));
     assert!(text.contains("rung_decision:14:missing_pgvector_profile_ref"));
 }
+
+#[test]
+fn rung15_profile_archives_inferred_belief_composition_promotion() {
+    let archive_dir = tempfile::tempdir().expect("tempdir");
+    let archive_path = archive_dir.path().join("rung15-profile.json");
+    let report = run_profile_file(
+        &repo_root().join("examples/evals/rung15-inferred-belief-composition-profile.yaml"),
+        "rungs-0-14-baseline",
+        Some(archive_path.clone()),
+    )
+    .expect("rung15 profile should pass");
+
+    let decision = report
+        .rung_decisions
+        .iter()
+        .find(|decision| decision.rung == 15)
+        .expect("rung 15 decision");
+    assert_eq!(decision.item, "inferred-belief composition");
+    assert_eq!(decision.status, "promoted");
+    assert!(decision.gate_met);
+    assert_eq!(decision.axes, ["outcome", "interactive", "restraint"]);
+    assert!(decision.delta_vs_baseline >= 0.03);
+    assert!(decision.ci[0] >= 0.03);
+    assert!(
+        decision
+            .benchmark_sample_refs
+            .iter()
+            .any(|sample| sample.contains("inferred_belief_composition"))
+    );
+    assert!(
+        decision
+            .benchmark_sample_refs
+            .iter()
+            .any(|sample| sample.contains("no-composition"))
+    );
+    assert!(
+        decision
+            .benchmark_sample_refs
+            .iter()
+            .any(|sample| sample.contains("op-bench"))
+    );
+
+    let archived: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&archive_path).expect("read archive"))
+            .expect("archive json");
+    assert_eq!(archived["rung_decisions"][0]["rung"], 15);
+}
+
+#[test]
+fn rung15_promotion_requires_sample_control_and_restraint_reference() {
+    let source = fs::read_to_string(
+        repo_root().join("examples/evals/rung15-inferred-belief-composition-profile.yaml"),
+    )
+    .expect("read fixture");
+    let bad = source
+        .replace(
+            "      - memphant:examples/evals/golden/inferred_belief_composition.yaml\n",
+            "",
+        )
+        .replace(
+            "      - no-composition:benchmarks/rung15-baseline-sampled.yaml\n",
+            "",
+        )
+        .replace(
+            "      - op-bench-style:no-regression:docs/build-log/artifacts/rung15-inferred-belief-sampled-traces.json\n",
+            "",
+        );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("bad-rung15-profile.yaml");
+    fs::write(&path, bad).expect("write fixture");
+
+    let error = run_profile_file(&path, "rungs-0-14-baseline", None)
+        .expect_err("rung15 promotion without sample/control/restraint proof should fail");
+
+    let text = error.to_string();
+    assert!(text.contains("rung_decision:15:missing_inferred_belief_sample"));
+    assert!(text.contains("rung_decision:15:missing_no_composition_control"));
+    assert!(text.contains("rung_decision:15:missing_op_bench_restraint_ref"));
+}

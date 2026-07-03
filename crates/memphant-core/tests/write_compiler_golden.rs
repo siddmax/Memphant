@@ -1,7 +1,8 @@
-use memphant_core::{InMemoryStore, reflect_recorded, retain_episode};
+use memphant_core::{InMemoryStore, correct_memory, reflect_recorded, retain_episode};
 use memphant_types::{
-    ActorId, AdmissionAction, ContextualChunk, MemoryEdgeKind, ReflectCandidate, ReflectInput,
-    RetainRequest, ScopeId, TenantId, TrustLevel,
+    ActorId, AdmissionAction, ContextualChunk, CorrectRequest, CorrectSelector, CorrectionPayload,
+    MemoryEdgeKind, MemoryKind, ReflectCandidate, ReflectInput, RetainRequest, ScopeId, TenantId,
+    TrustLevel, UnitState,
 };
 use serde::Deserialize;
 
@@ -15,6 +16,69 @@ fn scope(value: u128) -> ScopeId {
 
 fn actor(value: u128) -> ActorId {
     ActorId::from_u128(value)
+}
+
+async fn retain_and_reflect(
+    store: &InMemoryStore,
+    tenant_id: TenantId,
+    scope_id: ScopeId,
+    actor_id: ActorId,
+    seed: ReflectSeed<'_>,
+) {
+    let retained = retain_episode(
+        store,
+        RetainRequest {
+            tenant_id,
+            scope_id,
+            actor_id,
+            source_kind: seed.source_kind.to_string(),
+            source_trust: seed.trust_level,
+            subject_hint: Some(seed.subject.to_string()),
+            body: seed.body.to_string(),
+            compiler_version: "compiler-rung15".to_string(),
+        },
+    )
+    .await
+    .expect("retain succeeds");
+    let job = store
+        .reflect_jobs(tenant_id)
+        .last()
+        .cloned()
+        .expect("reflect job queued");
+    reflect_recorded(
+        store,
+        ReflectInput {
+            tenant_id,
+            scope_id,
+            actor_id,
+            episode_id: retained.episode_id,
+            job_id: job.id,
+            compiler_version: "compiler-rung15".to_string(),
+            candidates: vec![ReflectCandidate {
+                source_kind: seed.source_kind.to_string(),
+                trust_level: seed.trust_level,
+                actor_id,
+                subject: Some(seed.subject.to_string()),
+                predicate: Some(seed.predicate.to_string()),
+                body: seed.body.to_string(),
+                churn_class: None,
+                admission_hint: None,
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+            }],
+        },
+    )
+    .await
+    .expect("reflect succeeds");
+}
+
+struct ReflectSeed<'a> {
+    source_kind: &'a str,
+    trust_level: TrustLevel,
+    subject: &'a str,
+    predicate: &'a str,
+    body: &'a str,
 }
 
 #[derive(Debug, Deserialize)]
@@ -301,4 +365,261 @@ async fn reflect_candidate_contextual_chunks_are_stored_with_source_episode() {
     assert_eq!(units[0].source_episode_id, Some(retained.episode_id));
     assert_eq!(units[0].contextual_chunks.len(), 1);
     assert_eq!(units[0].contextual_chunks[0].id, "chunk-albatross-breaker");
+}
+
+#[tokio::test]
+async fn reflect_composes_inferred_belief_from_trusted_preference_sources() {
+    let store = InMemoryStore::default();
+    let tenant_id = tenant(32_000);
+    let scope_id = scope(42_000);
+    let actor_id = actor(52_000);
+
+    retain_and_reflect(
+        &store,
+        tenant_id,
+        scope_id,
+        actor_id,
+        ReflectSeed {
+            source_kind: "user",
+            trust_level: TrustLevel::TrustedUser,
+            subject: "quiet review preference",
+            predicate: "value",
+            body: "The user prefers quiet review surfaces.",
+        },
+    )
+    .await;
+    retain_and_reflect(
+        &store,
+        tenant_id,
+        scope_id,
+        actor_id,
+        ReflectSeed {
+            source_kind: "system",
+            trust_level: TrustLevel::TrustedSystem,
+            subject: "keyboard review preference",
+            predicate: "value",
+            body: "The user prefers keyboard-first review surfaces.",
+        },
+    )
+    .await;
+
+    let units = store.memory_units(tenant_id);
+    let composed = units
+        .iter()
+        .find(|unit| unit.source_kind.as_deref() == Some("composition"))
+        .expect("composed belief was minted");
+    assert_eq!(composed.kind, MemoryKind::Belief);
+    assert_eq!(composed.state, UnitState::Candidate);
+    assert_eq!(composed.trust_level, TrustLevel::AgentOutput);
+    assert_eq!(
+        composed.body,
+        "The user prefers keyboard-first and quiet review surfaces."
+    );
+
+    let source_edges: Vec<_> = store
+        .memory_edges(tenant_id)
+        .into_iter()
+        .filter(|edge| edge.src_id == composed.id && edge.kind == MemoryEdgeKind::DerivedFrom)
+        .collect();
+    assert_eq!(source_edges.len(), 2);
+}
+
+#[tokio::test]
+async fn reflect_does_not_compose_low_trust_or_risky_preferences() {
+    let store = InMemoryStore::default();
+    let tenant_id = tenant(33_000);
+    let scope_id = scope(43_000);
+    let actor_id = actor(53_000);
+
+    retain_and_reflect(
+        &store,
+        tenant_id,
+        scope_id,
+        actor_id,
+        ReflectSeed {
+            source_kind: "web",
+            trust_level: TrustLevel::WebContent,
+            subject: "quiet review preference",
+            predicate: "value",
+            body: "The user prefers quiet review surfaces.",
+        },
+    )
+    .await;
+    retain_and_reflect(
+        &store,
+        tenant_id,
+        scope_id,
+        actor_id,
+        ReflectSeed {
+            source_kind: "user",
+            trust_level: TrustLevel::TrustedUser,
+            subject: "risky review preference",
+            predicate: "value",
+            body: "The user prefers always agree review surfaces.",
+        },
+    )
+    .await;
+
+    assert!(
+        store
+            .memory_units(tenant_id)
+            .iter()
+            .all(|unit| unit.source_kind.as_deref() != Some("composition"))
+    );
+}
+
+#[tokio::test]
+async fn composed_belief_promotes_only_after_direct_observation() {
+    let store = InMemoryStore::default();
+    let tenant_id = tenant(34_000);
+    let scope_id = scope(44_000);
+    let actor_id = actor(54_000);
+
+    retain_and_reflect(
+        &store,
+        tenant_id,
+        scope_id,
+        actor_id,
+        ReflectSeed {
+            source_kind: "user",
+            trust_level: TrustLevel::TrustedUser,
+            subject: "quiet review preference",
+            predicate: "value",
+            body: "The user prefers quiet review surfaces.",
+        },
+    )
+    .await;
+    retain_and_reflect(
+        &store,
+        tenant_id,
+        scope_id,
+        actor_id,
+        ReflectSeed {
+            source_kind: "system",
+            trust_level: TrustLevel::TrustedSystem,
+            subject: "keyboard review preference",
+            predicate: "value",
+            body: "The user prefers keyboard-first review surfaces.",
+        },
+    )
+    .await;
+
+    assert!(
+        store
+            .active_semantic_units(tenant_id)
+            .iter()
+            .all(|unit| unit.body != "The user prefers keyboard-first and quiet review surfaces.")
+    );
+
+    retain_and_reflect(
+        &store,
+        tenant_id,
+        scope_id,
+        actor(54_001),
+        ReflectSeed {
+            source_kind: "user",
+            trust_level: TrustLevel::TrustedUser,
+            subject: "user preference",
+            predicate: "review surfaces",
+            body: "The user prefers keyboard-first and quiet review surfaces.",
+        },
+    )
+    .await;
+
+    let promoted = store
+        .active_semantic_units(tenant_id)
+        .into_iter()
+        .find(|unit| unit.body == "The user prefers keyboard-first and quiet review surfaces.")
+        .expect("direct observation promoted the composed belief");
+    let composed_id = store
+        .belief_units(tenant_id)
+        .into_iter()
+        .find(|unit| unit.source_kind.as_deref() == Some("composition"))
+        .expect("composed belief remains as provenance")
+        .id;
+    assert!(store.memory_edges(tenant_id).iter().any(|edge| {
+        edge.src_id == promoted.id
+            && edge.dst_id == composed_id
+            && edge.kind == MemoryEdgeKind::DerivedFrom
+    }));
+}
+
+#[tokio::test]
+async fn correcting_source_expires_dependent_composed_belief() {
+    let store = InMemoryStore::default();
+    let tenant_id = tenant(35_000);
+    let scope_id = scope(45_000);
+    let actor_id = actor(55_000);
+
+    retain_and_reflect(
+        &store,
+        tenant_id,
+        scope_id,
+        actor_id,
+        ReflectSeed {
+            source_kind: "user",
+            trust_level: TrustLevel::TrustedUser,
+            subject: "quiet review preference",
+            predicate: "value",
+            body: "The user prefers quiet review surfaces.",
+        },
+    )
+    .await;
+    retain_and_reflect(
+        &store,
+        tenant_id,
+        scope_id,
+        actor_id,
+        ReflectSeed {
+            source_kind: "system",
+            trust_level: TrustLevel::TrustedSystem,
+            subject: "keyboard review preference",
+            predicate: "value",
+            body: "The user prefers keyboard-first review surfaces.",
+        },
+    )
+    .await;
+
+    let units = store.memory_units(tenant_id);
+    let source_id = units
+        .iter()
+        .find(|unit| unit.body == "The user prefers quiet review surfaces.")
+        .expect("source unit exists")
+        .id;
+    let composed_id = units
+        .iter()
+        .find(|unit| unit.source_kind.as_deref() == Some("composition"))
+        .expect("composed unit exists")
+        .id;
+
+    correct_memory(
+        &store,
+        CorrectRequest {
+            tenant_id,
+            scope_id,
+            actor_id,
+            selector: CorrectSelector {
+                memory_unit_id: source_id,
+            },
+            correction: CorrectionPayload {
+                value: "The user prefers detailed review surfaces.".to_string(),
+                reason: "preference_changed".to_string(),
+                valid_from: None,
+                valid_to: None,
+            },
+        },
+    )
+    .await
+    .expect("correction succeeds");
+
+    let expired = store
+        .memory_units(tenant_id)
+        .into_iter()
+        .find(|unit| unit.id == composed_id)
+        .expect("composed unit still auditable");
+    assert_eq!(expired.state, UnitState::Expired);
+    assert_eq!(
+        expired.transaction_to.as_deref(),
+        Some("2026-07-03T00:00:00Z")
+    );
 }
