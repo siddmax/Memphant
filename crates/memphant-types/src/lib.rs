@@ -140,6 +140,8 @@ pub struct RecallRequest {
     pub query_decomposition_enabled: bool,
     #[serde(default = "default_true")]
     pub procedure_recall_enabled: bool,
+    #[serde(default = "default_true")]
+    pub decay_enabled: bool,
     pub engine_version: String,
 }
 
@@ -155,6 +157,14 @@ pub struct RecallCandidateTrace {
     pub rerank_score: f32,
     #[serde(default)]
     pub subquery_ids: Vec<String>,
+    #[serde(default)]
+    pub decay_retrievability: f32,
+    #[serde(default)]
+    pub dsr_stability_days: Option<f32>,
+    #[serde(default)]
+    pub dsr_difficulty: Option<f32>,
+    #[serde(default)]
+    pub dsr_reinforcement_count: u32,
     pub trust_level: TrustLevel,
     pub state: UnitState,
     pub discard_reason: Option<RecallDropReason>,
@@ -234,6 +244,8 @@ pub struct RetrievalTrace {
     pub latency_ms: u64,
     pub token_estimate: usize,
     pub cost_micros: u64,
+    #[serde(default)]
+    pub decay_model_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -382,7 +394,7 @@ pub struct NewMemoryUnit {
     pub transaction_to: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct StoredMemoryUnit {
     pub id: UnitId,
     pub tenant_id: TenantId,
@@ -404,6 +416,14 @@ pub struct StoredMemoryUnit {
     pub valid_to: Option<String>,
     pub transaction_from: Option<String>,
     pub transaction_to: Option<String>,
+    #[serde(default)]
+    pub difficulty: Option<f32>,
+    #[serde(default)]
+    pub stability_days: Option<f32>,
+    #[serde(default)]
+    pub last_reinforced_at: Option<String>,
+    #[serde(default)]
+    pub reinforcement_count: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -710,6 +730,7 @@ pub struct RecallHttpRequest {
     pub rerank_enabled: Option<bool>,
     pub query_decomposition_enabled: Option<bool>,
     pub procedure_recall_enabled: Option<bool>,
+    pub decay_enabled: Option<bool>,
     pub include_trace: Option<bool>,
 }
 
@@ -811,7 +832,7 @@ pub struct ReviewEvent {
     pub outcome: MarkOutcome,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ScopeMemoryResponse {
     pub tenant_id: TenantId,
     pub scope_id: ScopeId,

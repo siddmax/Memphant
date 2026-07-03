@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
-use memphant_core::{CoreError, InMemoryStore, MemoryStore, recall};
+use memphant_core::{CoreError, InMemoryStore, MemoryStore, recall, record_mark};
 use memphant_types::{
-    ActorId, ContextualChunk, MemoryEdgeKind, MemoryKind, NewEpisode, NewMemoryEdge, NewMemoryUnit,
-    RecallChannel, RecallDropReason, RecallMode, RecallRequest, ScopeId, TenantId, TrustLevel,
-    UnitId, UnitState,
+    ActorId, ContextualChunk, MarkOutcome, MarkRequest, MemoryEdgeKind, MemoryKind, NewEpisode,
+    NewMemoryEdge, NewMemoryUnit, RecallChannel, RecallDropReason, RecallMode, RecallRequest,
+    ScopeId, TenantId, TraceId, TrustLevel, UnitId, UnitState,
 };
 use serde::Deserialize;
 
@@ -45,6 +45,7 @@ async fn recall_writes_trace_for_scope_denial() {
             rerank_enabled: true,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
+            decay_enabled: true,
             engine_version: "engine-wsc-test".to_string(),
         },
     )
@@ -58,6 +59,156 @@ async fn recall_writes_trace_for_scope_denial() {
     assert_eq!(traces[0].policy_filters[0].reason, RecallDropReason::Scope);
     assert!(traces[0].context_items.is_empty());
     assert!(traces[0].abstention_signal);
+}
+
+#[tokio::test]
+async fn dsr_decay_fold_promotes_reinforced_memory_over_ignored_stale_candidate() {
+    let store = InMemoryStore::default();
+    let tenant_id = tenant(71_000);
+    let scope_id = scope(71_001);
+    let actor_id = actor(71_002);
+
+    let mut tx = store.begin().await;
+    let stale_id = store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id,
+                scope_id,
+                kind: MemoryKind::Semantic,
+                state: UnitState::Active,
+                subject_key: Some("deploy runbook current".to_string()),
+                body: "Aardvark deploy runbook says to restart the legacy queue.".to_string(),
+                trust_level: TrustLevel::TrustedSystem,
+                churn_class: Some("slow".to_string()),
+                freshness_due: false,
+                actor_id: Some(actor_id),
+                source_kind: Some("fixture".to_string()),
+                source_episode_id: None,
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
+            },
+        )
+        .await
+        .expect("stale unit seeded");
+    let durable_id = store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id,
+                scope_id,
+                kind: MemoryKind::Semantic,
+                state: UnitState::Active,
+                subject_key: Some("deploy runbook current".to_string()),
+                body: "Zulu deploy runbook says to run the atlas cutover checklist.".to_string(),
+                trust_level: TrustLevel::TrustedSystem,
+                churn_class: Some("stable".to_string()),
+                freshness_due: false,
+                actor_id: Some(actor_id),
+                source_kind: Some("fixture".to_string()),
+                source_episode_id: None,
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
+            },
+        )
+        .await
+        .expect("durable unit seeded");
+    store.commit(tx).await.expect("seed committed");
+
+    for index in 0..3 {
+        record_mark(
+            &store,
+            MarkRequest {
+                tenant_id,
+                trace_id: TraceId::from_u128(71_100 + index),
+                caller_id: format!("rung11-positive-{index}"),
+                used_ids: vec![durable_id],
+                outcome: MarkOutcome::Success,
+            },
+        )
+        .await
+        .expect("positive review recorded");
+    }
+    record_mark(
+        &store,
+        MarkRequest {
+            tenant_id,
+            trace_id: TraceId::from_u128(71_200),
+            caller_id: "rung11-negative".to_string(),
+            used_ids: vec![stale_id],
+            outcome: MarkOutcome::Ignored,
+        },
+    )
+    .await
+    .expect("negative review recorded");
+
+    let response = recall(
+        &store,
+        RecallRequest {
+            tenant_id,
+            scope_id,
+            actor_id,
+            allowed_scope_ids: vec![scope_id],
+            query: "Which deploy runbook is current?".to_string(),
+            k: 1,
+            budget_tokens: 80,
+            mode: RecallMode::Balanced,
+            include_beliefs: false,
+            edge_expansion_enabled: true,
+            context_packing_abstention_enabled: true,
+            rerank_enabled: true,
+            query_decomposition_enabled: true,
+            procedure_recall_enabled: true,
+            decay_enabled: true,
+            engine_version: "engine-rung11-test".to_string(),
+        },
+    )
+    .await
+    .expect("recall succeeds");
+
+    assert_eq!(response.candidate_whitelist, vec![durable_id]);
+    let trace = store
+        .trace_by_id(response.trace_id)
+        .expect("trace recorded for decay fold");
+    assert!(
+        trace
+            .feature_flags
+            .iter()
+            .any(|flag| flag == "decay_enabled")
+    );
+    let trace_json = serde_json::to_value(&trace).expect("trace json");
+    assert_eq!(trace_json["decay_model_id"], "fixed-prior-dsr-v1");
+    let durable_candidate = trace_json["candidates"]
+        .as_array()
+        .expect("candidate array")
+        .iter()
+        .find(|candidate| candidate["unit_id"] == durable_id.as_uuid().to_string())
+        .expect("durable candidate traced");
+    let stale_candidate = trace_json["candidates"]
+        .as_array()
+        .expect("candidate array")
+        .iter()
+        .find(|candidate| candidate["unit_id"] == stale_id.as_uuid().to_string())
+        .expect("stale candidate traced");
+    assert!(
+        durable_candidate["decay_retrievability"]
+            .as_f64()
+            .expect("durable retrievability")
+            > stale_candidate["decay_retrievability"]
+                .as_f64()
+                .expect("stale retrievability")
+    );
+    assert_eq!(durable_candidate["dsr_reinforcement_count"], 3);
 }
 
 #[tokio::test]
@@ -135,6 +286,7 @@ async fn contextual_chunk_recall_finds_source_unit_and_traces_flag() {
             rerank_enabled: true,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
+            decay_enabled: true,
             engine_version: "engine-ws4-test".to_string(),
         },
     )
@@ -214,6 +366,7 @@ async fn servicenow_query_does_not_trigger_temporal_recency_match() {
             rerank_enabled: true,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
+            decay_enabled: true,
             engine_version: "engine-temporal-token-test".to_string(),
         },
     )
@@ -304,6 +457,7 @@ async fn recall_drops_expired_validity_window_for_current_query() {
             rerank_enabled: true,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
+            decay_enabled: true,
             engine_version: "engine-rung5-test".to_string(),
         },
     )
@@ -419,6 +573,7 @@ async fn edge_expansion_can_be_disabled_and_traces_related_candidates() {
             rerank_enabled: true,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
+            decay_enabled: true,
             engine_version: "engine-rung6-test".to_string(),
         },
     )
@@ -443,6 +598,7 @@ async fn edge_expansion_can_be_disabled_and_traces_related_candidates() {
             rerank_enabled: true,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
+            decay_enabled: true,
             engine_version: "engine-rung6-test".to_string(),
         },
     )
@@ -549,6 +705,7 @@ async fn packing_collapses_duplicate_decoys_and_preserves_answer_under_budget() 
             rerank_enabled: true,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
+            decay_enabled: true,
             engine_version: "engine-rung7-test".to_string(),
         },
     )
@@ -674,6 +831,7 @@ async fn packing_abstains_when_top_evidence_is_unresolved_contradiction() {
             rerank_enabled: true,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
+            decay_enabled: true,
             engine_version: "engine-rung7-test".to_string(),
         },
     )
@@ -772,6 +930,7 @@ async fn bounded_rerank_reorders_rank_sensitive_candidate_and_traces_decision() 
             rerank_enabled: false,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
+            decay_enabled: true,
             engine_version: "engine-rung8-test".to_string(),
         },
     )
@@ -805,6 +964,7 @@ async fn bounded_rerank_reorders_rank_sensitive_candidate_and_traces_decision() 
             rerank_enabled: true,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
+            decay_enabled: true,
             engine_version: "engine-rung8-test".to_string(),
         },
     )
@@ -954,6 +1114,7 @@ async fn query_decomposition_recovers_composite_answer_and_traces_subqueries() {
             rerank_enabled: true,
             query_decomposition_enabled: false,
             procedure_recall_enabled: true,
+            decay_enabled: true,
             engine_version: "engine-rung9-test".to_string(),
         },
     )
@@ -994,6 +1155,7 @@ async fn query_decomposition_recovers_composite_answer_and_traces_subqueries() {
             rerank_enabled: true,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
+            decay_enabled: true,
             engine_version: "engine-rung9-test".to_string(),
         },
     )
@@ -1229,6 +1391,7 @@ async fn procedural_memory_replays_only_validated_safe_procedures_and_traces_gat
             rerank_enabled: true,
             query_decomposition_enabled: true,
             procedure_recall_enabled: false,
+            decay_enabled: true,
             engine_version: "engine-rung10-test".to_string(),
         },
     )
@@ -1254,6 +1417,7 @@ async fn procedural_memory_replays_only_validated_safe_procedures_and_traces_gat
             rerank_enabled: true,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
+            decay_enabled: true,
             engine_version: "engine-rung10-test".to_string(),
         },
     )
@@ -1415,6 +1579,7 @@ async fn recall_golden_fixtures_pass() {
                 rerank_enabled: true,
                 query_decomposition_enabled: true,
                 procedure_recall_enabled: true,
+                decay_enabled: true,
                 engine_version: "engine-wsc-test".to_string(),
             },
         )

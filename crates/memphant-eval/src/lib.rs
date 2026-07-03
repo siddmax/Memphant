@@ -2,12 +2,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use memphant_core::{InMemoryStore, MemoryStore, forget_memory, recall};
+use memphant_core::{InMemoryStore, MemoryStore, forget_memory, recall, record_mark};
 use memphant_types::{
-    ActorId, ContextualChunk, ENGINE_VERSION, ForgetRequest, ForgetSelector, MemoryEdgeKind,
-    MemoryKind, NewEpisode, NewMemoryEdge, NewMemoryUnit, RecallDropReason, RecallMode,
-    RecallRequest, ScopeId, StoredMemoryUnit, TRACE_SCHEMA_VERSION, TenantId, TrustLevel, UnitId,
-    UnitState,
+    ActorId, ContextualChunk, ENGINE_VERSION, ForgetRequest, ForgetSelector, MarkOutcome,
+    MarkRequest, MemoryEdgeKind, MemoryKind, NewEpisode, NewMemoryEdge, NewMemoryUnit,
+    RecallDropReason, RecallMode, RecallRequest, ScopeId, StoredMemoryUnit, TRACE_SCHEMA_VERSION,
+    TenantId, TraceId, TrustLevel, UnitId, UnitState,
 };
 use schemars::schema_for;
 use serde::{Deserialize, Serialize};
@@ -54,6 +54,7 @@ pub struct EvalRunOptions {
     pub rerank_enabled: bool,
     pub query_decomposition_enabled: bool,
     pub procedure_recall_enabled: bool,
+    pub decay_enabled: bool,
     pub filesystem_control_enabled: bool,
 }
 
@@ -69,6 +70,7 @@ impl Default for EvalRunOptions {
             rerank_enabled: true,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
+            decay_enabled: true,
             filesystem_control_enabled: false,
         }
     }
@@ -328,6 +330,15 @@ struct GoldenUnit {
     valid_from: Option<String>,
     #[serde(default)]
     valid_to: Option<String>,
+    #[serde(default)]
+    churn_class: Option<String>,
+    #[serde(default)]
+    review_events: Vec<GoldenReview>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GoldenReview {
+    outcome: MarkOutcome,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -481,6 +492,7 @@ struct GoldenRunControls {
     rerank_enabled: bool,
     query_decomposition_enabled: bool,
     procedure_recall_enabled: bool,
+    decay_enabled: bool,
     filesystem_control_enabled: bool,
 }
 
@@ -494,6 +506,7 @@ impl Default for GoldenRunControls {
             rerank_enabled: true,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
+            decay_enabled: true,
             filesystem_control_enabled: false,
         }
     }
@@ -509,6 +522,7 @@ impl From<&EvalRunOptions> for GoldenRunControls {
             rerank_enabled: options.rerank_enabled,
             query_decomposition_enabled: options.query_decomposition_enabled,
             procedure_recall_enabled: options.procedure_recall_enabled,
+            decay_enabled: options.decay_enabled,
             filesystem_control_enabled: options.filesystem_control_enabled,
         }
     }
@@ -562,6 +576,7 @@ pub fn run_eval_file(path: &Path, options: EvalRunOptions) -> EvalResult<EvalRep
                 "rerank_enabled": options.rerank_enabled,
                 "query_decomposition_enabled": options.query_decomposition_enabled,
                 "procedure_recall_enabled": options.procedure_recall_enabled,
+                "decay_enabled": options.decay_enabled,
                 "filesystem_control_enabled": options.filesystem_control_enabled,
             },
             "case_results": report.case_results,
@@ -1045,6 +1060,9 @@ fn validate_rung_decision(
     if decision.rung == 10 && decision.status == "promoted" {
         validate_rung10_procedural_memory_promotion(decision, axes, &prefix, findings);
     }
+    if decision.rung == 11 && decision.status == "promoted" {
+        validate_rung11_dsr_decay_promotion(decision, axes, &prefix, findings);
+    }
 }
 
 fn validate_rung4_contextual_chunk_promotion(
@@ -1346,6 +1364,50 @@ fn validate_rung10_procedural_memory_promotion(
     }
 }
 
+fn validate_rung11_dsr_decay_promotion(
+    decision: &RungDecision,
+    axes: &BTreeMap<String, SotaAxisResult>,
+    prefix: &str,
+    findings: &mut Vec<String>,
+) {
+    if decision.item != "DSR decay" {
+        findings.push(format!("{prefix}:invalid_item:{}", decision.item));
+    }
+    for required_axis in ["longitudinal", "interactive"] {
+        if !decision.axes.iter().any(|axis| axis == required_axis) {
+            findings.push(format!("{prefix}:missing_{required_axis}_axis"));
+        }
+    }
+    if !decision
+        .benchmark_sample_refs
+        .iter()
+        .any(|sample| sample.to_ascii_lowercase().contains("memorystress"))
+    {
+        findings.push(format!("{prefix}:missing_memorystress_sample"));
+    }
+    if !decision
+        .benchmark_sample_refs
+        .iter()
+        .any(|sample| sample.contains("no-decay"))
+    {
+        findings.push(format!("{prefix}:missing_no_decay_control"));
+    }
+    if !decision
+        .benchmark_sample_refs
+        .iter()
+        .any(|sample| sample.contains("dsr_decay_fold_review_event"))
+    {
+        findings.push(format!("{prefix}:missing_review_event_sample"));
+    }
+    for axis in ["longitudinal", "interactive"] {
+        match axes.get(axis) {
+            Some(result) if result.delta_vs_baseline.unwrap_or_default() > 0.0 => {}
+            Some(_) => findings.push(format!("{prefix}:{axis}:non_positive_axis_delta")),
+            None => {}
+        }
+    }
+}
+
 fn validate_ci(prefix: &str, delta: Option<f64>, ci: Option<[f64; 2]>, findings: &mut Vec<String>) {
     let Some(delta) = delta else {
         findings.push(format!("{prefix}:missing_delta"));
@@ -1397,6 +1459,8 @@ async fn run_syndai_trace_compare(
                 contextual_chunks: Vec::new(),
                 valid_from: None,
                 valid_to: None,
+                churn_class: None,
+                review_events: Vec::new(),
             })
             .collect(),
         edges: Vec::new(),
@@ -1419,6 +1483,7 @@ async fn run_syndai_trace_compare(
             rerank_enabled: true,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
+            decay_enabled: true,
             engine_version: ENGINE_VERSION.to_string(),
         },
     )
@@ -1520,6 +1585,7 @@ async fn run_golden_case_inner(
             rerank_enabled: controls.rerank_enabled,
             query_decomposition_enabled: controls.query_decomposition_enabled,
             procedure_recall_enabled: controls.procedure_recall_enabled,
+            decay_enabled: controls.decay_enabled,
             engine_version: ENGINE_VERSION.to_string(),
         },
     )
@@ -1779,6 +1845,7 @@ async fn run_high_risk_lane(lane: &SecurityLane) -> EvalResult<String> {
             rerank_enabled: true,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
+            decay_enabled: true,
             engine_version: ENGINE_VERSION.to_string(),
         },
     )
@@ -1885,6 +1952,7 @@ async fn run_deletion_lane(lane: &SecurityLane) -> EvalResult<String> {
             rerank_enabled: true,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
+            decay_enabled: true,
             engine_version: ENGINE_VERSION.to_string(),
         },
     )
@@ -2054,8 +2122,8 @@ async fn seed_store(
                     subject_key: unit.subject_key.clone(),
                     body: unit.body.clone(),
                     trust_level: unit.trust_level,
-                    churn_class: None,
-                    freshness_due: false,
+                    churn_class: unit.churn_class.clone(),
+                    freshness_due: unit.churn_class.as_deref() == Some("volatile"),
                     actor_id: Some(actor_id),
                     source_kind: Some("fixture".to_string()),
                     source_episode_id: Some(episode.episode_id),
@@ -2108,6 +2176,37 @@ async fn seed_store(
         .commit(tx)
         .await
         .map_err(|error| EvalError::Core(error.to_string()))?;
+
+    let mut review_trace_seed = 600_000_u128;
+    for unit in seed
+        .units
+        .iter()
+        .filter(|unit| !masked_units.contains(&unit.name))
+    {
+        let Some(unit_id) = named_units.get(&unit.name).copied() else {
+            continue;
+        };
+        let unit_tenant_id = if unit.tenant == "other" {
+            other_tenant_id
+        } else {
+            tenant_id
+        };
+        for (index, review) in unit.review_events.iter().enumerate() {
+            review_trace_seed = review_trace_seed.saturating_add(1);
+            record_mark(
+                &store,
+                MarkRequest {
+                    tenant_id: unit_tenant_id,
+                    trace_id: TraceId::from_u128(review_trace_seed),
+                    caller_id: format!("fixture-review:{}:{index}", unit.name),
+                    used_ids: vec![unit_id],
+                    outcome: review.outcome,
+                },
+            )
+            .await
+            .map_err(|error| EvalError::Core(error.to_string()))?;
+        }
+    }
 
     for (name, id) in &named_units {
         if let Some(unit) = store

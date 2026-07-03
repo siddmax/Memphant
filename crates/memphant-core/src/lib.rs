@@ -2,20 +2,24 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use fsrs::{FSRS, FSRS6_DEFAULT_DECAY, MemoryState, current_retrievability};
 use memphant_types::{
     AdmissionAction, CorrectRequest, CorrectResult, DedupOutcome, EdgeId, EpisodeId, ForgetRequest,
-    ForgetResult, JobId, MarkRequest, MarkResult, MemoryEdgeKind, MemoryKind, NewEpisode,
-    NewMemoryEdge, NewMemoryUnit, ProcedureTraceFact, QueuedReflectJob, RecallCandidateTrace,
-    RecallChannel, RecallCitation, RecallContextItem, RecallDropReason, RecallDroppedItem,
-    RecallMode, RecallPolicyFilter, RecallRequest, RecallResponse, ReflectInput, ReflectJob,
-    ReflectJobKind, ReflectStageFact, ReflectTrace, RetainInput, RetainOutcome, RetainRequest,
-    RetainResourceOutcome, RetainResourceRequest, RetainResult, RetrievalTrace, ReviewEvent,
-    ScopeId, StoredEpisode, StoredMemoryEdge, StoredMemoryUnit, StoredResource, TenantId, TraceId,
-    TrustLevel, UnitId, UnitState,
+    ForgetResult, JobId, MarkOutcome, MarkRequest, MarkResult, MemoryEdgeKind, MemoryKind,
+    NewEpisode, NewMemoryEdge, NewMemoryUnit, ProcedureTraceFact, QueuedReflectJob,
+    RecallCandidateTrace, RecallChannel, RecallCitation, RecallContextItem, RecallDropReason,
+    RecallDroppedItem, RecallMode, RecallPolicyFilter, RecallRequest, RecallResponse, ReflectInput,
+    ReflectJob, ReflectJobKind, ReflectStageFact, ReflectTrace, RetainInput, RetainOutcome,
+    RetainRequest, RetainResourceOutcome, RetainResourceRequest, RetainResult, RetrievalTrace,
+    ReviewEvent, ScopeId, StoredEpisode, StoredMemoryEdge, StoredMemoryUnit, StoredResource,
+    TenantId, TraceId, TrustLevel, UnitId, UnitState,
 };
 use memphant_types::{NewResource, ResourceExtractorState, ResourceId};
 
 const CURRENT_VALIDITY_CUTOFF: &str = "2026-07-03T00:00:00Z";
+const DECAY_MODEL_ID: &str = "fixed-prior-dsr-v1";
+const DEFAULT_STABILITY_DAYS: f32 = 7.0;
+const DEFAULT_DIFFICULTY: f32 = 5.0;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -416,6 +420,10 @@ impl MemoryStore for InMemoryStore {
             valid_to: unit.valid_to,
             transaction_from: unit.transaction_from,
             transaction_to: unit.transaction_to,
+            difficulty: None,
+            stability_days: None,
+            last_reinforced_at: None,
+            reinforcement_count: 0,
         });
         Ok(id)
     }
@@ -704,17 +712,19 @@ pub async fn record_mark(
     }
 
     let mut state = store.inner.lock().map_err(|_| StoreError::Poisoned)?;
-    state
-        .review_events
-        .entry(request.tenant_id)
-        .or_default()
-        .push(ReviewEvent {
+    let events = state.review_events.entry(request.tenant_id).or_default();
+    if !events
+        .iter()
+        .any(|event| event.trace_id == request.trace_id && event.caller_id == request.caller_id)
+    {
+        events.push(ReviewEvent {
             tenant_id: request.tenant_id,
             trace_id: request.trace_id,
             caller_id: request.caller_id,
             used_ids: request.used_ids,
             outcome: request.outcome,
         });
+    }
 
     Ok(MarkResult {
         accepted: true,
@@ -737,7 +747,7 @@ pub async fn recall(
             scope_id: request.scope_id,
             actor_id: request.actor_id,
             query_hash: hash_query(&request.query),
-            engine_version: request.engine_version,
+            engine_version: request.engine_version.clone(),
             feature_flags: Vec::new(),
             channel_runs: vec![ReflectStageFact {
                 stage: "stage0_policy".to_string(),
@@ -769,6 +779,7 @@ pub async fn recall(
             latency_ms: 0,
             token_estimate: 0,
             cost_micros: 0,
+            decay_model_id: decay_model_id(&request).to_string(),
         };
         state
             .retrieval_traces
@@ -791,6 +802,11 @@ pub async fn recall(
         .unwrap_or_default();
     let tenant_edges = state
         .memory_edges
+        .get(&request.tenant_id)
+        .cloned()
+        .unwrap_or_default();
+    let tenant_review_events = state
+        .review_events
         .get(&request.tenant_id)
         .cloned()
         .unwrap_or_default();
@@ -832,6 +848,7 @@ pub async fn recall(
         });
         for (rank, (unit, score)) in ranked.into_iter().enumerate() {
             let channel_rank = rank + 1;
+            let decay = decay_score_for(&unit, &tenant_review_events, request.decay_enabled);
             let contribution =
                 channel_weight(channel, &request.query) / (60.0 + channel_rank as f32);
             candidates_by_unit
@@ -845,6 +862,7 @@ pub async fn recall(
                     fused_score: contribution,
                     rerank_rank: None,
                     rerank_score: 0.0,
+                    decay,
                     subquery_ids: Vec::new(),
                     decomposition_rank: None,
                     channels: vec![(channel, channel_rank, score)],
@@ -859,6 +877,10 @@ pub async fn recall(
                 rerank_rank: None,
                 rerank_score: 0.0,
                 subquery_ids: Vec::new(),
+                decay_retrievability: decay.retrievability,
+                dsr_stability_days: decay.stability_days,
+                dsr_difficulty: decay.difficulty,
+                dsr_reinforcement_count: decay.reinforcement_count,
                 trust_level: unit.trust_level,
                 state: unit.state,
                 discard_reason: None,
@@ -889,6 +911,8 @@ pub async fn recall(
                 });
                 for (rank, (unit, score)) in ranked.into_iter().take(request.k.max(1)).enumerate() {
                     let channel_rank = rank + 1;
+                    let decay =
+                        decay_score_for(&unit, &tenant_review_events, request.decay_enabled);
                     let contribution =
                         channel_weight(channel, &subquery.query) / (55.0 + channel_rank as f32);
                     candidates_by_unit
@@ -903,6 +927,7 @@ pub async fn recall(
                             fused_score: contribution,
                             rerank_rank: None,
                             rerank_score: 0.0,
+                            decay,
                             subquery_ids: vec![subquery.id.clone()],
                             decomposition_rank: None,
                             channels: vec![(channel, channel_rank, score)],
@@ -917,6 +942,10 @@ pub async fn recall(
                         rerank_rank: None,
                         rerank_score: 0.0,
                         subquery_ids: vec![subquery.id.clone()],
+                        decay_retrievability: decay.retrievability,
+                        dsr_stability_days: decay.stability_days,
+                        dsr_difficulty: decay.difficulty,
+                        dsr_reinforcement_count: decay.reinforcement_count,
                         trust_level: unit.trust_level,
                         state: unit.state,
                         discard_reason: None,
@@ -1004,7 +1033,7 @@ pub async fn recall(
         scope_id: request.scope_id,
         actor_id: request.actor_id,
         query_hash: hash_query(&request.query),
-        engine_version: request.engine_version,
+        engine_version: request.engine_version.clone(),
         feature_flags,
         channel_runs: recall_stage_facts(),
         candidates: candidate_traces,
@@ -1034,6 +1063,7 @@ pub async fn recall(
         latency_ms: 0,
         token_estimate,
         cost_micros: 0,
+        decay_model_id: decay_model_id(&request).to_string(),
     };
     state
         .retrieval_traces
@@ -1386,6 +1416,7 @@ fn deterministic_rerank_score(candidate: &CandidateAccumulator, query_tokens: &[
         + (2.0 * vector_score(&candidate.unit, query_tokens))
         + exact_score(&candidate.unit, query_tokens)
         + (2.0 * rerank_intent_anchor_score(&candidate.unit, query_tokens))
+        + (3.0 * candidate.decay.retrievability)
         + candidate.fused_score
 }
 
@@ -1431,9 +1462,29 @@ struct CandidateAccumulator {
     fused_score: f32,
     rerank_rank: Option<usize>,
     rerank_score: f32,
+    decay: DecayScore,
     subquery_ids: Vec<String>,
     decomposition_rank: Option<usize>,
     channels: Vec<(RecallChannel, usize, f32)>,
+}
+
+#[derive(Clone, Copy)]
+struct DecayScore {
+    retrievability: f32,
+    stability_days: Option<f32>,
+    difficulty: Option<f32>,
+    reinforcement_count: u32,
+}
+
+impl DecayScore {
+    fn neutral(unit: &StoredMemoryUnit) -> Self {
+        Self {
+            retrievability: 1.0,
+            stability_days: unit.stability_days,
+            difficulty: unit.difficulty,
+            reinforcement_count: unit.reinforcement_count,
+        }
+    }
 }
 
 struct RerankTraceFacts {
@@ -1614,6 +1665,7 @@ fn packing_relevance_score(candidate: &CandidateAccumulator, query_tokens: &[Str
         + exact_score(&candidate.unit, query_tokens)
         + lexical_score(&candidate.unit, query_tokens)
         + vector_score(&candidate.unit, query_tokens)
+        + candidate.decay.retrievability
 }
 
 fn replacement_index(
@@ -1968,6 +2020,132 @@ fn channel_weight(channel: RecallChannel, query: &str) -> f32 {
     }
 }
 
+fn decay_model_id(request: &RecallRequest) -> &'static str {
+    if request.decay_enabled {
+        DECAY_MODEL_ID
+    } else {
+        "none"
+    }
+}
+
+fn decay_score_for(
+    unit: &StoredMemoryUnit,
+    review_events: &[ReviewEvent],
+    decay_enabled: bool,
+) -> DecayScore {
+    if !decay_enabled {
+        return DecayScore::neutral(unit);
+    }
+
+    let fsrs = FSRS::default();
+    let mut state = MemoryState {
+        stability: unit.stability_days.unwrap_or(DEFAULT_STABILITY_DAYS),
+        difficulty: unit.difficulty.unwrap_or(DEFAULT_DIFFICULTY),
+    };
+    let mut reinforcement_count = unit.reinforcement_count;
+    let mut seen = std::collections::HashSet::new();
+    let mut event_count = 0_u32;
+    let mut last_outcome = None;
+
+    for event in review_events
+        .iter()
+        .filter(|event| event.used_ids.contains(&unit.id))
+    {
+        let source_key = (event.trace_id, event.caller_id.as_str());
+        if !seen.insert(source_key) {
+            continue;
+        }
+        let desired_retention = desired_retention_prior(unit);
+        if let Ok(next) = fsrs.next_states(
+            Some(state),
+            desired_retention,
+            days_elapsed_for_review(event.outcome),
+        ) {
+            state = match event.outcome {
+                MarkOutcome::Success => {
+                    reinforcement_count = reinforcement_count.saturating_add(1);
+                    next.good.memory
+                }
+                MarkOutcome::Corrected => {
+                    reinforcement_count = reinforcement_count.saturating_add(1);
+                    next.hard.memory
+                }
+                MarkOutcome::Ignored | MarkOutcome::Failure => next.again.memory,
+            };
+        }
+        event_count = event_count.saturating_add(1);
+        last_outcome = Some(event.outcome);
+    }
+
+    let elapsed = days_since_last_review(event_count, last_outcome);
+    let mut retrievability =
+        current_retrievability(state, elapsed, FSRS6_DEFAULT_DECAY).clamp(0.0, 1.0);
+    retrievability *= review_grade_adjustment(review_events, unit.id);
+    retrievability = retrievability.clamp(0.0, 1.0);
+
+    DecayScore {
+        retrievability,
+        stability_days: Some(state.stability),
+        difficulty: Some(state.difficulty),
+        reinforcement_count,
+    }
+}
+
+fn desired_retention_prior(unit: &StoredMemoryUnit) -> f32 {
+    match unit
+        .churn_class
+        .as_deref()
+        .map(normalize_component)
+        .as_deref()
+    {
+        Some("identity") | Some("stable") => 0.95,
+        Some("slow") => 0.9,
+        Some("volatile") => 0.8,
+        Some("web") | Some("world state") | Some("world-state") => 0.7,
+        _ if unit.kind == MemoryKind::Belief => 0.75,
+        _ => 0.9,
+    }
+}
+
+fn days_elapsed_for_review(outcome: MarkOutcome) -> u32 {
+    match outcome {
+        MarkOutcome::Success => 7,
+        MarkOutcome::Corrected => 3,
+        MarkOutcome::Ignored | MarkOutcome::Failure => 21,
+    }
+}
+
+fn days_since_last_review(event_count: u32, last_outcome: Option<MarkOutcome>) -> f32 {
+    match (event_count, last_outcome) {
+        (0, _) => 14.0,
+        (_, Some(MarkOutcome::Success)) => 7.0,
+        (_, Some(MarkOutcome::Corrected)) => 5.0,
+        (_, Some(MarkOutcome::Ignored | MarkOutcome::Failure)) => 14.0,
+        _ => 14.0,
+    }
+}
+
+fn review_grade_adjustment(review_events: &[ReviewEvent], unit_id: UnitId) -> f32 {
+    let mut adjustment = 1.0_f32;
+    let mut seen = std::collections::HashSet::new();
+    for event in review_events
+        .iter()
+        .filter(|event| event.used_ids.contains(&unit_id))
+    {
+        let source_key = (event.trace_id, event.caller_id.as_str());
+        if !seen.insert(source_key) {
+            continue;
+        }
+        adjustment += match event.outcome {
+            MarkOutcome::Success => 0.03,
+            MarkOutcome::Corrected => 0.01,
+            MarkOutcome::Ignored => -0.35,
+            MarkOutcome::Failure => -0.45,
+        };
+    }
+    adjustment.clamp(0.2, 1.15)
+}
+
 fn recall_stage_facts() -> Vec<ReflectStageFact> {
     [
         "stage0_policy",
@@ -2013,6 +2191,9 @@ fn recall_feature_flags(request: &RecallRequest) -> Vec<String> {
     }
     if request.procedure_recall_enabled {
         flags.push("procedure_recall_enabled".to_string());
+    }
+    if request.decay_enabled {
+        flags.push("decay_enabled".to_string());
     }
     flags
 }
@@ -2090,6 +2271,10 @@ pub async fn reflect_recorded(
                         valid_to: candidate.valid_to,
                         transaction_from: Some(CURRENT_VALIDITY_CUTOFF.to_string()),
                         transaction_to: None,
+                        difficulty: None,
+                        stability_days: None,
+                        last_reinforced_at: None,
+                        reinforcement_count: 0,
                     });
                     edges.push(StoredMemoryEdge {
                         id: EdgeId::new(),
@@ -2138,6 +2323,10 @@ pub async fn reflect_recorded(
                         valid_to: candidate.valid_to,
                         transaction_from: Some(CURRENT_VALIDITY_CUTOFF.to_string()),
                         transaction_to: None,
+                        difficulty: None,
+                        stability_days: None,
+                        last_reinforced_at: None,
+                        reinforcement_count: 0,
                     });
                     AdmissionAction::Quarantine
                 } else {
@@ -2190,6 +2379,10 @@ pub async fn reflect_recorded(
                         valid_to: candidate.valid_to,
                         transaction_from: Some(CURRENT_VALIDITY_CUTOFF.to_string()),
                         transaction_to: None,
+                        difficulty: None,
+                        stability_days: None,
+                        last_reinforced_at: None,
+                        reinforcement_count: 0,
                     });
                     action
                 }
@@ -2216,6 +2409,10 @@ pub async fn reflect_recorded(
                         valid_to: candidate.valid_to,
                         transaction_from: Some(CURRENT_VALIDITY_CUTOFF.to_string()),
                         transaction_to: None,
+                        difficulty: None,
+                        stability_days: None,
+                        last_reinforced_at: None,
+                        reinforcement_count: 0,
                     });
                     AdmissionAction::Quarantine
                 } else {
@@ -2240,6 +2437,10 @@ pub async fn reflect_recorded(
                         valid_to: candidate.valid_to,
                         transaction_from: Some(CURRENT_VALIDITY_CUTOFF.to_string()),
                         transaction_to: None,
+                        difficulty: None,
+                        stability_days: None,
+                        last_reinforced_at: None,
+                        reinforcement_count: 0,
                     });
                     AdmissionAction::Append
                 }

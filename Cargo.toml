@@ -22,6 +22,7 @@ rust-version = "1.96"
 [workspace.dependencies]
 async-trait = "0.1"
 axum = "0.8"
+fsrs = "6.6.1"
 http-body-util = "0.1"
 schemars = { version = "1", features = ["uuid1"] }
 memphant-core = { path = "crates/memphant-core" }

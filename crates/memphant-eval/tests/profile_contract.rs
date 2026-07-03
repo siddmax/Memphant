@@ -499,3 +499,75 @@ fn rung10_promotion_requires_replay_sample_and_no_procedure_control() {
     assert!(text.contains("rung_decision:10:missing_procedural_replay_sample"));
     assert!(text.contains("rung_decision:10:missing_no_procedure_control"));
 }
+
+#[test]
+fn rung11_profile_archives_dsr_decay_promotion() {
+    let archive_dir = tempfile::tempdir().expect("tempdir");
+    let archive_path = archive_dir.path().join("rung11-profile.json");
+    let report = run_profile_file(
+        &repo_root().join("examples/evals/rung11-dsr-decay-profile.yaml"),
+        "rungs-0-10-baseline",
+        Some(archive_path.clone()),
+    )
+    .expect("rung11 profile should pass");
+
+    let decision = report
+        .rung_decisions
+        .iter()
+        .find(|decision| decision.rung == 11)
+        .expect("rung 11 decision");
+    assert_eq!(decision.item, "DSR decay");
+    assert_eq!(decision.status, "promoted");
+    assert_eq!(decision.axes, ["longitudinal", "interactive"]);
+    assert!(decision.delta_vs_baseline > 0.0);
+    assert!(decision.ci[0] > 0.0);
+    assert!(
+        decision
+            .benchmark_sample_refs
+            .iter()
+            .any(|sample| sample.contains("rung11-memorystress"))
+    );
+    assert!(
+        decision
+            .benchmark_sample_refs
+            .iter()
+            .any(|sample| sample.contains("no-decay"))
+    );
+    assert!(
+        report
+            .activated_levers
+            .iter()
+            .any(|item| item == "DSR decay fold")
+    );
+
+    let archived: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&archive_path).expect("read archive"))
+            .expect("archive json");
+    assert_eq!(archived["rung_decisions"][0]["rung"], 11);
+}
+
+#[test]
+fn rung11_promotion_requires_memorystress_and_no_decay_control() {
+    let source =
+        fs::read_to_string(repo_root().join("examples/evals/rung11-dsr-decay-profile.yaml"))
+            .expect("read fixture");
+    let bad = source
+        .replace(
+            "      - memorystress-style:benchmarks/rung11-memorystress-sampled.yaml\n",
+            "",
+        )
+        .replace(
+            "      - no-decay:benchmarks/rung11-baseline-sampled.yaml\n",
+            "",
+        );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("bad-rung11-profile.yaml");
+    fs::write(&path, bad).expect("write fixture");
+
+    let error = run_profile_file(&path, "rungs-0-10-baseline", None)
+        .expect_err("rung11 promotion without MemoryStress/no-decay proof should fail");
+
+    let text = error.to_string();
+    assert!(text.contains("rung_decision:11:missing_memorystress_sample"));
+    assert!(text.contains("rung_decision:11:missing_no_decay_control"));
+}

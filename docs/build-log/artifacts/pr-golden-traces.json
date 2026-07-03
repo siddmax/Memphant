@@ -9,7 +9,7 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f27cb-795f-7653-a281-27fc72b135a7"
+      "trace_id": "019f27e0-6fac-7fa3-87b0-e831c4e89419"
     },
     {
       "dropped_mismatches": [],
@@ -20,7 +20,7 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f27cb-7966-7833-8e2d-1ab05a87048b"
+      "trace_id": "019f27e0-6fb3-7432-84d5-03e652b3cdb0"
     },
     {
       "dropped_mismatches": [],
@@ -31,7 +31,18 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f27cb-7968-79f0-8b81-d8bf481c4875"
+      "trace_id": "019f27e0-6fb7-7e03-82fb-708a32a3c329"
+    },
+    {
+      "dropped_mismatches": [],
+      "error": null,
+      "forbidden_present": [],
+      "id": "dsr_decay_fold_review_event",
+      "missing_citations": [],
+      "missing_trace_stages": [],
+      "missing_units": [],
+      "passed": true,
+      "trace_id": "019f27e0-6fb8-7a32-94e8-1cb1ec03f332"
     },
     {
       "dropped_mismatches": [],
@@ -42,7 +53,7 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f27cb-7969-7283-a3e9-da8bafbdc85e"
+      "trace_id": "019f27e0-6fb9-7ed1-9315-48adedd69c15"
     },
     {
       "dropped_mismatches": [],
@@ -53,7 +64,7 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f27cb-796a-70b2-a0f7-091eba08d698"
+      "trace_id": "019f27e0-6fba-7990-aaef-9feebaf68b2b"
     },
     {
       "dropped_mismatches": [],
@@ -64,7 +75,7 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f27cb-796a-70b2-a0f7-096a33f62d46"
+      "trace_id": "019f27e0-6fba-7990-aaef-a0314f9c58f7"
     },
     {
       "dropped_mismatches": [],
@@ -75,7 +86,7 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f27cb-796b-7812-9a8b-fe0787ab8612"
+      "trace_id": "019f27e0-6fbb-72e2-a85b-446e8a7b599e"
     },
     {
       "dropped_mismatches": [],
@@ -86,7 +97,7 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f27cb-796d-7b93-831e-ce6d048f9ffd"
+      "trace_id": "019f27e0-6fbd-7a72-9e15-06c3df86c7c4"
     },
     {
       "dropped_mismatches": [],
@@ -97,7 +108,7 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f27cb-796e-7703-90a0-2573c1571512"
+      "trace_id": "019f27e0-6fbe-7e80-8d8b-4175061c6063"
     },
     {
       "dropped_mismatches": [],
@@ -108,21 +119,22 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f27cb-796f-7bc3-a471-10320f139111"
+      "trace_id": "019f27e0-6fbf-74b2-8e10-840e90c3490c"
     }
   ],
   "eval_id": "pr-golden",
   "metrics": {
     "context_packing_abstention_enabled": true,
     "contextual_chunks_enabled": true,
+    "decay_enabled": true,
     "edge_expansion_enabled": true,
     "filesystem_control_enabled": false,
-    "passed_cases": 10,
+    "passed_cases": 11,
     "procedure_recall_enabled": true,
     "query_decomposition_enabled": true,
     "rerank_enabled": true,
     "temporal_validity_enabled": true,
-    "total_cases": 10
+    "total_cases": 11
   },
   "runner": "memphant-eval",
   "trace_schema_version": "trace-0.1.0-ws0"

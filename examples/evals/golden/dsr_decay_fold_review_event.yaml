@@ -1,0 +1,43 @@
+id: dsr_decay_fold_review_event
+second_author_confirmed: true
+query: "Which deploy runbook is current?"
+k: 1
+budget_tokens: 80
+mode: balanced
+seed:
+  units:
+    - name: mem_deploy_stale_ignored_runbook
+      episode_body: "Older deploy notes mentioned restarting the legacy queue."
+      kind: semantic
+      state: active
+      subject_key: "deploy runbook current"
+      body: "Aardvark deploy runbook says to restart the legacy queue."
+      trust_level: trusted_system
+      churn_class: slow
+      review_events:
+        - outcome: ignored
+    - name: mem_deploy_reinforced_runbook
+      episode_body: "Longitudinal reviews confirmed the atlas cutover checklist."
+      kind: semantic
+      state: active
+      subject_key: "deploy runbook current"
+      body: "Zulu deploy runbook says to run the atlas cutover checklist."
+      trust_level: trusted_system
+      churn_class: stable
+      review_events:
+        - outcome: success
+        - outcome: success
+        - outcome: success
+expect:
+  answer_bearing_ids:
+    - mem_deploy_reinforced_runbook
+  top_k_contains:
+    - mem_deploy_reinforced_runbook
+  forbidden_units:
+    - mem_deploy_stale_ignored_runbook
+  trace_stages_include:
+    - rerank
+    - trace
+  trace_feature_flags_include:
+    - decay_enabled
+  abstention_signal: false

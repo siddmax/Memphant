@@ -1,0 +1,354 @@
+id: rung11_dsr_decay_profile_001
+profile_version: sota-profile-0.2.0
+benchmark_version: memorystress-style-dsr-decay-2026-07-03
+compare_to: rungs-0-10-baseline
+harness_pin:
+  answer_model: retrieval-only-oracle
+  embedding_profile: deterministic-local
+  reranker: deterministic-local-v1
+  query_decomposer: deterministic-structural-v1
+  decay_model: fixed-prior-dsr-v1
+  memphant_commit_scope: rung11-dsr-decay
+axes:
+  outcome:
+    benchmark: memphant-golden
+    metric: pass_rate
+    source_status: internal_golden
+    trace_ref: docs/build-log/artifacts/pr-golden-traces.json
+    score: 1.0
+    baseline_score: 0.91
+    delta_vs_baseline: 0.09
+    ci: [0.09, 0.09]
+    gate: pass
+  long_horizon:
+    benchmark: lme-v2-composite-query-style
+    metric: composite_answer_bearing_top_k
+    source_status: sampled_public_style
+    trace_ref: docs/build-log/artifacts/rung9-state-lme-sampled-traces.json
+    score: 1.0
+    baseline_score: 1.0
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    gate: pass
+  scale:
+    benchmark: beam-100k-sampled
+    metric: answer_bearing_top_k
+    source_status: sampled_public
+    trace_ref: docs/build-log/artifacts/rung4-public-sampled-traces.json
+    score: 1.0
+    baseline_score: 1.0
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    gate: pass
+  longitudinal:
+    benchmark: memorystress-style
+    metric: degradation_auc
+    source_status: internal_mimic
+    trace_ref: docs/build-log/artifacts/rung11-memorystress-sampled-traces.json
+    score: 1.0
+    baseline_score: 0.0
+    delta_vs_baseline: 1.0
+    ci: [1.0, 1.0]
+    gate: pass
+  restraint:
+    benchmark: state-style-packing-abstention
+    metric: packed_answer_or_abstain
+    source_status: sampled_public_style
+    trace_ref: docs/build-log/artifacts/rung7-state-style-sampled-traces.json
+    score: 1.0
+    baseline_score: 1.0
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    gate: pass
+  interactive:
+    benchmark: state-style-feedback-loop
+    metric: marked_review_event_fold_top_k
+    source_status: internal_mimic
+    trace_ref: docs/build-log/artifacts/rung11-memorystress-sampled-traces.json
+    score: 1.0
+    baseline_score: 0.0
+    delta_vs_baseline: 1.0
+    ci: [1.0, 1.0]
+    gate: pass
+  embedding_selection:
+    benchmark: lmeb
+    metric: mean_n_at_10
+    source_status: not_run
+    trace_ref: not-run
+    gate: external_profile_required
+  procedural:
+    benchmark: skillos-state-style
+    metric: pass_k
+    source_status: sampled_public_style
+    trace_ref: docs/build-log/artifacts/rung10-state-style-sampled-traces.json
+    score: 1.0
+    baseline_score: 1.0
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    gate: pass
+  systems_cost:
+    benchmark: local-static
+    metric: packaging_contract
+    source_status: local_static
+    trace_ref: docs/build-log/2026-07-03-wsh-progress.md
+    score: 1.0
+    baseline_score: 1.0
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    gate: pass
+  internal_syndai:
+    benchmark: syndai-agent-file-memory
+    metric: answer_bearing_recall
+    source_status: internal_trace_compare
+    trace_ref: docs/build-log/artifacts/syndai_agent_file_memory_001-trace-compare.json
+    score: 1.0
+    baseline_score: 1.0
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    gate: pass
+rung_decisions:
+  - rung: 11
+    item: DSR decay
+    status: promoted
+    gate_met: true
+    decision: promote_fixed_prior_fold
+    reason: Fixed-prior DSR fold over review_event rows recovered the reinforced durable deploy runbook while the no-decay control returned the stale ignored runbook.
+    axes: [longitudinal, interactive]
+    benchmark_sample_refs:
+      - memorystress-style:benchmarks/rung11-memorystress-sampled.yaml
+      - no-decay:benchmarks/rung11-baseline-sampled.yaml
+      - memphant:examples/evals/golden/dsr_decay_fold_review_event.yaml
+    before_trace_ref: docs/build-log/artifacts/rung11-baseline-sampled-traces.json
+    after_trace_ref: docs/build-log/artifacts/rung11-memorystress-sampled-traces.json
+    delta_vs_baseline: 1.0
+    ci: [1.0, 1.0]
+    p95_ms: 1.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+activation_decisions:
+  - item: L4 exhaustive recall behavior
+    status: dormant
+    gate_met: false
+    decision: keep_disabled
+    reason: Rung 11 resolves the sampled longitudinal stale-memory miss with the fixed-prior decay fold, not exhaustive expansion.
+    before_trace_ref: docs/build-log/artifacts/rung11-baseline-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: fast
+    exhaustive_mode: disabled
+  - item: Learned reranker
+    status: dormant
+    gate_met: false
+    decision: keep_fixed_rules
+    reason: The longitudinal miss is resolved by decay using review evidence; no learned reranker data floor or paired learned-reranker gain is present.
+    before_trace_ref: docs/build-log/artifacts/rung11-baseline-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: fixed-rrf
+    exhaustive_mode: disabled
+  - item: Learned DSR/FSRS fitter
+    status: dormant
+    gate_met: false
+    decision: keep_fixed_priors
+    reason: The fixed-prior fold passes the longitudinal gate; learned fitting remains data-gated until enough MemPhant-native review traces exist.
+    before_trace_ref: docs/build-log/artifacts/rung11-baseline-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: fixed-prior-dsr
+    exhaustive_mode: disabled
+  - item: DSR decay fold
+    status: activated
+    gate_met: true
+    decision: build_fixed_prior_fold
+    reason: The longitudinal MemoryStress-style sample demonstrates that folding review_event outcomes into DSR retrievability beats the no-decay control without losing durable facts.
+    before_trace_ref: docs/build-log/artifacts/rung11-baseline-sampled-traces.json
+    after_trace_ref: docs/build-log/artifacts/rung11-memorystress-sampled-traces.json
+    delta_vs_baseline: 1.0
+    ci: [1.0, 1.0]
+    p95_ms: 1.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: fixed-prior-dsr
+    exhaustive_mode: fixed-prior-dsr
+  - item: Procedural replay-validation harness
+    status: activated
+    gate_met: true
+    decision: keep_validated_replay_gate
+    reason: Rung 10 remains active and independent of decay.
+    before_trace_ref: docs/build-log/artifacts/rung10-baseline-sampled-traces.json
+    after_trace_ref: docs/build-log/artifacts/rung10-state-style-sampled-traces.json
+    delta_vs_baseline: 1.0
+    ci: [1.0, 1.0]
+    p95_ms: 1.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: validated-procedure-recall
+    exhaustive_mode: validated-procedure-recall
+  - item: 3-tier DEK envelope encryption
+    status: dormant
+    gate_met: false
+    decision: keep_customer-gated
+    reason: No BYOC enterprise customer contract requires customer-held KEK yet.
+    before_trace_ref: docs/build-log/2026-07-03-wsh-progress.md
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: provider-sse
+    exhaustive_mode: disabled
+  - item: Ablation-voting recall
+    status: dormant
+    gate_met: false
+    decision: keep_disabled
+    reason: No containment gain worth multiplied read cost is present.
+    before_trace_ref: docs/build-log/artifacts/rung4-public-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: single-profile-recall
+    exhaustive_mode: disabled
+  - item: Delta recall
+    status: dormant
+    gate_met: false
+    decision: keep_disabled
+    reason: No paired ablation proves delta recall improves a target axis.
+    before_trace_ref: docs/build-log/artifacts/rung4-public-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: full-pack
+    exhaustive_mode: disabled
+  - item: Miss-repair re-extraction
+    status: dormant
+    gate_met: false
+    decision: keep_disabled
+    reason: The decay sample proves review-event retention, not query-conditioned extraction.
+    before_trace_ref: docs/build-log/artifacts/rung4-public-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: no-reextract-on-miss
+    exhaustive_mode: disabled
+  - item: Retrievability probe
+    status: dormant
+    gate_met: false
+    decision: keep_disabled
+    reason: The rung-11 proof concerns ranked retention after feedback, not write-time findability probes.
+    before_trace_ref: docs/build-log/artifacts/rung11-memorystress-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: no-probe
+    exhaustive_mode: disabled
+  - item: Consolidation event delivery
+    status: dormant
+    gate_met: false
+    decision: keep_polling
+    reason: No customer integration requires webhook delivery for consolidation events.
+    before_trace_ref: docs/build-log/2026-07-03-wsh-progress.md
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: polling
+    exhaustive_mode: disabled
+  - item: Hermes memory-provider adapter
+    status: dormant
+    gate_met: false
+    decision: keep_external
+    reason: No active Hermes integration proof is present in this profile.
+    before_trace_ref: docs/build-log/2026-07-03-wsh-progress.md
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: sdk-api
+    exhaustive_mode: disabled
+  - item: External graph DB / dedicated vector engine
+    status: dormant
+    gate_met: false
+    decision: keep_postgres_pgvector
+    reason: The sampled decay gate is ranking-side and does not require an external graph or vector service.
+    before_trace_ref: docs/build-log/artifacts/rung11-memorystress-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: postgres-pgvector
+    exhaustive_mode: disabled
+  - item: Cache cluster
+    status: dormant
+    gate_met: false
+    decision: keep_process_cache
+    reason: The local sampled gate has no hot-path cache SLO breach.
+    before_trace_ref: docs/build-log/artifacts/rung11-memorystress-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: in-process
+    exhaustive_mode: disabled
+  - item: TypeScript SDK
+    status: dormant
+    gate_met: false
+    decision: keep_rust_cli_http_mcp
+    reason: No GTM/customer signal requires a TypeScript SDK in the Rung 11 promotion slice.
+    before_trace_ref: docs/build-log/2026-07-03-wsh-progress.md
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: rust-cli-http-mcp
+    exhaustive_mode: disabled

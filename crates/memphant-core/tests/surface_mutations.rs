@@ -99,6 +99,7 @@ async fn correct_supersedes_old_generation_and_recall_returns_new_value() {
             rerank_enabled: true,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
+            decay_enabled: true,
             engine_version: "engine-wsd-test".to_string(),
         },
     )
@@ -171,6 +172,7 @@ async fn forget_marks_memory_deleted_and_recall_hides_it() {
             rerank_enabled: true,
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
+            decay_enabled: true,
             engine_version: "engine-wsd-test".to_string(),
         },
     )
@@ -216,6 +218,42 @@ async fn mark_records_outcome_feedback_for_trace() {
     assert_eq!(events[0].trace_id, trace_id);
     assert_eq!(events[0].used_ids, vec![unit_id]);
     assert_eq!(events[0].outcome, MarkOutcome::Success);
+}
+
+#[tokio::test]
+async fn mark_is_idempotent_per_trace_and_caller() {
+    let store = InMemoryStore::default();
+    let tenant_id = tenant(82_100);
+    let scope_id = scope(82_101);
+    let actor_id = actor(82_102);
+    let unit_id = seed_active_unit(
+        &store,
+        tenant_id,
+        scope_id,
+        actor_id,
+        "deploy_region:value",
+        "Deploy region is Taipei.",
+    )
+    .await;
+    let trace_id = TraceId::new();
+    let request = MarkRequest {
+        tenant_id,
+        trace_id,
+        caller_id: "surface-contract-test".to_string(),
+        used_ids: vec![unit_id],
+        outcome: MarkOutcome::Success,
+    };
+
+    record_mark(&store, request.clone())
+        .await
+        .expect("first mark succeeds");
+    record_mark(&store, request)
+        .await
+        .expect("duplicate mark succeeds");
+
+    let events = store.review_events(tenant_id);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].trace_id, trace_id);
 }
 
 async fn seed_active_unit(

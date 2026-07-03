@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+fsrs.workspace = true
 memphant-types.workspace = true
 thiserror.workspace = true
 

@@ -5,7 +5,7 @@
 > ## ✅ DONE definition (deterministic)
 > **MemPhant is FULLY COMPLETED when every checkbox in §1–§6 is checked and the banner below reads COMPLETE.** No section may be skipped; an activation-gated item (§5) counts as done when it is either ACTIVATED (gate met + built + proof) or RETIRED (its disable-when fired, recorded in `24`). Nothing else — no vibe, no partial credit — flips the banner.
 >
-> # CURRENT PHASE: `RUNG-10 PROMOTED — NEXT RUNG 11 DSR DECAY FOLD`
+> # CURRENT PHASE: `RUNG-11 PROMOTED — NEXT RUNG 12 L4 EXHAUSTIVE`
 >
 > WS-0 proof artifact: `docs/build-log/artifacts/ws0-two-language-spike.json`.
 > R83 spike measured warm no-recompile Rust policy-change iteration at **0.073×** Python (`rust_proceeds`).
@@ -26,6 +26,7 @@
 > Rung-8 promotion proof artifact: `docs/build-log/2026-07-03-rung8-bounded-rerank-profile.md` + `docs/build-log/artifacts/rung8-bounded-rerank-profile.json` + `docs/build-log/artifacts/rung8-baseline-sampled-traces.json` + `docs/build-log/artifacts/rung8-state-style-sampled-traces.json` (bounded deterministic rerank recovered a rank-sensitive owner answer while the no-rerank control returned the topical decoy).
 > Rung-9 promotion proof artifact: `docs/build-log/2026-07-03-rung9-query-decomposition-profile.md` + `docs/build-log/artifacts/rung9-query-decomposition-profile.json` + `docs/build-log/artifacts/rung9-baseline-sampled-traces.json` + `docs/build-log/artifacts/rung9-state-lme-sampled-traces.json` (deterministic structural decomposition recovered both halves of a composite deploy/release query while the no-decomposition control missed one).
 > Rung-10 promotion proof artifact: `docs/build-log/2026-07-03-rung10-procedural-memory-profile.md` + `docs/build-log/artifacts/rung10-procedural-memory-profile.json` + `docs/build-log/artifacts/rung10-baseline-sampled-traces.json` + `docs/build-log/artifacts/rung10-state-style-sampled-traces.json` (validated procedural/failure-pattern recall recovered replay-proven guidance while the no-procedure control missed it and unsafe procedure sketches were suppressed).
+> Rung-11 promotion proof artifact: `docs/build-log/2026-07-03-rung11-dsr-decay-profile.md` + `docs/build-log/artifacts/rung11-dsr-decay-profile.json` + `docs/build-log/artifacts/rung11-baseline-sampled-traces.json` + `docs/build-log/artifacts/rung11-memorystress-sampled-traces.json` (fixed-prior DSR fold over `review_event` recovered reinforced durable memory while the no-decay control returned stale ignored memory).
 > Syndai spec/preflight proof: `docs/build-log/2026-07-03-syndai-preflight.md` (`Syndai/main` `fe17bc488`, preflight green in 764s).
 
 ## 1. Spec corpus
@@ -52,7 +53,7 @@
 
 - [x] 0 trace/eval harness · [x] 1 raw episodes+citations · [x] 2 write/extraction policy · [x] 3 hybrid baseline (proof: `docs/build-log/2026-07-03-wsi-progress.md`; profile `wsi_local_gate_profile_001`)
 - [x] 4 contextual chunks (proof: `docs/build-log/2026-07-03-rung4-contextual-chunks-profile.md`; profile `rung4_contextual_chunks_sampled_profile_001`) · [x] 5 temporal validity (proof: `docs/build-log/2026-07-03-rung5-temporal-validity-profile.md`; profile `rung5_temporal_validity_profile_001`) · [x] 6 edge expansion (proof: `docs/build-log/2026-07-03-rung6-edge-expansion-profile.md`; profile `rung6_edge_expansion_profile_001`) · [x] 7 packing+abstention (proof: `docs/build-log/2026-07-03-rung7-packing-abstention-profile.md`; profile `rung7_packing_abstention_profile_001`) · [x] 8 bounded rerank (proof: `docs/build-log/2026-07-03-rung8-bounded-rerank-profile.md`; profile `rung8_bounded_rerank_profile_001`) · [x] 9 query decomposition (proof: `docs/build-log/2026-07-03-rung9-query-decomposition-profile.md`; profile `rung9_query_decomposition_profile_001`) · [x] 10 procedural memory (proof: `docs/build-log/2026-07-03-rung10-procedural-memory-profile.md`; profile `rung10_procedural_memory_profile_001`)
-- [ ] 11 DSR decay fold · [ ] 12 L4 exhaustive
+- [x] 11 DSR decay fold (proof: `docs/build-log/2026-07-03-rung11-dsr-decay-profile.md`; profile `rung11_dsr_decay_profile_001`) · [ ] 12 L4 exhaustive
 - [ ] 13 learned rerank/DSR · [ ] 14 external graph/vector escape hatch (or RETIRED) · [ ] 15 inferred-belief composition
 
 ## 4. Launch gates (contracts owned by `29` §5–§7)
@@ -67,10 +68,10 @@
 
 | Item | Status |
 |---|---|
-| L4 exhaustive recall behavior | DORMANT (`wsi_local_gate_profile_001`: no public sampled gain after rungs 0-11) |
-| Learned reranker | DORMANT (`wsi_local_gate_profile_001`: no rank-sensitive miss set or paired CI win) |
-| Learned DSR/FSRS fitter | DORMANT (`wsi_local_gate_profile_001`: no longitudinal FSRS-over-exponential proof) |
-| DSR decay fold (fsrs engine; ledger capture is v1) | DORMANT (`wsi_local_gate_profile_001`: review ledger capture only) |
+| L4 exhaustive recall behavior | DORMANT (`rung11_dsr_decay_profile_001`: longitudinal miss resolved by decay, no L4 exhaustive proof) |
+| Learned reranker | DORMANT (`rung11_dsr_decay_profile_001`: no learned-reranker paired CI win) |
+| Learned DSR/FSRS fitter | DORMANT (`rung11_dsr_decay_profile_001`: fixed-prior fold passed; learned fitting still awaits enough MemPhant-native review traces) |
+| DSR decay fold (fsrs engine; ledger capture is v1) | BUILT (`rung11_dsr_decay_profile_001`: fixed-prior DSR fold over `review_event` active; no-decay control missed durable memory) |
 | Procedural replay-validation harness | BUILT (`rung10_procedural_memory_profile_001`: validated procedure recall active; unsafe procedure sketches suppressed) |
 | 3-tier DEK envelope encryption | DORMANT (`key_custody` shape frozen; no BYOC enterprise KEK contract) |
 | Ablation-voting recall (SMSR-style, exhaustive mode) | DORMANT (`wsi_local_gate_profile_001`: no containment gain worth multiplied read cost) |
@@ -83,7 +84,7 @@
 
 ## 6. Standing quality bars (never one-and-done; checked at every release while building)
 
-- [x] Security suites green at latest release (tenant isolation, deletion completeness, corroboration-farming, filter injection — `05` §10; proof: `docs/build-log/2026-07-03-rung10-procedural-memory-profile.md`)
+- [x] Security suites green at latest release (tenant isolation, deletion completeness, corroboration-farming, filter injection — `05` §10; proof: `docs/build-log/2026-07-03-rung11-dsr-decay-profile.md`)
 - [ ] Hot-path SLO holding (fast p50 <200ms / p95 <500ms — `02` §4)
 - [ ] `memory_utility_trend` SLI wired on the dogfood lane (`22` §1.3)
 - [ ] Landscape-completeness rule satisfied at latest review pass (`13` §1.4)

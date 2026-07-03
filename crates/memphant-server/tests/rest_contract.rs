@@ -87,6 +87,7 @@ async fn rest_examples_round_trip_through_retain_reflect_recall_trace_and_mutati
             rerank_enabled: None,
             query_decomposition_enabled: None,
             procedure_recall_enabled: None,
+            decay_enabled: None,
             include_trace: Some(true),
         }),
     )

@@ -2,6 +2,7 @@ golden:
   - bounded_rerank_incident_owner
   - query_decomposition_deploy_release
   - procedural_memory_replay_validation
+  - dsr_decay_fold_review_event
   - checkout_region
   - contextual_chunk_breaker
   - deleted_secret_filter

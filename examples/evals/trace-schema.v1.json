@@ -55,6 +55,11 @@
           "format": "float",
           "type": "number"
         },
+        "decay_retrievability": {
+          "default": 0.0,
+          "format": "float",
+          "type": "number"
+        },
         "discard_reason": {
           "anyOf": [
             {
@@ -63,6 +68,28 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "dsr_difficulty": {
+          "default": null,
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "dsr_reinforcement_count": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "dsr_stability_days": {
+          "default": null,
+          "format": "float",
+          "type": [
+            "number",
+            "null"
           ]
         },
         "fused_rank": {
@@ -375,6 +402,10 @@
       "format": "uint64",
       "minimum": 0,
       "type": "integer"
+    },
+    "decay_model_id": {
+      "default": "",
+      "type": "string"
     },
     "decomposition_reason": {
       "type": "string"

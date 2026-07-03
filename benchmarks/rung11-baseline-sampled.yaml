@@ -1,0 +1,3 @@
+id: rung11-baseline-sampled
+cases:
+  - ../examples/evals/golden/dsr_decay_fold_review_event.yaml
