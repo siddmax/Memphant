@@ -1,6 +1,7 @@
-use memphant_core::{InMemoryStore, MemoryStore};
+use memphant_core::{InMemoryStore, MemoryStore, retain_episode};
 use memphant_types::{
-    ActorId, MemoryKind, NewEpisode, NewMemoryUnit, ScopeId, TenantId, TrustLevel, UnitState,
+    ActorId, MemoryKind, NewEpisode, NewMemoryUnit, RetainRequest, ScopeId, TenantId, TrustLevel,
+    UnitState,
 };
 
 fn tenant(value: u128) -> TenantId {
@@ -13,6 +14,77 @@ fn scope(value: u128) -> ScopeId {
 
 fn actor(value: u128) -> ActorId {
     ActorId::from_u128(value)
+}
+
+#[tokio::test]
+async fn retain_pipeline_stores_episode_and_reflect_job_atomically() {
+    let store = InMemoryStore::default();
+    let tenant_id = tenant(900);
+    let scope_id = scope(901);
+    let actor_id = actor(902);
+
+    let result = retain_episode(
+        &store,
+        RetainRequest {
+            tenant_id,
+            scope_id,
+            actor_id,
+            source_kind: "user".to_string(),
+            source_trust: TrustLevel::TrustedUser,
+            subject_hint: Some("deploy channel".to_string()),
+            body: "Remember the deploy channel is #launch.".to_string(),
+            compiler_version: "compiler-wsb-test".to_string(),
+        },
+    )
+    .await
+    .expect("retain succeeds");
+
+    let episodes = store.episodes(tenant_id);
+    let jobs = store.reflect_jobs(tenant_id);
+
+    assert_eq!(episodes.len(), 1);
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(episodes[0].id, result.episode_id);
+    assert_eq!(jobs[0].episode_id, result.episode_id);
+    assert_eq!(jobs[0].compiler_version, "compiler-wsb-test");
+}
+
+#[tokio::test]
+async fn retain_pipeline_collapses_duplicate_episode_by_dedup_key() {
+    let store = InMemoryStore::default();
+    let tenant_id = tenant(910);
+    let scope_id = scope(911);
+    let actor_id = actor(912);
+    let request = RetainRequest {
+        tenant_id,
+        scope_id,
+        actor_id,
+        source_kind: "tool".to_string(),
+        source_trust: TrustLevel::VerifiedTool,
+        subject_hint: Some("node version".to_string()),
+        body: "Staging pins Node 24.15.0.".to_string(),
+        compiler_version: "compiler-wsb-test".to_string(),
+    };
+
+    let first = retain_episode(&store, request.clone())
+        .await
+        .expect("first retain succeeds");
+    let second = retain_episode(&store, request)
+        .await
+        .expect("second retain succeeds");
+
+    let episodes = store.episodes(tenant_id);
+    let jobs = store.reflect_jobs(tenant_id);
+
+    assert_eq!(episodes.len(), 1);
+    assert_eq!(episodes[0].id, first.episode_id);
+    assert_eq!(episodes[0].observation_count, 2);
+    assert!(!first.dedup.matched);
+    assert!(second.dedup.matched);
+    assert_eq!(second.episode_id, first.episode_id);
+    assert_eq!(second.dedup.observation_count, 2);
+    assert_eq!(jobs.len(), 2);
+    assert!(jobs.iter().all(|job| job.episode_id == first.episode_id));
 }
 
 #[tokio::test]

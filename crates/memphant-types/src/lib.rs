@@ -54,6 +54,18 @@ pub struct RetainResult {
     pub extracted_values: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetainRequest {
+    pub tenant_id: TenantId,
+    pub scope_id: ScopeId,
+    pub actor_id: ActorId,
+    pub source_kind: String,
+    pub source_trust: TrustLevel,
+    pub subject_hint: Option<String>,
+    pub body: String,
+    pub compiler_version: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryKind {
@@ -138,6 +150,31 @@ pub struct StoredMemoryUnit {
     pub subject_key: Option<String>,
     pub body: String,
     pub trust_level: TrustLevel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReflectJobKind {
+    ReflectEpisode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReflectJob {
+    pub tenant_id: TenantId,
+    pub scope_id: ScopeId,
+    pub episode_id: EpisodeId,
+    pub kind: ReflectJobKind,
+    pub compiler_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedReflectJob {
+    pub id: JobId,
+    pub tenant_id: TenantId,
+    pub scope_id: ScopeId,
+    pub episode_id: EpisodeId,
+    pub kind: ReflectJobKind,
+    pub compiler_version: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
