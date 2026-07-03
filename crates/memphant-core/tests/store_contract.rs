@@ -1,7 +1,7 @@
-use memphant_core::{InMemoryStore, MemoryStore, retain_episode};
+use memphant_core::{InMemoryStore, MemoryStore, retain_episode, retain_resource};
 use memphant_types::{
-    ActorId, MemoryKind, NewEpisode, NewMemoryUnit, RetainRequest, ScopeId, TenantId, TrustLevel,
-    UnitState,
+    ActorId, MemoryKind, NewEpisode, NewMemoryUnit, ResourceExtractorState, RetainRequest,
+    RetainResourceRequest, ScopeId, TenantId, TrustLevel, UnitState,
 };
 
 fn tenant(value: u128) -> TenantId {
@@ -45,7 +45,7 @@ async fn retain_pipeline_stores_episode_and_reflect_job_atomically() {
     assert_eq!(episodes.len(), 1);
     assert_eq!(jobs.len(), 1);
     assert_eq!(episodes[0].id, result.episode_id);
-    assert_eq!(jobs[0].episode_id, result.episode_id);
+    assert_eq!(jobs[0].episode_id, Some(result.episode_id));
     assert_eq!(jobs[0].compiler_version, "compiler-wsb-test");
 }
 
@@ -84,7 +84,46 @@ async fn retain_pipeline_collapses_duplicate_episode_by_dedup_key() {
     assert_eq!(second.episode_id, first.episode_id);
     assert_eq!(second.dedup.observation_count, 2);
     assert_eq!(jobs.len(), 2);
-    assert!(jobs.iter().all(|job| job.episode_id == first.episode_id));
+    assert!(
+        jobs.iter()
+            .all(|job| job.episode_id == Some(first.episode_id))
+    );
+}
+
+#[tokio::test]
+async fn retain_resource_stores_pointer_before_extraction_and_enqueues_reflect() {
+    let store = InMemoryStore::default();
+    let tenant_id = tenant(920);
+    let scope_id = scope(921);
+    let actor_id = actor(922);
+
+    let retained = retain_resource(
+        &store,
+        RetainResourceRequest {
+            tenant_id,
+            scope_id,
+            actor_id,
+            uri: "https://example.test/runbooks/deploy.md".to_string(),
+            content_hash: "sha256:deploy-runbook".to_string(),
+            mime_type: "text/markdown".to_string(),
+            source_trust: TrustLevel::WebContent,
+            compiler_version: "compiler-wsb-test".to_string(),
+        },
+    )
+    .await
+    .expect("resource retain succeeds");
+
+    let resources = store.resources(tenant_id);
+    let jobs = store.reflect_jobs(tenant_id);
+
+    assert_eq!(resources.len(), 1);
+    assert_eq!(resources[0].id, retained.resource_id);
+    assert_eq!(
+        resources[0].extractor_state,
+        ResourceExtractorState::Registered
+    );
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].resource_id, Some(retained.resource_id));
 }
 
 #[tokio::test]

@@ -32,6 +32,7 @@ id_type!(ActorId);
 id_type!(EdgeId);
 id_type!(EpisodeId);
 id_type!(JobId);
+id_type!(ResourceId);
 id_type!(ScopeId);
 id_type!(TenantId);
 id_type!(TraceId);
@@ -64,6 +65,18 @@ pub struct RetainRequest {
     pub source_trust: TrustLevel,
     pub subject_hint: Option<String>,
     pub body: String,
+    pub compiler_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetainResourceRequest {
+    pub tenant_id: TenantId,
+    pub scope_id: ScopeId,
+    pub actor_id: ActorId,
+    pub uri: String,
+    pub content_hash: String,
+    pub mime_type: String,
+    pub source_trust: TrustLevel,
     pub compiler_version: String,
 }
 
@@ -130,6 +143,42 @@ pub struct StoredEpisode {
     pub observation_count: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceExtractorState {
+    Registered,
+    Fetching,
+    Extracting,
+    Chunked,
+    Embedded,
+    Failed,
+    Stale,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewResource {
+    pub tenant_id: TenantId,
+    pub scope_id: ScopeId,
+    pub actor_id: ActorId,
+    pub uri: String,
+    pub content_hash: String,
+    pub mime_type: String,
+    pub source_trust: TrustLevel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredResource {
+    pub id: ResourceId,
+    pub tenant_id: TenantId,
+    pub scope_id: ScopeId,
+    pub actor_id: ActorId,
+    pub uri: String,
+    pub content_hash: String,
+    pub mime_type: String,
+    pub source_trust: TrustLevel,
+    pub extractor_state: ResourceExtractorState,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NewMemoryUnit {
     pub tenant_id: TenantId,
@@ -193,13 +242,15 @@ pub enum AdmissionAction {
 #[serde(rename_all = "snake_case")]
 pub enum ReflectJobKind {
     ReflectEpisode,
+    ReflectResource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReflectJob {
     pub tenant_id: TenantId,
     pub scope_id: ScopeId,
-    pub episode_id: EpisodeId,
+    pub episode_id: Option<EpisodeId>,
+    pub resource_id: Option<ResourceId>,
     pub kind: ReflectJobKind,
     pub compiler_version: String,
 }
@@ -209,7 +260,8 @@ pub struct QueuedReflectJob {
     pub id: JobId,
     pub tenant_id: TenantId,
     pub scope_id: ScopeId,
-    pub episode_id: EpisodeId,
+    pub episode_id: Option<EpisodeId>,
+    pub resource_id: Option<ResourceId>,
     pub kind: ReflectJobKind,
     pub compiler_version: String,
 }
@@ -223,6 +275,7 @@ pub struct ReflectCandidate {
     pub predicate: Option<String>,
     pub body: String,
     pub churn_class: Option<String>,
+    pub admission_hint: Option<AdmissionAction>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -273,4 +326,9 @@ pub struct DedupOutcome {
 pub struct RetainOutcome {
     pub episode_id: EpisodeId,
     pub dedup: DedupOutcome,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetainResourceOutcome {
+    pub resource_id: ResourceId,
 }

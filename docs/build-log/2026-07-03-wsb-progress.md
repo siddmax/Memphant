@@ -9,9 +9,11 @@
 - Added `retain_episode` in `memphant-core`: validate body, derive a deterministic dedup key, stage the raw episode, enqueue `reflect`, and commit as one unit.
 - Added exact episode dedup collapse in the in-memory store: matching `(tenant_id, scope_id, dedup_key)` increments `observation_count` without deleting or overwriting the existing episode.
 - Added store-contract tests for transactional retain/enqueue and duplicate collapse.
+- Added resource retain support: `retain_resource` stores raw resource pointers in `registered` extractor state and enqueues `reflect_resource` jobs in the same transaction.
 - Added record-replay WS-B golden fixtures in `examples/evals/wsb-write-goldens.json`.
-- Added `write_compiler_golden` coverage for noisy-write rejection, duplicate collapse, contradiction detection, same-origin corroboration-farming resistance, independent-source belief promotion, stale volatile fact handling, trace stage/cost facts, and duplicate-job idempotency.
-- Added first deterministic `reflect_recorded` compiler path in `memphant-core` over recorded candidates; it writes memory units, contradiction/supersession/derived edges, freshness markers, and durable reflect traces in the in-memory store.
+- Added `write_compiler_golden` coverage for noisy-write rejection, duplicate collapse, contradiction detection, same-origin corroboration-farming resistance, independent-source belief promotion, explicit invalidate/quarantine admission, stale volatile fact handling, trace stage/cost facts, and duplicate-job idempotency.
+- Added first deterministic `reflect_recorded` compiler path in `memphant-core` over recorded candidates; it writes memory units, contradiction/supersession/derived edges, quarantine states, freshness markers, and durable reflect traces in the in-memory store.
+- Added the reserved `memphant.event_outbox` table shape with tenant RLS, cursor indexes, and provider/catalog lint coverage. Delivery consumers remain post-v1 as specified.
 
 ## Proof
 
@@ -34,17 +36,27 @@
   - GREEN result after checkpointing by `(job_id, compiler_version)`: `1 passed; 1 filtered out`.
 - `cargo test -p memphant-core --test write_compiler_golden`
   - Result: `2 passed`.
+- `cargo test -p memphant-core --test store_contract retain_resource_stores_pointer_before_extraction_and_enqueues_reflect`
+  - RED result before implementation: compile failed because `retain_resource`, `RetainResourceRequest`, `ResourceExtractorState`, `resources`, and `resource_id` did not exist.
+  - GREEN result after implementation: `1 passed; 5 filtered out`.
+- `cargo test -p memphant-core --test write_compiler_golden write_compiler_golden_fixtures_pass`
+  - RED result after adding invalidate/quarantine/freshness expectations: compile failed because `ReflectCandidate.admission_hint`, `quarantined_units`, and `freshness_due_units` did not exist; then failed `quarantine_action` until quarantined beliefs were separated from visible belief units.
+  - GREEN result after implementation: `1 passed; 1 filtered out`.
+- `python3 -m pytest tests/test_wsa_migration_contract.py`
+  - Result after adding `event_outbox`: `9 passed in 0.20s`.
+- `cargo test -p memphant-store-postgres --test provider_lint`
+  - Result after adding `event_outbox`: `3 passed`.
 - `python3 scripts/check_spec_drift.py`
   - Result: `spec_drift=clean public=/Users/sidsharma/Memphant/docs/superpowers/specs/memphant private=/Users/sidsharma/Syndai/.wt/codex-memphant-cross-repo/docs/superpowers/specs/memphant`
 - `cargo clippy --all-targets --all-features -- -D warnings`
   - Result: passed.
 - `cargo test --all-targets --all-features`
-  - Result: passed; includes `store_contract` (`5 passed`), `write_compiler_golden` (`2 passed`), and `provider_lint` (`3 passed`).
+  - Result: passed; includes `store_contract` (`6 passed`), `write_compiler_golden` (`2 passed`), and `provider_lint` (`3 passed`).
 - `python3 -m pytest tests`
-  - Result: `16 passed in 0.29s`.
+  - Result: `16 passed in 0.24s`.
 - `cargo test --doc`
   - Result: passed doc tests for `memphant-core`, `memphant-eval`, `memphant-store-postgres`, and `memphant-types`.
 
 ## Status
 
-WS-B is not checked in `STATUS.md` yet. Current proof covers the in-memory core/fake path for retain, reflect enqueue, exact dedup, the named write compiler golden families, trace facts, and duplicate-job idempotency. Remaining completion audit before flipping WS-B: verify whether resource capture, non-fixture Postgres adapter persistence for reflect jobs/traces/edges, full admission variants (`invalidate`/`quarantine`), and the active freshness due-scan surface are required in the WS-B exit packet or belong to later WS-C/WS-D surfaces.
+WS-B is checked in `STATUS.md`. Current proof covers raw episode/resource capture before extraction, transactional reflect enqueue, exact dedup, the named write compiler golden families, explicit `invalidate`/`quarantine` admission actions, active freshness due-scan visibility, trace stage/cost facts, duplicate-job idempotency, and the reserved consolidation outbox table shape. Postgres write adapters, REST/MCP/SDK surfaces, and event consumers remain in later workstreams per `29`.

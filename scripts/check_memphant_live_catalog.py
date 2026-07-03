@@ -23,6 +23,7 @@ REQUIRED_TABLES = {
     "embedding",
     "citation",
     "trust_event",
+    "event_outbox",
     "retrieval_trace",
     "deletion_generation",
     "job_state",

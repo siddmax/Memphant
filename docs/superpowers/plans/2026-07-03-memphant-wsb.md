@@ -114,11 +114,41 @@
   - Record exact command outputs.
   - State whether WS-B is complete or which exit-packet proof remains.
 
-- [ ] **Step 4: Update ledger only with complete proof**
+- [x] **Step 4: Update ledger only with complete proof**
   - Flip WS-B in `STATUS.md` only if every golden fixture passes, reflect is idempotent under duplicate job delivery, and trace facts are proven.
+
+### Task 5: Completion Audit Gap Closure
+
+**Files:**
+- Modify: `crates/memphant-types/src/lib.rs`
+- Modify: `crates/memphant-core/src/lib.rs`
+- Modify: `crates/memphant-core/tests/store_contract.rs`
+- Modify: `crates/memphant-core/tests/write_compiler_golden.rs`
+- Modify: `examples/evals/wsb-write-goldens.json`
+- Modify: `memphant_migrations/versions/20260703_001_wsa_bootstrap.sql`
+- Modify: `scripts/check_memphant_live_catalog.py`
+- Modify: `tests/test_wsa_migration_contract.py`
+- Modify: `crates/memphant-store-postgres/src/lib.rs`
+
+- [x] **Step 1: Prove resource capture before extraction**
+  - Add `retain_resource` coverage that stores a resource pointer with `registered` extractor state and enqueues a resource reflect job in the same transaction.
+
+- [x] **Step 2: Prove full admission action coverage**
+  - Extend the golden fixture schema and data with explicit `invalidate` and `quarantine` cases.
+  - Keep quarantined units out of active/candidate belief lists while exposing them through a quarantine accessor.
+
+- [x] **Step 3: Prove active freshness due-scan surface**
+  - Assert volatile active semantic units surface through `freshness_due_units`.
+
+- [x] **Step 4: Land the reserved consolidation outbox table shape**
+  - Add `memphant.event_outbox` with tenant RLS, poll-cursor indexes, and provider/catalog lint coverage.
+  - Keep delivery consumers dormant; the table shape satisfies the WS-B-write schema requirement while `GET /v1/events` remains post-v1.
+
+- [x] **Step 5: Re-run focused and full gates**
+  - Focused WS-B suites, schema lint, spec drift, Python tests, clippy, all Rust tests, and doctests pass.
 
 ## Self-Review
 
-- Spec coverage: Tasks 1-2 cover raw capture before extraction, transactional reflect enqueue, and exact dedup. Task 3 covers the named WS-B exit fixtures: noisy rejection, duplicate collapse, contradiction, corroboration-farming resistance, stale fact handling, trace facts, and duplicate-job idempotency. Task 4 covers proof and ledger protocol.
+- Spec coverage: Tasks 1-2 cover raw episode capture before extraction, transactional reflect enqueue, and exact dedup. Task 3 covers the named WS-B exit fixtures: noisy rejection, duplicate collapse, contradiction, corroboration-farming resistance, stale fact handling, trace facts, and duplicate-job idempotency. Task 5 closes the completion-audit gaps for raw resource capture, explicit invalidate/quarantine admission, active freshness due-scan visibility, and the reserved consolidation outbox table.
 - Placeholder scan: no TODO/TBD placeholders are present; every task names files, commands, and expected red/green outcomes.
 - Type consistency: the plan uses `RetainRequest`, `ReflectJob`, `AdmissionAction`, and `ReflectTrace` consistently across tests and implementation steps.

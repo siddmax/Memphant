@@ -23,8 +23,15 @@ struct GoldenCase {
     episodes: Vec<GoldenEpisode>,
     expected_actions: Vec<AdmissionAction>,
     expected_unit_count: usize,
+    #[serde(default)]
     expected_semantic_bodies: Vec<String>,
+    #[serde(default)]
     expected_belief_bodies: Vec<String>,
+    #[serde(default)]
+    expected_quarantined_bodies: Vec<String>,
+    #[serde(default)]
+    expected_freshness_due_bodies: Vec<String>,
+    #[serde(default)]
     expected_edge_kinds: Vec<MemoryEdgeKind>,
 }
 
@@ -37,6 +44,7 @@ struct GoldenEpisode {
     predicate: Option<String>,
     body: String,
     churn_class: Option<String>,
+    admission_hint: Option<AdmissionAction>,
 }
 
 #[tokio::test]
@@ -91,6 +99,7 @@ async fn write_compiler_golden_fixtures_pass() {
                         predicate: episode.predicate.clone(),
                         body: episode.body.clone(),
                         churn_class: episode.churn_class.clone(),
+                        admission_hint: episode.admission_hint,
                     }],
                 },
             )
@@ -136,6 +145,16 @@ async fn write_compiler_golden_fixtures_pass() {
             .into_iter()
             .map(|edge| edge.kind)
             .collect();
+        let quarantined_bodies: Vec<_> = store
+            .quarantined_units(tenant_id)
+            .into_iter()
+            .map(|unit| unit.body)
+            .collect();
+        let freshness_due_bodies: Vec<_> = store
+            .freshness_due_units(tenant_id)
+            .into_iter()
+            .map(|unit| unit.body)
+            .collect();
 
         assert_eq!(
             semantic_bodies, case.expected_semantic_bodies,
@@ -143,6 +162,16 @@ async fn write_compiler_golden_fixtures_pass() {
             case.id
         );
         assert_eq!(belief_bodies, case.expected_belief_bodies, "{}", case.id);
+        assert_eq!(
+            quarantined_bodies, case.expected_quarantined_bodies,
+            "{}",
+            case.id
+        );
+        assert_eq!(
+            freshness_due_bodies, case.expected_freshness_due_bodies,
+            "{}",
+            case.id
+        );
         assert_eq!(edge_kinds, case.expected_edge_kinds, "{}", case.id);
         if case.id == "stale_fact_handling" {
             let active = store.active_semantic_units(tenant_id);
@@ -189,6 +218,7 @@ async fn reflect_recorded_is_idempotent_for_duplicate_job_delivery() {
             predicate: Some("value".to_string()),
             body: "Deployment region is Taipei.".to_string(),
             churn_class: None,
+            admission_hint: None,
         }],
     };
 

@@ -5,9 +5,11 @@ use async_trait::async_trait;
 use memphant_types::{
     AdmissionAction, DedupOutcome, EdgeId, EpisodeId, JobId, MemoryEdgeKind, MemoryKind,
     NewEpisode, NewMemoryUnit, QueuedReflectJob, ReflectInput, ReflectJob, ReflectJobKind,
-    ReflectStageFact, ReflectTrace, RetainInput, RetainOutcome, RetainRequest, RetainResult,
-    StoredEpisode, StoredMemoryEdge, StoredMemoryUnit, TenantId, TrustLevel, UnitId, UnitState,
+    ReflectStageFact, ReflectTrace, RetainInput, RetainOutcome, RetainRequest,
+    RetainResourceOutcome, RetainResourceRequest, RetainResult, StoredEpisode, StoredMemoryEdge,
+    StoredMemoryUnit, StoredResource, TenantId, TrustLevel, UnitId, UnitState,
 };
+use memphant_types::{NewResource, ResourceExtractorState, ResourceId};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -52,6 +54,11 @@ pub trait MemoryStore: Send + Sync {
         tx: &mut Self::Txn,
         unit: NewMemoryUnit,
     ) -> Result<UnitId, StoreError>;
+    async fn stage_resource(
+        &self,
+        tx: &mut Self::Txn,
+        resource: NewResource,
+    ) -> Result<ResourceId, StoreError>;
     async fn enqueue_reflect(
         &self,
         tx: &mut Self::Txn,
@@ -67,6 +74,7 @@ pub struct InMemoryStore {
 #[derive(Default)]
 struct InMemoryState {
     episodes: HashMap<TenantId, Vec<StoredEpisode>>,
+    resources: HashMap<TenantId, Vec<StoredResource>>,
     memory_units: HashMap<TenantId, Vec<StoredMemoryUnit>>,
     memory_edges: HashMap<TenantId, Vec<StoredMemoryEdge>>,
     reflect_jobs: HashMap<TenantId, Vec<QueuedReflectJob>>,
@@ -77,6 +85,7 @@ struct InMemoryState {
 pub struct InMemoryTxn {
     episodes: Vec<StoredEpisode>,
     episode_observation_updates: Vec<(TenantId, EpisodeId)>,
+    resources: Vec<StoredResource>,
     memory_units: Vec<StoredMemoryUnit>,
     reflect_jobs: Vec<QueuedReflectJob>,
     committed: bool,
@@ -103,6 +112,13 @@ impl InMemoryStore {
             .unwrap_or_default()
     }
 
+    pub fn resources(&self, tenant_id: TenantId) -> Vec<StoredResource> {
+        self.inner
+            .lock()
+            .map(|state| state.resources.get(&tenant_id).cloned().unwrap_or_default())
+            .unwrap_or_default()
+    }
+
     pub fn reflect_jobs(&self, tenant_id: TenantId) -> Vec<QueuedReflectJob> {
         self.inner
             .lock()
@@ -126,7 +142,21 @@ impl InMemoryStore {
     pub fn belief_units(&self, tenant_id: TenantId) -> Vec<StoredMemoryUnit> {
         self.memory_units(tenant_id)
             .into_iter()
-            .filter(|unit| unit.kind == MemoryKind::Belief)
+            .filter(|unit| unit.kind == MemoryKind::Belief && unit.state != UnitState::Quarantined)
+            .collect()
+    }
+
+    pub fn quarantined_units(&self, tenant_id: TenantId) -> Vec<StoredMemoryUnit> {
+        self.memory_units(tenant_id)
+            .into_iter()
+            .filter(|unit| unit.state == UnitState::Quarantined)
+            .collect()
+    }
+
+    pub fn freshness_due_units(&self, tenant_id: TenantId) -> Vec<StoredMemoryUnit> {
+        self.memory_units(tenant_id)
+            .into_iter()
+            .filter(|unit| unit.freshness_due && unit.state == UnitState::Active)
             .collect()
     }
 
@@ -189,6 +219,13 @@ impl MemoryStore for InMemoryStore {
                 .entry(episode.tenant_id)
                 .or_default()
                 .push(episode);
+        }
+        for resource in tx.resources {
+            state
+                .resources
+                .entry(resource.tenant_id)
+                .or_default()
+                .push(resource);
         }
         for unit in tx.memory_units {
             state
@@ -303,6 +340,30 @@ impl MemoryStore for InMemoryStore {
         Ok(id)
     }
 
+    async fn stage_resource(
+        &self,
+        tx: &mut Self::Txn,
+        resource: NewResource,
+    ) -> Result<ResourceId, StoreError> {
+        if tx.committed {
+            return Err(StoreError::TransactionAlreadyCommitted);
+        }
+
+        let id = ResourceId::new();
+        tx.resources.push(StoredResource {
+            id,
+            tenant_id: resource.tenant_id,
+            scope_id: resource.scope_id,
+            actor_id: resource.actor_id,
+            uri: resource.uri,
+            content_hash: resource.content_hash,
+            mime_type: resource.mime_type,
+            source_trust: resource.source_trust,
+            extractor_state: ResourceExtractorState::Registered,
+        });
+        Ok(id)
+    }
+
     async fn enqueue_reflect(
         &self,
         tx: &mut Self::Txn,
@@ -318,6 +379,7 @@ impl MemoryStore for InMemoryStore {
             tenant_id: job.tenant_id,
             scope_id: job.scope_id,
             episode_id: job.episode_id,
+            resource_id: job.resource_id,
             kind: job.kind,
             compiler_version: job.compiler_version,
         });
@@ -362,7 +424,8 @@ where
             ReflectJob {
                 tenant_id: request.tenant_id,
                 scope_id: request.scope_id,
-                episode_id: outcome.episode_id,
+                episode_id: Some(outcome.episode_id),
+                resource_id: None,
                 kind: ReflectJobKind::ReflectEpisode,
                 compiler_version: request.compiler_version,
             },
@@ -370,6 +433,45 @@ where
         .await?;
     store.commit(tx).await?;
     Ok(outcome)
+}
+
+pub async fn retain_resource<S>(
+    store: &S,
+    request: RetainResourceRequest,
+) -> Result<RetainResourceOutcome, CoreError>
+where
+    S: MemoryStore,
+{
+    let mut tx = store.begin().await;
+    let resource_id = store
+        .stage_resource(
+            &mut tx,
+            NewResource {
+                tenant_id: request.tenant_id,
+                scope_id: request.scope_id,
+                actor_id: request.actor_id,
+                uri: request.uri,
+                content_hash: request.content_hash,
+                mime_type: request.mime_type,
+                source_trust: request.source_trust,
+            },
+        )
+        .await?;
+    store
+        .enqueue_reflect(
+            &mut tx,
+            ReflectJob {
+                tenant_id: request.tenant_id,
+                scope_id: request.scope_id,
+                episode_id: None,
+                resource_id: Some(resource_id),
+                kind: ReflectJobKind::ReflectResource,
+                compiler_version: request.compiler_version,
+            },
+        )
+        .await?;
+    store.commit(tx).await?;
+    Ok(RetainResourceOutcome { resource_id })
 }
 
 fn derive_dedup_key(
@@ -481,63 +583,109 @@ pub async fn reflect_recorded(
             } else if high_trust {
                 let new_id = UnitId::new();
                 let mut action = AdmissionAction::Append;
-                if let Some(existing_index) = units.iter().position(|unit| {
-                    unit.scope_id == input.scope_id
-                        && unit.subject_key.as_deref() == Some(subject_key.as_str())
-                        && unit.state == UnitState::Active
-                        && unit.kind == MemoryKind::Semantic
-                }) {
-                    action = AdmissionAction::Supersede;
-                    let old_id = units[existing_index].id;
-                    units[existing_index].state = UnitState::Superseded;
-                    edges.push(StoredMemoryEdge {
-                        id: EdgeId::new(),
+                if candidate.admission_hint == Some(AdmissionAction::Invalidate) {
+                    if let Some(existing_index) = units.iter().position(|unit| {
+                        unit.scope_id == input.scope_id
+                            && unit.subject_key.as_deref() == Some(subject_key.as_str())
+                            && unit.state == UnitState::Active
+                            && unit.kind == MemoryKind::Semantic
+                    }) {
+                        units[existing_index].state = UnitState::Invalidated;
+                    }
+                    AdmissionAction::Invalidate
+                } else if candidate.admission_hint == Some(AdmissionAction::Quarantine) {
+                    units.push(StoredMemoryUnit {
+                        id: new_id,
                         tenant_id: input.tenant_id,
                         scope_id: input.scope_id,
-                        src_id: old_id,
-                        dst_id: new_id,
-                        kind: MemoryEdgeKind::Contradicts,
+                        kind: MemoryKind::Belief,
+                        state: UnitState::Quarantined,
+                        subject_key: Some(subject_key),
+                        body: candidate.body,
+                        trust_level: candidate.trust_level,
+                        freshness_due: false,
+                        churn_class: candidate.churn_class,
+                        actor_id: Some(candidate.actor_id),
+                        source_kind: Some(candidate.source_kind),
                     });
-                    edges.push(StoredMemoryEdge {
-                        id: EdgeId::new(),
+                    AdmissionAction::Quarantine
+                } else {
+                    if let Some(existing_index) = units.iter().position(|unit| {
+                        unit.scope_id == input.scope_id
+                            && unit.subject_key.as_deref() == Some(subject_key.as_str())
+                            && unit.state == UnitState::Active
+                            && unit.kind == MemoryKind::Semantic
+                    }) {
+                        action = AdmissionAction::Supersede;
+                        let old_id = units[existing_index].id;
+                        units[existing_index].state = UnitState::Superseded;
+                        edges.push(StoredMemoryEdge {
+                            id: EdgeId::new(),
+                            tenant_id: input.tenant_id,
+                            scope_id: input.scope_id,
+                            src_id: old_id,
+                            dst_id: new_id,
+                            kind: MemoryEdgeKind::Contradicts,
+                        });
+                        edges.push(StoredMemoryEdge {
+                            id: EdgeId::new(),
+                            tenant_id: input.tenant_id,
+                            scope_id: input.scope_id,
+                            src_id: new_id,
+                            dst_id: old_id,
+                            kind: MemoryEdgeKind::Supersedes,
+                        });
+                    }
+                    units.push(StoredMemoryUnit {
+                        id: new_id,
                         tenant_id: input.tenant_id,
                         scope_id: input.scope_id,
-                        src_id: new_id,
-                        dst_id: old_id,
-                        kind: MemoryEdgeKind::Supersedes,
+                        kind: MemoryKind::Semantic,
+                        state: UnitState::Active,
+                        subject_key: Some(subject_key),
+                        body: candidate.body,
+                        trust_level: candidate.trust_level,
+                        freshness_due: candidate.churn_class.as_deref() == Some("volatile"),
+                        churn_class: candidate.churn_class,
+                        actor_id: Some(candidate.actor_id),
+                        source_kind: Some(candidate.source_kind),
                     });
+                    action
                 }
-                units.push(StoredMemoryUnit {
-                    id: new_id,
-                    tenant_id: input.tenant_id,
-                    scope_id: input.scope_id,
-                    kind: MemoryKind::Semantic,
-                    state: UnitState::Active,
-                    subject_key: Some(subject_key),
-                    body: candidate.body,
-                    trust_level: candidate.trust_level,
-                    freshness_due: candidate.churn_class.as_deref() == Some("volatile"),
-                    churn_class: candidate.churn_class,
-                    actor_id: Some(candidate.actor_id),
-                    source_kind: Some(candidate.source_kind),
-                });
-                action
             } else {
-                units.push(StoredMemoryUnit {
-                    id: UnitId::new(),
-                    tenant_id: input.tenant_id,
-                    scope_id: input.scope_id,
-                    kind: MemoryKind::Belief,
-                    state: UnitState::Candidate,
-                    subject_key: Some(subject_key),
-                    body: candidate.body,
-                    trust_level: candidate.trust_level,
-                    freshness_due: candidate.churn_class.as_deref() == Some("volatile"),
-                    churn_class: candidate.churn_class,
-                    actor_id: Some(candidate.actor_id),
-                    source_kind: Some(candidate.source_kind),
-                });
-                AdmissionAction::Append
+                if candidate.admission_hint == Some(AdmissionAction::Quarantine) {
+                    units.push(StoredMemoryUnit {
+                        id: UnitId::new(),
+                        tenant_id: input.tenant_id,
+                        scope_id: input.scope_id,
+                        kind: MemoryKind::Belief,
+                        state: UnitState::Quarantined,
+                        subject_key: Some(subject_key),
+                        body: candidate.body,
+                        trust_level: candidate.trust_level,
+                        freshness_due: false,
+                        churn_class: candidate.churn_class,
+                        actor_id: Some(candidate.actor_id),
+                        source_kind: Some(candidate.source_kind),
+                    });
+                    AdmissionAction::Quarantine
+                } else {
+                    units.push(StoredMemoryUnit {
+                        id: UnitId::new(),
+                        tenant_id: input.tenant_id,
+                        scope_id: input.scope_id,
+                        kind: MemoryKind::Belief,
+                        state: UnitState::Candidate,
+                        subject_key: Some(subject_key),
+                        body: candidate.body,
+                        trust_level: candidate.trust_level,
+                        freshness_due: candidate.churn_class.as_deref() == Some("volatile"),
+                        churn_class: candidate.churn_class,
+                        actor_id: Some(candidate.actor_id),
+                        source_kind: Some(candidate.source_kind),
+                    });
+                    AdmissionAction::Append
+                }
             }
         };
         state

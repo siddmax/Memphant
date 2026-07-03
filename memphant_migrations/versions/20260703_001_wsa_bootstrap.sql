@@ -305,6 +305,29 @@ create table if not exists memphant.trust_event (
   primary key (tenant_id, id)
 );
 
+create table if not exists memphant.event_outbox (
+  id uuid not null,
+  tenant_id uuid not null,
+  scope_id uuid not null,
+  event_type text not null check (event_type in (
+    'memory.promoted','memory.superseded','memory.contradiction_detected',
+    'memory.quarantined','reflect.completed','mark.recorded'
+  )),
+  event_schema_version integer not null default 1 check (event_schema_version > 0),
+  visibility text not null check (visibility in ('public','internal','billing')),
+  memory_unit_ids uuid[] not null default '{}'::uuid[],
+  trust_event_id uuid,
+  generation_ref text,
+  payload jsonb not null default '{}'::jsonb,
+  occurred_at timestamptz not null,
+  delivered_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  primary key (tenant_id, id),
+  foreign key (tenant_id, scope_id) references memphant.scope (tenant_id, id),
+  foreign key (tenant_id, trust_event_id) references memphant.trust_event (tenant_id, id)
+);
+
 create table if not exists memphant.retrieval_trace (
   id uuid not null,
   tenant_id uuid not null,
@@ -433,6 +456,9 @@ create index if not exists memphant_citation_tenant_unit_idx on memphant.citatio
 create index if not exists memphant_citation_tenant_episode_idx on memphant.citation (tenant_id, episode_id);
 create index if not exists memphant_citation_tenant_resource_idx on memphant.citation (tenant_id, resource_id);
 create index if not exists memphant_trust_event_tenant_target_idx on memphant.trust_event (tenant_id, target_kind, target_id, created_at);
+create index if not exists memphant_event_outbox_tenant_scope_idx on memphant.event_outbox (tenant_id, scope_id, occurred_at, id);
+create index if not exists memphant_event_outbox_tenant_delivery_idx on memphant.event_outbox (tenant_id, delivered_at, occurred_at, id);
+create index if not exists memphant_event_outbox_tenant_trust_event_idx on memphant.event_outbox (tenant_id, trust_event_id);
 create index if not exists memphant_retrieval_trace_tenant_scope_idx on memphant.retrieval_trace (tenant_id, scope_id, created_at);
 create index if not exists memphant_deletion_generation_tenant_scope_idx on memphant.deletion_generation (tenant_id, scope_id, state);
 create index if not exists memphant_deletion_generation_tenant_actor_idx on memphant.deletion_generation (tenant_id, requested_by);
@@ -457,6 +483,7 @@ alter table memphant.embedding_profile enable row level security;
 alter table memphant.embedding enable row level security;
 alter table memphant.citation enable row level security;
 alter table memphant.trust_event enable row level security;
+alter table memphant.event_outbox enable row level security;
 alter table memphant.retrieval_trace enable row level security;
 alter table memphant.deletion_generation enable row level security;
 alter table memphant.job_state enable row level security;
@@ -500,6 +527,7 @@ create policy memphant_embedding_profile_tenant_isolation on memphant.embedding_
 create policy memphant_embedding_tenant_isolation on memphant.embedding for all to memphant_app, memphant_cron using (tenant_id = memphant.current_tenant_id()) with check (tenant_id = memphant.current_tenant_id());
 create policy memphant_citation_tenant_isolation on memphant.citation for all to memphant_app, memphant_cron using (tenant_id = memphant.current_tenant_id()) with check (tenant_id = memphant.current_tenant_id());
 create policy memphant_trust_event_tenant_isolation on memphant.trust_event for all to memphant_app, memphant_cron using (tenant_id = memphant.current_tenant_id()) with check (tenant_id = memphant.current_tenant_id());
+create policy memphant_event_outbox_tenant_isolation on memphant.event_outbox for all to memphant_app, memphant_cron using (tenant_id = memphant.current_tenant_id()) with check (tenant_id = memphant.current_tenant_id());
 create policy memphant_retrieval_trace_tenant_isolation on memphant.retrieval_trace for all to memphant_app, memphant_cron using (tenant_id = memphant.current_tenant_id()) with check (tenant_id = memphant.current_tenant_id());
 create policy memphant_deletion_generation_tenant_isolation on memphant.deletion_generation for all to memphant_app, memphant_cron using (tenant_id = memphant.current_tenant_id()) with check (tenant_id = memphant.current_tenant_id());
 create policy memphant_job_state_tenant_isolation on memphant.job_state for all to memphant_app, memphant_cron using (tenant_id = memphant.current_tenant_id()) with check (tenant_id = memphant.current_tenant_id());
