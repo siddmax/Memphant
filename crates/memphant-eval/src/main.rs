@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use memphant_eval::{
-    EvalRunOptions, generate_trace_schema, run_eval_file, run_ops_file, run_security_file,
-    run_syndai_trace_compare_file, verify_golden_file,
+    EvalRunOptions, generate_trace_schema, run_eval_file, run_ops_file, run_profile_file,
+    run_security_file, run_syndai_trace_compare_file, verify_golden_file,
 };
 
 fn main() -> ExitCode {
@@ -21,6 +21,7 @@ fn main() -> ExitCode {
         "syndai-trace-compare" => syndai_trace_compare_command(args),
         "schema" => schema_command(args),
         "ablate" => ablate_command(args),
+        "profile" => profile_command(args),
         "compare" => compare_command(args),
         _ => {
             usage();
@@ -286,8 +287,62 @@ fn compare_command(args: Vec<String>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn profile_command(args: Vec<String>) -> ExitCode {
+    let Some(path) = args.first() else {
+        usage();
+        return ExitCode::from(2);
+    };
+    let mut compare_to = None;
+    let mut archive = None;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--compare-to" if index + 1 < args.len() => {
+                compare_to = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--archive" if index + 1 < args.len() => {
+                archive = Some(PathBuf::from(&args[index + 1]));
+                index += 2;
+            }
+            _ => {
+                usage();
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let Some(compare_to) = compare_to else {
+        usage();
+        return ExitCode::from(2);
+    };
+
+    match run_profile_file(&PathBuf::from(path), &compare_to, archive) {
+        Ok(report) => {
+            println!(
+                "profile=pass id={} compare_to={} activated={} dormant={} retired={} archive={}",
+                report.id,
+                report.compare_to,
+                report.activated_levers.len(),
+                report.dormant_levers.len(),
+                report.retired_levers.len(),
+                report
+                    .archived_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "none".to_string())
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("profile=error");
+            eprintln!("{error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn usage() {
     eprintln!(
-        "usage: memphant-eval run <suite.yaml> [--archive-traces] [--archive-dir <dir>] | memphant-eval verify-golden <suite.yaml> | memphant-eval security <suite.yaml> | memphant-eval ops <suite.yaml> | memphant-eval syndai-trace-compare <fixture.yaml> [--archive-traces] [--archive-dir <dir>] | memphant-eval schema trace"
+        "usage: memphant-eval run <suite.yaml> [--archive-traces] [--archive-dir <dir>] | memphant-eval verify-golden <suite.yaml> | memphant-eval security <suite.yaml> | memphant-eval ops <suite.yaml> | memphant-eval syndai-trace-compare <fixture.yaml> [--archive-traces] [--archive-dir <dir>] | memphant-eval profile <profile.yaml> --compare-to <baseline> [--archive <path>] | memphant-eval schema trace"
     );
 }

@@ -12,6 +12,35 @@ use schemars::schema_for;
 use serde::{Deserialize, Serialize};
 
 pub const EVAL_RUNNER_NAME: &str = "memphant-eval";
+const REQUIRED_PROFILE_AXES: &[&str] = &[
+    "outcome",
+    "long_horizon",
+    "scale",
+    "longitudinal",
+    "restraint",
+    "interactive",
+    "embedding_selection",
+    "procedural",
+    "systems_cost",
+    "internal_syndai",
+];
+const REQUIRED_ACTIVATION_DECISIONS: &[&str] = &[
+    "L4 exhaustive recall behavior",
+    "Learned reranker",
+    "Learned DSR/FSRS fitter",
+    "DSR decay fold",
+    "Procedural replay-validation harness",
+    "3-tier DEK envelope encryption",
+    "Ablation-voting recall",
+    "Delta recall",
+    "Miss-repair re-extraction",
+    "Retrievability probe",
+    "Consolidation event delivery",
+    "Hermes memory-provider adapter",
+    "External graph DB / dedicated vector engine",
+    "Cache cluster",
+    "TypeScript SDK",
+];
 
 #[derive(Debug, Clone, Default)]
 pub struct EvalRunOptions {
@@ -102,6 +131,53 @@ pub struct OpsCheckResult {
     pub kind: String,
     pub passed: bool,
     pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SotaProfileReport {
+    pub id: String,
+    pub profile_version: String,
+    pub benchmark_version: String,
+    pub compare_to: String,
+    pub harness_pin: BTreeMap<String, String>,
+    pub axes: BTreeMap<String, SotaAxisResult>,
+    pub activation_decisions: Vec<ActivationDecision>,
+    pub activated_levers: Vec<String>,
+    pub dormant_levers: Vec<String>,
+    pub retired_levers: Vec<String>,
+    pub archived_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SotaAxisResult {
+    pub benchmark: String,
+    pub metric: String,
+    pub source_status: String,
+    pub trace_ref: String,
+    pub score: Option<f64>,
+    pub baseline_score: Option<f64>,
+    pub delta_vs_baseline: Option<f64>,
+    pub ci: Option<[f64; 2]>,
+    pub gate: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ActivationDecision {
+    pub item: String,
+    pub status: String,
+    pub gate_met: bool,
+    pub decision: String,
+    pub reason: String,
+    pub before_trace_ref: Option<String>,
+    pub after_trace_ref: Option<String>,
+    pub delta_vs_baseline: Option<f64>,
+    pub ci: Option<[f64; 2]>,
+    pub p95_ms: Option<f64>,
+    pub cost_per_1k_recalls_usd: Option<f64>,
+    pub security_result: String,
+    pub deletion_result: String,
+    pub default_mode: String,
+    pub exhaustive_mode: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -268,6 +344,17 @@ struct ForgetFixture {
 struct OpsSuite {
     id: String,
     checks: Vec<OpsCheck>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SotaProfileSuite {
+    id: String,
+    profile_version: String,
+    benchmark_version: String,
+    compare_to: String,
+    harness_pin: BTreeMap<String, String>,
+    axes: BTreeMap<String, SotaAxisResult>,
+    activation_decisions: Vec<ActivationDecision>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -534,6 +621,211 @@ pub fn run_syndai_trace_compare_file(
     }
 
     Ok(report)
+}
+
+pub fn run_profile_file(
+    path: &Path,
+    compare_to: &str,
+    archive_path: Option<PathBuf>,
+) -> EvalResult<SotaProfileReport> {
+    let suite: SotaProfileSuite = read_yaml(path)?;
+    if suite.compare_to != compare_to {
+        return Err(EvalError::Failed(format!(
+            "profile compare_to mismatch: fixture={} requested={compare_to}",
+            suite.compare_to
+        )));
+    }
+
+    let mut findings = validate_profile_suite(&suite);
+    if !findings.is_empty() {
+        findings.sort();
+        return Err(EvalError::Failed(findings.join("; ")));
+    }
+
+    let mut activated_levers = Vec::new();
+    let mut dormant_levers = Vec::new();
+    let mut retired_levers = Vec::new();
+    for decision in &suite.activation_decisions {
+        match decision.status.as_str() {
+            "activated" => activated_levers.push(decision.item.clone()),
+            "dormant" => dormant_levers.push(decision.item.clone()),
+            "retired" => retired_levers.push(decision.item.clone()),
+            _ => {}
+        }
+    }
+
+    let mut report = SotaProfileReport {
+        id: suite.id,
+        profile_version: suite.profile_version,
+        benchmark_version: suite.benchmark_version,
+        compare_to: suite.compare_to,
+        harness_pin: suite.harness_pin,
+        axes: suite.axes,
+        activation_decisions: suite.activation_decisions,
+        activated_levers,
+        dormant_levers,
+        retired_levers,
+        archived_path: None,
+    };
+
+    if let Some(archive_path) = archive_path {
+        if let Some(parent) = archive_path.parent() {
+            fs::create_dir_all(parent).map_err(|source| EvalError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        report.archived_path = Some(archive_path.clone());
+        write_json(&archive_path, &report)?;
+    }
+
+    Ok(report)
+}
+
+fn validate_profile_suite(suite: &SotaProfileSuite) -> Vec<String> {
+    let mut findings = Vec::new();
+    for axis in REQUIRED_PROFILE_AXES {
+        match suite.axes.get(*axis) {
+            Some(result) => validate_axis(axis, result, &mut findings),
+            None => findings.push(format!("axis:missing:{axis}")),
+        }
+    }
+
+    let decisions: BTreeSet<_> = suite
+        .activation_decisions
+        .iter()
+        .map(|decision| decision.item.as_str())
+        .collect();
+    for item in REQUIRED_ACTIVATION_DECISIONS {
+        if !decisions.contains(item) {
+            findings.push(format!("activation_decision:missing:{item}"));
+        }
+    }
+    for decision in &suite.activation_decisions {
+        validate_activation_decision(decision, &mut findings);
+    }
+
+    findings
+}
+
+fn validate_axis(axis: &str, result: &SotaAxisResult, findings: &mut Vec<String>) {
+    if result.benchmark.trim().is_empty() {
+        findings.push(format!("axis:{axis}:missing_benchmark"));
+    }
+    if result.metric.trim().is_empty() {
+        findings.push(format!("axis:{axis}:missing_metric"));
+    }
+    if result.source_status.trim().is_empty() {
+        findings.push(format!("axis:{axis}:missing_source_status"));
+    }
+    if result.trace_ref.trim().is_empty() {
+        findings.push(format!("axis:{axis}:missing_trace_ref"));
+    }
+    if result.source_status != "not_run" {
+        if result.score.is_none() {
+            findings.push(format!("axis:{axis}:missing_score"));
+        }
+        if result.delta_vs_baseline.is_none() {
+            findings.push(format!("axis:{axis}:missing_delta"));
+        }
+        validate_ci(
+            &format!("axis:{axis}"),
+            result.delta_vs_baseline,
+            result.ci,
+            findings,
+        );
+    }
+}
+
+fn validate_activation_decision(decision: &ActivationDecision, findings: &mut Vec<String>) {
+    if !["activated", "dormant", "retired"].contains(&decision.status.as_str()) {
+        findings.push(format!(
+            "activation_decision:{}:invalid_status:{}",
+            decision.item, decision.status
+        ));
+    }
+    if decision.reason.trim().is_empty() {
+        findings.push(format!(
+            "activation_decision:{}:missing_reason",
+            decision.item
+        ));
+    }
+    if decision.security_result != "pass" {
+        findings.push(format!(
+            "activation_decision:{}:security_not_pass:{}",
+            decision.item, decision.security_result
+        ));
+    }
+    if decision.deletion_result != "pass" {
+        findings.push(format!(
+            "activation_decision:{}:deletion_not_pass:{}",
+            decision.item, decision.deletion_result
+        ));
+    }
+
+    match decision.status.as_str() {
+        "activated" => {
+            if !decision.gate_met {
+                findings.push(format!(
+                    "activation_decision:{}:activated_without_gate",
+                    decision.item
+                ));
+            }
+            if decision.before_trace_ref.is_none() {
+                findings.push(format!(
+                    "activation_decision:{}:missing_before_trace",
+                    decision.item
+                ));
+            }
+            if decision.after_trace_ref.is_none() {
+                findings.push(format!(
+                    "activation_decision:{}:missing_after_trace",
+                    decision.item
+                ));
+            }
+            if decision.p95_ms.is_none() {
+                findings.push(format!("activation_decision:{}:missing_p95", decision.item));
+            }
+            if decision.cost_per_1k_recalls_usd.is_none() {
+                findings.push(format!(
+                    "activation_decision:{}:missing_cost",
+                    decision.item
+                ));
+            }
+            validate_ci(
+                &format!("activation_decision:{}", decision.item),
+                decision.delta_vs_baseline,
+                decision.ci,
+                findings,
+            );
+        }
+        "dormant" if decision.gate_met => findings.push(format!(
+            "activation_decision:{}:dormant_with_gate_met",
+            decision.item
+        )),
+        "retired" if decision.gate_met => findings.push(format!(
+            "activation_decision:{}:retired_with_gate_met",
+            decision.item
+        )),
+        _ => {}
+    }
+}
+
+fn validate_ci(prefix: &str, delta: Option<f64>, ci: Option<[f64; 2]>, findings: &mut Vec<String>) {
+    let Some(delta) = delta else {
+        findings.push(format!("{prefix}:missing_delta"));
+        return;
+    };
+    let Some(ci) = ci else {
+        findings.push(format!("{prefix}:missing_ci"));
+        return;
+    };
+    if ci[0] > ci[1] {
+        findings.push(format!("{prefix}:ci_bounds_inverted"));
+    }
+    if delta < ci[0] || delta > ci[1] {
+        findings.push(format!("{prefix}:delta_outside_ci"));
+    }
 }
 
 pub fn generate_trace_schema() -> serde_json::Value {

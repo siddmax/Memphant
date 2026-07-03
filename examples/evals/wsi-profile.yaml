@@ -1,0 +1,309 @@
+id: wsi_local_gate_profile_001
+profile_version: sota-profile-0.1.0
+benchmark_version: memphant-internal-2026-07-03
+compare_to: rungs-0-3-baseline
+harness_pin:
+  answer_model: retrieval-only-oracle
+  embedding_profile: deterministic-local
+  reranker: none
+  memphant_commit_scope: local-wsi
+axes:
+  outcome:
+    benchmark: memphant-golden
+    metric: pass_rate
+    source_status: internal_golden
+    trace_ref: docs/build-log/artifacts/nightly-sampled-traces.json
+    score: 1.0
+    baseline_score: 1.0
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    gate: pass
+  long_horizon:
+    benchmark: lme-v2
+    metric: accuracy
+    source_status: not_run
+    trace_ref: not-run
+    gate: external_profile_required
+  scale:
+    benchmark: beam-10m
+    metric: accuracy
+    source_status: not_run
+    trace_ref: not-run
+    gate: external_profile_required
+  longitudinal:
+    benchmark: memorystress-style
+    metric: degradation_auc
+    source_status: not_run
+    trace_ref: not-run
+    gate: external_profile_required
+  restraint:
+    benchmark: op-bench
+    metric: rel_drop_vs_memory_free
+    source_status: not_run
+    trace_ref: not-run
+    gate: restraint_launch_gate_pending
+  interactive:
+    benchmark: emembench
+    metric: trajectory_success
+    source_status: not_run
+    trace_ref: not-run
+    gate: external_profile_required
+  embedding_selection:
+    benchmark: lmeb
+    metric: mean_n_at_10
+    source_status: not_run
+    trace_ref: not-run
+    gate: external_profile_required
+  procedural:
+    benchmark: skillos-state-style
+    metric: pass_k
+    source_status: not_run
+    trace_ref: not-run
+    gate: procedural_rung_pending
+  systems_cost:
+    benchmark: local-static
+    metric: packaging_contract
+    source_status: local_static
+    trace_ref: docs/build-log/2026-07-03-wsh-progress.md
+    score: 1.0
+    baseline_score: 1.0
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    gate: pass
+  internal_syndai:
+    benchmark: syndai-agent-file-memory
+    metric: answer_bearing_recall
+    source_status: internal_trace_compare
+    trace_ref: docs/build-log/artifacts/syndai_agent_file_memory_001-trace-compare.json
+    score: 1.0
+    baseline_score: 1.0
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    gate: pass
+activation_decisions:
+  - item: L4 exhaustive recall behavior
+    status: dormant
+    gate_met: false
+    decision: keep_disabled
+    reason: No archived public sampled profile shows answer-bearing misses after rungs 0-11 or a cost/latency-positive exhaustive gain.
+    before_trace_ref: docs/build-log/artifacts/nightly-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: fast
+    exhaustive_mode: disabled
+  - item: Learned reranker
+    status: dormant
+    gate_met: false
+    decision: keep_fixed_rules
+    reason: No archived rank-sensitive miss set and no paired delta CI excluding zero.
+    before_trace_ref: docs/build-log/artifacts/nightly-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: fixed-rrf
+    exhaustive_mode: disabled
+  - item: Learned DSR/FSRS fitter
+    status: dormant
+    gate_met: false
+    decision: keep_exponential_decay
+    reason: No internal longitudinal MemoryStress-style suite shows FSRS beating exponential decay.
+    before_trace_ref: docs/build-log/artifacts/nightly-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: recency-exponential
+    exhaustive_mode: disabled
+  - item: DSR decay fold
+    status: dormant
+    gate_met: false
+    decision: keep_ledger_capture_only
+    reason: Review-event capture exists, but rung-11 longitudinal proof is absent.
+    before_trace_ref: docs/build-log/artifacts/nightly-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: capture-only
+    exhaustive_mode: disabled
+  - item: Procedural replay-validation harness
+    status: dormant
+    gate_met: false
+    decision: keep_schema_only
+    reason: Procedural recall is not activating and no adversarial replay gate has promoted it.
+    before_trace_ref: docs/build-log/artifacts/nightly-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: schema-only
+    exhaustive_mode: disabled
+  - item: 3-tier DEK envelope encryption
+    status: dormant
+    gate_met: false
+    decision: keep_customer-gated
+    reason: No BYOC enterprise customer contract requires customer-held KEK yet.
+    before_trace_ref: docs/build-log/2026-07-03-wsh-progress.md
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: provider-sse
+    exhaustive_mode: disabled
+  - item: Ablation-voting recall
+    status: dormant
+    gate_met: false
+    decision: keep_disabled
+    reason: No high-stakes tenant demand and no containment gain worth multiplied read cost.
+    before_trace_ref: docs/build-log/artifacts/nightly-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: single-profile-recall
+    exhaustive_mode: disabled
+  - item: Delta recall
+    status: dormant
+    gate_met: false
+    decision: keep_disabled
+    reason: No paired ablation proves delta recall improves a target axis, and deletion-completeness delta coverage has not promoted it.
+    before_trace_ref: docs/build-log/artifacts/nightly-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: full-pack
+    exhaustive_mode: disabled
+  - item: Miss-repair re-extraction
+    status: dormant
+    gate_met: false
+    decision: keep_disabled
+    reason: No recurring query-feature miss is archived against a raw episode requiring surgical re-extraction.
+    before_trace_ref: docs/build-log/artifacts/nightly-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: no-reextract-on-miss
+    exhaustive_mode: disabled
+  - item: Retrievability probe
+    status: dormant
+    gate_met: false
+    decision: keep_disabled
+    reason: No sustained post-write probe-failure rate is measured on the dogfood lane.
+    before_trace_ref: docs/build-log/artifacts/nightly-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: no-probe
+    exhaustive_mode: disabled
+  - item: Consolidation event delivery
+    status: dormant
+    gate_met: false
+    decision: keep_outbox_only
+    reason: Event taxonomy and outbox shape exist, but no external integrator needs push delivery yet.
+    before_trace_ref: docs/build-log/artifacts/nightly-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: outbox-shape-only
+    exhaustive_mode: disabled
+  - item: Hermes memory-provider adapter
+    status: dormant
+    gate_met: false
+    decision: keep_unbuilt
+    reason: No Hermes design partner or launch-window demand has activated the unstable provider SPI.
+    before_trace_ref: docs/build-log/artifacts/syndai_agent_file_memory_001-trace-compare.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: public-api-only
+    exhaustive_mode: disabled
+  - item: External graph DB / dedicated vector engine
+    status: dormant
+    gate_met: false
+    decision: keep_postgres
+    reason: No relational edge or pgvector trace proves a bottleneck that a specialized engine fixes.
+    before_trace_ref: docs/build-log/artifacts/nightly-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: postgres
+    exhaustive_mode: disabled
+  - item: Cache cluster
+    status: dormant
+    gate_met: false
+    decision: keep_single-node
+    reason: No p95 or repeated-recall cost trace shows cache-cluster need.
+    before_trace_ref: docs/build-log/artifacts/nightly-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: no-cluster-cache
+    exhaustive_mode: disabled
+  - item: TypeScript SDK
+    status: dormant
+    gate_met: false
+    decision: keep_openapi_contract_only
+    reason: No first TypeScript consumer or launch-window demand has activated maintenance cost.
+    before_trace_ref: openapi/memphant.openapi.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: openapi-python-mcp
+    exhaustive_mode: disabled
+
