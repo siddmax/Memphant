@@ -409,6 +409,7 @@ impl MemoryStore for InMemoryStore {
             source_episode_id: unit.source_episode_id,
             source_resource_id: unit.source_resource_id,
             deletion_generation: unit.deletion_generation,
+            contextual_chunks: unit.contextual_chunks,
         });
         Ok(id)
     }
@@ -866,11 +867,16 @@ pub async fn recall(
         }
         token_estimate += unit_tokens;
         let suppression_labels = suppression_labels_for(&candidate.unit, &tenant_edges);
+        let matched_contextual_chunk = contextual_chunk_score(&candidate.unit, &query_tokens) > 0.0;
         items.push(RecallContextItem {
             unit_id: candidate.unit.id,
             body: candidate.unit.body,
             kind: candidate.unit.kind,
-            inclusion_reason: "fused_top_k".to_string(),
+            inclusion_reason: if matched_contextual_chunk {
+                "contextual_chunk".to_string()
+            } else {
+                "fused_top_k".to_string()
+            },
             citation_episode_id: candidate.unit.source_episode_id,
             citation_resource_id: candidate.unit.source_resource_id,
             suppression_labels,
@@ -910,6 +916,7 @@ pub async fn recall(
             "fts_enabled".to_string(),
             "vector_enabled".to_string(),
             "temporal_enabled".to_string(),
+            "contextual_chunks_enabled".to_string(),
             "context_packing_abstention_enabled".to_string(),
         ],
         channel_runs: recall_stage_facts(),
@@ -1133,7 +1140,18 @@ fn lexical_score(unit: &StoredMemoryUnit, query_tokens: &[String]) -> f32 {
 }
 
 fn vector_score(unit: &StoredMemoryUnit, query_tokens: &[String]) -> f32 {
-    let body_tokens = tokenize(&unit.body);
+    vector_text_score(&unit.body, query_tokens).max(contextual_chunk_score(unit, query_tokens))
+}
+
+fn contextual_chunk_score(unit: &StoredMemoryUnit, query_tokens: &[String]) -> f32 {
+    unit.contextual_chunks
+        .iter()
+        .map(|chunk| vector_text_score(&format!("{} {}", chunk.header, chunk.body), query_tokens))
+        .fold(0.0, f32::max)
+}
+
+fn vector_text_score(text: &str, query_tokens: &[String]) -> f32 {
+    let body_tokens = tokenize(text);
     let union = body_tokens
         .iter()
         .chain(query_tokens.iter())
@@ -1264,6 +1282,7 @@ pub async fn reflect_recorded(
                         source_episode_id: Some(input.episode_id),
                         source_resource_id: None,
                         deletion_generation: None,
+                        contextual_chunks: candidate.contextual_chunks,
                     });
                     edges.push(StoredMemoryEdge {
                         id: EdgeId::new(),
@@ -1307,6 +1326,7 @@ pub async fn reflect_recorded(
                         source_episode_id: Some(input.episode_id),
                         source_resource_id: None,
                         deletion_generation: None,
+                        contextual_chunks: candidate.contextual_chunks,
                     });
                     AdmissionAction::Quarantine
                 } else {
@@ -1352,6 +1372,7 @@ pub async fn reflect_recorded(
                         source_episode_id: Some(input.episode_id),
                         source_resource_id: None,
                         deletion_generation: None,
+                        contextual_chunks: candidate.contextual_chunks,
                     });
                     action
                 }
@@ -1373,6 +1394,7 @@ pub async fn reflect_recorded(
                         source_episode_id: Some(input.episode_id),
                         source_resource_id: None,
                         deletion_generation: None,
+                        contextual_chunks: candidate.contextual_chunks,
                     });
                     AdmissionAction::Quarantine
                 } else {
@@ -1392,6 +1414,7 @@ pub async fn reflect_recorded(
                         source_episode_id: Some(input.episode_id),
                         source_resource_id: None,
                         deletion_generation: None,
+                        contextual_chunks: candidate.contextual_chunks,
                     });
                     AdmissionAction::Append
                 }

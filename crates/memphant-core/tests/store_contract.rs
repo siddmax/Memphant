@@ -166,6 +166,7 @@ async fn committed_transaction_publishes_staged_episode_and_unit() {
                 source_episode_id: Some(episode.episode_id),
                 source_resource_id: None,
                 deletion_generation: None,
+                contextual_chunks: Vec::new(),
             },
         )
         .await
@@ -233,6 +234,7 @@ fn new_episode_and_unit_shapes_require_tenant_and_scope_ids() {
         source_episode_id: None,
         source_resource_id: None,
         deletion_generation: None,
+        contextual_chunks: Vec::new(),
     };
 
     assert_eq!(episode.tenant_id, unit.tenant_id);

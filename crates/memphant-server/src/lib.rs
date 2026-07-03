@@ -137,6 +137,7 @@ async fn reflect_handler(
                     body: episode.body.clone(),
                     churn_class: None,
                     admission_hint: None,
+                    contextual_chunks: Vec::new(),
                 }],
             },
         )

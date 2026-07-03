@@ -239,6 +239,7 @@ async fn seed_active_unit(
                 source_episode_id: Some(episode.episode_id),
                 source_resource_id: None,
                 deletion_generation: None,
+                contextual_chunks: Vec::new(),
             },
         )
         .await

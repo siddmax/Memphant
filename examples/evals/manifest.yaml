@@ -1,3 +1,4 @@
 golden:
   - checkout_region
+  - contextual_chunk_breaker
   - deleted_secret_filter

@@ -2,8 +2,9 @@ use std::collections::HashMap;
 
 use memphant_core::{CoreError, InMemoryStore, MemoryStore, recall};
 use memphant_types::{
-    ActorId, MemoryEdgeKind, MemoryKind, NewEpisode, NewMemoryEdge, NewMemoryUnit,
-    RecallDropReason, RecallMode, RecallRequest, ScopeId, TenantId, TrustLevel, UnitId, UnitState,
+    ActorId, ContextualChunk, MemoryEdgeKind, MemoryKind, NewEpisode, NewMemoryEdge, NewMemoryUnit,
+    RecallChannel, RecallDropReason, RecallMode, RecallRequest, ScopeId, TenantId, TrustLevel,
+    UnitId, UnitState,
 };
 use serde::Deserialize;
 
@@ -52,6 +53,97 @@ async fn recall_writes_trace_for_scope_denial() {
     assert_eq!(traces[0].policy_filters[0].reason, RecallDropReason::Scope);
     assert!(traces[0].context_items.is_empty());
     assert!(traces[0].abstention_signal);
+}
+
+#[tokio::test]
+async fn contextual_chunk_recall_finds_source_unit_and_traces_flag() {
+    let store = InMemoryStore::default();
+    let tenant_id = tenant(72_000);
+    let scope_id = scope(72_001);
+    let actor_id = actor(72_002);
+
+    let mut tx = store.begin().await;
+    let episode = store
+        .stage_episode(
+            &mut tx,
+            NewEpisode {
+                tenant_id,
+                scope_id,
+                actor_id,
+                source_kind: "system".to_string(),
+                source_trust: TrustLevel::TrustedSystem,
+                dedup_key: "chunked-runbook".to_string(),
+                body: "The deployment runbook mentions an emergency breaker named albatross."
+                    .to_string(),
+            },
+        )
+        .await
+        .expect("episode seeded");
+    let unit_id = store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id,
+                scope_id,
+                kind: MemoryKind::Semantic,
+                state: UnitState::Active,
+                subject_key: Some("deployment runbook".to_string()),
+                body: "Runbook contains a gated switch.".to_string(),
+                trust_level: TrustLevel::TrustedSystem,
+                churn_class: None,
+                freshness_due: false,
+                actor_id: Some(actor_id),
+                source_kind: Some("system".to_string()),
+                source_episode_id: Some(episode.episode_id),
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: vec![ContextualChunk {
+                    id: "chunk-albatross-breaker".to_string(),
+                    header: "Deployment runbook / emergency breaker".to_string(),
+                    body: "The emergency breaker codeword is albatross.".to_string(),
+                    source_span: Some("episode:0-74".to_string()),
+                }],
+            },
+        )
+        .await
+        .expect("unit seeded");
+    store.commit(tx).await.expect("seed committed");
+
+    let response = recall(
+        &store,
+        RecallRequest {
+            tenant_id,
+            scope_id,
+            actor_id,
+            allowed_scope_ids: vec![scope_id],
+            query: "What is the albatross codeword?".to_string(),
+            k: 1,
+            budget_tokens: 80,
+            mode: RecallMode::Fast,
+            include_beliefs: false,
+            engine_version: "engine-ws4-test".to_string(),
+        },
+    )
+    .await
+    .expect("recall succeeds");
+
+    assert_eq!(response.items.len(), 1);
+    assert_eq!(response.items[0].unit_id, unit_id);
+    assert_eq!(response.items[0].inclusion_reason, "contextual_chunk");
+
+    let traces = store.retrieval_traces(tenant_id);
+    assert_eq!(traces.len(), 1);
+    assert!(
+        traces[0]
+            .feature_flags
+            .iter()
+            .any(|flag| flag == "contextual_chunks_enabled")
+    );
+    assert!(traces[0].candidates.iter().any(|candidate| {
+        candidate.unit_id == unit_id
+            && candidate.channel == RecallChannel::Vector
+            && candidate.channel_score > 0.0
+    }));
 }
 
 #[derive(Debug, Deserialize)]
@@ -185,6 +277,7 @@ async fn recall_golden_fixtures_pass() {
                         source_episode_id: Some(episode.episode_id),
                         source_resource_id: None,
                         deletion_generation: unit.deletion_generation,
+                        contextual_chunks: Vec::new(),
                     },
                 )
                 .await

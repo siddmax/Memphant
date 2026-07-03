@@ -1,7 +1,7 @@
 use memphant_core::{InMemoryStore, reflect_recorded, retain_episode};
 use memphant_types::{
-    ActorId, AdmissionAction, MemoryEdgeKind, ReflectCandidate, ReflectInput, RetainRequest,
-    ScopeId, TenantId, TrustLevel,
+    ActorId, AdmissionAction, ContextualChunk, MemoryEdgeKind, ReflectCandidate, ReflectInput,
+    RetainRequest, ScopeId, TenantId, TrustLevel,
 };
 use serde::Deserialize;
 
@@ -100,6 +100,7 @@ async fn write_compiler_golden_fixtures_pass() {
                         body: episode.body.clone(),
                         churn_class: episode.churn_class.clone(),
                         admission_hint: episode.admission_hint,
+                        contextual_chunks: Vec::new(),
                     }],
                 },
             )
@@ -219,6 +220,7 @@ async fn reflect_recorded_is_idempotent_for_duplicate_job_delivery() {
             body: "Deployment region is Taipei.".to_string(),
             churn_class: None,
             admission_hint: None,
+            contextual_chunks: Vec::new(),
         }],
     };
 
@@ -232,4 +234,65 @@ async fn reflect_recorded_is_idempotent_for_duplicate_job_delivery() {
     assert_eq!(first, second);
     assert_eq!(store.memory_units(tenant_id).len(), 1);
     assert_eq!(store.reflect_traces(tenant_id).len(), 1);
+}
+
+#[tokio::test]
+async fn reflect_candidate_contextual_chunks_are_stored_with_source_episode() {
+    let store = InMemoryStore::default();
+    let tenant_id = tenant(31_000);
+    let scope_id = scope(41_000);
+    let actor_id = actor(51_000);
+    let retained = retain_episode(
+        &store,
+        RetainRequest {
+            tenant_id,
+            scope_id,
+            actor_id,
+            source_kind: "system".to_string(),
+            source_trust: TrustLevel::TrustedSystem,
+            subject_hint: Some("deployment runbook".to_string()),
+            body: "The deployment runbook says the emergency breaker codeword is albatross."
+                .to_string(),
+            compiler_version: "compiler-ws4-chunks".to_string(),
+        },
+    )
+    .await
+    .expect("retain succeeds");
+    let job = store.reflect_jobs(tenant_id)[0].clone();
+
+    reflect_recorded(
+        &store,
+        ReflectInput {
+            tenant_id,
+            scope_id,
+            actor_id,
+            episode_id: retained.episode_id,
+            job_id: job.id,
+            compiler_version: "compiler-ws4-chunks".to_string(),
+            candidates: vec![ReflectCandidate {
+                source_kind: "system".to_string(),
+                trust_level: TrustLevel::TrustedSystem,
+                actor_id,
+                subject: Some("deployment runbook".to_string()),
+                predicate: Some("emergency breaker".to_string()),
+                body: "Runbook contains a gated switch.".to_string(),
+                churn_class: None,
+                admission_hint: None,
+                contextual_chunks: vec![ContextualChunk {
+                    id: "chunk-albatross-breaker".to_string(),
+                    header: "Deployment runbook / emergency breaker".to_string(),
+                    body: "The emergency breaker codeword is albatross.".to_string(),
+                    source_span: Some("episode:0-72".to_string()),
+                }],
+            }],
+        },
+    )
+    .await
+    .expect("reflect succeeds");
+
+    let units = store.active_semantic_units(tenant_id);
+    assert_eq!(units.len(), 1);
+    assert_eq!(units[0].source_episode_id, Some(retained.episode_id));
+    assert_eq!(units[0].contextual_chunks.len(), 1);
+    assert_eq!(units[0].contextual_chunks[0].id, "chunk-albatross-breaker");
 }

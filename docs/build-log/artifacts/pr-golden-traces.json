@@ -9,7 +9,7 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2727-6c78-74d1-964d-24a45ed354f4"
+      "trace_id": "019f2727-6c80-76f1-a33f-7af45af3d2c0"
     },
     {
       "dropped_mismatches": [],
@@ -20,13 +20,24 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2727-6c79-76b0-9282-e6e81dc8478c"
+      "trace_id": "019f2727-6c80-76f1-a33f-7b21697fb277"
+    },
+    {
+      "dropped_mismatches": [],
+      "error": null,
+      "forbidden_present": [],
+      "id": "deleted_secret_filter",
+      "missing_citations": [],
+      "missing_trace_stages": [],
+      "missing_units": [],
+      "passed": true,
+      "trace_id": "019f2727-6c80-76f1-a33f-7b73f0efe615"
     }
   ],
-  "eval_id": "nightly-sampled",
+  "eval_id": "pr-golden",
   "metrics": {
-    "passed_cases": 2,
-    "total_cases": 2
+    "passed_cases": 3,
+    "total_cases": 3
   },
   "runner": "memphant-eval",
   "trace_schema_version": "trace-0.1.0-ws0"

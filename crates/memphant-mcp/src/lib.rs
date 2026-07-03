@@ -242,6 +242,7 @@ impl McpRuntime {
                         body: episode.body.clone(),
                         churn_class: None,
                         admission_hint: None,
+                        contextual_chunks: Vec::new(),
                     }],
                 },
             )

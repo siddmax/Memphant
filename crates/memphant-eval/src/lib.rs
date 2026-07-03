@@ -4,9 +4,10 @@ use std::path::{Path, PathBuf};
 
 use memphant_core::{InMemoryStore, MemoryStore, forget_memory, recall};
 use memphant_types::{
-    ActorId, ENGINE_VERSION, ForgetRequest, ForgetSelector, MemoryEdgeKind, MemoryKind, NewEpisode,
-    NewMemoryEdge, NewMemoryUnit, RecallDropReason, RecallMode, RecallRequest, ScopeId,
-    StoredMemoryUnit, TRACE_SCHEMA_VERSION, TenantId, TrustLevel, UnitId, UnitState,
+    ActorId, ContextualChunk, ENGINE_VERSION, ForgetRequest, ForgetSelector, MemoryEdgeKind,
+    MemoryKind, NewEpisode, NewMemoryEdge, NewMemoryUnit, RecallDropReason, RecallMode,
+    RecallRequest, ScopeId, StoredMemoryUnit, TRACE_SCHEMA_VERSION, TenantId, TrustLevel, UnitId,
+    UnitState,
 };
 use schemars::schema_for;
 use serde::{Deserialize, Serialize};
@@ -273,6 +274,8 @@ struct GoldenUnit {
     trust_level: TrustLevel,
     #[serde(default)]
     deletion_generation: Option<u64>,
+    #[serde(default)]
+    contextual_chunks: Vec<ContextualChunk>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -859,6 +862,7 @@ async fn run_syndai_trace_compare(
                 body: file.content.clone(),
                 trust_level: TrustLevel::TrustedSystem,
                 deletion_generation: None,
+                contextual_chunks: Vec::new(),
             })
             .collect(),
         edges: Vec::new(),
@@ -1400,6 +1404,7 @@ async fn seed_store(seed: &GoldenSeed, masked_units: &BTreeSet<String>) -> EvalR
                     source_episode_id: Some(episode.episode_id),
                     source_resource_id: None,
                     deletion_generation: unit.deletion_generation,
+                    contextual_chunks: unit.contextual_chunks.clone(),
                 },
             )
             .await

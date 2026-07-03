@@ -1,0 +1,27 @@
+id: contextual_chunk_breaker
+second_author_confirmed: true
+query: "What is the albatross codeword?"
+seed:
+  units:
+    - name: mem_contextual_breaker
+      episode_body: "The deployment runbook mentions an emergency breaker named albatross."
+      kind: semantic
+      state: active
+      subject_key: "deployment runbook"
+      body: "Runbook contains a gated switch."
+      trust_level: trusted_system
+      contextual_chunks:
+        - id: chunk-albatross-breaker
+          header: "Deployment runbook / emergency breaker"
+          body: "The emergency breaker codeword is albatross."
+          source_span: "episode:0-74"
+expect:
+  answer_bearing_ids:
+    - mem_contextual_breaker
+  top_k_contains:
+    - mem_contextual_breaker
+  citations_include:
+    - mem_contextual_breaker
+  trace_stages_include:
+    - vector
+    - trace

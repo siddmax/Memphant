@@ -1,3 +1,4 @@
 id: nightly-sampled
 cases:
   - ../examples/evals/golden/checkout_region.yaml
+  - ../examples/evals/golden/contextual_chunk_breaker.yaml

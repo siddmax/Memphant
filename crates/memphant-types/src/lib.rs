@@ -315,6 +315,14 @@ pub struct StoredResource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ContextualChunk {
+    pub id: String,
+    pub header: String,
+    pub body: String,
+    pub source_span: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NewMemoryUnit {
     pub tenant_id: TenantId,
     pub scope_id: ScopeId,
@@ -330,6 +338,8 @@ pub struct NewMemoryUnit {
     pub source_episode_id: Option<EpisodeId>,
     pub source_resource_id: Option<ResourceId>,
     pub deletion_generation: Option<u64>,
+    #[serde(default)]
+    pub contextual_chunks: Vec<ContextualChunk>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -349,6 +359,7 @@ pub struct StoredMemoryUnit {
     pub source_episode_id: Option<EpisodeId>,
     pub source_resource_id: Option<ResourceId>,
     pub deletion_generation: Option<u64>,
+    pub contextual_chunks: Vec<ContextualChunk>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -430,6 +441,8 @@ pub struct ReflectCandidate {
     pub body: String,
     pub churn_class: Option<String>,
     pub admission_hint: Option<AdmissionAction>,
+    #[serde(default)]
+    pub contextual_chunks: Vec<ContextualChunk>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
