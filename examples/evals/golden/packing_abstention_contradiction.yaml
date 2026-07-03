@@ -1,0 +1,38 @@
+id: packing_abstention_contradiction
+second_author_confirmed: true
+query: "What is the refund window?"
+k: 4
+seed:
+  units:
+    - name: mem_refund_30
+      episode_body: "Refund window is 30 days."
+      kind: semantic
+      state: active
+      subject_key: "refund window"
+      body: "Refund window is 30 days."
+      trust_level: trusted_system
+    - name: mem_refund_14
+      episode_body: "Refund window is 14 days."
+      kind: semantic
+      state: active
+      subject_key: "refund window policy"
+      body: "Refund window is 14 days."
+      trust_level: trusted_system
+  edges:
+    - src: mem_refund_30
+      dst: mem_refund_14
+      kind: contradicts
+expect:
+  answer_bearing_ids:
+    - mem_refund_30
+    - mem_refund_14
+  top_k_contains:
+    - mem_refund_30
+    - mem_refund_14
+  packed_context_contains:
+    - mem_refund_30
+    - mem_refund_14
+  abstention_signal: true
+  trace_stages_include:
+    - assemble
+    - trace

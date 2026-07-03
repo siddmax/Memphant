@@ -1,0 +1,45 @@
+{
+  "case_results": [
+    {
+      "dropped_mismatches": [
+        "packed_position:mem_deploy_approval:expected<=2:actual=missing",
+        "dedup_collapsed_ids_min:expected>=3:actual=0"
+      ],
+      "error": null,
+      "forbidden_present": [],
+      "id": "packing_abstention_buried_deploy",
+      "missing_citations": [],
+      "missing_trace_stages": [],
+      "missing_units": [
+        "mem_deploy_approval"
+      ],
+      "passed": false,
+      "trace_id": "019f2780-6910-7bd1-af7e-96d88fd84940"
+    },
+    {
+      "dropped_mismatches": [
+        "abstention_signal:expected=true:trace=false:response=false"
+      ],
+      "error": null,
+      "forbidden_present": [],
+      "id": "packing_abstention_contradiction",
+      "missing_citations": [],
+      "missing_trace_stages": [],
+      "missing_units": [],
+      "passed": false,
+      "trace_id": "019f2780-6911-7aa1-8ba2-11b2b06c337a"
+    }
+  ],
+  "eval_id": "rung7-baseline-sampled",
+  "metrics": {
+    "context_packing_abstention_enabled": false,
+    "contextual_chunks_enabled": true,
+    "edge_expansion_enabled": true,
+    "filesystem_control_enabled": false,
+    "passed_cases": 0,
+    "temporal_validity_enabled": true,
+    "total_cases": 2
+  },
+  "runner": "memphant-eval",
+  "trace_schema_version": "trace-0.1.0-ws0"
+}

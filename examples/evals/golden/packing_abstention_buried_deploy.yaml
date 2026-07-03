@@ -1,0 +1,55 @@
+id: packing_abstention_buried_deploy
+second_author_confirmed: true
+query: "What is required before prod deploy?"
+k: 8
+budget_tokens: 14
+seed:
+  units:
+    - name: mem_deploy_decoy_1
+      episode_body: "A prod deploy step ran before release 1."
+      kind: semantic
+      state: active
+      subject_key: "prod deploy step"
+      body: "A prod deploy step ran before release 1."
+      trust_level: trusted_system
+    - name: mem_deploy_decoy_2
+      episode_body: "A prod deploy step ran before release 2."
+      kind: semantic
+      state: active
+      subject_key: "prod deploy step"
+      body: "A prod deploy step ran before release 2."
+      trust_level: trusted_system
+    - name: mem_deploy_decoy_3
+      episode_body: "A prod deploy step ran before release 3."
+      kind: semantic
+      state: active
+      subject_key: "prod deploy step"
+      body: "A prod deploy step ran before release 3."
+      trust_level: trusted_system
+    - name: mem_deploy_decoy_4
+      episode_body: "A prod deploy step ran before release 4."
+      kind: semantic
+      state: active
+      subject_key: "prod deploy step"
+      body: "A prod deploy step ran before release 4."
+      trust_level: trusted_system
+    - name: mem_deploy_approval
+      episode_body: "Prod deploy requires manual approval in release."
+      kind: semantic
+      state: active
+      subject_key: "prod deploy approval"
+      body: "Prod deploy requires manual approval in release."
+      trust_level: trusted_system
+expect:
+  answer_bearing_ids:
+    - mem_deploy_approval
+  top_k_contains:
+    - mem_deploy_approval
+  packed_context_contains:
+    - mem_deploy_approval
+  packed_position_max:
+    mem_deploy_approval: 2
+  dedup_collapsed_ids_min: 3
+  trace_stages_include:
+    - assemble
+    - trace

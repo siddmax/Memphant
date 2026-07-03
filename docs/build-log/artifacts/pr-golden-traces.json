@@ -9,7 +9,7 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2764-aa9f-7d52-9960-5cd7f24e3327"
+      "trace_id": "019f2780-690f-78f0-b194-b0c10d932898"
     },
     {
       "dropped_mismatches": [],
@@ -20,7 +20,7 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2764-aa9f-7d52-9960-5d03c5774422"
+      "trace_id": "019f2780-6910-7293-9e78-481fda2e2c53"
     },
     {
       "dropped_mismatches": [],
@@ -31,7 +31,7 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2764-aa9f-7d52-9960-5d5cff5327ff"
+      "trace_id": "019f2780-6910-7293-9e78-4869ade76f60"
     },
     {
       "dropped_mismatches": [],
@@ -42,7 +42,29 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2764-aaa0-7152-aac8-2052c827eeb7"
+      "trace_id": "019f2780-6911-7ab1-97a2-803f6643b32f"
+    },
+    {
+      "dropped_mismatches": [],
+      "error": null,
+      "forbidden_present": [],
+      "id": "packing_abstention_buried_deploy",
+      "missing_citations": [],
+      "missing_trace_stages": [],
+      "missing_units": [],
+      "passed": true,
+      "trace_id": "019f2780-6912-7261-b4b8-c457be05167a"
+    },
+    {
+      "dropped_mismatches": [],
+      "error": null,
+      "forbidden_present": [],
+      "id": "packing_abstention_contradiction",
+      "missing_citations": [],
+      "missing_trace_stages": [],
+      "missing_units": [],
+      "passed": true,
+      "trace_id": "019f2780-6912-7261-b4b8-c4b709b37aa2"
     },
     {
       "dropped_mismatches": [],
@@ -53,17 +75,18 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2764-aaa0-7152-aac8-20a5449f1c44"
+      "trace_id": "019f2780-6913-7941-9768-0ee55b0b07e7"
     }
   ],
   "eval_id": "pr-golden",
   "metrics": {
+    "context_packing_abstention_enabled": true,
     "contextual_chunks_enabled": true,
     "edge_expansion_enabled": true,
     "filesystem_control_enabled": false,
-    "passed_cases": 5,
+    "passed_cases": 7,
     "temporal_validity_enabled": true,
-    "total_cases": 5
+    "total_cases": 7
   },
   "runner": "memphant-eval",
   "trace_schema_version": "trace-0.1.0-ws0"

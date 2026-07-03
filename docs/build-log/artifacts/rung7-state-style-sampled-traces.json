@@ -1,0 +1,38 @@
+{
+  "case_results": [
+    {
+      "dropped_mismatches": [],
+      "error": null,
+      "forbidden_present": [],
+      "id": "packing_abstention_buried_deploy",
+      "missing_citations": [],
+      "missing_trace_stages": [],
+      "missing_units": [],
+      "passed": true,
+      "trace_id": "019f2780-6910-7522-9824-045153c18554"
+    },
+    {
+      "dropped_mismatches": [],
+      "error": null,
+      "forbidden_present": [],
+      "id": "packing_abstention_contradiction",
+      "missing_citations": [],
+      "missing_trace_stages": [],
+      "missing_units": [],
+      "passed": true,
+      "trace_id": "019f2780-6911-7140-ba6d-8d02cff30bda"
+    }
+  ],
+  "eval_id": "rung7-state-style-sampled",
+  "metrics": {
+    "context_packing_abstention_enabled": true,
+    "contextual_chunks_enabled": true,
+    "edge_expansion_enabled": true,
+    "filesystem_control_enabled": false,
+    "passed_cases": 2,
+    "temporal_validity_enabled": true,
+    "total_cases": 2
+  },
+  "runner": "memphant-eval",
+  "trace_schema_version": "trace-0.1.0-ws0"
+}

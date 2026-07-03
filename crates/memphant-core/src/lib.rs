@@ -787,7 +787,7 @@ pub async fn recall(
         .get(&request.tenant_id)
         .cloned()
         .unwrap_or_default();
-    let mut dropped_items = trace_filter_drops(&tenant_units, &request);
+    let dropped_items = trace_filter_drops(&tenant_units, &request);
     let scope_units = tenant_units
         .iter()
         .filter(|unit| request.allowed_scope_ids.contains(&unit.scope_id))
@@ -869,34 +869,11 @@ pub async fn recall(
         }
     }
 
-    let mut token_estimate = 0;
-    let mut items = Vec::new();
-    for candidate in fused.into_iter().take(request.k) {
-        let unit_tokens = candidate.unit.body.split_whitespace().count();
-        if token_estimate + unit_tokens > request.budget_tokens {
-            dropped_items.push(RecallDroppedItem {
-                unit_id: candidate.unit.id,
-                reason: RecallDropReason::Budget,
-            });
-            continue;
-        }
-        token_estimate += unit_tokens;
-        let suppression_labels = suppression_labels_for(&candidate.unit, &tenant_edges);
-        let matched_contextual_chunk = contextual_chunk_score(&candidate.unit, &query_tokens) > 0.0;
-        items.push(RecallContextItem {
-            unit_id: candidate.unit.id,
-            body: candidate.unit.body,
-            kind: candidate.unit.kind,
-            inclusion_reason: if matched_contextual_chunk {
-                "contextual_chunk".to_string()
-            } else {
-                "fused_top_k".to_string()
-            },
-            citation_episode_id: candidate.unit.source_episode_id,
-            citation_resource_id: candidate.unit.source_resource_id,
-            suppression_labels,
-        });
-    }
+    let packed = pack_recall_context(fused, &request, &tenant_edges, &query_tokens, dropped_items);
+    let token_estimate = packed.token_estimate;
+    let items = packed.items;
+    let dropped_items = packed.dropped_items;
+    let abstention = packed.abstention;
 
     let candidate_whitelist: Vec<_> = items.iter().map(|item| item.unit_id).collect();
     let mut suppression_labels = Vec::new();
@@ -918,7 +895,6 @@ pub async fn recall(
         })
         .collect();
     let trace_id = TraceId::new();
-    let abstention = items.is_empty();
     let feature_flags = recall_feature_flags(&request);
     let trace = RetrievalTrace {
         id: trace_id,
@@ -1005,6 +981,183 @@ struct CandidateAccumulator {
     unit: StoredMemoryUnit,
     fused_score: f32,
     channels: Vec<(RecallChannel, usize, f32)>,
+}
+
+struct PackedRecallContext {
+    items: Vec<RecallContextItem>,
+    dropped_items: Vec<RecallDroppedItem>,
+    token_estimate: usize,
+    abstention: bool,
+}
+
+fn pack_recall_context(
+    mut fused: Vec<CandidateAccumulator>,
+    request: &RecallRequest,
+    tenant_edges: &[StoredMemoryEdge],
+    query_tokens: &[String],
+    mut dropped_items: Vec<RecallDroppedItem>,
+) -> PackedRecallContext {
+    let mut token_estimate = 0;
+    let mut items: Vec<RecallContextItem> = Vec::new();
+    let mut packed_token_counts = Vec::new();
+    let mut packed_relevance_scores = Vec::new();
+    let mut seen_subjects: HashMap<String, Vec<UnitId>> = HashMap::new();
+
+    if request.context_packing_abstention_enabled {
+        fused.sort_by(|left, right| {
+            right
+                .fused_score
+                .partial_cmp(&left.fused_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    packing_density_score(right)
+                        .partial_cmp(&packing_density_score(left))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| left.unit.body.cmp(&right.unit.body))
+        });
+    }
+
+    for candidate in fused.into_iter().take(request.k) {
+        if request.context_packing_abstention_enabled
+            && let Some(subject_key) = candidate.unit.subject_key.as_deref()
+        {
+            let dedup_key = normalize_component(subject_key);
+            if !dedup_key.is_empty() {
+                let seen_ids = seen_subjects.entry(dedup_key).or_default();
+                if !seen_ids.is_empty()
+                    && !has_contradiction_with_any(candidate.unit.id, seen_ids, tenant_edges)
+                {
+                    dropped_items.push(RecallDroppedItem {
+                        unit_id: candidate.unit.id,
+                        reason: RecallDropReason::Duplicate,
+                    });
+                    continue;
+                }
+                seen_ids.push(candidate.unit.id);
+            }
+        }
+
+        let unit_tokens = candidate.unit.body.split_whitespace().count();
+        if token_estimate + unit_tokens > request.budget_tokens {
+            if request.context_packing_abstention_enabled {
+                let candidate_score = packing_relevance_score(&candidate, query_tokens);
+                if let Some(replace_index) = replacement_index(
+                    &packed_token_counts,
+                    &packed_relevance_scores,
+                    token_estimate,
+                    unit_tokens,
+                    candidate_score,
+                    request.budget_tokens,
+                ) {
+                    let replaced = items.remove(replace_index);
+                    let replaced_tokens = packed_token_counts.remove(replace_index);
+                    packed_relevance_scores.remove(replace_index);
+                    token_estimate = token_estimate - replaced_tokens + unit_tokens;
+                    dropped_items.push(RecallDroppedItem {
+                        unit_id: replaced.unit_id,
+                        reason: RecallDropReason::Budget,
+                    });
+                    packed_token_counts.push(unit_tokens);
+                    packed_relevance_scores.push(candidate_score);
+                    items.push(context_item_for(candidate, tenant_edges, query_tokens));
+                    continue;
+                }
+            }
+            dropped_items.push(RecallDroppedItem {
+                unit_id: candidate.unit.id,
+                reason: RecallDropReason::Budget,
+            });
+            continue;
+        }
+        token_estimate += unit_tokens;
+        packed_token_counts.push(unit_tokens);
+        packed_relevance_scores.push(packing_relevance_score(&candidate, query_tokens));
+        items.push(context_item_for(candidate, tenant_edges, query_tokens));
+    }
+
+    let abstention = items.is_empty()
+        || (request.context_packing_abstention_enabled
+            && items.iter().any(|item| {
+                item.suppression_labels
+                    .iter()
+                    .any(|label| label == "unresolved_contradiction")
+            }));
+
+    PackedRecallContext {
+        items,
+        dropped_items,
+        token_estimate,
+        abstention,
+    }
+}
+
+fn packing_density_score(candidate: &CandidateAccumulator) -> f32 {
+    candidate.fused_score / candidate.unit.body.split_whitespace().count().max(1) as f32
+}
+
+fn packing_relevance_score(candidate: &CandidateAccumulator, query_tokens: &[String]) -> f32 {
+    candidate.fused_score
+        + exact_score(&candidate.unit, query_tokens)
+        + lexical_score(&candidate.unit, query_tokens)
+        + vector_score(&candidate.unit, query_tokens)
+}
+
+fn replacement_index(
+    packed_token_counts: &[usize],
+    packed_relevance_scores: &[f32],
+    token_estimate: usize,
+    candidate_tokens: usize,
+    candidate_score: f32,
+    budget_tokens: usize,
+) -> Option<usize> {
+    packed_relevance_scores
+        .iter()
+        .enumerate()
+        .filter(|(index, score)| {
+            candidate_score > **score
+                && token_estimate - packed_token_counts[*index] + candidate_tokens <= budget_tokens
+        })
+        .min_by(|(_, left), (_, right)| {
+            left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(index, _)| index)
+}
+
+fn context_item_for(
+    candidate: CandidateAccumulator,
+    tenant_edges: &[StoredMemoryEdge],
+    query_tokens: &[String],
+) -> RecallContextItem {
+    let suppression_labels = suppression_labels_for(&candidate.unit, tenant_edges);
+    let matched_contextual_chunk = contextual_chunk_score(&candidate.unit, query_tokens) > 0.0;
+    RecallContextItem {
+        unit_id: candidate.unit.id,
+        body: candidate.unit.body,
+        kind: candidate.unit.kind,
+        inclusion_reason: if matched_contextual_chunk {
+            "contextual_chunk".to_string()
+        } else {
+            "fused_top_k".to_string()
+        },
+        citation_episode_id: candidate.unit.source_episode_id,
+        citation_resource_id: candidate.unit.source_resource_id,
+        suppression_labels,
+    }
+}
+
+fn has_contradiction_with_any(
+    unit_id: UnitId,
+    seen_ids: &[UnitId],
+    tenant_edges: &[StoredMemoryEdge],
+) -> bool {
+    seen_ids.iter().any(|seen_id| {
+        tenant_edges.iter().any(|edge| {
+            edge.kind == MemoryEdgeKind::Contradicts
+                && ((edge.src_id == unit_id && edge.dst_id == *seen_id)
+                    || (edge.src_id == *seen_id && edge.dst_id == unit_id))
+        })
+    })
 }
 
 fn derive_dedup_key(
@@ -1163,7 +1316,11 @@ fn exact_score(unit: &StoredMemoryUnit, query_tokens: &[String]) -> f32 {
     let subject_tokens = tokenize(subject_key);
     let matches = subject_tokens
         .iter()
-        .filter(|token| query_tokens.contains(token))
+        .filter(|token| {
+            query_tokens
+                .iter()
+                .any(|query| tokens_related(token, query))
+        })
         .count();
     if matches == 0 {
         0.0
@@ -1176,7 +1333,11 @@ fn lexical_score(unit: &StoredMemoryUnit, query_tokens: &[String]) -> f32 {
     let body_tokens = tokenize(&unit.body);
     let overlap = body_tokens
         .iter()
-        .filter(|token| query_tokens.contains(token))
+        .filter(|token| {
+            query_tokens
+                .iter()
+                .any(|query| tokens_related(token, query))
+        })
         .count();
     overlap as f32 / body_tokens.len().max(1) as f32
 }
@@ -1201,7 +1362,11 @@ fn vector_text_score(text: &str, query_tokens: &[String]) -> f32 {
         .len();
     let intersection = body_tokens
         .iter()
-        .filter(|token| query_tokens.contains(token))
+        .filter(|token| {
+            query_tokens
+                .iter()
+                .any(|query| tokens_related(token, query))
+        })
         .collect::<std::collections::HashSet<_>>()
         .len();
     if union == 0 {
@@ -1209,6 +1374,17 @@ fn vector_text_score(text: &str, query_tokens: &[String]) -> f32 {
     } else {
         intersection as f32 / union as f32
     }
+}
+
+fn tokens_related(left: &str, right: &str) -> bool {
+    left == right
+        || (left.len() >= 5
+            && right.len() >= 5
+            && left
+                .chars()
+                .zip(right.chars())
+                .take(5)
+                .all(|(left, right)| left == right))
 }
 
 fn temporal_score(unit: &StoredMemoryUnit, query: &str) -> f32 {
@@ -1271,10 +1447,12 @@ fn recall_feature_flags(request: &RecallRequest) -> Vec<String> {
         "vector_enabled".to_string(),
         "temporal_enabled".to_string(),
         "contextual_chunks_enabled".to_string(),
-        "context_packing_abstention_enabled".to_string(),
     ];
     if request.edge_expansion_enabled {
         flags.push("edge_expansion_enabled".to_string());
+    }
+    if request.context_packing_abstention_enabled {
+        flags.push("context_packing_abstention_enabled".to_string());
     }
     flags
 }

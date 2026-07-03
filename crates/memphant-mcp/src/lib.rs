@@ -163,6 +163,9 @@ impl McpRuntime {
                         mode: request.mode.unwrap_or(RecallMode::Fast),
                         include_beliefs: request.include_beliefs.unwrap_or(false),
                         edge_expansion_enabled: request.edge_expansion_enabled.unwrap_or(true),
+                        context_packing_abstention_enabled: request
+                            .context_packing_abstention_enabled
+                            .unwrap_or(true),
                         engine_version: ENGINE_VERSION.to_string(),
                     },
                 )

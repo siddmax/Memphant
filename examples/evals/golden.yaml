@@ -5,4 +5,6 @@ cases:
   - golden/contextual_chunk_breaker.yaml
   - golden/deleted_secret_filter.yaml
   - golden/edge_expansion_runbook_lineage.yaml
+  - golden/packing_abstention_buried_deploy.yaml
+  - golden/packing_abstention_contradiction.yaml
   - golden/temporal_validity_current_office.yaml

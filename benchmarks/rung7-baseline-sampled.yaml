@@ -1,0 +1,4 @@
+id: rung7-baseline-sampled
+cases:
+  - ../examples/evals/golden/packing_abstention_buried_deploy.yaml
+  - ../examples/evals/golden/packing_abstention_contradiction.yaml

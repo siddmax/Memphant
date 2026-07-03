@@ -3,4 +3,6 @@ golden:
   - contextual_chunk_breaker
   - deleted_secret_filter
   - edge_expansion_runbook_lineage
+  - packing_abstention_buried_deploy
+  - packing_abstention_contradiction
   - temporal_validity_current_office

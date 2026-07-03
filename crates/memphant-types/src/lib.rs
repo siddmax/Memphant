@@ -132,6 +132,8 @@ pub struct RecallRequest {
     pub include_beliefs: bool,
     #[serde(default = "default_true")]
     pub edge_expansion_enabled: bool,
+    #[serde(default = "default_true")]
+    pub context_packing_abstention_enabled: bool,
     pub engine_version: String,
 }
 
@@ -676,6 +678,7 @@ pub struct RecallHttpRequest {
     pub mode: Option<RecallMode>,
     pub include_beliefs: Option<bool>,
     pub edge_expansion_enabled: Option<bool>,
+    pub context_packing_abstention_enabled: Option<bool>,
     pub include_trace: Option<bool>,
 }
 

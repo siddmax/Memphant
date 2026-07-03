@@ -41,6 +41,7 @@ async fn recall_writes_trace_for_scope_denial() {
             mode: RecallMode::Fast,
             include_beliefs: false,
             edge_expansion_enabled: true,
+            context_packing_abstention_enabled: true,
             engine_version: "engine-wsc-test".to_string(),
         },
     )
@@ -127,6 +128,7 @@ async fn contextual_chunk_recall_finds_source_unit_and_traces_flag() {
             mode: RecallMode::Fast,
             include_beliefs: false,
             edge_expansion_enabled: true,
+            context_packing_abstention_enabled: true,
             engine_version: "engine-ws4-test".to_string(),
         },
     )
@@ -202,6 +204,7 @@ async fn servicenow_query_does_not_trigger_temporal_recency_match() {
             mode: RecallMode::Fast,
             include_beliefs: false,
             edge_expansion_enabled: true,
+            context_packing_abstention_enabled: true,
             engine_version: "engine-temporal-token-test".to_string(),
         },
     )
@@ -288,6 +291,7 @@ async fn recall_drops_expired_validity_window_for_current_query() {
             mode: RecallMode::Fast,
             include_beliefs: false,
             edge_expansion_enabled: true,
+            context_packing_abstention_enabled: true,
             engine_version: "engine-rung5-test".to_string(),
         },
     )
@@ -399,6 +403,7 @@ async fn edge_expansion_can_be_disabled_and_traces_related_candidates() {
             mode: RecallMode::Fast,
             include_beliefs: false,
             edge_expansion_enabled: false,
+            context_packing_abstention_enabled: true,
             engine_version: "engine-rung6-test".to_string(),
         },
     )
@@ -419,6 +424,7 @@ async fn edge_expansion_can_be_disabled_and_traces_related_candidates() {
             mode: RecallMode::Fast,
             include_beliefs: false,
             edge_expansion_enabled: true,
+            context_packing_abstention_enabled: true,
             engine_version: "engine-rung6-test".to_string(),
         },
     )
@@ -438,6 +444,227 @@ async fn edge_expansion_can_be_disabled_and_traces_related_candidates() {
             && candidate.channel == RecallChannel::Edge
             && candidate.channel_score > 0.0
     }));
+}
+
+#[tokio::test]
+async fn packing_collapses_duplicate_decoys_and_preserves_answer_under_budget() {
+    let store = InMemoryStore::default();
+    let tenant_id = tenant(76_000);
+    let scope_id = scope(76_001);
+    let actor_id = actor(76_002);
+
+    let mut tx = store.begin().await;
+    let mut seeded = Vec::new();
+    for index in 1..=4 {
+        let unit_id = store
+            .stage_memory_unit(
+                &mut tx,
+                NewMemoryUnit {
+                    tenant_id,
+                    scope_id,
+                    kind: MemoryKind::Semantic,
+                    state: UnitState::Active,
+                    subject_key: Some("prod deploy step".to_string()),
+                    body: format!("A prod deploy step ran before release {index}."),
+                    trust_level: TrustLevel::TrustedSystem,
+                    churn_class: None,
+                    freshness_due: false,
+                    actor_id: Some(actor_id),
+                    source_kind: Some("fixture".to_string()),
+                    source_episode_id: None,
+                    source_resource_id: None,
+                    deletion_generation: None,
+                    contextual_chunks: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                    transaction_from: None,
+                    transaction_to: None,
+                },
+            )
+            .await
+            .expect("decoy seeded");
+        seeded.push(unit_id);
+    }
+    let answer_id = store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id,
+                scope_id,
+                kind: MemoryKind::Semantic,
+                state: UnitState::Active,
+                subject_key: Some("prod deploy approval".to_string()),
+                body: "Prod deploy requires manual approval in release.".to_string(),
+                trust_level: TrustLevel::TrustedSystem,
+                churn_class: None,
+                freshness_due: false,
+                actor_id: Some(actor_id),
+                source_kind: Some("fixture".to_string()),
+                source_episode_id: None,
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
+            },
+        )
+        .await
+        .expect("answer seeded");
+    store.commit(tx).await.expect("seed committed");
+
+    let response = recall(
+        &store,
+        RecallRequest {
+            tenant_id,
+            scope_id,
+            actor_id,
+            allowed_scope_ids: vec![scope_id],
+            query: "What is required before prod deploy?".to_string(),
+            k: 8,
+            budget_tokens: 14,
+            mode: RecallMode::Fast,
+            include_beliefs: false,
+            edge_expansion_enabled: true,
+            context_packing_abstention_enabled: true,
+            engine_version: "engine-rung7-test".to_string(),
+        },
+    )
+    .await
+    .expect("recall succeeds");
+
+    assert!(response.candidate_whitelist.contains(&answer_id));
+    assert!(
+        response
+            .items
+            .iter()
+            .position(|item| item.unit_id == answer_id)
+            .is_some_and(|position| position <= 1)
+    );
+
+    let trace = store.trace_by_id(response.trace_id).expect("trace exists");
+    assert!(
+        trace
+            .feature_flags
+            .iter()
+            .any(|flag| flag == "context_packing_abstention_enabled")
+    );
+    let duplicate_drops = trace
+        .dropped_items
+        .iter()
+        .filter(|item| item.reason == RecallDropReason::Duplicate && seeded.contains(&item.unit_id))
+        .count();
+    assert!(duplicate_drops >= 3);
+    assert!(!trace.abstention_signal);
+}
+
+#[tokio::test]
+async fn packing_abstains_when_top_evidence_is_unresolved_contradiction() {
+    let store = InMemoryStore::default();
+    let tenant_id = tenant(77_000);
+    let scope_id = scope(77_001);
+    let actor_id = actor(77_002);
+
+    let mut tx = store.begin().await;
+    let old_id = store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id,
+                scope_id,
+                kind: MemoryKind::Semantic,
+                state: UnitState::Active,
+                subject_key: Some("refund window".to_string()),
+                body: "Refund window is 30 days.".to_string(),
+                trust_level: TrustLevel::TrustedSystem,
+                churn_class: None,
+                freshness_due: false,
+                actor_id: Some(actor_id),
+                source_kind: Some("fixture".to_string()),
+                source_episode_id: None,
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
+            },
+        )
+        .await
+        .expect("old unit seeded");
+    let new_id = store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id,
+                scope_id,
+                kind: MemoryKind::Semantic,
+                state: UnitState::Active,
+                subject_key: Some("refund window policy".to_string()),
+                body: "Refund window is 14 days.".to_string(),
+                trust_level: TrustLevel::TrustedSystem,
+                churn_class: None,
+                freshness_due: false,
+                actor_id: Some(actor_id),
+                source_kind: Some("fixture".to_string()),
+                source_episode_id: None,
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
+            },
+        )
+        .await
+        .expect("new unit seeded");
+    store
+        .stage_memory_edge(
+            &mut tx,
+            NewMemoryEdge {
+                tenant_id,
+                scope_id,
+                src_id: old_id,
+                dst_id: new_id,
+                kind: MemoryEdgeKind::Contradicts,
+            },
+        )
+        .await
+        .expect("contradiction edge seeded");
+    store.commit(tx).await.expect("seed committed");
+
+    let response = recall(
+        &store,
+        RecallRequest {
+            tenant_id,
+            scope_id,
+            actor_id,
+            allowed_scope_ids: vec![scope_id],
+            query: "What is the refund window?".to_string(),
+            k: 4,
+            budget_tokens: 80,
+            mode: RecallMode::Fast,
+            include_beliefs: false,
+            edge_expansion_enabled: true,
+            context_packing_abstention_enabled: true,
+            engine_version: "engine-rung7-test".to_string(),
+        },
+    )
+    .await
+    .expect("recall succeeds");
+
+    assert!(response.candidate_whitelist.contains(&old_id));
+    assert!(response.candidate_whitelist.contains(&new_id));
+    assert!(response.abstention);
+    assert!(
+        response
+            .suppression_labels
+            .iter()
+            .any(|label| label == "unresolved_contradiction")
+    );
 }
 
 #[derive(Debug, Deserialize)]
@@ -619,6 +846,7 @@ async fn recall_golden_fixtures_pass() {
                 mode: RecallMode::Fast,
                 include_beliefs: false,
                 edge_expansion_enabled: true,
+                context_packing_abstention_enabled: true,
                 engine_version: "engine-wsc-test".to_string(),
             },
         )

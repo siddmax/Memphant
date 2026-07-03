@@ -226,3 +226,70 @@ fn rung6_promotion_requires_no_edges_and_filesystem_controls() {
     assert!(text.contains("rung_decision:6:missing_no_edges_control"));
     assert!(text.contains("rung_decision:6:missing_filesystem_control"));
 }
+
+#[test]
+fn rung7_profile_archives_packing_abstention_promotion() {
+    let archive_dir = tempfile::tempdir().expect("tempdir");
+    let archive_path = archive_dir.path().join("rung7-profile.json");
+    let report = run_profile_file(
+        &repo_root().join("examples/evals/rung7-packing-abstention-profile.yaml"),
+        "rungs-0-6-baseline",
+        Some(archive_path.clone()),
+    )
+    .expect("rung7 profile should pass");
+
+    let decision = report
+        .rung_decisions
+        .iter()
+        .find(|decision| decision.rung == 7)
+        .expect("rung 7 decision");
+    assert_eq!(decision.item, "packing+abstention");
+    assert_eq!(decision.status, "promoted");
+    assert_eq!(decision.axes, ["outcome", "restraint"]);
+    assert!(decision.delta_vs_baseline > 0.0);
+    assert!(decision.ci[0] > 0.0);
+    assert!(
+        decision
+            .benchmark_sample_refs
+            .iter()
+            .any(|sample| sample.contains("packing_abstention_buried_deploy"))
+    );
+    assert!(
+        decision
+            .benchmark_sample_refs
+            .iter()
+            .any(|sample| sample.contains("packing_abstention_contradiction"))
+    );
+
+    let archived: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&archive_path).expect("read archive"))
+            .expect("archive json");
+    assert_eq!(archived["rung_decisions"][0]["rung"], 7);
+}
+
+#[test]
+fn rung7_promotion_requires_packing_and_abstention_samples() {
+    let source = fs::read_to_string(
+        repo_root().join("examples/evals/rung7-packing-abstention-profile.yaml"),
+    )
+    .expect("read fixture");
+    let bad = source
+        .replace(
+            "      - memphant:examples/evals/golden/packing_abstention_buried_deploy.yaml\n",
+            "",
+        )
+        .replace(
+            "      - memphant:examples/evals/golden/packing_abstention_contradiction.yaml\n",
+            "",
+        );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("bad-rung7-profile.yaml");
+    fs::write(&path, bad).expect("write fixture");
+
+    let error = run_profile_file(&path, "rungs-0-6-baseline", None)
+        .expect_err("rung7 promotion without samples should fail");
+
+    let text = error.to_string();
+    assert!(text.contains("rung_decision:7:missing_packing_sample"));
+    assert!(text.contains("rung_decision:7:missing_abstention_sample"));
+}

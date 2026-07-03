@@ -40,6 +40,7 @@ fn run_command(args: Vec<String>) -> ExitCode {
     let mut contextual_chunks_enabled = true;
     let mut temporal_validity_enabled = true;
     let mut edge_expansion_enabled = true;
+    let mut context_packing_abstention_enabled = true;
     let mut filesystem_control_enabled = false;
     let mut index = 1;
     while index < args.len() {
@@ -58,6 +59,10 @@ fn run_command(args: Vec<String>) -> ExitCode {
             }
             "--disable-edge-expansion" => {
                 edge_expansion_enabled = false;
+                index += 1;
+            }
+            "--disable-context-packing-abstention" => {
+                context_packing_abstention_enabled = false;
                 index += 1;
             }
             "--filesystem-control" => {
@@ -84,6 +89,7 @@ fn run_command(args: Vec<String>) -> ExitCode {
             contextual_chunks_enabled,
             temporal_validity_enabled,
             edge_expansion_enabled,
+            context_packing_abstention_enabled,
             filesystem_control_enabled,
         },
     ) {
@@ -232,6 +238,7 @@ fn syndai_trace_compare_command(args: Vec<String>) -> ExitCode {
             contextual_chunks_enabled: true,
             temporal_validity_enabled: true,
             edge_expansion_enabled: true,
+            context_packing_abstention_enabled: true,
             filesystem_control_enabled: false,
         },
     ) {
@@ -372,6 +379,6 @@ fn profile_command(args: Vec<String>) -> ExitCode {
 
 fn usage() {
     eprintln!(
-        "usage: memphant-eval run <suite.yaml> [--archive-traces] [--archive-dir <dir>] [--disable-contextual-chunks] [--disable-temporal-validity] [--disable-edge-expansion] [--filesystem-control] | memphant-eval verify-golden <suite.yaml> | memphant-eval security <suite.yaml> | memphant-eval ops <suite.yaml> | memphant-eval syndai-trace-compare <fixture.yaml> [--archive-traces] [--archive-dir <dir>] | memphant-eval profile <profile.yaml> --compare-to <baseline> [--archive <path>] | memphant-eval schema trace"
+        "usage: memphant-eval run <suite.yaml> [--archive-traces] [--archive-dir <dir>] [--disable-contextual-chunks] [--disable-temporal-validity] [--disable-edge-expansion] [--disable-context-packing-abstention] [--filesystem-control] | memphant-eval verify-golden <suite.yaml> | memphant-eval security <suite.yaml> | memphant-eval ops <suite.yaml> | memphant-eval syndai-trace-compare <fixture.yaml> [--archive-traces] [--archive-dir <dir>] | memphant-eval profile <profile.yaml> --compare-to <baseline> [--archive <path>] | memphant-eval schema trace"
     );
 }

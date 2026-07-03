@@ -50,6 +50,7 @@ pub struct EvalRunOptions {
     pub contextual_chunks_enabled: bool,
     pub temporal_validity_enabled: bool,
     pub edge_expansion_enabled: bool,
+    pub context_packing_abstention_enabled: bool,
     pub filesystem_control_enabled: bool,
 }
 
@@ -61,6 +62,7 @@ impl Default for EvalRunOptions {
             contextual_chunks_enabled: true,
             temporal_validity_enabled: true,
             edge_expansion_enabled: true,
+            context_packing_abstention_enabled: true,
             filesystem_control_enabled: false,
         }
     }
@@ -342,6 +344,14 @@ struct GoldenExpect {
     #[serde(default)]
     dropped: Vec<GoldenDropped>,
     #[serde(default)]
+    packed_context_contains: Vec<String>,
+    #[serde(default)]
+    packed_position_max: BTreeMap<String, usize>,
+    #[serde(default)]
+    dedup_collapsed_ids_min: Option<usize>,
+    #[serde(default)]
+    abstention_signal: Option<bool>,
+    #[serde(default)]
     high_risk_suppressed: Vec<String>,
     #[serde(default)]
     invalidated_units: Vec<String>,
@@ -461,6 +471,7 @@ pub fn run_eval_file(path: &Path, options: EvalRunOptions) -> EvalResult<EvalRep
             options.contextual_chunks_enabled,
             options.temporal_validity_enabled,
             options.edge_expansion_enabled,
+            options.context_packing_abstention_enabled,
             options.filesystem_control_enabled,
         ));
         case_results.push(result);
@@ -494,6 +505,7 @@ pub fn run_eval_file(path: &Path, options: EvalRunOptions) -> EvalResult<EvalRep
                 "contextual_chunks_enabled": options.contextual_chunks_enabled,
                 "temporal_validity_enabled": options.temporal_validity_enabled,
                 "edge_expansion_enabled": options.edge_expansion_enabled,
+                "context_packing_abstention_enabled": options.context_packing_abstention_enabled,
                 "filesystem_control_enabled": options.filesystem_control_enabled,
             },
             "case_results": report.case_results,
@@ -525,11 +537,13 @@ pub fn verify_golden_file(path: &Path) -> EvalResult<GoldenVerifyReport> {
             true,
             true,
             true,
+            true,
             false,
         ));
         let masked = runtime.block_on(run_golden_case(
             &case,
             &answer_bearing,
+            true,
             true,
             true,
             true,
@@ -971,6 +985,9 @@ fn validate_rung_decision(
     if decision.rung == 6 && decision.status == "promoted" {
         validate_rung6_edge_expansion_promotion(decision, axes, &prefix, findings);
     }
+    if decision.rung == 7 && decision.status == "promoted" {
+        validate_rung7_packing_abstention_promotion(decision, axes, &prefix, findings);
+    }
 }
 
 fn validate_rung4_contextual_chunk_promotion(
@@ -1096,6 +1113,50 @@ fn validate_rung6_edge_expansion_promotion(
     }
 }
 
+fn validate_rung7_packing_abstention_promotion(
+    decision: &RungDecision,
+    axes: &BTreeMap<String, SotaAxisResult>,
+    prefix: &str,
+    findings: &mut Vec<String>,
+) {
+    if decision.item != "packing+abstention" {
+        findings.push(format!("{prefix}:invalid_item:{}", decision.item));
+    }
+    for required_axis in ["outcome", "restraint"] {
+        if !decision.axes.iter().any(|axis| axis == required_axis) {
+            findings.push(format!("{prefix}:missing_{required_axis}_axis"));
+        }
+    }
+    if !decision
+        .benchmark_sample_refs
+        .iter()
+        .any(|sample| sample.contains("packing_abstention_buried_deploy"))
+    {
+        findings.push(format!("{prefix}:missing_packing_sample"));
+    }
+    if !decision
+        .benchmark_sample_refs
+        .iter()
+        .any(|sample| sample.contains("packing_abstention_contradiction"))
+    {
+        findings.push(format!("{prefix}:missing_abstention_sample"));
+    }
+    if !decision
+        .benchmark_sample_refs
+        .iter()
+        .any(|sample| sample.contains("rung7-baseline"))
+    {
+        findings.push(format!("{prefix}:missing_baseline_control"));
+    }
+    for axis in ["outcome", "restraint"] {
+        match axes.get(axis) {
+            Some(result) if result.delta_vs_baseline.unwrap_or_default() > 0.0 => {}
+            Some(_) => findings.push(format!("{prefix}:{axis}:non_positive_axis_delta")),
+            None => {}
+        }
+    }
+}
+
 fn validate_ci(prefix: &str, delta: Option<f64>, ci: Option<[f64; 2]>, findings: &mut Vec<String>) {
     let Some(delta) = delta else {
         findings.push(format!("{prefix}:missing_delta"));
@@ -1165,6 +1226,7 @@ async fn run_syndai_trace_compare(
             mode: RecallMode::Fast,
             include_beliefs: false,
             edge_expansion_enabled: true,
+            context_packing_abstention_enabled: true,
             engine_version: ENGINE_VERSION.to_string(),
         },
     )
@@ -1219,6 +1281,7 @@ async fn run_golden_case(
     contextual_chunks_enabled: bool,
     temporal_validity_enabled: bool,
     edge_expansion_enabled: bool,
+    context_packing_abstention_enabled: bool,
     filesystem_control_enabled: bool,
 ) -> EvalCaseResult {
     match run_golden_case_inner(
@@ -1227,6 +1290,7 @@ async fn run_golden_case(
         contextual_chunks_enabled,
         temporal_validity_enabled,
         edge_expansion_enabled,
+        context_packing_abstention_enabled,
         filesystem_control_enabled,
     )
     .await
@@ -1252,6 +1316,7 @@ async fn run_golden_case_inner(
     contextual_chunks_enabled: bool,
     temporal_validity_enabled: bool,
     edge_expansion_enabled: bool,
+    context_packing_abstention_enabled: bool,
     filesystem_control_enabled: bool,
 ) -> EvalResult<EvalCaseResult> {
     let context = seed_store(
@@ -1276,6 +1341,7 @@ async fn run_golden_case_inner(
             mode: RecallMode::Fast,
             include_beliefs: case.include_beliefs,
             edge_expansion_enabled: recall_edge_expansion_enabled,
+            context_packing_abstention_enabled,
             engine_version: ENGINE_VERSION.to_string(),
         },
     )
@@ -1290,6 +1356,11 @@ async fn run_golden_case_inner(
     for answer in &case.expect.answer_bearing_ids {
         if !required_units.contains(answer) {
             required_units.push(answer.clone());
+        }
+    }
+    for packed in &case.expect.packed_context_contains {
+        if !required_units.contains(packed) {
+            required_units.push(packed.clone());
         }
     }
     let missing_units = required_units
@@ -1340,7 +1411,7 @@ async fn run_golden_case_inner(
         .filter(|stage| !trace_stages.contains(stage.as_str()))
         .cloned()
         .collect::<Vec<_>>();
-    let dropped_mismatches = case
+    let mut dropped_mismatches = case
         .expect
         .dropped
         .iter()
@@ -1357,6 +1428,43 @@ async fn run_golden_case_inner(
         })
         .map(|expected| format!("{}:{:?}", expected.unit, expected.reason))
         .collect::<Vec<_>>();
+    for (name, max_position) in &case.expect.packed_position_max {
+        let actual_position = context.named_units.get(name).and_then(|unit_id| {
+            response
+                .items
+                .iter()
+                .position(|item| item.unit_id == *unit_id)
+                .map(|position| position + 1)
+        });
+        if actual_position.is_none_or(|position| position > *max_position) {
+            dropped_mismatches.push(format!(
+                "packed_position:{name}:expected<={max_position}:actual={}",
+                actual_position
+                    .map(|position| position.to_string())
+                    .unwrap_or_else(|| "missing".to_string())
+            ));
+        }
+    }
+    if let Some(minimum) = case.expect.dedup_collapsed_ids_min {
+        let duplicate_drops = trace
+            .dropped_items
+            .iter()
+            .filter(|item| item.reason == RecallDropReason::Duplicate)
+            .count();
+        if duplicate_drops < minimum {
+            dropped_mismatches.push(format!(
+                "dedup_collapsed_ids_min:expected>={minimum}:actual={duplicate_drops}"
+            ));
+        }
+    }
+    if let Some(expected) = case.expect.abstention_signal
+        && (trace.abstention_signal != expected || response.abstention != expected)
+    {
+        dropped_mismatches.push(format!(
+            "abstention_signal:expected={expected}:trace={}:response={}",
+            trace.abstention_signal, response.abstention
+        ));
+    }
 
     let passed = missing_units.is_empty()
         && forbidden_present.is_empty()
@@ -1412,7 +1520,8 @@ async fn run_fixture_security_lane(lane: &SecurityLane) -> EvalResult<String> {
         seed: lane.seed.clone(),
         expect: lane.expect.clone(),
     };
-    let result = run_golden_case_inner(&case, &BTreeSet::new(), true, true, true, false).await?;
+    let result =
+        run_golden_case_inner(&case, &BTreeSet::new(), true, true, true, true, false).await?;
     if result.passed {
         Ok("fixture assertions passed".to_string())
     } else {
@@ -1449,6 +1558,7 @@ async fn run_high_risk_lane(lane: &SecurityLane) -> EvalResult<String> {
             mode: RecallMode::Fast,
             include_beliefs: true,
             edge_expansion_enabled: true,
+            context_packing_abstention_enabled: true,
             engine_version: ENGINE_VERSION.to_string(),
         },
     )
@@ -1550,6 +1660,7 @@ async fn run_deletion_lane(lane: &SecurityLane) -> EvalResult<String> {
             mode: RecallMode::Fast,
             include_beliefs: false,
             edge_expansion_enabled: true,
+            context_packing_abstention_enabled: true,
             engine_version: ENGINE_VERSION.to_string(),
         },
     )

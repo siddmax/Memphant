@@ -83,6 +83,7 @@ async fn rest_examples_round_trip_through_retain_reflect_recall_trace_and_mutati
             mode: None,
             include_beliefs: None,
             edge_expansion_enabled: None,
+            context_packing_abstention_enabled: None,
             include_trace: Some(true),
         }),
     )
