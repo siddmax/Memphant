@@ -1,0 +1,150 @@
+use std::time::{Duration, Instant};
+
+use memphant_core::{InMemoryStore, MemoryStore, recall};
+use memphant_types::{
+    ActorId, ENGINE_VERSION, MemoryKind, NewEpisode, NewMemoryUnit, RecallMode, RecallRequest,
+    ScopeId, TenantId, TrustLevel, UnitState,
+};
+
+const FAST_P50_LIMIT: Duration = Duration::from_millis(200);
+const FAST_P95_LIMIT: Duration = Duration::from_millis(500);
+
+fn tenant(value: u128) -> TenantId {
+    TenantId::from_u128(value)
+}
+
+fn scope(value: u128) -> ScopeId {
+    ScopeId::from_u128(value)
+}
+
+fn actor(value: u128) -> ActorId {
+    ActorId::from_u128(value)
+}
+
+#[tokio::test]
+async fn fast_mode_recall_holds_release_hot_path_slo() {
+    let store = InMemoryStore::default();
+    let tenant_id = tenant(86_000);
+    let scope_id = scope(86_001);
+    let actor_id = actor(86_002);
+
+    seed_reference_corpus(&store, tenant_id, scope_id, actor_id).await;
+
+    let request = RecallRequest {
+        tenant_id,
+        scope_id,
+        actor_id,
+        allowed_scope_ids: vec![scope_id],
+        query: "release owner for atlas rollback".to_string(),
+        k: 5,
+        budget_tokens: 512,
+        mode: RecallMode::Fast,
+        include_beliefs: false,
+        edge_expansion_enabled: false,
+        context_packing_abstention_enabled: false,
+        rerank_enabled: false,
+        learned_rerank_profile: None,
+        query_decomposition_enabled: false,
+        procedure_recall_enabled: false,
+        decay_enabled: false,
+        engine_version: ENGINE_VERSION.to_string(),
+    };
+
+    for _ in 0..5 {
+        recall(&store, request.clone()).await.expect("warm recall");
+    }
+
+    let mut samples = Vec::with_capacity(80);
+    for _ in 0..80 {
+        let started = Instant::now();
+        let response = recall(&store, request.clone()).await.expect("fast recall");
+        assert!(!response.items.is_empty());
+        samples.push(started.elapsed());
+    }
+
+    samples.sort_unstable();
+    let p50 = percentile(&samples, 0.50);
+    let p95 = percentile(&samples, 0.95);
+
+    assert!(
+        p50 < FAST_P50_LIMIT,
+        "fast recall p50 {:?} breached {:?}",
+        p50,
+        FAST_P50_LIMIT
+    );
+    assert!(
+        p95 < FAST_P95_LIMIT,
+        "fast recall p95 {:?} breached {:?}",
+        p95,
+        FAST_P95_LIMIT
+    );
+}
+
+fn percentile(samples: &[Duration], quantile: f64) -> Duration {
+    let index = ((samples.len() as f64 - 1.0) * quantile).ceil() as usize;
+    samples[index]
+}
+
+async fn seed_reference_corpus(
+    store: &InMemoryStore,
+    tenant_id: TenantId,
+    scope_id: ScopeId,
+    actor_id: ActorId,
+) {
+    let mut tx = store.begin().await;
+    for index in 0..240 {
+        let body = if index == 121 {
+            "Atlas rollback release owner is platform on-call; cite runbook RB-77."
+        } else {
+            "Routine release note for an unrelated service shard."
+        };
+        let subject_key = if index == 121 {
+            "release_owner:atlas_rollback".to_string()
+        } else {
+            format!("release_note:shard_{index}")
+        };
+        let episode = store
+            .stage_episode(
+                &mut tx,
+                NewEpisode {
+                    tenant_id,
+                    scope_id,
+                    actor_id,
+                    source_kind: "reference-corpus".to_string(),
+                    source_trust: TrustLevel::TrustedSystem,
+                    dedup_key: format!("hot_path_slo:{index}"),
+                    body: body.to_string(),
+                },
+            )
+            .await
+            .expect("episode seed");
+        store
+            .stage_memory_unit(
+                &mut tx,
+                NewMemoryUnit {
+                    tenant_id,
+                    scope_id,
+                    kind: MemoryKind::Semantic,
+                    state: UnitState::Active,
+                    subject_key: Some(subject_key),
+                    body: body.to_string(),
+                    trust_level: TrustLevel::TrustedSystem,
+                    churn_class: None,
+                    freshness_due: false,
+                    actor_id: Some(actor_id),
+                    source_kind: Some("reference-corpus".to_string()),
+                    source_episode_id: Some(episode.episode_id),
+                    source_resource_id: None,
+                    deletion_generation: None,
+                    contextual_chunks: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                    transaction_from: None,
+                    transaction_to: None,
+                },
+            )
+            .await
+            .expect("unit seed");
+    }
+    store.commit(tx).await.expect("seed commit");
+}

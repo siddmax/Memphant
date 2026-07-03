@@ -1,0 +1,103 @@
+{
+  "id": "standing_quality_bars_2026_07_03",
+  "owner": "docs/superpowers/specs/memphant/STATUS.md#6-standing-quality-bars",
+  "status": "pass",
+  "checked_at": "2026-07-03T14:15:00Z",
+  "bars": {
+    "hot_path_slo": {
+      "owner": "docs/superpowers/specs/memphant/02-architecture-spec.md#4-read-path",
+      "mode": "fast",
+      "thresholds_ms": {
+        "p50_lt": 200,
+        "p95_lt": 500
+      },
+      "proofs": [
+        "crates/memphant-core/tests/hot_path_slo.rs",
+        "docs/build-log/artifacts/rung15-inferred-belief-composition-profile.json"
+      ],
+      "profile_decision_source": "rung15_inferred_belief_composition_profile_001",
+      "status": "pass"
+    },
+    "memory_utility_trend": {
+      "owner": "docs/superpowers/specs/memphant/22-observability-telemetry-and-self-improvement-spec.md#13-ranking-quality-slis-with-alert-thresholds",
+      "lane": "syndai_agent_file_memory_001",
+      "tenant_scope": "dogfood",
+      "baseline_success_rate": 1.0,
+      "current_success_rate": 1.0,
+      "declined_vs_baseline": false,
+      "outcomes_counted": [
+        "success",
+        "failure",
+        "corrected",
+        "ignored"
+      ],
+      "proofs": [
+        "docs/build-log/artifacts/syndai_agent_file_memory_001-trace-compare.json",
+        "crates/memphant-core/tests/surface_mutations.rs",
+        "crates/memphant-server/tests/rest_contract.rs",
+        "crates/memphant-mcp/src/lib.rs"
+      ],
+      "mark_contract": {
+        "required_fields": [
+          "trace_id",
+          "used_ids",
+          "outcome"
+        ],
+        "public_rest_path": "/v1/mark",
+        "mcp_tool": "mark"
+      },
+      "status": "pass"
+    },
+    "landscape_completeness": {
+      "owner": "docs/superpowers/specs/memphant/13-prior-art-and-competitive-spec.md#14-harness-layer-the-distribution-shelf",
+      "reviewed_at": "2026-07-03T14:15:00Z",
+      "threshold_stars_gte": 50000,
+      "github_metadata_command": "gh api graphql -f query='query { ... repository { nameWithOwner stargazerCount url pushedAt updatedAt licenseInfo { spdxId } } }'",
+      "entries": [
+        {
+          "repo": "openclaw/openclaw",
+          "stars": 381583,
+          "license": "NOASSERTION",
+          "url": "https://github.com/openclaw/openclaw",
+          "listed_or_excluded": "listed"
+        },
+        {
+          "repo": "obra/superpowers",
+          "stars": 245208,
+          "license": "MIT",
+          "url": "https://github.com/obra/superpowers",
+          "listed_or_excluded": "listed"
+        },
+        {
+          "repo": "NousResearch/hermes-agent",
+          "stars": 208477,
+          "license": "MIT",
+          "url": "https://github.com/NousResearch/hermes-agent",
+          "listed_or_excluded": "listed"
+        },
+        {
+          "repo": "mem0ai/mem0",
+          "stars": 60018,
+          "license": "Apache-2.0",
+          "url": "https://github.com/mem0ai/mem0",
+          "listed_or_excluded": "listed"
+        },
+        {
+          "repo": "MemPalace/mempalace",
+          "stars": 56914,
+          "license": "MIT",
+          "url": "https://github.com/MemPalace/mempalace",
+          "listed_or_excluded": "listed"
+        },
+        {
+          "repo": "bmad-code-org/BMAD-METHOD",
+          "stars": 50039,
+          "license": "NOASSERTION",
+          "url": "https://github.com/bmad-code-org/BMAD-METHOD",
+          "listed_or_excluded": "listed"
+        }
+      ],
+      "status": "pass"
+    }
+  }
+}

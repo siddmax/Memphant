@@ -1,0 +1,26 @@
+{
+  "id": "gatemem_conditional_gate_2026_07_03",
+  "owner": "docs/superpowers/specs/memphant/27-sota-ladder-and-validation.md#1-benchmark-targets",
+  "benchmark": "gatemem-internal-reproduction",
+  "first_internal_reproduction": true,
+  "status": "pass",
+  "axes": {
+    "utility": {
+      "result": "pass",
+      "score": 1.0,
+      "proof": "docs/build-log/artifacts/syndai_agent_file_memory_001-trace-compare.json"
+    },
+    "access_control": {
+      "result": "pass",
+      "security_lane": "tenant_leakage",
+      "proof": "examples/evals/security-smoke.yaml"
+    },
+    "forgetting": {
+      "result": "pass",
+      "security_lane": "deletion_completeness",
+      "proof": "examples/evals/security-smoke.yaml"
+    }
+  },
+  "bar": "simultaneous_pass",
+  "notes": "GateMem gates nothing before first reproduction. This scorecard records the first internal reproduction in MemPhant's harness and requires utility, access control, and reliable forgetting to pass together."
+}

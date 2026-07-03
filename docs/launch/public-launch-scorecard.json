@@ -1,0 +1,103 @@
+{
+  "id": "public_launch_gate_2026_07_03",
+  "owner": "docs/superpowers/specs/memphant/29-implementation-plan.md#7-public-launch-gate",
+  "status": "candidate_pass",
+  "profile": {
+    "path": "docs/build-log/artifacts/rung15-inferred-belief-composition-profile.json",
+    "public_sampled_trace_refs": [
+      "docs/build-log/artifacts/rung12-l4-exhaustive-sampled-traces.json",
+      "docs/build-log/artifacts/rung11-memorystress-sampled-traces.json",
+      "docs/build-log/artifacts/rung10-state-style-sampled-traces.json"
+    ],
+    "required_fields": [
+      "harness_pin",
+      "trace_ref",
+      "p95_ms",
+      "cost_per_1k_recalls_usd",
+      "security_result",
+      "deletion_result"
+    ]
+  },
+  "criteria": [
+    {
+      "name": "public_api_sdk_mcp_cli_docs_examples",
+      "proofs": [
+        "openapi/memphant.v1.json",
+        "bindings/python/memphant/__init__.py",
+        "bindings/python/examples/roundtrip.py",
+        "mcp/memphant.tools.v1.json",
+        "crates/memphant-cli/src/main.rs",
+        "docs/deployment/self-host.md",
+        "examples/evals/golden.yaml",
+        "web/public/index.html"
+      ]
+    },
+    {
+      "name": "self_host_docker_compose",
+      "proofs": [
+        "Dockerfile",
+        "compose.yaml",
+        "docs/deployment/self-host.md"
+      ]
+    },
+    {
+      "name": "security_policy_and_release_process",
+      "proofs": [
+        "SECURITY.md",
+        "CONTRIBUTING.md",
+        "docs/release-process.md",
+        ".github/workflows/ci.yml"
+      ]
+    },
+    {
+      "name": "golden_security_sampled_deletion_gates",
+      "proofs": [
+        "examples/evals/golden.yaml",
+        "examples/evals/security-smoke.yaml",
+        "benchmarks/nightly-sampled.yaml",
+        "docs/build-log/artifacts/nightly-sampled-traces.json"
+      ]
+    },
+    {
+      "name": "reproduced_public_benchmark_profile",
+      "proofs": [
+        "docs/build-log/artifacts/rung15-inferred-belief-composition-profile.json"
+      ]
+    },
+    {
+      "name": "hosted_db_exposure",
+      "proofs": [
+        "deploy/provider-profiles/plain-postgres.env.example",
+        "deploy/provider-profiles/supabase.env.example",
+        "deploy/provider-profiles/neon.env.example",
+        "docs/deployment/byoc-supabase.md",
+        "crates/memphant-cli/tests/bootstrap_check.rs"
+      ],
+      "critical_findings": []
+    },
+    {
+      "name": "no_hidden_syndai_only_behavior",
+      "proofs": [
+        "openapi/memphant.v1.json",
+        "mcp/memphant.tools.v1.json",
+        "bindings/python/memphant/__init__.py",
+        "crates/memphant-server/src/lib.rs",
+        "crates/memphant-types/src/lib.rs",
+        "web/public/app.js"
+      ]
+    },
+    {
+      "name": "public_sota_claim_policy",
+      "proofs": [
+        "docs/release-process.md",
+        "web/public/app.js",
+        "web/tests/launch-surface.spec.js"
+      ]
+    }
+  ],
+  "sota_claim": {
+    "claim_made": false,
+    "axis": null,
+    "statement": "No public SOTA claim is made from this launch scorecard."
+  }
+}
