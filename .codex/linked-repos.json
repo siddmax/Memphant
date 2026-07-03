@@ -1,0 +1,17 @@
+{
+  "public_repo": {
+    "name": "Memphant",
+    "path": "/Users/sidsharma/Documents/Memphant"
+  },
+  "private_repo": {
+    "name": "Syndai",
+    "path": "/Users/sidsharma/Syndai/.wt/codex-memphant-cross-repo",
+    "branch": "codex/memphant-cross-repo",
+    "upstream": "Syndai/main"
+  },
+  "source_docs": {
+    "remote_ref": "Syndai/main",
+    "commit": "cd4c81b2fb68d8d70cbed17b1a8179cfa17ddb0b",
+    "path": "docs/superpowers/specs/memphant"
+  }
+}

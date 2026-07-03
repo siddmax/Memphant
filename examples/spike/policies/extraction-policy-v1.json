@@ -1,0 +1,15 @@
+{
+  "compiler_version": "compiler-0.1.0-ws0",
+  "rules": [
+    {
+      "contains": "callback token v2",
+      "subject": "callback token version",
+      "value": "v2"
+    },
+    {
+      "contains": "#release",
+      "subject": "release channel",
+      "value": "#release"
+    }
+  ]
+}

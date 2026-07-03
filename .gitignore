@@ -1,0 +1,34 @@
+# Rust build artifacts
+/target/
+/spikes/rust-retain/target/
+**/*.rs.bk
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Local secrets and machine-specific config
+.env
+.env.*
+!.env.example
+*.local
+
+# Local Codex state; keep the repo-link manifest trackable.
+.codex/feature-flow/
+
+# OS and editor state
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs and transient outputs
+*.log
+tmp/
+temp/

@@ -1,0 +1,159 @@
+# MemPhant - Final Decision Register
+
+## 0. Purpose
+
+This file records final launch-critical decisions. If another doc conflicts with this register, this register wins and the other doc must be patched.
+
+## 1. Core Architecture Decisions
+
+| Decision | Final choice | Reason |
+|---|---|---|
+| Public repo | Apache-2.0 open core from day one | adoption and enterprise trust |
+| Primary language | Rust core/server/CLI/MCP/eval runner | deterministic hot paths, deployment, safety; WS-0 R83 spike measured warm no-recompile Rust policy-change iteration at 0.073× Python, below the <1.5× proceed threshold |
+| Primary production integration | HTTP API plus generated SDKs | stable public contract |
+| Python integration | HTTP SDK plus PyO3/maturin native wheel | Python adoption without hidden production coupling |
+| TypeScript integration | generated HTTP SDK | web/Node agent adoption |
+| MCP | stdio and Streamable HTTP | local and hosted agent integration |
+| Store | Postgres 17/18-compatible plus pgvector ≥ 0.8.4 | production-grade and portable (R74) |
+| Local dev store | Docker/plain Postgres | avoids second store semantics |
+| External graph DB | rejected for first public architecture | relational edges cover v1 without another dependency |
+| Object store | required for raw episodes/resources over inline size limit | raw capture without bloating Postgres |
+| ID type | UUIDv7 for public IDs and primary keys | sortable, globally unique, Postgres-friendly |
+| Time type | timezone-aware UTC timestamps | reproducibility and bitemporal facts |
+| Physical partitioning | `PARTITION BY HASH(tenant_id)`, modulus set-once-immutable (64 hosted / 4–8 BYOC / **1 = plain unpartitioned table, no `PARTITION BY`**); partitioning is opt-in (>1 only); no pg_partman, no Citus | per-partition local HNSW fixes small-tenant filtered recall; `tenant_id` isolation key stays in every deployment; single-tenant self-host pays zero partitioning overhead; retrofit = full table rewrite (`04` §7.0) |
+| Vector index dim cap | `halfvec` HNSW ≤ 4,000 (NOT 2,000); per-profile partial indexes; dimensionless `vec` column | corrects the `vector`-vs-`halfvec` confusion; mixed-profile coexistence (`02` §2.1a) |
+| Schema evolution | `schema_compat_revision` boot-floor (Synapse pattern) + additive-vs-breaking taxonomy + forward-compat read contract | no-CLA forks need an in-data contract, not a central coordinator (`25` §11b/§11c) |
+| Two-store durability | content-addressed blobs; GC marks from Postgres reference set + `blob_ledger`, never `object_store.list()`; `MIN_AGE` grace closes the write-commit race | one inequality (`max_txn ≪ MIN_AGE`) is the whole proof; `MemoryStore` gains a txn seam (`02` §2.3, `03` §4) |
+| Scope tree + inheritance | adjacency (`parent_scope_id`) + cached `materialized_path` `ltree` (GiST `@>` walk, no hot-path recursion), depth ≤ 32; inheritance-policy = typed `scope_policy` table, deny-by-default; grant = explicit row, NEVER a `memory_edge`; `scope`/`scope_policy`/`agent_node` unpartitioned (tree, not memory — §7.0 carve-out) | read-heavy recall wants indexed ancestor resolution; makes "no implicit sibling access" falsifiable (`04` §11.0) |
+| Resource chunk identity | a chunk IS a `kind='resource'` `memory_unit`; `embedding` keys on `memory_unit_id`, no chunk table/grain; `resource.acl` is an in-stage narrowing gate, not a parallel engine | avoids a frozen-PK rewrite + split embedding grain at 10M scale; closes the chunk-recall ACL leak (`04` §6.1, `03` §5.2) |
+| Bitemporal write discipline | transaction-time **append-only**: close-generation + INSERT for `correct`/supersede/invalidate; never in-place `valid_*` mutate; current-generation partial index (`transaction_to IS NULL`) | makes `time_basis:transaction` audit-replay reproducible (Fowler/SQL:2011/XTDB); fixes the §3.4 in-place bug (`04` §7.3a) |
+| Cross-store restore/PITR | Postgres PITR authoritative; bucket reconciled by presence, never rolled back; object-store retention ≥ PITR window; GC suspended until post-restore sweep validates the reference set; quiesce writes until the integrity gate passes | content-addressing makes restore a presence problem, not a version-merge; crypto-shred correct across all restore points (`02` §2.3, `14` §4.2, `25` §7a) |
+| Encryption & crypto-shred | 3-tier envelope: per-user DEK ← per-tenant KEK ← KMS/TEE root KEK; encrypt `body`/blobs only (vectors plaintext; `exact`-profile opt-in to encrypt); plaintext keys never in Postgres (wrapped DEKs + KMS refs); BYOC customer holds own KEK | per-user DEK ⇒ "forget user X" by key destruction; HNSW needs plaintext vectors (arXiv:2508.10373); crypto-shred complements tombstone+compaction, order = DEK→saga (`06` §6.1.1/§6.2) |
+| Deployment posture | OSS Apache-2.0 library/core + a **closed managed hosted service** (Syndai = first dogfood tenant; external Pro/Team tenants); open core sufficient to self-host without Syndai | library is the product, hosted is the closed revenue layer (`09` §0.1/§9.1) |
+| Multi-region residency | **cell-per-region**: open core stays single-region (immutable `tenant.region`, cross-region refused); hosted multi-region = N single-region cells + a no-PII tenant→region directory + an edge router (Fly `fly-replay`); migration = export→import, never live copy | KISS — no multi-region schema/replication/distributed-txn; residency is a closed-layer composition of single-region cells; library carries zero multi-region machinery (`25` §7b) |
+| Hosted runtime | **full backend on Fly Machines** — the same single static binary self-hosters run (`memphant-server` + `memphant-worker` process groups, bluegreen, doppler-run boot); Supabase = Postgres + Storage only, never compute; **Supabase Edge Functions REJECTED for core** (no Deno layer anywhere; the only edge component is the thin `fly-replay` router) | the Rust core, advisory-lock reflect leases, pgmq consumers, Temporal workers, `spawn_blocking` pools, and stateful MCP sessions are structurally impossible on per-request isolates; an edge layer would fork invariant #11's one-binary hosted=self-host contract (R93, `25` §7b) |
+| Tenancy primitive | keep `tenant_id` isolation in the open core (2026-standard — every vector DB + Letta/Cognee bake one in); partitioning is **opt-in** (modulus 1 = plain table) so single-tenant self-host pays ~zero; `actor` (provenance) and `agent_node` (access-tree) stay distinct (orthogonal, not redundant) | isolation primitive is mandatory + irreversible; partition machinery is opt-in cost; tenant=isolation (core) vs account/billing (hosted) à la Temporal (`04` §7.0, `00` §2) |
+| Hosted billing model | metered units (`recall_unit`/`storage_gb_month`-per-tier/`retain`/`reflect`+passthrough); quota→overage/degrade/cap + `billing_status` (suspend≠delete, export always free); **BYOC = flat control-plane fee, hosted = usage-metered** (opposite COGS); per-cell/per-tier COGS + gross-margin-per-tenant; Syndai = paying customer #1 | bill the dimensions now, defer prices until measured COGS; residency/erasure-SLA/DPA = Enterprise-billable, export stays free (`21` §1a/§2a/§3a/§3b/§7) |
+| Escape-hatch principle | every frozen public contract has an internal **promotion-to-a-more-specialized-lane**: pgvector profile→dedicated vector engine; whale tenant→dedicated cell; hot subject→hot-current/audit split; kind enum→additive new kind; region→cell | the adversarial-review meta-lesson — the danger is the missing escape hatch, not the primitive (`02` §2.1b/§6.2, `04` §7.0/§7, `25` §7b) |
+| Binary-quant dim floor | `hnsw_binary` forbidden below ~1024-d (raw bit recall collapses: 960-d=0%, 128-d~2.5%); always rerank; pays only ≥1536-d; `iterative_scan=relaxed_order` default on filtered recall | corrects "binary is a blanket scale lever" — it isn't below the floor (Katz/Qdrant/arXiv:2603.23710; `02` §2.1a) |
+| Poisoning: provenance + anomaly | provenance is necessary-NOT-sufficient (query-only self-generated MINJA + Sybil have clean provenance) → add a MemAudit-style causal+structural anomaly layer (post-hoc) + Sybil-resistant `actor_id` + dual-guard + high-risk quorum | defense is layered, not provenance-only (`06` §3.2/§4.3) |
+| Bitemporal tiebreak | authoritative ordering = DB-assigned `transaction_from` (DB clock/HLC), NEVER writer wall-clock; contradiction resolution = write-time typed contract with keyed audit of the LLM judge (TOKI) | wall-clock tiebreak is non-deterministic under skew; an LLM judge on the write path is replay-inconsistent without keyed logging (`04` §3.1/§3.4) |
+| Crypto-shred completeness | erasure incomplete until vectors are **physically compacted out of the index** (plaintext embeddings invertible to PII, cross-model/training-free); GDPR = pseudonymisation hedge, "reduces recoverability" not "provably erased" | the index is the deletion boundary; key-shredding the body alone is a bypass (`06` §6.2) |
+| **V1 build scope** | freeze EVERY interface (schema, flags, trace fields, verbs); **build = rungs 0–3 spine + citations + `correct`/`forget` + REST/MCP/Python SDK**; rung-4+ *behavior* (edge expansion, rerank, decomposition, DSR fold, procedural replay harness, L4) built only at its `27` rung activation | resolves the suite's one internal contradiction ("ship the methods from the first build" vs "activate behind gates"), found independently by two Round-9 reviewers; cut line + calendar envelope owned by `29` §2a (R73) |
+| Rust-first preconditions | Rust core RETAINED after the WS-0 R83 two-language spike, with the iteration-loop rule intact: no accuracy-critical iteration may require a Rust recompile; prompts/weights/thresholds are versioned data. | measured artifact `docs/build-log/artifacts/ws0-two-language-spike.json`: Python policy-change median 0.034191s, Rust policy-change median 0.002485s, Rust/Python ratio 0.073× |
+| Outcome feedback verb (`mark`) | new public verb `mark {trace_id, used_ids[], outcome}` — the producer of the `outcome_label` trace field; `review_event` rows captured from day one (labels cannot be backfilled), fold/decay engine at rung 11 | freezing a trace field with no producer is a socket with no plug; every unlabeled dogfood day destroys the rung-13/FSRS training data (R77) |
+| File-memory compatibility adapter | ship a `memory_20250818`-compatible virtual-filesystem handler (Anthropic's six file commands, GA; OpenAI converged on the same file metaphor) projecting the typed store as `/memories` | ONE adapter to a platform convention is not the rejected *wide framework matrix*; it makes MemPhant a drop-in durable backend for file-memory agents and answers the local-first wedge without a second store (R79) |
+| Consolidation events | event taxonomy reserved-with-shape (`memory.promoted/superseded/contradiction_detected/quarantined`, `reflect.completed`) + transactional outbox; **poll-cursor delivery first, webhooks later, build post-v1** | integrators need push-shape typing before SDKs calcify; full webhook delivery semantics stays deferred (R78) |
+| pgvector version floor | **pin ≥ 0.8.4** (0.8.3/0.8.4 fixed HNSW vacuum corruption + maintenance errors) | `forget` is delete-heavy and every partition carries a local HNSW index — the vacuum-corruption class is directly load-bearing (R74) |
+| Pinned scope block | **ONE content-editable pinned block per scope** (`04` §12): hard Stage-7 token sub-budget, never silently dropped (explicit labeled truncation), trust-capped (data only; never `high_risk_arg`-eligible; never corroboration), append-only versioned + audited, cleared by scope-`forget`, OP-Bench-gated | the Letta-block job is *guaranteed presence of editable content*; order-only pins break that promise and N guaranteed refs recreate the over-personalization harm; Syndai's production persona block is the proven shape (R88) |
+| Executable memory (rule store / auto-trigger / `rules/evaluate` verb) | **REJECTED** — the need is served by the named safe subset: procedures-with-preconditions (recall-matched, replay-validated, injected as *recommendations*), `trusted_user` preference facts the runtime applies, and outbox events the runtime chooses to act on (`04` §4) | auto-execution converts memory poisoning into persistent code execution (MemoryGraft passes naive replay; MINJA has clean provenance); `rules/evaluate` ≡ `recall(kinds:[procedural])` — a synonym verb (R-answers, Round 10) |
+| `materialize` verb / working-memory kind / server-side memory views | **REJECTED** — packs are recomputed through Stage-0 gates every read; `delta_since` + `breadth` + the pinned block cover the working-set need | a materialized view is memory copied at write: a later `forget`/policy change is not reflected in the copy — a deletion-completeness hole by construction (`04` §11.1) |
+| Stored composite importance score | **REJECTED** — importance stays decomposed (trust ⊥ confidence ⊥ DSR ⊥ `mark` utility); consequence = protected categories + `arg_risk` + `desired_retention` priors (`04` §8.1) | a single scalar is unauditable and farmable — a repetition term structurally rewards an attacker for repeating themselves; trust-as-hard-ceiling resists exactly that (Round 10) |
+| Memory-provider adapters (above-MemPhant) | Hermes memory-provider adapter **specced at an activation gate** (`08` §5.1b; first design partner / launch window), after the R79 file-tool adapter — one thin adapter per *platform convention*, each mapping onto the seven verbs with source-trust caps + Stage-0 gates intact. NOT frozen (zero retrofit cost over an SPI the harness owns). **Direction distinction:** storage SPIs *below* MemPhant remain rejected; provider adapters *above* (MemPhant-as-provider) are this lane | auto-capture belongs below the tool layer (the `08` §4.2 determinism principle applied to capture); six mapped competitors already sit on the Hermes shelf; a 2–3 adapter set is not the rejected "wide framework matrix" (R87) |
+
+## 2. SOTA-Critical Retrieval Decisions
+
+| Lever | Final choice |
+|---|---|
+| Lexical retrieval | Postgres FTS in v1 |
+| Dense retrieval | pgvector dense embeddings in v1 |
+| Fusion | deterministic RRF in v1 |
+| Rerank | bounded rerank in v1; learned/cross-encoder rerank may be provider-pluggable |
+| Temporal recall | validity/recency windows in v1 |
+| Edge expansion | relational 1-hop expansion in v1 |
+| Query decomposition | enabled in benchmark/exhaustive mode in v1 |
+| Contextual chunks | generated during extraction in v1 |
+| HyDE | rejected for v1 because hallucinated pseudo-docs blur evidence provenance |
+| L4 deliberate recall | shipped as explicit exhaustive/benchmark mode, never default hot path |
+| Procedure recall | shipped with validation status; no skill compiler required |
+| Decay | DSR fields and fixed-prior update rule in v1; learned fitter data-gated |
+
+## 3. Benchmark Decisions
+
+| Decision | Final choice |
+|---|---|
+| Primary production-improvement target | STATE-Bench (neutral, memory-agnostic, no published memory-system SOTA yet — the best defensible *first* SOTA claim) |
+| Primary public accuracy benchmark | LongMemEval-V2 (arxiv 2605.12493) |
+| Scale benchmark | BEAM at 100K/1M/10M tiers — cite the primary paper **arxiv 2510.27246**; the `agentmemorybenchmark.ai` board is a vendor leaderboard (`vendor_reported`) |
+| Security benchmark | the custom corroboration-farming / persistent-memory-poisoning suite is primary; AgentDojo is supplementary (it tests tool-call injection, not persistent memory poisoning, and is near-saturated) |
+| Compatibility baselines | LoCoMo, LongMemEval-S, PersonaMem, LifeBench |
+| Public claim bar | accuracy + CI + latency + token/cost + config + archived traces |
+| Competitor evidence | independent reproduction preferred; vendor-reported numbers labeled |
+| Golden tests | executable fixtures with expected IDs, citations, forbidden leaks, trace assertions |
+| SOTA policy | no SOTA claim without paired ablations and security evals |
+| SOTA ladder | `27-sota-ladder-and-validation.md` is the activation and proof contract |
+
+## 4. Security and Data Decisions
+
+| Decision | Final choice |
+|---|---|
+| Memory as control flow | rejected; memory is evidence only |
+| Tenant isolation | mandatory on every recall/write path |
+| Browser/mobile DB access | rejected |
+| Supabase BYOC | supported only through explicit schema/RLS/grant posture |
+| Direct PostgREST memory table access | off by default; allowed only with tested RLS |
+| Service/admin keys in SDK/MCP | forbidden |
+| Correction | first-class `correct` operation; selector-based, auditable, no silent overwrite |
+| Deletion | immediate recall hide plus deletion generation and completeness audit |
+| Poisoning defense | write-time classification, quarantine, read-time labels, high-risk suppression |
+| Telemetry | IDs/counts/timings by default; raw memory only in tenant-governed traces |
+
+## 5. Open Source and Governance Decisions
+
+| Decision | Final choice |
+|---|---|
+| Contribution attestation | DCO with inbound=outbound Apache-2.0 |
+| CLA | rejected at launch |
+| Code of conduct | Contributor Covenant |
+| Security policy | required before public repo |
+| Public/private split | core/server/MCP/SDK/evals public; billing/control plane/private corpora may be closed |
+| Syndai advantage | prohibited; Syndai uses public contracts |
+| Benchmark disputes | public changelog and score deltas; no silent edits |
+
+## 6. Syndai Integration Decisions
+
+| Decision | Final choice |
+|---|---|
+| Syndai integration path | backend -> MemPhant SDK/API -> MemPhant service |
+| Mobile/web path | mobile/web -> Syndai backend only |
+| Direct DB coupling | rejected |
+| Cutover | export, trace compare, first surface, full cutover, delete replaced paths |
+| L0/L1+ policy | preserve Syndai L1+ block contract through neutral `agent_node` policy |
+| Syndai source contract | `28-syndai-code-contract.md` owns checked backend invariants and required fixture families |
+| Failure handling | keep raw episode export and golden cases; fix MemPhant before switching more surfaces |
+
+## 7. Explicit Non-Goals
+
+These are explicit non-goals:
+
+- external graph DB as a default dependency
+- SQLite/PGLite adapter
+- large framework adapter matrix
+- agent runtime
+- workflow engine
+- governed-action executor
+- vendor leaderboard business
+- CRDT/Yjs skill editor
+- agent-native billing
+
+They can only be reopened by (a) benchmark traces showing the current architecture cannot achieve the target, **or (b) distribution evidence that the adoption target is unreachable through the specced channels** (R86 — a distribution gap can never produce a benchmark trace; the register must not be category-blind on adoption). Prose reports satisfy neither test.
+
+## 8. OSS Dependency & Prior-Art License Register
+
+MemPhant is Apache-2.0, so every reused component and studied competitor is license-checked (GitHub-verified 2026-06-25, `13` §1.3). Clean-room verdict = whether MemPhant may copy code (vs. study architecture only):
+
+| Component / project | License | Clean-room verdict |
+|---|---|---|
+| pgvector | **PostgreSQL License** (permissive, OSI-approved, more permissive than Apache-2.0) | **REUSE OK** — infra dependency; GitHub's `NOASSERTION` label is a detector failure, not a real concern |
+| `rmcp`, `axum`, `sqlx`, `tokio`, `serde`, `fsrs-rs` | Apache-2.0 / MIT | **REUSE OK** |
+| mem0, Graphiti, cognee, Letta, MemoryOS, txtai, memvid, agentmemory (rohitg00), GateMem | Apache-2.0 / MIT (GateMem) | study + copy patterns OK (attribute) |
+| OpenClaw, Hermes Agent, Beads, gbrain, Superpowers, BMAD | MIT (OpenClaw LICENSE © OpenClaw Foundation — GitHub NOASSERTION is a detector failure) | study + copy patterns OK (attribute); harness-layer rows in `13` §1.4 |
+| Hindsight, TencentDB-Agent-Memory, A-MEM, Memary | MIT | **REUSE OK** (MIT lacks a patent grant — mild IP note) |
+| **`campfirein/byterover-cli`** | **Elastic License 2.0** | **LANDMINE — study only**; cannot copy code, cannot host as a service |
+| **Smithery CLI** | **AGPL-3.0** | **LANDMINE — cannot vendor** |
+| **`volcengine/OpenViking`** | **AGPL-3.0** | **LANDMINE — study only** (ByteDance filesystem-paradigm context DB, 26k★) |
+| **`plastic-labs/honcho`** | **AGPL-3.0** | **LANDMINE — study only** (BEAM competitor) |
+| MemPalace, supermemory | MIT | REUSE OK (MIT lacks a patent grant — mild IP note); verify per `13` §1.2 before any reuse |
+| **Zep product** (vs. Graphiti engine) | closed-source SaaS | only the Apache-2.0 Graphiti engine is reusable |
+
+Rule: copying code from an ELv2/AGPL/SSPL/closed project is forbidden; architecture study is always allowed. Re-verify a license before any code reuse — projects relicense.

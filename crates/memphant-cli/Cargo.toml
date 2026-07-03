@@ -1,0 +1,11 @@
+[package]
+name = "memphant-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+memphant-core.workspace = true
+memphant-store-postgres = { path = "../memphant-store-postgres" }

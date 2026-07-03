@@ -1,0 +1,2 @@
+{"id":"case_checkout_token","episodes":[{"body":"Checkout now uses callback token v2 for dispatch."}],"expected":["callback token version:v2"]}
+{"id":"case_release_channel","episodes":[{"body":"Prod deploy requires manual approval in #release before merge."}],"expected":["release channel:#release"]}

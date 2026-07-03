@@ -1,0 +1,39 @@
+{
+  "decision": "rust_proceeds",
+  "measurement_mode": "median of warm no-recompile policy-runner invocations; Rust cargo build recorded separately and excluded from policy-change ratio",
+  "python_baseline_samples_seconds": [
+    0.040638583013787866,
+    0.03611070790793747,
+    0.03567150002345443,
+    0.034433625056408346,
+    0.0353958330815658
+  ],
+  "python_baseline_seconds": 0.03567150002345443,
+  "python_policy_change_samples_seconds": [
+    0.03416062507312745,
+    0.034633749979548156,
+    0.03466291690710932,
+    0.03419108397793025,
+    0.03267320792656392
+  ],
+  "python_policy_change_seconds": 0.03419108397793025,
+  "rust_baseline_samples_seconds": [
+    0.003219333942979574,
+    0.0026060829404741526,
+    0.0024803339038044214,
+    0.002307542017661035,
+    0.002143083023838699
+  ],
+  "rust_baseline_seconds": 0.0024803339038044214,
+  "rust_build_seconds": 0.041980291018262506,
+  "rust_policy_change_samples_seconds": [
+    0.002484540920704603,
+    0.0025670420145615935,
+    0.0021619159961119294,
+    0.002542832982726395,
+    0.002405332983471453
+  ],
+  "rust_policy_change_seconds": 0.002484540920704603,
+  "rust_to_python_policy_change_ratio": 0.0726663396313592,
+  "sample_count": 5
+}
