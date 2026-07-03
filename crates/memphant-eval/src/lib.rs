@@ -84,6 +84,18 @@ pub struct OpsReport {
     pub check_results: Vec<OpsCheckResult>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SyndaiTraceCompareReport {
+    pub id: String,
+    pub surface: String,
+    pub passed: bool,
+    pub answer_bearing_recall: f32,
+    pub missing_answer_bearing: Vec<String>,
+    pub forbidden_returned: Vec<String>,
+    pub trace_id: Option<String>,
+    pub archived_trace_path: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OpsCheckResult {
     pub id: String,
@@ -124,6 +136,26 @@ struct EvalSuite {
     id: String,
     manifest: Option<PathBuf>,
     cases: Vec<PathBuf>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SyndaiTraceCompareFixture {
+    id: String,
+    surface: String,
+    query: String,
+    token_budget: usize,
+    answer_bearing_ids: Vec<String>,
+    #[serde(default)]
+    forbidden_ids: Vec<String>,
+    files: Vec<SyndaiFileMemory>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SyndaiFileMemory {
+    id: String,
+    path: String,
+    scope_kind: String,
+    content: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -470,9 +502,134 @@ pub fn run_ops_file(path: &Path) -> EvalResult<OpsReport> {
     })
 }
 
+pub fn run_syndai_trace_compare_file(
+    path: &Path,
+    options: EvalRunOptions,
+) -> EvalResult<SyndaiTraceCompareReport> {
+    let fixture: SyndaiTraceCompareFixture = read_yaml(path)?;
+    let runtime = runtime()?;
+    let mut report = runtime.block_on(run_syndai_trace_compare(&fixture))?;
+
+    if options.archive_traces {
+        let archive_dir = options
+            .archive_dir
+            .unwrap_or_else(|| PathBuf::from("docs/build-log/artifacts"));
+        fs::create_dir_all(&archive_dir).map_err(|source| EvalError::Io {
+            path: archive_dir.clone(),
+            source,
+        })?;
+        let archive_path = archive_dir.join(format!("{}-trace-compare.json", report.id));
+        let archive = serde_json::json!({
+            "case_id": report.id,
+            "surface": report.surface,
+            "runner": EVAL_RUNNER_NAME,
+            "trace_schema_version": TRACE_SCHEMA_VERSION,
+            "answer_bearing_recall": report.answer_bearing_recall,
+            "missing_answer_bearing": report.missing_answer_bearing,
+            "forbidden_returned": report.forbidden_returned,
+            "trace_id": report.trace_id,
+        });
+        write_json(&archive_path, &archive)?;
+        report.archived_trace_path = Some(archive_path);
+    }
+
+    Ok(report)
+}
+
 pub fn generate_trace_schema() -> serde_json::Value {
     serde_json::to_value(schema_for!(memphant_types::RetrievalTrace))
         .expect("RetrievalTrace schema serializes")
+}
+
+async fn run_syndai_trace_compare(
+    fixture: &SyndaiTraceCompareFixture,
+) -> EvalResult<SyndaiTraceCompareReport> {
+    if fixture.surface != "agent_file_memory" {
+        return Err(EvalError::Failed(format!(
+            "unsupported Syndai surface {}",
+            fixture.surface
+        )));
+    }
+
+    let seed = GoldenSeed {
+        units: fixture
+            .files
+            .iter()
+            .filter(|file| file.scope_kind == "agent")
+            .map(|file| GoldenUnit {
+                name: file.id.clone(),
+                tenant: primary_name(),
+                scope: primary_name(),
+                episode_body: format!("{}: {}", file.path, file.content),
+                kind: MemoryKind::Resource,
+                state: UnitState::Active,
+                subject_key: Some(file.path.clone()),
+                body: file.content.clone(),
+                trust_level: TrustLevel::TrustedSystem,
+                deletion_generation: None,
+            })
+            .collect(),
+        edges: Vec::new(),
+    };
+    let context = seed_store(&seed, &BTreeSet::new()).await?;
+    let response = recall(
+        &context.store,
+        RecallRequest {
+            tenant_id: context.tenant_id,
+            scope_id: context.scope_id,
+            actor_id: context.actor_id,
+            allowed_scope_ids: vec![context.scope_id],
+            query: fixture.query.clone(),
+            k: 8,
+            budget_tokens: fixture.token_budget,
+            mode: RecallMode::Fast,
+            include_beliefs: false,
+            engine_version: ENGINE_VERSION.to_string(),
+        },
+    )
+    .await
+    .map_err(|error| EvalError::Core(error.to_string()))?;
+
+    let missing_answer_bearing = fixture
+        .answer_bearing_ids
+        .iter()
+        .filter(|name| {
+            context
+                .named_units
+                .get(*name)
+                .is_none_or(|unit_id| !response.candidate_whitelist.contains(unit_id))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let forbidden_returned = fixture
+        .forbidden_ids
+        .iter()
+        .filter(|name| {
+            context
+                .named_units
+                .get(*name)
+                .is_some_and(|unit_id| response.candidate_whitelist.contains(unit_id))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let answer_bearing_recall = if fixture.answer_bearing_ids.is_empty() {
+        1.0
+    } else {
+        (fixture.answer_bearing_ids.len() - missing_answer_bearing.len()) as f32
+            / fixture.answer_bearing_ids.len() as f32
+    };
+    let passed = missing_answer_bearing.is_empty() && forbidden_returned.is_empty();
+
+    Ok(SyndaiTraceCompareReport {
+        id: fixture.id.clone(),
+        surface: fixture.surface.clone(),
+        passed,
+        answer_bearing_recall,
+        missing_answer_bearing,
+        forbidden_returned,
+        trace_id: Some(response.trace_id.as_uuid().to_string()),
+        archived_trace_path: None,
+    })
 }
 
 async fn run_golden_case(case: &GoldenCase, masked_units: &BTreeSet<String>) -> EvalCaseResult {

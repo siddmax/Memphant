@@ -3,7 +3,7 @@ use std::process::ExitCode;
 
 use memphant_eval::{
     EvalRunOptions, generate_trace_schema, run_eval_file, run_ops_file, run_security_file,
-    verify_golden_file,
+    run_syndai_trace_compare_file, verify_golden_file,
 };
 
 fn main() -> ExitCode {
@@ -18,6 +18,7 @@ fn main() -> ExitCode {
         "verify-golden" => verify_golden_command(args),
         "security" => security_command(args),
         "ops" => ops_command(args),
+        "syndai-trace-compare" => syndai_trace_compare_command(args),
         "schema" => schema_command(args),
         "ablate" => ablate_command(args),
         "compare" => compare_command(args),
@@ -173,6 +174,66 @@ fn ops_command(args: Vec<String>) -> ExitCode {
     }
 }
 
+fn syndai_trace_compare_command(args: Vec<String>) -> ExitCode {
+    let Some(path) = args.first() else {
+        usage();
+        return ExitCode::from(2);
+    };
+    let mut archive_traces = false;
+    let mut archive_dir = None;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--archive-traces" => {
+                archive_traces = true;
+                index += 1;
+            }
+            "--archive-dir" if index + 1 < args.len() => {
+                archive_dir = Some(PathBuf::from(&args[index + 1]));
+                index += 2;
+            }
+            _ => {
+                usage();
+                return ExitCode::from(2);
+            }
+        }
+    }
+    match run_syndai_trace_compare_file(
+        &PathBuf::from(path),
+        EvalRunOptions {
+            archive_traces,
+            archive_dir,
+        },
+    ) {
+        Ok(report) if report.passed => {
+            println!(
+                "syndai_trace_compare=pass id={} surface={} recall={} archive={}",
+                report.id,
+                report.surface,
+                report.answer_bearing_recall,
+                report
+                    .archived_trace_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "none".to_string())
+            );
+            ExitCode::SUCCESS
+        }
+        Ok(report) => {
+            eprintln!(
+                "syndai_trace_compare=fail id={} missing={:?} forbidden={:?}",
+                report.id, report.missing_answer_bearing, report.forbidden_returned
+            );
+            ExitCode::from(1)
+        }
+        Err(error) => {
+            eprintln!("syndai_trace_compare=error");
+            eprintln!("{error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn schema_command(args: Vec<String>) -> ExitCode {
     if args.as_slice() != ["trace"] {
         usage();
@@ -227,6 +288,6 @@ fn compare_command(args: Vec<String>) -> ExitCode {
 
 fn usage() {
     eprintln!(
-        "usage: memphant-eval run <suite.yaml> [--archive-traces] [--archive-dir <dir>] | memphant-eval verify-golden <suite.yaml> | memphant-eval security <suite.yaml> | memphant-eval ops <suite.yaml> | memphant-eval schema trace"
+        "usage: memphant-eval run <suite.yaml> [--archive-traces] [--archive-dir <dir>] | memphant-eval verify-golden <suite.yaml> | memphant-eval security <suite.yaml> | memphant-eval ops <suite.yaml> | memphant-eval syndai-trace-compare <fixture.yaml> [--archive-traces] [--archive-dir <dir>] | memphant-eval schema trace"
     );
 }

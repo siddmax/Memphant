@@ -5,7 +5,7 @@
 > ## ✅ DONE definition (deterministic)
 > **MemPhant is FULLY COMPLETED when every checkbox in §1–§6 is checked and the banner below reads COMPLETE.** No section may be skipped; an activation-gated item (§5) counts as done when it is either ACTIVATED (gate met + built + proof) or RETIRED (its disable-when fired, recorded in `24`). Nothing else — no vibe, no partial credit — flips the banner.
 >
-> # CURRENT PHASE: `WS-F READY — WS-E EXIT PACKET COMPLETE`
+> # CURRENT PHASE: `WS-G READY — WS-F EXIT PACKET COMPLETE`
 >
 > WS-0 proof artifact: `docs/build-log/artifacts/ws0-two-language-spike.json`.
 > R83 spike measured warm no-recompile Rust policy-change iteration at **0.073×** Python (`rust_proceeds`).
@@ -14,6 +14,7 @@
 > WS-C proof artifact: `docs/build-log/2026-07-03-wsc-progress.md` (recall trace spine + oracle/isolation/citation/filter goldens + full local gates).
 > WS-D proof artifact: `docs/build-log/2026-07-03-wsd-progress.md` (REST/MCP/Python SDK round-trips + schema snapshots + `memphant verify` + full local gates). Next build workstream: WS-E.
 > WS-E proof artifact: `docs/build-log/2026-07-03-wse-progress.md` (YAML oracle + manifest guard + trace schema snapshot + security/ops suites + nightly sampled archive + Markdown compile/verify + full local gates). Next build workstream: WS-F.
+> WS-F proof artifact: `docs/build-log/2026-07-03-wsf-progress.md` (Syndai L1+ agent file-memory export + trace compare + config-gated public active-read adapter + focused Syndai gates). Next build workstream: WS-G.
 > Syndai spec/preflight proof: `docs/build-log/2026-07-03-syndai-preflight.md` (`Syndai/main` `fe17bc488`, preflight green in 764s).
 
 ## 1. Spec corpus
@@ -31,7 +32,7 @@
 - [x] **WS-C** Read path + trace spine — every recall traced; oracle + isolation + citation + small-tenant fixtures pass (proof: `docs/build-log/2026-07-03-wsc-progress.md`)
 - [x] **WS-D** Public surfaces — REST/MCP/Python SDK round-trip; schemas validate; `memphant verify` works (proof: `docs/build-log/2026-07-03-wsd-progress.md`)
 - [x] **WS-E** Eval, security, ops — golden oracle + manifest guard + security suites + nightly sampled runner + deletion-completeness lane (proof: `docs/build-log/2026-07-03-wse-progress.md`)
-- [ ] **WS-F** Syndai dogfood cutover — first low-risk surface exported + trace-compared (stop-rule honored; launch not hostage to full cutover)
+- [x] **WS-F** Syndai dogfood cutover — first low-risk surface exported + trace-compared (proof: `docs/build-log/2026-07-03-wsf-progress.md`; stop-rule honored; launch not hostage to full cutover)
 - [ ] **WS-G** Public UI/docs/launch surface
 - [ ] **WS-H** BYOC + hosted packaging
 - [ ] **WS-I** Advanced lever activation (tracked per-item in §5)

@@ -1,0 +1,17 @@
+id: syndai_agent_file_memory_001
+surface: agent_file_memory
+query: "Where are the rollout notes kept?"
+token_budget: 2500
+answer_bearing_ids:
+  - file_rollout_notes
+forbidden_ids:
+  - file_project_decoy
+files:
+  - id: file_rollout_notes
+    path: agents/root/memory/rollout-notes.md
+    scope_kind: agent
+    content: "Rollout notes live in agents/root/memory/rollout-notes.md and require release checklist review."
+  - id: file_project_decoy
+    path: projects/checkout/memory/rollout-notes.md
+    scope_kind: project
+    content: "Project rollout notes mention a retired staging-only checklist and must not enter the agent-scoped surface."
