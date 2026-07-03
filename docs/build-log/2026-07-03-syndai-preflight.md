@@ -1,8 +1,8 @@
-# Syndai Preflight Attempt
+# Syndai Preflight Proof
 
 ## Scope
 
-Committed and pushed the mirrored Syndai MemPhant spec/status update:
+Committed and pushed the mirrored Syndai MemPhant spec/status update, then resolved the environment schema-contract blocker that the preflight CI surfaced.
 
 - Syndai commit: `f894b3b3a22ac1700bf596e9346cc384240d63d1`
 - Commit message: `docs(memphant): record ws0 wsa exits`
@@ -13,11 +13,16 @@ The public Memphant proof artifacts are committed locally in:
 - Memphant commit: `6b4f423`
 - Commit message: `feat: bootstrap memphant ws0 wsa`
 
+Follow-up Syndai commits:
+
+- `0c99ecc64` `fix(preflight): ship registry sync resumable migration`
+- `fe17bc488` `style(preflight): format registry migration test`
+
 ## Preflight Command
 
 `bash .claude/skills/preflight/run.sh`
 
-## Result
+## Initial Result
 
 Preflight reached push and CI watch:
 
@@ -64,9 +69,60 @@ That worktree also has a broad uncommitted registry-sync implementation. This is
 
 Do not flip `STATUS.md` §1 `Pass 15+16 work committed/shipped via /preflight` yet. The Memphant spec/status commit is pushed to `Syndai/main`, but the required preflight gate is not green because the shared Syndai environment database is ahead of the shipped migration graph.
 
-Unblock options:
+## Resolution
 
-- Land the registry-sync-resumable migration/worktree through its own Syndai preflight path.
-- Or restore the shared environment database to revision `2026_07_02_002_drop_evalrank_observability_rollup_cron`.
+Shipped only the already-applied Alembic revision from the dirty registry-sync worktree, plus a narrow regression test that loads the local Alembic `ScriptDirectory` and proves the revision is in the shipped graph. The broad registry-sync implementation remained out of scope.
 
-After that, rerun Syndai preflight for the current `Syndai/main` head and flip §1 only with green proof.
+Local verification after the fix:
+
+```text
+$ uv run pytest tests/scripts/test_registry_sync_resumable_migration.py tests/scripts/test_preflight_migration_db_check.py tests/scripts/test_check_schema_contract.py -q --no-cov
+.............                                                            [100%]
+13 passed in 4.96s
+
+$ doppler run -- uv run python scripts/check_schema_contract.py --require-db
+PASS: local Alembic head is 2026_07_02_003_registry_sync_resumable_crawl
+PASS: database schema contract satisfied (db_revision=2026_07_02_003_registry_sync_resumable_crawl, expected_revision=2026_07_02_003_registry_sync_resumable_crawl)
+
+$ make check-ci-public
+✅ All checks passed!
+```
+
+Final preflight result for `Syndai/main` `fe17bc488`:
+
+```text
+bash .claude/skills/preflight/run.sh
+✅ (764s)
+```
+
+GitHub Actions for `fe17bc488`:
+
+- `GitHub Action Pin Checks`: success — https://github.com/siddmax/Syndai/actions/runs/28638615251
+- `EvalRank Web Checks`: success — https://github.com/siddmax/Syndai/actions/runs/28638615233
+- `Portal Checks`: success — https://github.com/siddmax/Syndai/actions/runs/28638615345
+- `Web Checks`: success — https://github.com/siddmax/Syndai/actions/runs/28638615356
+- `Backend Checks`: success — https://github.com/siddmax/Syndai/actions/runs/28638615365
+- `Mobile Checks`: success — https://github.com/siddmax/Syndai/actions/runs/28638615340
+- `Deploy`: success — https://github.com/siddmax/Syndai/actions/runs/28638615359
+
+## Mirror Ledger Commit
+
+After the blocker fix passed, the final mirrored STATUS ledger flip was committed to `Syndai/main` as `27abc08bb548b4ffdbafdf23591f8ff0caa2f367` (`docs(memphant): mark syndai preflight complete`) and passed preflight:
+
+```text
+bash .claude/skills/preflight/run.sh
+✅ (767s)
+```
+
+GitHub Actions for `27abc08bb`:
+
+- `GitHub Action Pin Checks`: success — https://github.com/siddmax/Syndai/actions/runs/28639350377
+- `EvalRank Web Checks`: success — https://github.com/siddmax/Syndai/actions/runs/28639350361
+- `Portal Checks`: success — https://github.com/siddmax/Syndai/actions/runs/28639350446
+- `Web Checks`: success — https://github.com/siddmax/Syndai/actions/runs/28639350522
+- `Backend Checks`: success — https://github.com/siddmax/Syndai/actions/runs/28639350469
+- `Mobile Checks`: success — https://github.com/siddmax/Syndai/actions/runs/28639350466
+
+## Status Impact
+
+Flip `STATUS.md` §1 `Pass 15+16 work committed/shipped via /preflight`. The mirrored MemPhant spec/status work is pushed to `Syndai/main`, the environment database revision is resolvable by shipped code, and preflight completed green on the final mirrored ledger head.

@@ -5,18 +5,19 @@
 > ## ✅ DONE definition (deterministic)
 > **MemPhant is FULLY COMPLETED when every checkbox in §1–§6 is checked and the banner below reads COMPLETE.** No section may be skipped; an activation-gated item (§5) counts as done when it is either ACTIVATED (gate met + built + proof) or RETIRED (its disable-when fired, recorded in `24`). Nothing else — no vibe, no partial credit — flips the banner.
 >
-> # CURRENT PHASE: `WS-A EXIT RECORDED — STORE SEAM READY`
+> # CURRENT PHASE: `WS-B READY — SPEC PREFLIGHT COMPLETE`
 >
 > WS-0 proof artifact: `docs/build-log/artifacts/ws0-two-language-spike.json`.
 > R83 spike measured warm no-recompile Rust policy-change iteration at **0.073×** Python (`rust_proceeds`).
 > WS-A proof artifact: `docs/build-log/2026-07-03-wsa-progress.md` (fresh `pgvector/pgvector:0.8.4-pg17` bootstrap + provider lint + store seam tests). Next build workstream: WS-B.
+> Syndai spec/preflight proof: `docs/build-log/2026-07-03-syndai-preflight.md` (`Syndai/main` `fe17bc488`, preflight green in 764s).
 
 ## 1. Spec corpus
 
 - [x] Spec suite complete through 16 hardening passes (audit trail: `24` R1–R92 + Round registers; plans in `docs/superpowers/plans/`)
 - [x] All irreversible surfaces decision-registered (`26`); v1 cut line owned by `29` §2a
 - [x] Consistency gates green: `python scripts/validate_docs.py` + `backend/tests/scripts/test_validate_docs_evalrank_contract.py` (16 tests)
-- [ ] Pass 15+16 work committed/shipped via `/preflight`
+- [x] Pass 15+16 work committed/shipped via `/preflight` (proof: `docs/build-log/2026-07-03-syndai-preflight.md`; `Syndai/main` `fe17bc488`, preflight green in 764s)
 
 ## 2. Workstreams (order + exit-packet contracts owned by `29` §2; check only on exit-packet proof)
 
