@@ -57,6 +57,18 @@
             "null"
           ]
         },
+        "rerank_rank": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "rerank_score": {
+          "format": "float",
+          "type": "number"
+        },
         "state": {
           "$ref": "#/$defs/UnitState"
         },
@@ -72,6 +84,7 @@
         "channel",
         "channel_rank",
         "channel_score",
+        "rerank_score",
         "trust_level",
         "state"
       ],
@@ -389,6 +402,18 @@
     "query_hash": {
       "type": "string"
     },
+    "rerank_input_count": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "rerank_overfetch_ratio": {
+      "format": "float",
+      "type": "number"
+    },
+    "reranker_id": {
+      "type": "string"
+    },
     "scope_id": {
       "$ref": "#/$defs/ScopeId"
     },
@@ -423,6 +448,9 @@
     "mode_requested",
     "mode_executed",
     "escalation_reason",
+    "reranker_id",
+    "rerank_input_count",
+    "rerank_overfetch_ratio",
     "abstention_signal",
     "latency_ms",
     "token_estimate",

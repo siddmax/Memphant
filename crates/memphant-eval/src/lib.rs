@@ -51,6 +51,7 @@ pub struct EvalRunOptions {
     pub temporal_validity_enabled: bool,
     pub edge_expansion_enabled: bool,
     pub context_packing_abstention_enabled: bool,
+    pub rerank_enabled: bool,
     pub filesystem_control_enabled: bool,
 }
 
@@ -63,6 +64,7 @@ impl Default for EvalRunOptions {
             temporal_validity_enabled: true,
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
+            rerank_enabled: true,
             filesystem_control_enabled: false,
         }
     }
@@ -342,6 +344,12 @@ struct GoldenExpect {
     #[serde(default)]
     trace_stages_include: Vec<String>,
     #[serde(default)]
+    trace_feature_flags_include: Vec<String>,
+    #[serde(default)]
+    reranker_id: Option<String>,
+    #[serde(default)]
+    rerank_input_count_min: Option<usize>,
+    #[serde(default)]
     dropped: Vec<GoldenDropped>,
     #[serde(default)]
     packed_context_contains: Vec<String>,
@@ -454,6 +462,42 @@ struct SeedContext {
     unit_records: HashMap<String, StoredMemoryUnit>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct GoldenRunControls {
+    contextual_chunks_enabled: bool,
+    temporal_validity_enabled: bool,
+    edge_expansion_enabled: bool,
+    context_packing_abstention_enabled: bool,
+    rerank_enabled: bool,
+    filesystem_control_enabled: bool,
+}
+
+impl Default for GoldenRunControls {
+    fn default() -> Self {
+        Self {
+            contextual_chunks_enabled: true,
+            temporal_validity_enabled: true,
+            edge_expansion_enabled: true,
+            context_packing_abstention_enabled: true,
+            rerank_enabled: true,
+            filesystem_control_enabled: false,
+        }
+    }
+}
+
+impl From<&EvalRunOptions> for GoldenRunControls {
+    fn from(options: &EvalRunOptions) -> Self {
+        Self {
+            contextual_chunks_enabled: options.contextual_chunks_enabled,
+            temporal_validity_enabled: options.temporal_validity_enabled,
+            edge_expansion_enabled: options.edge_expansion_enabled,
+            context_packing_abstention_enabled: options.context_packing_abstention_enabled,
+            rerank_enabled: options.rerank_enabled,
+            filesystem_control_enabled: options.filesystem_control_enabled,
+        }
+    }
+}
+
 pub fn run_eval_file(path: &Path, options: EvalRunOptions) -> EvalResult<EvalReport> {
     let suite: EvalSuite = read_yaml(path)?;
     let base = path.parent().unwrap_or_else(|| Path::new("."));
@@ -463,17 +507,10 @@ pub fn run_eval_file(path: &Path, options: EvalRunOptions) -> EvalResult<EvalRep
 
     let runtime = runtime()?;
     let mut case_results = Vec::new();
+    let controls = GoldenRunControls::from(&options);
     for case_path in &suite.cases {
         let case: GoldenCase = read_yaml(&base.join(case_path))?;
-        let result = runtime.block_on(run_golden_case(
-            &case,
-            &BTreeSet::new(),
-            options.contextual_chunks_enabled,
-            options.temporal_validity_enabled,
-            options.edge_expansion_enabled,
-            options.context_packing_abstention_enabled,
-            options.filesystem_control_enabled,
-        ));
+        let result = runtime.block_on(run_golden_case(&case, &BTreeSet::new(), controls));
         case_results.push(result);
     }
 
@@ -506,6 +543,7 @@ pub fn run_eval_file(path: &Path, options: EvalRunOptions) -> EvalResult<EvalRep
                 "temporal_validity_enabled": options.temporal_validity_enabled,
                 "edge_expansion_enabled": options.edge_expansion_enabled,
                 "context_packing_abstention_enabled": options.context_packing_abstention_enabled,
+                "rerank_enabled": options.rerank_enabled,
                 "filesystem_control_enabled": options.filesystem_control_enabled,
             },
             "case_results": report.case_results,
@@ -534,20 +572,12 @@ pub fn verify_golden_file(path: &Path) -> EvalResult<GoldenVerifyReport> {
         let normal = runtime.block_on(run_golden_case(
             &case,
             &BTreeSet::new(),
-            true,
-            true,
-            true,
-            true,
-            false,
+            GoldenRunControls::default(),
         ));
         let masked = runtime.block_on(run_golden_case(
             &case,
             &answer_bearing,
-            true,
-            true,
-            true,
-            true,
-            false,
+            GoldenRunControls::default(),
         ));
         let load_bearing = normal.passed
             && !masked.passed
@@ -988,6 +1018,9 @@ fn validate_rung_decision(
     if decision.rung == 7 && decision.status == "promoted" {
         validate_rung7_packing_abstention_promotion(decision, axes, &prefix, findings);
     }
+    if decision.rung == 8 && decision.status == "promoted" {
+        validate_rung8_bounded_rerank_promotion(decision, axes, &prefix, findings);
+    }
 }
 
 fn validate_rung4_contextual_chunk_promotion(
@@ -1157,6 +1190,50 @@ fn validate_rung7_packing_abstention_promotion(
     }
 }
 
+fn validate_rung8_bounded_rerank_promotion(
+    decision: &RungDecision,
+    axes: &BTreeMap<String, SotaAxisResult>,
+    prefix: &str,
+    findings: &mut Vec<String>,
+) {
+    if decision.item != "bounded rerank" {
+        findings.push(format!("{prefix}:invalid_item:{}", decision.item));
+    }
+    for required_axis in ["outcome", "interactive"] {
+        if !decision.axes.iter().any(|axis| axis == required_axis) {
+            findings.push(format!("{prefix}:missing_{required_axis}_axis"));
+        }
+    }
+    if !decision
+        .benchmark_sample_refs
+        .iter()
+        .any(|sample| sample.contains("bounded_rerank_incident_owner"))
+    {
+        findings.push(format!("{prefix}:missing_bounded_rerank_sample"));
+    }
+    if !decision
+        .benchmark_sample_refs
+        .iter()
+        .any(|sample| sample.contains("no-rerank"))
+    {
+        findings.push(format!("{prefix}:missing_no_rerank_control"));
+    }
+    if !decision
+        .benchmark_sample_refs
+        .iter()
+        .any(|sample| sample.contains("rung8-state-style"))
+    {
+        findings.push(format!("{prefix}:missing_state_style_sample_ref"));
+    }
+    for axis in ["outcome", "interactive"] {
+        match axes.get(axis) {
+            Some(result) if result.delta_vs_baseline.unwrap_or_default() > 0.0 => {}
+            Some(_) => findings.push(format!("{prefix}:{axis}:non_positive_axis_delta")),
+            None => {}
+        }
+    }
+}
+
 fn validate_ci(prefix: &str, delta: Option<f64>, ci: Option<[f64; 2]>, findings: &mut Vec<String>) {
     let Some(delta) = delta else {
         findings.push(format!("{prefix}:missing_delta"));
@@ -1227,6 +1304,7 @@ async fn run_syndai_trace_compare(
             include_beliefs: false,
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
+            rerank_enabled: true,
             engine_version: ENGINE_VERSION.to_string(),
         },
     )
@@ -1278,23 +1356,9 @@ async fn run_syndai_trace_compare(
 async fn run_golden_case(
     case: &GoldenCase,
     masked_units: &BTreeSet<String>,
-    contextual_chunks_enabled: bool,
-    temporal_validity_enabled: bool,
-    edge_expansion_enabled: bool,
-    context_packing_abstention_enabled: bool,
-    filesystem_control_enabled: bool,
+    controls: GoldenRunControls,
 ) -> EvalCaseResult {
-    match run_golden_case_inner(
-        case,
-        masked_units,
-        contextual_chunks_enabled,
-        temporal_validity_enabled,
-        edge_expansion_enabled,
-        context_packing_abstention_enabled,
-        filesystem_control_enabled,
-    )
-    .await
-    {
+    match run_golden_case_inner(case, masked_units, controls).await {
         Ok(result) => result,
         Err(error) => EvalCaseResult {
             id: case.id.clone(),
@@ -1313,21 +1377,18 @@ async fn run_golden_case(
 async fn run_golden_case_inner(
     case: &GoldenCase,
     masked_units: &BTreeSet<String>,
-    contextual_chunks_enabled: bool,
-    temporal_validity_enabled: bool,
-    edge_expansion_enabled: bool,
-    context_packing_abstention_enabled: bool,
-    filesystem_control_enabled: bool,
+    controls: GoldenRunControls,
 ) -> EvalResult<EvalCaseResult> {
     let context = seed_store(
         &case.seed,
         masked_units,
-        contextual_chunks_enabled,
-        temporal_validity_enabled,
-        !filesystem_control_enabled,
+        controls.contextual_chunks_enabled,
+        controls.temporal_validity_enabled,
+        !controls.filesystem_control_enabled,
     )
     .await?;
-    let recall_edge_expansion_enabled = edge_expansion_enabled && !filesystem_control_enabled;
+    let recall_edge_expansion_enabled =
+        controls.edge_expansion_enabled && !controls.filesystem_control_enabled;
     let response = recall(
         &context.store,
         RecallRequest {
@@ -1341,7 +1402,8 @@ async fn run_golden_case_inner(
             mode: RecallMode::Fast,
             include_beliefs: case.include_beliefs,
             edge_expansion_enabled: recall_edge_expansion_enabled,
-            context_packing_abstention_enabled,
+            context_packing_abstention_enabled: controls.context_packing_abstention_enabled,
+            rerank_enabled: controls.rerank_enabled,
             engine_version: ENGINE_VERSION.to_string(),
         },
     )
@@ -1411,6 +1473,7 @@ async fn run_golden_case_inner(
         .filter(|stage| !trace_stages.contains(stage.as_str()))
         .cloned()
         .collect::<Vec<_>>();
+    let trace_feature_flags: BTreeSet<_> = trace.feature_flags.iter().map(String::as_str).collect();
     let mut dropped_mismatches = case
         .expect
         .dropped
@@ -1428,6 +1491,27 @@ async fn run_golden_case_inner(
         })
         .map(|expected| format!("{}:{:?}", expected.unit, expected.reason))
         .collect::<Vec<_>>();
+    for flag in &case.expect.trace_feature_flags_include {
+        if !trace_feature_flags.contains(flag.as_str()) {
+            dropped_mismatches.push(format!("trace_feature_flag_missing:{flag}"));
+        }
+    }
+    if let Some(expected) = &case.expect.reranker_id
+        && trace.reranker_id != *expected
+    {
+        dropped_mismatches.push(format!(
+            "reranker_id:expected={expected}:actual={}",
+            trace.reranker_id
+        ));
+    }
+    if let Some(minimum) = case.expect.rerank_input_count_min
+        && trace.rerank_input_count < minimum
+    {
+        dropped_mismatches.push(format!(
+            "rerank_input_count_min:expected>={minimum}:actual={}",
+            trace.rerank_input_count
+        ));
+    }
     for (name, max_position) in &case.expect.packed_position_max {
         let actual_position = context.named_units.get(name).and_then(|unit_id| {
             response
@@ -1521,7 +1605,7 @@ async fn run_fixture_security_lane(lane: &SecurityLane) -> EvalResult<String> {
         expect: lane.expect.clone(),
     };
     let result =
-        run_golden_case_inner(&case, &BTreeSet::new(), true, true, true, true, false).await?;
+        run_golden_case_inner(&case, &BTreeSet::new(), GoldenRunControls::default()).await?;
     if result.passed {
         Ok("fixture assertions passed".to_string())
     } else {
@@ -1559,6 +1643,7 @@ async fn run_high_risk_lane(lane: &SecurityLane) -> EvalResult<String> {
             include_beliefs: true,
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
+            rerank_enabled: true,
             engine_version: ENGINE_VERSION.to_string(),
         },
     )
@@ -1661,6 +1746,7 @@ async fn run_deletion_lane(lane: &SecurityLane) -> EvalResult<String> {
             include_beliefs: false,
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
+            rerank_enabled: true,
             engine_version: ENGINE_VERSION.to_string(),
         },
     )

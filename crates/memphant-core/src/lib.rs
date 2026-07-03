@@ -6,12 +6,12 @@ use memphant_types::{
     AdmissionAction, CorrectRequest, CorrectResult, DedupOutcome, EdgeId, EpisodeId, ForgetRequest,
     ForgetResult, JobId, MarkRequest, MarkResult, MemoryEdgeKind, MemoryKind, NewEpisode,
     NewMemoryEdge, NewMemoryUnit, QueuedReflectJob, RecallCandidateTrace, RecallChannel,
-    RecallCitation, RecallContextItem, RecallDropReason, RecallDroppedItem, RecallPolicyFilter,
-    RecallRequest, RecallResponse, ReflectInput, ReflectJob, ReflectJobKind, ReflectStageFact,
-    ReflectTrace, RetainInput, RetainOutcome, RetainRequest, RetainResourceOutcome,
-    RetainResourceRequest, RetainResult, RetrievalTrace, ReviewEvent, ScopeId, StoredEpisode,
-    StoredMemoryEdge, StoredMemoryUnit, StoredResource, TenantId, TraceId, TrustLevel, UnitId,
-    UnitState,
+    RecallCitation, RecallContextItem, RecallDropReason, RecallDroppedItem, RecallMode,
+    RecallPolicyFilter, RecallRequest, RecallResponse, ReflectInput, ReflectJob, ReflectJobKind,
+    ReflectStageFact, ReflectTrace, RetainInput, RetainOutcome, RetainRequest,
+    RetainResourceOutcome, RetainResourceRequest, RetainResult, RetrievalTrace, ReviewEvent,
+    ScopeId, StoredEpisode, StoredMemoryEdge, StoredMemoryUnit, StoredResource, TenantId, TraceId,
+    TrustLevel, UnitId, UnitState,
 };
 use memphant_types::{NewResource, ResourceExtractorState, ResourceId};
 
@@ -758,6 +758,9 @@ pub async fn recall(
             mode_requested: request.mode,
             mode_executed: request.mode,
             escalation_reason: "none".to_string(),
+            reranker_id: "none".to_string(),
+            rerank_input_count: 0,
+            rerank_overfetch_ratio: 0.0,
             abstention_signal: true,
             latency_ms: 0,
             token_estimate: 0,
@@ -835,6 +838,8 @@ pub async fn recall(
                 .or_insert_with(|| CandidateAccumulator {
                     unit: unit.clone(),
                     fused_score: contribution,
+                    rerank_rank: None,
+                    rerank_score: 0.0,
                     channels: vec![(channel, channel_rank, score)],
                 });
             candidate_traces.push(RecallCandidateTrace {
@@ -844,6 +849,8 @@ pub async fn recall(
                 channel_score: score,
                 fused_rank: None,
                 fused_score: None,
+                rerank_rank: None,
+                rerank_score: 0.0,
                 trust_level: unit.trust_level,
                 state: unit.state,
                 discard_reason: None,
@@ -866,6 +873,17 @@ pub async fn recall(
         {
             trace_candidate.fused_rank = Some(rank + 1);
             trace_candidate.fused_score = Some(candidate.fused_score);
+        }
+    }
+
+    let rerank = rerank_candidates(fused.as_mut_slice(), &request, &query_tokens);
+    for candidate in &fused {
+        for trace_candidate in candidate_traces
+            .iter_mut()
+            .filter(|trace_candidate| trace_candidate.unit_id == candidate.unit.id)
+        {
+            trace_candidate.rerank_rank = candidate.rerank_rank;
+            trace_candidate.rerank_score = candidate.rerank_score;
         }
     }
 
@@ -917,6 +935,9 @@ pub async fn recall(
         mode_requested: request.mode,
         mode_executed: request.mode,
         escalation_reason: "none".to_string(),
+        reranker_id: rerank.reranker_id,
+        rerank_input_count: rerank.input_count,
+        rerank_overfetch_ratio: rerank.overfetch_ratio,
         abstention_signal: abstention,
         latency_ms: 0,
         token_estimate,
@@ -976,11 +997,112 @@ fn trace_filter_drops(
         .collect()
 }
 
+fn rerank_candidates(
+    fused: &mut [CandidateAccumulator],
+    request: &RecallRequest,
+    query_tokens: &[String],
+) -> RerankTraceFacts {
+    if !request.rerank_enabled {
+        return RerankTraceFacts {
+            reranker_id: "none".to_string(),
+            input_count: 0,
+            overfetch_ratio: 0.0,
+        };
+    }
+
+    let input_count = fused.len().min(rerank_input_cap(request));
+    for candidate in fused.iter_mut().take(input_count) {
+        candidate.rerank_score = deterministic_rerank_score(candidate, query_tokens);
+    }
+    fused[..input_count].sort_by(|left, right| {
+        right
+            .rerank_score
+            .partial_cmp(&left.rerank_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                right
+                    .fused_score
+                    .partial_cmp(&left.fused_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| left.unit.body.cmp(&right.unit.body))
+    });
+    for (rank, candidate) in fused.iter_mut().take(input_count).enumerate() {
+        candidate.rerank_rank = Some(rank + 1);
+    }
+
+    RerankTraceFacts {
+        reranker_id: "deterministic-local-v1".to_string(),
+        input_count,
+        overfetch_ratio: input_count as f32 / request.k.max(1) as f32,
+    }
+}
+
+fn rerank_input_cap(request: &RecallRequest) -> usize {
+    let mode_cap = match request.mode {
+        RecallMode::Fast => 100,
+        RecallMode::Balanced | RecallMode::Exhaustive => 200,
+    };
+    (request.k.saturating_mul(10)).min(mode_cap).max(request.k)
+}
+
+fn deterministic_rerank_score(candidate: &CandidateAccumulator, query_tokens: &[String]) -> f32 {
+    (3.0 * lexical_score(&candidate.unit, query_tokens))
+        + (2.0 * vector_score(&candidate.unit, query_tokens))
+        + exact_score(&candidate.unit, query_tokens)
+        + (2.0 * rerank_intent_anchor_score(&candidate.unit, query_tokens))
+        + candidate.fused_score
+}
+
+fn rerank_intent_anchor_score(unit: &StoredMemoryUnit, query_tokens: &[String]) -> f32 {
+    let Some(subject_key) = unit.subject_key.as_deref() else {
+        return 0.0;
+    };
+    let subject_tokens = tokenize(subject_key);
+    let body_tokens = tokenize(&unit.body);
+    query_tokens
+        .iter()
+        .filter(|token| is_rerank_intent_token(token))
+        .map(|token| {
+            let subject_anchor = subject_tokens
+                .iter()
+                .any(|subject| tokens_related(subject, token))
+                as u8 as f32;
+            let body_anchor =
+                body_tokens.iter().any(|body| tokens_related(body, token)) as u8 as f32;
+            subject_anchor + (0.5 * body_anchor)
+        })
+        .sum()
+}
+
+fn is_rerank_intent_token(token: &str) -> bool {
+    matches!(
+        token,
+        "owner"
+            | "owns"
+            | "owned"
+            | "resolve"
+            | "resolves"
+            | "resolved"
+            | "responsible"
+            | "assignee"
+            | "assigned"
+    )
+}
+
 #[derive(Clone)]
 struct CandidateAccumulator {
     unit: StoredMemoryUnit,
     fused_score: f32,
+    rerank_rank: Option<usize>,
+    rerank_score: f32,
     channels: Vec<(RecallChannel, usize, f32)>,
+}
+
+struct RerankTraceFacts {
+    reranker_id: String,
+    input_count: usize,
+    overfetch_ratio: f32,
 }
 
 struct PackedRecallContext {
@@ -1005,16 +1127,29 @@ fn pack_recall_context(
 
     if request.context_packing_abstention_enabled {
         fused.sort_by(|left, right| {
-            right
-                .fused_score
-                .partial_cmp(&left.fused_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| {
-                    packing_density_score(right)
-                        .partial_cmp(&packing_density_score(left))
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .then_with(|| left.unit.body.cmp(&right.unit.body))
+            if request.rerank_enabled {
+                left.rerank_rank
+                    .unwrap_or(usize::MAX)
+                    .cmp(&right.rerank_rank.unwrap_or(usize::MAX))
+                    .then_with(|| {
+                        right
+                            .rerank_score
+                            .partial_cmp(&left.rerank_score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .then_with(|| left.unit.body.cmp(&right.unit.body))
+            } else {
+                right
+                    .fused_score
+                    .partial_cmp(&left.fused_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        packing_density_score(right)
+                            .partial_cmp(&packing_density_score(left))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .then_with(|| left.unit.body.cmp(&right.unit.body))
+            }
         });
     }
 
@@ -1429,6 +1564,7 @@ fn recall_stage_facts() -> Vec<ReflectStageFact> {
         "temporal",
         "edge",
         "fusion",
+        "rerank",
         "assemble",
         "trace",
     ]
@@ -1453,6 +1589,9 @@ fn recall_feature_flags(request: &RecallRequest) -> Vec<String> {
     }
     if request.context_packing_abstention_enabled {
         flags.push("context_packing_abstention_enabled".to_string());
+    }
+    if request.rerank_enabled {
+        flags.push("rerank_enabled".to_string());
     }
     flags
 }

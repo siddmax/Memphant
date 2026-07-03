@@ -42,6 +42,7 @@ async fn recall_writes_trace_for_scope_denial() {
             include_beliefs: false,
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
+            rerank_enabled: true,
             engine_version: "engine-wsc-test".to_string(),
         },
     )
@@ -129,6 +130,7 @@ async fn contextual_chunk_recall_finds_source_unit_and_traces_flag() {
             include_beliefs: false,
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
+            rerank_enabled: true,
             engine_version: "engine-ws4-test".to_string(),
         },
     )
@@ -205,6 +207,7 @@ async fn servicenow_query_does_not_trigger_temporal_recency_match() {
             include_beliefs: false,
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
+            rerank_enabled: true,
             engine_version: "engine-temporal-token-test".to_string(),
         },
     )
@@ -292,6 +295,7 @@ async fn recall_drops_expired_validity_window_for_current_query() {
             include_beliefs: false,
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
+            rerank_enabled: true,
             engine_version: "engine-rung5-test".to_string(),
         },
     )
@@ -404,6 +408,7 @@ async fn edge_expansion_can_be_disabled_and_traces_related_candidates() {
             include_beliefs: false,
             edge_expansion_enabled: false,
             context_packing_abstention_enabled: true,
+            rerank_enabled: true,
             engine_version: "engine-rung6-test".to_string(),
         },
     )
@@ -425,6 +430,7 @@ async fn edge_expansion_can_be_disabled_and_traces_related_candidates() {
             include_beliefs: false,
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
+            rerank_enabled: true,
             engine_version: "engine-rung6-test".to_string(),
         },
     )
@@ -528,6 +534,7 @@ async fn packing_collapses_duplicate_decoys_and_preserves_answer_under_budget() 
             include_beliefs: false,
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
+            rerank_enabled: true,
             engine_version: "engine-rung7-test".to_string(),
         },
     )
@@ -650,6 +657,7 @@ async fn packing_abstains_when_top_evidence_is_unresolved_contradiction() {
             include_beliefs: false,
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
+            rerank_enabled: true,
             engine_version: "engine-rung7-test".to_string(),
         },
     )
@@ -665,6 +673,150 @@ async fn packing_abstains_when_top_evidence_is_unresolved_contradiction() {
             .iter()
             .any(|label| label == "unresolved_contradiction")
     );
+}
+
+#[tokio::test]
+async fn bounded_rerank_reorders_rank_sensitive_candidate_and_traces_decision() {
+    let store = InMemoryStore::default();
+    let tenant_id = tenant(78_000);
+    let scope_id = scope(78_001);
+    let actor_id = actor(78_002);
+
+    let mut tx = store.begin().await;
+    let decoy_id = store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id,
+                scope_id,
+                kind: MemoryKind::Semantic,
+                state: UnitState::Active,
+                subject_key: Some("pager alerts".to_string()),
+                body: "Owner currently resolves pager alerts noise.".to_string(),
+                trust_level: TrustLevel::TrustedSystem,
+                churn_class: None,
+                freshness_due: false,
+                actor_id: Some(actor_id),
+                source_kind: Some("fixture".to_string()),
+                source_episode_id: None,
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
+            },
+        )
+        .await
+        .expect("decoy seeded");
+    let answer_id = store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id,
+                scope_id,
+                kind: MemoryKind::Semantic,
+                state: UnitState::Active,
+                subject_key: Some("incident owner".to_string()),
+                body: "Incident owner resolves pager alerts.".to_string(),
+                trust_level: TrustLevel::TrustedSystem,
+                churn_class: None,
+                freshness_due: false,
+                actor_id: Some(actor_id),
+                source_kind: Some("fixture".to_string()),
+                source_episode_id: None,
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
+            },
+        )
+        .await
+        .expect("answer seeded");
+    store.commit(tx).await.expect("seed committed");
+
+    let disabled = recall(
+        &store,
+        RecallRequest {
+            tenant_id,
+            scope_id,
+            actor_id,
+            allowed_scope_ids: vec![scope_id],
+            query: "Which owner currently resolves pager alerts?".to_string(),
+            k: 1,
+            budget_tokens: 64,
+            mode: RecallMode::Fast,
+            include_beliefs: false,
+            edge_expansion_enabled: true,
+            context_packing_abstention_enabled: true,
+            rerank_enabled: false,
+            engine_version: "engine-rung8-test".to_string(),
+        },
+    )
+    .await
+    .expect("recall succeeds with rerank disabled");
+    let disabled_trace = store.trace_by_id(disabled.trace_id).expect("trace exists");
+    assert!(
+        disabled.candidate_whitelist.contains(&decoy_id),
+        "disabled whitelist={:?}, decoy_id={:?}, answer_id={:?}, candidates={:?}",
+        disabled.candidate_whitelist,
+        decoy_id,
+        answer_id,
+        disabled_trace.candidates
+    );
+    assert!(!disabled.candidate_whitelist.contains(&answer_id));
+
+    let enabled = recall(
+        &store,
+        RecallRequest {
+            tenant_id,
+            scope_id,
+            actor_id,
+            allowed_scope_ids: vec![scope_id],
+            query: "Which owner currently resolves pager alerts?".to_string(),
+            k: 1,
+            budget_tokens: 64,
+            mode: RecallMode::Fast,
+            include_beliefs: false,
+            edge_expansion_enabled: true,
+            context_packing_abstention_enabled: true,
+            rerank_enabled: true,
+            engine_version: "engine-rung8-test".to_string(),
+        },
+    )
+    .await
+    .expect("recall succeeds with rerank enabled");
+    assert!(enabled.candidate_whitelist.contains(&answer_id));
+    assert!(!enabled.candidate_whitelist.contains(&decoy_id));
+
+    let trace = store.trace_by_id(enabled.trace_id).expect("trace exists");
+    assert!(
+        trace
+            .feature_flags
+            .iter()
+            .any(|flag| flag == "rerank_enabled")
+    );
+    assert_eq!(trace.reranker_id, "deterministic-local-v1");
+    assert!(trace.rerank_input_count >= 2);
+    assert!(trace.rerank_overfetch_ratio >= 2.0);
+
+    let answer_trace = trace
+        .candidates
+        .iter()
+        .find(|candidate| candidate.unit_id == answer_id)
+        .expect("answer candidate traced");
+    let decoy_trace = trace
+        .candidates
+        .iter()
+        .find(|candidate| candidate.unit_id == decoy_id)
+        .expect("decoy candidate traced");
+    assert_eq!(answer_trace.rerank_rank, Some(1));
+    assert!(decoy_trace.rerank_rank.is_some_and(|rank| rank > 1));
+    assert!(answer_trace.rerank_score > decoy_trace.rerank_score);
 }
 
 #[derive(Debug, Deserialize)]
@@ -847,6 +999,7 @@ async fn recall_golden_fixtures_pass() {
                 include_beliefs: false,
                 edge_expansion_enabled: true,
                 context_packing_abstention_enabled: true,
+                rerank_enabled: true,
                 engine_version: "engine-wsc-test".to_string(),
             },
         )

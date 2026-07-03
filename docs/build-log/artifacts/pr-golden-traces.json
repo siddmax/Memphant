@@ -4,12 +4,23 @@
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
+      "id": "bounded_rerank_incident_owner",
+      "missing_citations": [],
+      "missing_trace_stages": [],
+      "missing_units": [],
+      "passed": true,
+      "trace_id": "019f279e-5388-7510-aad8-b3eb5b913957"
+    },
+    {
+      "dropped_mismatches": [],
+      "error": null,
+      "forbidden_present": [],
       "id": "checkout_region",
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2780-690f-78f0-b194-b0c10d932898"
+      "trace_id": "019f279e-5388-7510-aad8-b4122cb69838"
     },
     {
       "dropped_mismatches": [],
@@ -20,7 +31,7 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2780-6910-7293-9e78-481fda2e2c53"
+      "trace_id": "019f279e-5389-7aa0-901f-41fb27da4164"
     },
     {
       "dropped_mismatches": [],
@@ -31,7 +42,7 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2780-6910-7293-9e78-4869ade76f60"
+      "trace_id": "019f279e-5389-7aa0-901f-42452abeecd6"
     },
     {
       "dropped_mismatches": [],
@@ -42,7 +53,7 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2780-6911-7ab1-97a2-803f6643b32f"
+      "trace_id": "019f279e-538a-7b80-abf8-1c67550a5dc0"
     },
     {
       "dropped_mismatches": [],
@@ -53,7 +64,7 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2780-6912-7261-b4b8-c457be05167a"
+      "trace_id": "019f279e-538b-7802-8faa-355f5b18f4e3"
     },
     {
       "dropped_mismatches": [],
@@ -64,7 +75,7 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2780-6912-7261-b4b8-c4b709b37aa2"
+      "trace_id": "019f279e-538c-7670-b411-7f60deb8412b"
     },
     {
       "dropped_mismatches": [],
@@ -75,7 +86,7 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2780-6913-7941-9768-0ee55b0b07e7"
+      "trace_id": "019f279e-538d-7b61-91ea-3683dff6f606"
     }
   ],
   "eval_id": "pr-golden",
@@ -84,9 +95,10 @@
     "contextual_chunks_enabled": true,
     "edge_expansion_enabled": true,
     "filesystem_control_enabled": false,
-    "passed_cases": 7,
+    "passed_cases": 8,
+    "rerank_enabled": true,
     "temporal_validity_enabled": true,
-    "total_cases": 7
+    "total_cases": 8
   },
   "runner": "memphant-eval",
   "trace_schema_version": "trace-0.1.0-ws0"

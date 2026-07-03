@@ -11,6 +11,7 @@
       "temporal",
       "edge",
       "fusion",
+      "rerank",
       "assemble",
       "trace"
     ],
@@ -43,6 +44,7 @@
       "temporal",
       "edge",
       "fusion",
+      "rerank",
       "assemble",
       "trace"
     ],
@@ -87,6 +89,7 @@
       "temporal",
       "edge",
       "fusion",
+      "rerank",
       "assemble",
       "trace"
     ],
@@ -133,6 +136,7 @@
       "temporal",
       "edge",
       "fusion",
+      "rerank",
       "assemble",
       "trace"
     ],
@@ -203,6 +207,7 @@
       "temporal",
       "edge",
       "fusion",
+      "rerank",
       "assemble",
       "trace"
     ],
@@ -253,6 +258,7 @@
       "temporal",
       "edge",
       "fusion",
+      "rerank",
       "assemble",
       "trace"
     ],

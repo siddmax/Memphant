@@ -1,6 +1,7 @@
 id: pr-golden
 manifest: manifest.yaml
 cases:
+  - golden/bounded_rerank_incident_owner.yaml
   - golden/checkout_region.yaml
   - golden/contextual_chunk_breaker.yaml
   - golden/deleted_secret_filter.yaml

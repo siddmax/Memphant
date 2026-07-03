@@ -12,12 +12,12 @@ fn oracle_suite_runs_and_verifies_load_bearing_labels() {
     let suite = root.join("examples/evals/golden.yaml");
 
     let report = run_eval_file(&suite, EvalRunOptions::default()).expect("golden run");
-    assert_eq!(report.total_cases, 7);
+    assert_eq!(report.total_cases, 8);
     assert_eq!(report.passed_cases, report.total_cases);
     assert!(report.case_results.iter().all(|case| case.passed));
 
     let verify = verify_golden_file(&suite).expect("verify golden");
-    assert_eq!(verify.verified_cases, 7);
+    assert_eq!(verify.verified_cases, 8);
     assert!(verify.case_results.iter().all(|case| case.load_bearing));
 }
 
@@ -26,7 +26,7 @@ fn verify_golden_accepts_whole_corpus_directory() {
     let verify =
         verify_golden_file(&repo_root().join("examples/evals")).expect("verify golden directory");
 
-    assert_eq!(verify.verified_cases, 7);
+    assert_eq!(verify.verified_cases, 8);
     assert!(verify.case_results.iter().all(|case| case.load_bearing));
 }
 
@@ -205,6 +205,30 @@ fn rung7_state_style_suite_proves_packing_abstention_delta() {
             .case_results
             .iter()
             .all(|case| { !case.missing_units.is_empty() || !case.dropped_mismatches.is_empty() })
+    );
+}
+
+#[test]
+fn rung8_state_style_suite_proves_bounded_rerank_delta() {
+    let suite = repo_root().join("benchmarks/rung8-state-style-sampled.yaml");
+    let with_rerank = run_eval_file(&suite, EvalRunOptions::default()).expect("with rerank");
+    assert_eq!(with_rerank.passed_cases, with_rerank.total_cases);
+
+    let without_rerank = run_eval_file(
+        &suite,
+        EvalRunOptions {
+            rerank_enabled: false,
+            ..EvalRunOptions::default()
+        },
+    )
+    .expect("without rerank");
+    assert_eq!(without_rerank.total_cases, with_rerank.total_cases);
+    assert_eq!(without_rerank.passed_cases, 0);
+    assert!(
+        without_rerank
+            .case_results
+            .iter()
+            .all(|case| !case.missing_units.is_empty() || !case.forbidden_present.is_empty())
     );
 }
 
