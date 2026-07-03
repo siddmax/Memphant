@@ -797,13 +797,17 @@ pub async fn recall(
     let mut candidates_by_unit: HashMap<UnitId, CandidateAccumulator> = HashMap::new();
     let mut candidate_traces = Vec::new();
 
-    for channel in [
+    let channels = [
         RecallChannel::Exact,
         RecallChannel::Lexical,
         RecallChannel::Vector,
         RecallChannel::Temporal,
         RecallChannel::Edge,
-    ] {
+    ];
+    for channel in channels
+        .into_iter()
+        .filter(|channel| request.edge_expansion_enabled || *channel != RecallChannel::Edge)
+    {
         let mut ranked = channel_candidates(
             channel,
             &tenant_units,
@@ -915,6 +919,7 @@ pub async fn recall(
         .collect();
     let trace_id = TraceId::new();
     let abstention = items.is_empty();
+    let feature_flags = recall_feature_flags(&request);
     let trace = RetrievalTrace {
         id: trace_id,
         tenant_id: request.tenant_id,
@@ -922,14 +927,7 @@ pub async fn recall(
         actor_id: request.actor_id,
         query_hash: hash_query(&request.query),
         engine_version: request.engine_version,
-        feature_flags: vec![
-            "entity_exact_enabled".to_string(),
-            "fts_enabled".to_string(),
-            "vector_enabled".to_string(),
-            "temporal_enabled".to_string(),
-            "contextual_chunks_enabled".to_string(),
-            "context_packing_abstention_enabled".to_string(),
-        ],
+        feature_flags,
         channel_runs: recall_stage_facts(),
         candidates: candidate_traces,
         policy_filters: Vec::new(),
@@ -1264,6 +1262,21 @@ fn recall_stage_facts() -> Vec<ReflectStageFact> {
         detail: "completed".to_string(),
     })
     .collect()
+}
+
+fn recall_feature_flags(request: &RecallRequest) -> Vec<String> {
+    let mut flags = vec![
+        "entity_exact_enabled".to_string(),
+        "fts_enabled".to_string(),
+        "vector_enabled".to_string(),
+        "temporal_enabled".to_string(),
+        "contextual_chunks_enabled".to_string(),
+        "context_packing_abstention_enabled".to_string(),
+    ];
+    if request.edge_expansion_enabled {
+        flags.push("edge_expansion_enabled".to_string());
+    }
+    flags
 }
 
 pub async fn reflect_recorded(

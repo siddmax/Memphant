@@ -1,0 +1,3 @@
+id: rung6-state-lme-sampled
+cases:
+  - ../examples/evals/golden/edge_expansion_runbook_lineage.yaml

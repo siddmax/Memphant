@@ -1,0 +1,34 @@
+id: edge_expansion_runbook_lineage
+second_author_confirmed: true
+query: "What is related to Atlas pipeline?"
+k: 2
+seed:
+  units:
+    - name: mem_atlas_pipeline_anchor
+      episode_body: "Atlas pipeline points to the sealed runbook."
+      kind: resource
+      state: active
+      subject_key: "atlas pipeline"
+      body: "Atlas pipeline points to the sealed runbook."
+      trust_level: trusted_system
+    - name: mem_atlas_pipeline_payload
+      episode_body: "The sealed runbook payload is Bluebird."
+      kind: semantic
+      state: active
+      subject_key: "sealed runbook payload"
+      body: "Bluebird."
+      trust_level: trusted_system
+  edges:
+    - src: mem_atlas_pipeline_anchor
+      dst: mem_atlas_pipeline_payload
+      kind: depends_on
+expect:
+  answer_bearing_ids:
+    - mem_atlas_pipeline_payload
+  top_k_contains:
+    - mem_atlas_pipeline_payload
+  citations_include:
+    - mem_atlas_pipeline_payload
+  trace_stages_include:
+    - edge
+    - trace

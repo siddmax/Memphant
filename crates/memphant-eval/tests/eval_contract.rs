@@ -12,12 +12,12 @@ fn oracle_suite_runs_and_verifies_load_bearing_labels() {
     let suite = root.join("examples/evals/golden.yaml");
 
     let report = run_eval_file(&suite, EvalRunOptions::default()).expect("golden run");
-    assert_eq!(report.total_cases, 4);
+    assert_eq!(report.total_cases, 5);
     assert_eq!(report.passed_cases, report.total_cases);
     assert!(report.case_results.iter().all(|case| case.passed));
 
     let verify = verify_golden_file(&suite).expect("verify golden");
-    assert_eq!(verify.verified_cases, 4);
+    assert_eq!(verify.verified_cases, 5);
     assert!(verify.case_results.iter().all(|case| case.load_bearing));
 }
 
@@ -26,7 +26,7 @@ fn verify_golden_accepts_whole_corpus_directory() {
     let verify =
         verify_golden_file(&repo_root().join("examples/evals")).expect("verify golden directory");
 
-    assert_eq!(verify.verified_cases, 4);
+    assert_eq!(verify.verified_cases, 5);
     assert!(verify.case_results.iter().all(|case| case.load_bearing));
 }
 
@@ -157,6 +157,30 @@ fn rung5_state_style_suite_proves_temporal_validity_delta() {
             .case_results
             .iter()
             .all(|case| !case.forbidden_present.is_empty())
+    );
+}
+
+#[test]
+fn rung6_state_lme_suite_proves_edge_expansion_delta() {
+    let suite = repo_root().join("benchmarks/rung6-state-lme-sampled.yaml");
+    let with_edges = run_eval_file(&suite, EvalRunOptions::default()).expect("with edges");
+    assert_eq!(with_edges.passed_cases, with_edges.total_cases);
+
+    let without_edges = run_eval_file(
+        &suite,
+        EvalRunOptions {
+            edge_expansion_enabled: false,
+            ..EvalRunOptions::default()
+        },
+    )
+    .expect("without edges");
+    assert_eq!(without_edges.total_cases, with_edges.total_cases);
+    assert_eq!(without_edges.passed_cases, 0);
+    assert!(
+        without_edges
+            .case_results
+            .iter()
+            .all(|case| !case.missing_units.is_empty())
     );
 }
 

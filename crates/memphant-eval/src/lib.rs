@@ -49,6 +49,8 @@ pub struct EvalRunOptions {
     pub archive_dir: Option<PathBuf>,
     pub contextual_chunks_enabled: bool,
     pub temporal_validity_enabled: bool,
+    pub edge_expansion_enabled: bool,
+    pub filesystem_control_enabled: bool,
 }
 
 impl Default for EvalRunOptions {
@@ -58,6 +60,8 @@ impl Default for EvalRunOptions {
             archive_dir: None,
             contextual_chunks_enabled: true,
             temporal_validity_enabled: true,
+            edge_expansion_enabled: true,
+            filesystem_control_enabled: false,
         }
     }
 }
@@ -456,6 +460,8 @@ pub fn run_eval_file(path: &Path, options: EvalRunOptions) -> EvalResult<EvalRep
             &BTreeSet::new(),
             options.contextual_chunks_enabled,
             options.temporal_validity_enabled,
+            options.edge_expansion_enabled,
+            options.filesystem_control_enabled,
         ));
         case_results.push(result);
     }
@@ -487,6 +493,8 @@ pub fn run_eval_file(path: &Path, options: EvalRunOptions) -> EvalResult<EvalRep
                 "passed_cases": report.passed_cases,
                 "contextual_chunks_enabled": options.contextual_chunks_enabled,
                 "temporal_validity_enabled": options.temporal_validity_enabled,
+                "edge_expansion_enabled": options.edge_expansion_enabled,
+                "filesystem_control_enabled": options.filesystem_control_enabled,
             },
             "case_results": report.case_results,
         });
@@ -511,8 +519,22 @@ pub fn verify_golden_file(path: &Path) -> EvalResult<GoldenVerifyReport> {
     for case_path in &suite.cases {
         let case: GoldenCase = read_yaml(&base.join(case_path))?;
         let answer_bearing: BTreeSet<_> = case.expect.answer_bearing_ids.iter().cloned().collect();
-        let normal = runtime.block_on(run_golden_case(&case, &BTreeSet::new(), true, true));
-        let masked = runtime.block_on(run_golden_case(&case, &answer_bearing, true, true));
+        let normal = runtime.block_on(run_golden_case(
+            &case,
+            &BTreeSet::new(),
+            true,
+            true,
+            true,
+            false,
+        ));
+        let masked = runtime.block_on(run_golden_case(
+            &case,
+            &answer_bearing,
+            true,
+            true,
+            true,
+            false,
+        ));
         let load_bearing = normal.passed
             && !masked.passed
             && case.second_author_confirmed
@@ -946,6 +968,9 @@ fn validate_rung_decision(
     if decision.rung == 5 && decision.status == "promoted" {
         validate_rung5_temporal_validity_promotion(decision, axes, &prefix, findings);
     }
+    if decision.rung == 6 && decision.status == "promoted" {
+        validate_rung6_edge_expansion_promotion(decision, axes, &prefix, findings);
+    }
 }
 
 fn validate_rung4_contextual_chunk_promotion(
@@ -1024,6 +1049,53 @@ fn validate_rung5_temporal_validity_promotion(
     }
 }
 
+fn validate_rung6_edge_expansion_promotion(
+    decision: &RungDecision,
+    axes: &BTreeMap<String, SotaAxisResult>,
+    prefix: &str,
+    findings: &mut Vec<String>,
+) {
+    if decision.item != "edge expansion" {
+        findings.push(format!("{prefix}:invalid_item:{}", decision.item));
+    }
+    for required_axis in ["outcome", "long_horizon", "interactive"] {
+        if !decision.axes.iter().any(|axis| axis == required_axis) {
+            findings.push(format!("{prefix}:missing_{required_axis}_axis"));
+        }
+    }
+    if !decision
+        .benchmark_sample_refs
+        .iter()
+        .any(|sample| sample.contains("edge_expansion"))
+    {
+        findings.push(format!("{prefix}:missing_golden_edge_sample_ref"));
+    }
+    if !decision
+        .benchmark_sample_refs
+        .iter()
+        .any(|sample| sample.contains("no-edges"))
+    {
+        findings.push(format!("{prefix}:missing_no_edges_control"));
+    }
+    if !decision
+        .benchmark_sample_refs
+        .iter()
+        .any(|sample| sample.contains("filesystem-control"))
+    {
+        findings.push(format!("{prefix}:missing_filesystem_control"));
+    }
+    if decision.delta_vs_baseline < 0.03 || decision.ci[0] < 0.03 {
+        findings.push(format!("{prefix}:delta_below_three_point_gate"));
+    }
+    for axis in ["outcome", "long_horizon", "interactive"] {
+        match axes.get(axis) {
+            Some(result) if result.delta_vs_baseline.unwrap_or_default() > 0.0 => {}
+            Some(_) => findings.push(format!("{prefix}:{axis}:non_positive_axis_delta")),
+            None => {}
+        }
+    }
+}
+
 fn validate_ci(prefix: &str, delta: Option<f64>, ci: Option<[f64; 2]>, findings: &mut Vec<String>) {
     let Some(delta) = delta else {
         findings.push(format!("{prefix}:missing_delta"));
@@ -1079,7 +1151,7 @@ async fn run_syndai_trace_compare(
             .collect(),
         edges: Vec::new(),
     };
-    let context = seed_store(&seed, &BTreeSet::new(), true, true).await?;
+    let context = seed_store(&seed, &BTreeSet::new(), true, true, true).await?;
     let response = recall(
         &context.store,
         RecallRequest {
@@ -1092,6 +1164,7 @@ async fn run_syndai_trace_compare(
             budget_tokens: fixture.token_budget,
             mode: RecallMode::Fast,
             include_beliefs: false,
+            edge_expansion_enabled: true,
             engine_version: ENGINE_VERSION.to_string(),
         },
     )
@@ -1145,12 +1218,16 @@ async fn run_golden_case(
     masked_units: &BTreeSet<String>,
     contextual_chunks_enabled: bool,
     temporal_validity_enabled: bool,
+    edge_expansion_enabled: bool,
+    filesystem_control_enabled: bool,
 ) -> EvalCaseResult {
     match run_golden_case_inner(
         case,
         masked_units,
         contextual_chunks_enabled,
         temporal_validity_enabled,
+        edge_expansion_enabled,
+        filesystem_control_enabled,
     )
     .await
     {
@@ -1174,14 +1251,18 @@ async fn run_golden_case_inner(
     masked_units: &BTreeSet<String>,
     contextual_chunks_enabled: bool,
     temporal_validity_enabled: bool,
+    edge_expansion_enabled: bool,
+    filesystem_control_enabled: bool,
 ) -> EvalResult<EvalCaseResult> {
     let context = seed_store(
         &case.seed,
         masked_units,
         contextual_chunks_enabled,
         temporal_validity_enabled,
+        !filesystem_control_enabled,
     )
     .await?;
+    let recall_edge_expansion_enabled = edge_expansion_enabled && !filesystem_control_enabled;
     let response = recall(
         &context.store,
         RecallRequest {
@@ -1194,6 +1275,7 @@ async fn run_golden_case_inner(
             budget_tokens: case.budget_tokens.unwrap_or(256),
             mode: RecallMode::Fast,
             include_beliefs: case.include_beliefs,
+            edge_expansion_enabled: recall_edge_expansion_enabled,
             engine_version: ENGINE_VERSION.to_string(),
         },
     )
@@ -1330,7 +1412,7 @@ async fn run_fixture_security_lane(lane: &SecurityLane) -> EvalResult<String> {
         seed: lane.seed.clone(),
         expect: lane.expect.clone(),
     };
-    let result = run_golden_case_inner(&case, &BTreeSet::new(), true, true).await?;
+    let result = run_golden_case_inner(&case, &BTreeSet::new(), true, true, true, false).await?;
     if result.passed {
         Ok("fixture assertions passed".to_string())
     } else {
@@ -1353,7 +1435,7 @@ fn run_selector_injection_lane(lane: &SecurityLane) -> EvalResult<String> {
 }
 
 async fn run_high_risk_lane(lane: &SecurityLane) -> EvalResult<String> {
-    let context = seed_store(&lane.seed, &BTreeSet::new(), true, true).await?;
+    let context = seed_store(&lane.seed, &BTreeSet::new(), true, true, true).await?;
     let response = recall(
         &context.store,
         RecallRequest {
@@ -1366,6 +1448,7 @@ async fn run_high_risk_lane(lane: &SecurityLane) -> EvalResult<String> {
             budget_tokens: 256,
             mode: RecallMode::Fast,
             include_beliefs: true,
+            edge_expansion_enabled: true,
             engine_version: ENGINE_VERSION.to_string(),
         },
     )
@@ -1407,7 +1490,7 @@ async fn run_high_risk_lane(lane: &SecurityLane) -> EvalResult<String> {
 }
 
 async fn run_deletion_lane(lane: &SecurityLane) -> EvalResult<String> {
-    let context = seed_store(&lane.seed, &BTreeSet::new(), true, true).await?;
+    let context = seed_store(&lane.seed, &BTreeSet::new(), true, true, true).await?;
     let forget = lane
         .forget
         .as_ref()
@@ -1466,6 +1549,7 @@ async fn run_deletion_lane(lane: &SecurityLane) -> EvalResult<String> {
             budget_tokens: 256,
             mode: RecallMode::Fast,
             include_beliefs: false,
+            edge_expansion_enabled: true,
             engine_version: ENGINE_VERSION.to_string(),
         },
     )
@@ -1583,6 +1667,7 @@ async fn seed_store(
     masked_units: &BTreeSet<String>,
     contextual_chunks_enabled: bool,
     temporal_validity_enabled: bool,
+    seed_edges_enabled: bool,
 ) -> EvalResult<SeedContext> {
     let store = InMemoryStore::default();
     let tenant_id = TenantId::from_u128(90_000);
@@ -1660,7 +1745,7 @@ async fn seed_store(
             .map_err(|error| EvalError::Core(error.to_string()))?;
         named_units.insert(unit.name.clone(), unit_id);
     }
-    for edge in &seed.edges {
+    for edge in seed.edges.iter().filter(|_| seed_edges_enabled) {
         if masked_units.contains(&edge.src) || masked_units.contains(&edge.dst) {
             continue;
         }

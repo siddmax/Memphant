@@ -2,4 +2,5 @@ golden:
   - checkout_region
   - contextual_chunk_breaker
   - deleted_secret_filter
+  - edge_expansion_runbook_lineage
   - temporal_validity_current_office

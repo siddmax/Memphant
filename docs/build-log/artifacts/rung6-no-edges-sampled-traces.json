@@ -1,0 +1,30 @@
+{
+  "case_results": [
+    {
+      "dropped_mismatches": [],
+      "error": null,
+      "forbidden_present": [],
+      "id": "edge_expansion_runbook_lineage",
+      "missing_citations": [
+        "mem_atlas_pipeline_payload"
+      ],
+      "missing_trace_stages": [],
+      "missing_units": [
+        "mem_atlas_pipeline_payload"
+      ],
+      "passed": false,
+      "trace_id": "019f2764-e18a-74c1-b39f-45c9d8019f99"
+    }
+  ],
+  "eval_id": "rung6-no-edges-sampled",
+  "metrics": {
+    "contextual_chunks_enabled": true,
+    "edge_expansion_enabled": false,
+    "filesystem_control_enabled": false,
+    "passed_cases": 0,
+    "temporal_validity_enabled": true,
+    "total_cases": 1
+  },
+  "runner": "memphant-eval",
+  "trace_schema_version": "trace-0.1.0-ws0"
+}

@@ -130,6 +130,8 @@ pub struct RecallRequest {
     pub budget_tokens: usize,
     pub mode: RecallMode,
     pub include_beliefs: bool,
+    #[serde(default = "default_true")]
+    pub edge_expansion_enabled: bool,
     pub engine_version: String,
 }
 
@@ -673,7 +675,12 @@ pub struct RecallHttpRequest {
     pub budget_tokens: Option<usize>,
     pub mode: Option<RecallMode>,
     pub include_beliefs: Option<bool>,
+    pub edge_expansion_enabled: Option<bool>,
     pub include_trace: Option<bool>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

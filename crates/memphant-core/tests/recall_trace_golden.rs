@@ -40,6 +40,7 @@ async fn recall_writes_trace_for_scope_denial() {
             budget_tokens: 80,
             mode: RecallMode::Fast,
             include_beliefs: false,
+            edge_expansion_enabled: true,
             engine_version: "engine-wsc-test".to_string(),
         },
     )
@@ -125,6 +126,7 @@ async fn contextual_chunk_recall_finds_source_unit_and_traces_flag() {
             budget_tokens: 80,
             mode: RecallMode::Fast,
             include_beliefs: false,
+            edge_expansion_enabled: true,
             engine_version: "engine-ws4-test".to_string(),
         },
     )
@@ -199,6 +201,7 @@ async fn servicenow_query_does_not_trigger_temporal_recency_match() {
             budget_tokens: 256,
             mode: RecallMode::Fast,
             include_beliefs: false,
+            edge_expansion_enabled: true,
             engine_version: "engine-temporal-token-test".to_string(),
         },
     )
@@ -284,6 +287,7 @@ async fn recall_drops_expired_validity_window_for_current_query() {
             budget_tokens: 256,
             mode: RecallMode::Fast,
             include_beliefs: false,
+            edge_expansion_enabled: true,
             engine_version: "engine-rung5-test".to_string(),
         },
     )
@@ -303,6 +307,137 @@ async fn recall_drops_expired_validity_window_for_current_query() {
             .iter()
             .any(|item| { item.unit_id == stale_id && item.reason == RecallDropReason::Stale })
     );
+}
+
+#[tokio::test]
+async fn edge_expansion_can_be_disabled_and_traces_related_candidates() {
+    let store = InMemoryStore::default();
+    let tenant_id = tenant(75_000);
+    let scope_id = scope(75_001);
+    let actor_id = actor(75_002);
+
+    let mut tx = store.begin().await;
+    let anchor_id = store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id,
+                scope_id,
+                kind: MemoryKind::Resource,
+                state: UnitState::Active,
+                subject_key: Some("atlas pipeline".to_string()),
+                body: "Atlas pipeline points to the sealed runbook.".to_string(),
+                trust_level: TrustLevel::TrustedSystem,
+                churn_class: None,
+                freshness_due: false,
+                actor_id: Some(actor_id),
+                source_kind: Some("fixture".to_string()),
+                source_episode_id: None,
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
+            },
+        )
+        .await
+        .expect("anchor seeded");
+    let related_id = store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id,
+                scope_id,
+                kind: MemoryKind::Semantic,
+                state: UnitState::Active,
+                subject_key: Some("sealed runbook payload".to_string()),
+                body: "Bluebird.".to_string(),
+                trust_level: TrustLevel::TrustedSystem,
+                churn_class: None,
+                freshness_due: false,
+                actor_id: Some(actor_id),
+                source_kind: Some("fixture".to_string()),
+                source_episode_id: None,
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
+            },
+        )
+        .await
+        .expect("related seeded");
+    store
+        .stage_memory_edge(
+            &mut tx,
+            NewMemoryEdge {
+                tenant_id,
+                scope_id,
+                src_id: anchor_id,
+                dst_id: related_id,
+                kind: MemoryEdgeKind::DependsOn,
+            },
+        )
+        .await
+        .expect("edge seeded");
+    store.commit(tx).await.expect("seed committed");
+
+    let disabled = recall(
+        &store,
+        RecallRequest {
+            tenant_id,
+            scope_id,
+            actor_id,
+            allowed_scope_ids: vec![scope_id],
+            query: "What is related to Atlas pipeline?".to_string(),
+            k: 2,
+            budget_tokens: 80,
+            mode: RecallMode::Fast,
+            include_beliefs: false,
+            edge_expansion_enabled: false,
+            engine_version: "engine-rung6-test".to_string(),
+        },
+    )
+    .await
+    .expect("recall succeeds with edges disabled");
+    assert!(!disabled.candidate_whitelist.contains(&related_id));
+
+    let enabled = recall(
+        &store,
+        RecallRequest {
+            tenant_id,
+            scope_id,
+            actor_id,
+            allowed_scope_ids: vec![scope_id],
+            query: "What is related to Atlas pipeline?".to_string(),
+            k: 2,
+            budget_tokens: 80,
+            mode: RecallMode::Fast,
+            include_beliefs: false,
+            edge_expansion_enabled: true,
+            engine_version: "engine-rung6-test".to_string(),
+        },
+    )
+    .await
+    .expect("recall succeeds with edges enabled");
+
+    assert!(enabled.candidate_whitelist.contains(&related_id));
+    let trace = store.trace_by_id(enabled.trace_id).expect("trace exists");
+    assert!(
+        trace
+            .feature_flags
+            .iter()
+            .any(|flag| flag == "edge_expansion_enabled")
+    );
+    assert!(trace.candidates.iter().any(|candidate| {
+        candidate.unit_id == related_id
+            && candidate.channel == RecallChannel::Edge
+            && candidate.channel_score > 0.0
+    }));
 }
 
 #[derive(Debug, Deserialize)]
@@ -483,6 +618,7 @@ async fn recall_golden_fixtures_pass() {
                 budget_tokens: case.budget_tokens.unwrap_or(80),
                 mode: RecallMode::Fast,
                 include_beliefs: false,
+                edge_expansion_enabled: true,
                 engine_version: "engine-wsc-test".to_string(),
             },
         )

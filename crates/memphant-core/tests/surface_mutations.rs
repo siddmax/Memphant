@@ -94,6 +94,7 @@ async fn correct_supersedes_old_generation_and_recall_returns_new_value() {
             budget_tokens: 80,
             mode: RecallMode::Fast,
             include_beliefs: false,
+            edge_expansion_enabled: true,
             engine_version: "engine-wsd-test".to_string(),
         },
     )
@@ -161,6 +162,7 @@ async fn forget_marks_memory_deleted_and_recall_hides_it() {
             budget_tokens: 80,
             mode: RecallMode::Fast,
             include_beliefs: false,
+            edge_expansion_enabled: true,
             engine_version: "engine-wsd-test".to_string(),
         },
     )

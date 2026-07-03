@@ -160,3 +160,69 @@ fn rung5_promotion_requires_state_style_axis() {
             .contains("rung_decision:5:missing_interactive_axis")
     );
 }
+
+#[test]
+fn rung6_profile_archives_edge_expansion_promotion_with_controls() {
+    let archive_dir = tempfile::tempdir().expect("tempdir");
+    let archive_path = archive_dir.path().join("rung6-profile.json");
+    let report = run_profile_file(
+        &repo_root().join("examples/evals/rung6-edge-expansion-profile.yaml"),
+        "rungs-0-5-baseline",
+        Some(archive_path.clone()),
+    )
+    .expect("rung6 profile should pass");
+
+    let decision = report
+        .rung_decisions
+        .iter()
+        .find(|decision| decision.rung == 6)
+        .expect("rung 6 decision");
+    assert_eq!(decision.item, "edge expansion");
+    assert_eq!(decision.status, "promoted");
+    assert_eq!(decision.axes, ["outcome", "long_horizon", "interactive"]);
+    assert!(decision.delta_vs_baseline >= 0.03);
+    assert!(decision.ci[0] > 0.0);
+    assert!(
+        decision
+            .benchmark_sample_refs
+            .iter()
+            .any(|sample| sample.contains("no-edges"))
+    );
+    assert!(
+        decision
+            .benchmark_sample_refs
+            .iter()
+            .any(|sample| sample.contains("filesystem-control"))
+    );
+
+    let archived: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&archive_path).expect("read archive"))
+            .expect("archive json");
+    assert_eq!(archived["rung_decisions"][0]["rung"], 6);
+}
+
+#[test]
+fn rung6_promotion_requires_no_edges_and_filesystem_controls() {
+    let source =
+        fs::read_to_string(repo_root().join("examples/evals/rung6-edge-expansion-profile.yaml"))
+            .expect("read fixture");
+    let bad = source
+        .replace(
+            "      - no-edges:benchmarks/rung6-no-edges-sampled.yaml\n",
+            "",
+        )
+        .replace(
+            "      - filesystem-control:benchmarks/rung6-filesystem-control-sampled.yaml\n",
+            "",
+        );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("bad-rung6-profile.yaml");
+    fs::write(&path, bad).expect("write fixture");
+
+    let error = run_profile_file(&path, "rungs-0-5-baseline", None)
+        .expect_err("rung6 promotion without controls should fail");
+
+    let text = error.to_string();
+    assert!(text.contains("rung_decision:6:missing_no_edges_control"));
+    assert!(text.contains("rung_decision:6:missing_filesystem_control"));
+}

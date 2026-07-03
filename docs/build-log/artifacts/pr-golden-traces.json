@@ -9,7 +9,7 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2754-fc46-7692-a378-5dae46abbdcc"
+      "trace_id": "019f2764-aa9f-7d52-9960-5cd7f24e3327"
     },
     {
       "dropped_mismatches": [],
@@ -20,7 +20,7 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2754-fc47-7821-893b-1429d7f1e5da"
+      "trace_id": "019f2764-aa9f-7d52-9960-5d03c5774422"
     },
     {
       "dropped_mismatches": [],
@@ -31,7 +31,18 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2754-fc47-7821-893b-147c4f8b84af"
+      "trace_id": "019f2764-aa9f-7d52-9960-5d5cff5327ff"
+    },
+    {
+      "dropped_mismatches": [],
+      "error": null,
+      "forbidden_present": [],
+      "id": "edge_expansion_runbook_lineage",
+      "missing_citations": [],
+      "missing_trace_stages": [],
+      "missing_units": [],
+      "passed": true,
+      "trace_id": "019f2764-aaa0-7152-aac8-2052c827eeb7"
     },
     {
       "dropped_mismatches": [],
@@ -42,15 +53,17 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2754-fc47-7821-893b-14c967eb3e1e"
+      "trace_id": "019f2764-aaa0-7152-aac8-20a5449f1c44"
     }
   ],
   "eval_id": "pr-golden",
   "metrics": {
     "contextual_chunks_enabled": true,
-    "passed_cases": 4,
+    "edge_expansion_enabled": true,
+    "filesystem_control_enabled": false,
+    "passed_cases": 5,
     "temporal_validity_enabled": true,
-    "total_cases": 4
+    "total_cases": 5
   },
   "runner": "memphant-eval",
   "trace_schema_version": "trace-0.1.0-ws0"

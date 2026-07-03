@@ -178,6 +178,7 @@ async fn recall_handler(
             budget_tokens: request.budget_tokens.unwrap_or(512),
             mode: request.mode.unwrap_or(RecallMode::Fast),
             include_beliefs: request.include_beliefs.unwrap_or(false),
+            edge_expansion_enabled: request.edge_expansion_enabled.unwrap_or(true),
             engine_version: ENGINE_VERSION.to_string(),
         },
     )
