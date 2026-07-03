@@ -5,6 +5,7 @@
     "expected_weight_vector_id": "default",
     "expected_stage_names": [
       "stage0_policy",
+      "query_decomposition",
       "exact",
       "lexical",
       "vector",
@@ -38,6 +39,7 @@
     "expected_weight_vector_id": "default",
     "expected_stage_names": [
       "stage0_policy",
+      "query_decomposition",
       "exact",
       "lexical",
       "vector",
@@ -83,6 +85,7 @@
     "expected_weight_vector_id": "default",
     "expected_stage_names": [
       "stage0_policy",
+      "query_decomposition",
       "exact",
       "lexical",
       "vector",
@@ -130,6 +133,7 @@
     "expected_weight_vector_id": "default",
     "expected_stage_names": [
       "stage0_policy",
+      "query_decomposition",
       "exact",
       "lexical",
       "vector",
@@ -201,6 +205,7 @@
     "expected_weight_vector_id": "default",
     "expected_stage_names": [
       "stage0_policy",
+      "query_decomposition",
       "exact",
       "lexical",
       "vector",
@@ -252,6 +257,7 @@
     "expected_weight_vector_id": "default",
     "expected_stage_names": [
       "stage0_policy",
+      "query_decomposition",
       "exact",
       "lexical",
       "vector",

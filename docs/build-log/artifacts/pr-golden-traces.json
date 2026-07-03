@@ -9,7 +9,18 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f279e-5388-7510-aad8-b3eb5b913957"
+      "trace_id": "019f27b4-7d7a-7061-8d04-9b1c63763b4d"
+    },
+    {
+      "dropped_mismatches": [],
+      "error": null,
+      "forbidden_present": [],
+      "id": "query_decomposition_deploy_release",
+      "missing_citations": [],
+      "missing_trace_stages": [],
+      "missing_units": [],
+      "passed": true,
+      "trace_id": "019f27b4-7d7e-7153-938d-53e5bf54e787"
     },
     {
       "dropped_mismatches": [],
@@ -20,7 +31,7 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f279e-5388-7510-aad8-b4122cb69838"
+      "trace_id": "019f27b4-7d7e-7153-938d-541773c8d43d"
     },
     {
       "dropped_mismatches": [],
@@ -31,7 +42,7 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f279e-5389-7aa0-901f-41fb27da4164"
+      "trace_id": "019f27b4-7d7e-7153-938d-544b46e21772"
     },
     {
       "dropped_mismatches": [],
@@ -42,7 +53,7 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f279e-5389-7aa0-901f-42452abeecd6"
+      "trace_id": "019f27b4-7d7f-75e0-b68d-90d13b2f28ca"
     },
     {
       "dropped_mismatches": [],
@@ -53,7 +64,7 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f279e-538a-7b80-abf8-1c67550a5dc0"
+      "trace_id": "019f27b4-7d7f-75e0-b68d-9134dfac24c2"
     },
     {
       "dropped_mismatches": [],
@@ -64,7 +75,7 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f279e-538b-7802-8faa-355f5b18f4e3"
+      "trace_id": "019f27b4-7d80-7461-80c5-72c5db305fd9"
     },
     {
       "dropped_mismatches": [],
@@ -75,7 +86,7 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f279e-538c-7670-b411-7f60deb8412b"
+      "trace_id": "019f27b4-7d81-7ad2-a63e-f0e30c14f79a"
     },
     {
       "dropped_mismatches": [],
@@ -86,7 +97,7 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f279e-538d-7b61-91ea-3683dff6f606"
+      "trace_id": "019f27b4-7d81-7ad2-a63e-f131011146a1"
     }
   ],
   "eval_id": "pr-golden",
@@ -95,10 +106,11 @@
     "contextual_chunks_enabled": true,
     "edge_expansion_enabled": true,
     "filesystem_control_enabled": false,
-    "passed_cases": 8,
+    "passed_cases": 9,
+    "query_decomposition_enabled": true,
     "rerank_enabled": true,
     "temporal_validity_enabled": true,
-    "total_cases": 8
+    "total_cases": 9
   },
   "runner": "memphant-eval",
   "trace_schema_version": "trace-0.1.0-ws0"

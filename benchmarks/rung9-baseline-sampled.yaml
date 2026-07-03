@@ -1,0 +1,3 @@
+id: rung9-baseline-sampled
+cases:
+  - ../examples/evals/golden/query_decomposition_deploy_release.yaml

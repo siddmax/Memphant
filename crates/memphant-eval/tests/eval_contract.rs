@@ -12,12 +12,12 @@ fn oracle_suite_runs_and_verifies_load_bearing_labels() {
     let suite = root.join("examples/evals/golden.yaml");
 
     let report = run_eval_file(&suite, EvalRunOptions::default()).expect("golden run");
-    assert_eq!(report.total_cases, 8);
+    assert_eq!(report.total_cases, 9);
     assert_eq!(report.passed_cases, report.total_cases);
     assert!(report.case_results.iter().all(|case| case.passed));
 
     let verify = verify_golden_file(&suite).expect("verify golden");
-    assert_eq!(verify.verified_cases, 8);
+    assert_eq!(verify.verified_cases, 9);
     assert!(verify.case_results.iter().all(|case| case.load_bearing));
 }
 
@@ -26,7 +26,7 @@ fn verify_golden_accepts_whole_corpus_directory() {
     let verify =
         verify_golden_file(&repo_root().join("examples/evals")).expect("verify golden directory");
 
-    assert_eq!(verify.verified_cases, 8);
+    assert_eq!(verify.verified_cases, 9);
     assert!(verify.case_results.iter().all(|case| case.load_bearing));
 }
 
@@ -229,6 +229,37 @@ fn rung8_state_style_suite_proves_bounded_rerank_delta() {
             .case_results
             .iter()
             .all(|case| !case.missing_units.is_empty() || !case.forbidden_present.is_empty())
+    );
+}
+
+#[test]
+fn rung9_state_lme_suite_proves_query_decomposition_delta() {
+    let suite = repo_root().join("benchmarks/rung9-state-lme-sampled.yaml");
+    let with_decomposition =
+        run_eval_file(&suite, EvalRunOptions::default()).expect("with decomposition");
+    assert_eq!(
+        with_decomposition.passed_cases,
+        with_decomposition.total_cases
+    );
+
+    let without_decomposition = run_eval_file(
+        &suite,
+        EvalRunOptions {
+            query_decomposition_enabled: false,
+            ..EvalRunOptions::default()
+        },
+    )
+    .expect("without decomposition");
+    assert_eq!(
+        without_decomposition.total_cases,
+        with_decomposition.total_cases
+    );
+    assert_eq!(without_decomposition.passed_cases, 0);
+    assert!(
+        without_decomposition
+            .case_results
+            .iter()
+            .all(|case| !case.missing_units.is_empty())
     );
 }
 

@@ -1,0 +1,36 @@
+{
+  "case_results": [
+    {
+      "dropped_mismatches": [
+        "trace_feature_flag_missing:query_decomposition_enabled",
+        "subquery_count_min:expected>=2:actual=0",
+        "decomposition_reason:expected_contains=multi_constraint_conjunction:actual=none"
+      ],
+      "error": null,
+      "forbidden_present": [],
+      "id": "query_decomposition_deploy_release",
+      "missing_citations": [],
+      "missing_trace_stages": [],
+      "missing_units": [
+        "mem_deploy_task_file",
+        "mem_release_approval"
+      ],
+      "passed": false,
+      "trace_id": "019f27b4-a52c-7ed3-b671-1e9e9a6bcad7"
+    }
+  ],
+  "eval_id": "rung9-baseline-sampled",
+  "metrics": {
+    "context_packing_abstention_enabled": true,
+    "contextual_chunks_enabled": true,
+    "edge_expansion_enabled": true,
+    "filesystem_control_enabled": false,
+    "passed_cases": 0,
+    "query_decomposition_enabled": false,
+    "rerank_enabled": true,
+    "temporal_validity_enabled": true,
+    "total_cases": 1
+  },
+  "runner": "memphant-eval",
+  "trace_schema_version": "trace-0.1.0-ws0"
+}

@@ -72,6 +72,13 @@
         "state": {
           "$ref": "#/$defs/UnitState"
         },
+        "subquery_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "trust_level": {
           "$ref": "#/$defs/TrustLevel"
         },
@@ -346,6 +353,9 @@
       "minimum": 0,
       "type": "integer"
     },
+    "decomposition_reason": {
+      "type": "string"
+    },
     "dropped_items": {
       "items": {
         "$ref": "#/$defs/RecallDroppedItem"
@@ -417,6 +427,13 @@
     "scope_id": {
       "$ref": "#/$defs/ScopeId"
     },
+    "subquery_ids": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
     "tenant_id": {
       "$ref": "#/$defs/TenantId"
     },
@@ -451,6 +468,7 @@
     "reranker_id",
     "rerank_input_count",
     "rerank_overfetch_ratio",
+    "decomposition_reason",
     "abstention_signal",
     "latency_ms",
     "token_estimate",

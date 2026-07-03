@@ -183,6 +183,7 @@ async fn recall_handler(
                 .context_packing_abstention_enabled
                 .unwrap_or(true),
             rerank_enabled: request.rerank_enabled.unwrap_or(true),
+            query_decomposition_enabled: request.query_decomposition_enabled.unwrap_or(true),
             engine_version: ENGINE_VERSION.to_string(),
         },
     )

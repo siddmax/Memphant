@@ -1,5 +1,6 @@
 golden:
   - bounded_rerank_incident_owner
+  - query_decomposition_deploy_release
   - checkout_region
   - contextual_chunk_breaker
   - deleted_secret_filter

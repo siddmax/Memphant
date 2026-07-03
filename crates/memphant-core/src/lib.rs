@@ -761,6 +761,8 @@ pub async fn recall(
             reranker_id: "none".to_string(),
             rerank_input_count: 0,
             rerank_overfetch_ratio: 0.0,
+            subquery_ids: Vec::new(),
+            decomposition_reason: "none".to_string(),
             abstention_signal: true,
             latency_ms: 0,
             token_estimate: 0,
@@ -797,6 +799,7 @@ pub async fn recall(
         .count();
     let filter_selectivity = Some(scope_units as f32 / all_units as f32);
     let query_tokens = tokenize(&request.query);
+    let decomposition = decompose_query(&request);
     let mut candidates_by_unit: HashMap<UnitId, CandidateAccumulator> = HashMap::new();
     let mut candidate_traces = Vec::new();
 
@@ -840,6 +843,8 @@ pub async fn recall(
                     fused_score: contribution,
                     rerank_rank: None,
                     rerank_score: 0.0,
+                    subquery_ids: Vec::new(),
+                    decomposition_rank: None,
                     channels: vec![(channel, channel_rank, score)],
                 });
             candidate_traces.push(RecallCandidateTrace {
@@ -851,6 +856,7 @@ pub async fn recall(
                 fused_score: None,
                 rerank_rank: None,
                 rerank_score: 0.0,
+                subquery_ids: Vec::new(),
                 trust_level: unit.trust_level,
                 state: unit.state,
                 discard_reason: None,
@@ -858,7 +864,76 @@ pub async fn recall(
         }
     }
 
+    if decomposition.active() {
+        for (subquery_index, subquery) in decomposition.subqueries.iter().enumerate() {
+            let subquery_tokens = tokenize(&subquery.query);
+            for channel in channels
+                .into_iter()
+                .filter(|channel| request.edge_expansion_enabled || *channel != RecallChannel::Edge)
+            {
+                let mut ranked = channel_candidates(
+                    channel,
+                    &tenant_units,
+                    &tenant_edges,
+                    &request,
+                    &subquery_tokens,
+                );
+                ranked.sort_by(|left, right| {
+                    right
+                        .1
+                        .partial_cmp(&left.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| left.0.body.cmp(&right.0.body))
+                });
+                for (rank, (unit, score)) in ranked.into_iter().take(request.k.max(1)).enumerate() {
+                    let channel_rank = rank + 1;
+                    let contribution =
+                        channel_weight(channel, &subquery.query) / (55.0 + channel_rank as f32);
+                    candidates_by_unit
+                        .entry(unit.id)
+                        .and_modify(|candidate| {
+                            candidate.fused_score += contribution;
+                            candidate.channels.push((channel, channel_rank, score));
+                            push_unique(&mut candidate.subquery_ids, subquery.id.clone());
+                        })
+                        .or_insert_with(|| CandidateAccumulator {
+                            unit: unit.clone(),
+                            fused_score: contribution,
+                            rerank_rank: None,
+                            rerank_score: 0.0,
+                            subquery_ids: vec![subquery.id.clone()],
+                            decomposition_rank: None,
+                            channels: vec![(channel, channel_rank, score)],
+                        });
+                    candidate_traces.push(RecallCandidateTrace {
+                        unit_id: unit.id,
+                        channel,
+                        channel_rank,
+                        channel_score: score,
+                        fused_rank: None,
+                        fused_score: None,
+                        rerank_rank: None,
+                        rerank_score: 0.0,
+                        subquery_ids: vec![subquery.id.clone()],
+                        trust_level: unit.trust_level,
+                        state: unit.state,
+                        discard_reason: None,
+                    });
+                }
+            }
+            mark_best_subquery_candidate(
+                &mut candidates_by_unit,
+                &subquery.id,
+                &subquery.query,
+                subquery_index + 1,
+            );
+        }
+    }
+
     let mut fused: Vec<_> = candidates_by_unit.into_values().collect();
+    if decomposition.active() {
+        fused.retain(|candidate| !candidate.subquery_ids.is_empty());
+    }
     fused.sort_by(|left, right| {
         right
             .fused_score
@@ -884,6 +959,7 @@ pub async fn recall(
         {
             trace_candidate.rerank_rank = candidate.rerank_rank;
             trace_candidate.rerank_score = candidate.rerank_score;
+            trace_candidate.subquery_ids = candidate.subquery_ids.clone();
         }
     }
 
@@ -938,6 +1014,12 @@ pub async fn recall(
         reranker_id: rerank.reranker_id,
         rerank_input_count: rerank.input_count,
         rerank_overfetch_ratio: rerank.overfetch_ratio,
+        subquery_ids: decomposition
+            .subqueries
+            .iter()
+            .map(|subquery| subquery.id.clone())
+            .collect(),
+        decomposition_reason: decomposition.reason,
         abstention_signal: abstention,
         latency_ms: 0,
         token_estimate,
@@ -995,6 +1077,153 @@ fn trace_filter_drops(
             })
         })
         .collect()
+}
+
+fn decompose_query(request: &RecallRequest) -> QueryDecompositionFacts {
+    if !request.query_decomposition_enabled || request.mode == RecallMode::Fast {
+        return QueryDecompositionFacts::none();
+    }
+
+    let conjuncts = structural_query_conjuncts(&request.query);
+    let mut reasons = Vec::new();
+    if conjuncts.len() >= 2 {
+        reasons.push("multi_constraint_conjunction");
+        reasons.push("multiple_entity_hits");
+    }
+    if has_comparative_or_causal_connector(&request.query) {
+        reasons.push("comparative_causal_connector");
+    }
+    if has_temporal_relation(&request.query) {
+        reasons.push("temporal_relation");
+    }
+
+    if reasons.len() < 2 || conjuncts.len() < 2 {
+        return QueryDecompositionFacts::none();
+    }
+
+    let subqueries = conjuncts
+        .into_iter()
+        .enumerate()
+        .map(|(index, query)| QuerySubquery {
+            id: format!("sq{}_{}", index + 1, stable_subquery_slug(&query)),
+            query,
+        })
+        .collect::<Vec<_>>();
+
+    QueryDecompositionFacts {
+        subqueries,
+        reason: reasons.join("+"),
+    }
+}
+
+fn structural_query_conjuncts(query: &str) -> Vec<String> {
+    let normalized = normalize_component(query);
+    let mut parts = vec![normalized.as_str()];
+    for connector in [
+        " and which ",
+        " and what ",
+        " and where ",
+        " and who ",
+        " and when ",
+        " and ",
+    ] {
+        if normalized.contains(connector) {
+            parts = normalized.split(connector).collect();
+            break;
+        }
+    }
+
+    parts
+        .into_iter()
+        .map(|part| {
+            part.trim()
+                .trim_start_matches("which ")
+                .trim_start_matches("what ")
+                .trim_start_matches("where ")
+                .trim_start_matches("who ")
+                .trim_start_matches("when ")
+                .trim()
+                .to_string()
+        })
+        .filter(|part| tokenize(part).len() >= 2)
+        .collect()
+}
+
+fn has_comparative_or_causal_connector(query: &str) -> bool {
+    let query = normalize_component(query);
+    query
+        .split_whitespace()
+        .any(|token| matches!(token, "because" | "why" | "versus" | "vs" | "compare"))
+}
+
+fn has_temporal_relation(query: &str) -> bool {
+    let query_tokens = tokenize(query);
+    query_tokens.iter().any(|token| {
+        matches!(
+            token.as_str(),
+            "before" | "after" | "during" | "since" | "current" | "latest" | "now"
+        )
+    })
+}
+
+fn stable_subquery_slug(query: &str) -> String {
+    let tokens = tokenize(query);
+    let slug = tokens.iter().take(4).cloned().collect::<Vec<_>>().join("_");
+    if slug.is_empty() {
+        "empty".to_string()
+    } else {
+        slug
+    }
+}
+
+fn mark_best_subquery_candidate(
+    candidates: &mut HashMap<UnitId, CandidateAccumulator>,
+    subquery_id: &str,
+    subquery: &str,
+    rank: usize,
+) {
+    let subquery_tokens = tokenize(subquery);
+    let Some(unit_id) = candidates
+        .iter()
+        .filter(|(_, candidate)| {
+            candidate
+                .subquery_ids
+                .iter()
+                .any(|candidate_subquery| candidate_subquery == subquery_id)
+        })
+        .max_by(|(_, left), (_, right)| {
+            exact_score(&left.unit, &subquery_tokens)
+                .partial_cmp(&exact_score(&right.unit, &subquery_tokens))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    lexical_score(&left.unit, &subquery_tokens)
+                        .partial_cmp(&lexical_score(&right.unit, &subquery_tokens))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| {
+                    left.fused_score
+                        .partial_cmp(&right.fused_score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| right.unit.body.cmp(&left.unit.body))
+        })
+        .map(|(unit_id, _)| *unit_id)
+    else {
+        return;
+    };
+    if let Some(candidate) = candidates.get_mut(&unit_id) {
+        candidate.decomposition_rank = Some(
+            candidate
+                .decomposition_rank
+                .map_or(rank, |existing| existing.min(rank)),
+        );
+    }
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
 }
 
 fn rerank_candidates(
@@ -1096,6 +1325,8 @@ struct CandidateAccumulator {
     fused_score: f32,
     rerank_rank: Option<usize>,
     rerank_score: f32,
+    subquery_ids: Vec<String>,
+    decomposition_rank: Option<usize>,
     channels: Vec<(RecallChannel, usize, f32)>,
 }
 
@@ -1103,6 +1334,29 @@ struct RerankTraceFacts {
     reranker_id: String,
     input_count: usize,
     overfetch_ratio: f32,
+}
+
+struct QueryDecompositionFacts {
+    subqueries: Vec<QuerySubquery>,
+    reason: String,
+}
+
+impl QueryDecompositionFacts {
+    fn none() -> Self {
+        Self {
+            subqueries: Vec::new(),
+            reason: "none".to_string(),
+        }
+    }
+
+    fn active(&self) -> bool {
+        !self.subqueries.is_empty()
+    }
+}
+
+struct QuerySubquery {
+    id: String,
+    query: String,
 }
 
 struct PackedRecallContext {
@@ -1127,7 +1381,25 @@ fn pack_recall_context(
 
     if request.context_packing_abstention_enabled {
         fused.sort_by(|left, right| {
-            if request.rerank_enabled {
+            if request.query_decomposition_enabled
+                && (left.decomposition_rank.is_some() || right.decomposition_rank.is_some())
+            {
+                left.decomposition_rank
+                    .unwrap_or(usize::MAX)
+                    .cmp(&right.decomposition_rank.unwrap_or(usize::MAX))
+                    .then_with(|| {
+                        left.rerank_rank
+                            .unwrap_or(usize::MAX)
+                            .cmp(&right.rerank_rank.unwrap_or(usize::MAX))
+                    })
+                    .then_with(|| {
+                        right
+                            .rerank_score
+                            .partial_cmp(&left.rerank_score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .then_with(|| left.unit.body.cmp(&right.unit.body))
+            } else if request.rerank_enabled {
                 left.rerank_rank
                     .unwrap_or(usize::MAX)
                     .cmp(&right.rerank_rank.unwrap_or(usize::MAX))
@@ -1558,6 +1830,7 @@ fn channel_weight(channel: RecallChannel, query: &str) -> f32 {
 fn recall_stage_facts() -> Vec<ReflectStageFact> {
     [
         "stage0_policy",
+        "query_decomposition",
         "exact",
         "lexical",
         "vector",
@@ -1592,6 +1865,9 @@ fn recall_feature_flags(request: &RecallRequest) -> Vec<String> {
     }
     if request.rerank_enabled {
         flags.push("rerank_enabled".to_string());
+    }
+    if request.query_decomposition_enabled {
+        flags.push("query_decomposition_enabled".to_string());
     }
     flags
 }

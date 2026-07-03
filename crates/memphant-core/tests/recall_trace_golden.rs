@@ -43,6 +43,7 @@ async fn recall_writes_trace_for_scope_denial() {
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
+            query_decomposition_enabled: true,
             engine_version: "engine-wsc-test".to_string(),
         },
     )
@@ -131,6 +132,7 @@ async fn contextual_chunk_recall_finds_source_unit_and_traces_flag() {
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
+            query_decomposition_enabled: true,
             engine_version: "engine-ws4-test".to_string(),
         },
     )
@@ -208,6 +210,7 @@ async fn servicenow_query_does_not_trigger_temporal_recency_match() {
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
+            query_decomposition_enabled: true,
             engine_version: "engine-temporal-token-test".to_string(),
         },
     )
@@ -296,6 +299,7 @@ async fn recall_drops_expired_validity_window_for_current_query() {
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
+            query_decomposition_enabled: true,
             engine_version: "engine-rung5-test".to_string(),
         },
     )
@@ -409,6 +413,7 @@ async fn edge_expansion_can_be_disabled_and_traces_related_candidates() {
             edge_expansion_enabled: false,
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
+            query_decomposition_enabled: true,
             engine_version: "engine-rung6-test".to_string(),
         },
     )
@@ -431,6 +436,7 @@ async fn edge_expansion_can_be_disabled_and_traces_related_candidates() {
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
+            query_decomposition_enabled: true,
             engine_version: "engine-rung6-test".to_string(),
         },
     )
@@ -535,6 +541,7 @@ async fn packing_collapses_duplicate_decoys_and_preserves_answer_under_budget() 
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
+            query_decomposition_enabled: true,
             engine_version: "engine-rung7-test".to_string(),
         },
     )
@@ -658,6 +665,7 @@ async fn packing_abstains_when_top_evidence_is_unresolved_contradiction() {
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
+            query_decomposition_enabled: true,
             engine_version: "engine-rung7-test".to_string(),
         },
     )
@@ -754,6 +762,7 @@ async fn bounded_rerank_reorders_rank_sensitive_candidate_and_traces_decision() 
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
             rerank_enabled: false,
+            query_decomposition_enabled: true,
             engine_version: "engine-rung8-test".to_string(),
         },
     )
@@ -785,6 +794,7 @@ async fn bounded_rerank_reorders_rank_sensitive_candidate_and_traces_decision() 
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
+            query_decomposition_enabled: true,
             engine_version: "engine-rung8-test".to_string(),
         },
     )
@@ -817,6 +827,189 @@ async fn bounded_rerank_reorders_rank_sensitive_candidate_and_traces_decision() 
     assert_eq!(answer_trace.rerank_rank, Some(1));
     assert!(decoy_trace.rerank_rank.is_some_and(|rank| rank > 1));
     assert!(answer_trace.rerank_score > decoy_trace.rerank_score);
+}
+
+#[tokio::test]
+async fn query_decomposition_recovers_composite_answer_and_traces_subqueries() {
+    let store = InMemoryStore::default();
+    let tenant_id = tenant(79_000);
+    let scope_id = scope(79_001);
+    let actor_id = actor(79_002);
+
+    let mut tx = store.begin().await;
+    let file_id = store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id,
+                scope_id,
+                kind: MemoryKind::Semantic,
+                state: UnitState::Active,
+                subject_key: Some("deploy task file".to_string()),
+                body: "Deploy task file changed rollout.toml.".to_string(),
+                trust_level: TrustLevel::TrustedSystem,
+                churn_class: None,
+                freshness_due: false,
+                actor_id: Some(actor_id),
+                source_kind: Some("fixture".to_string()),
+                source_episode_id: None,
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
+            },
+        )
+        .await
+        .expect("file unit seeded");
+    let approval_id = store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id,
+                scope_id,
+                kind: MemoryKind::Semantic,
+                state: UnitState::Active,
+                subject_key: Some("release approval".to_string()),
+                body: "Manual gate is required.".to_string(),
+                trust_level: TrustLevel::TrustedSystem,
+                churn_class: None,
+                freshness_due: false,
+                actor_id: Some(actor_id),
+                source_kind: Some("fixture".to_string()),
+                source_episode_id: None,
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
+            },
+        )
+        .await
+        .expect("approval unit seeded");
+    let mut decoy_ids = Vec::new();
+    for index in 0..4 {
+        let decoy_id = store
+            .stage_memory_unit(
+                &mut tx,
+                NewMemoryUnit {
+                    tenant_id,
+                    scope_id,
+                    kind: MemoryKind::Semantic,
+                    state: UnitState::Active,
+                    subject_key: Some(format!("release approval chatter {index}")),
+                    body: format!(
+                        "Deploy task file changed release approval required noisy status {index}."
+                    ),
+                    trust_level: TrustLevel::TrustedSystem,
+                    churn_class: None,
+                    freshness_due: false,
+                    actor_id: Some(actor_id),
+                    source_kind: Some("fixture".to_string()),
+                    source_episode_id: None,
+                    source_resource_id: None,
+                    deletion_generation: None,
+                    contextual_chunks: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                    transaction_from: None,
+                    transaction_to: None,
+                },
+            )
+            .await
+            .expect("decoy unit seeded");
+        decoy_ids.push(decoy_id);
+    }
+    store.commit(tx).await.expect("seed committed");
+
+    let query = "Which deploy task file changed and which release approval is required?";
+    let disabled = recall(
+        &store,
+        RecallRequest {
+            tenant_id,
+            scope_id,
+            actor_id,
+            allowed_scope_ids: vec![scope_id],
+            query: query.to_string(),
+            k: 2,
+            budget_tokens: 96,
+            mode: RecallMode::Balanced,
+            include_beliefs: false,
+            edge_expansion_enabled: true,
+            context_packing_abstention_enabled: true,
+            rerank_enabled: true,
+            query_decomposition_enabled: false,
+            engine_version: "engine-rung9-test".to_string(),
+        },
+    )
+    .await
+    .expect("recall succeeds with decomposition disabled");
+    let disabled_trace = store.trace_by_id(disabled.trace_id).expect("trace exists");
+    assert!(
+        decoy_ids
+            .iter()
+            .any(|decoy_id| disabled.candidate_whitelist.contains(decoy_id)),
+        "disabled whitelist={:?}, decoy_ids={:?}",
+        disabled.candidate_whitelist,
+        decoy_ids
+    );
+    assert!(
+        !disabled.candidate_whitelist.contains(&approval_id),
+        "disabled whitelist should miss release approval, got {:?}; file_id={:?}; approval_id={:?}; candidates={:?}",
+        disabled.candidate_whitelist,
+        file_id,
+        approval_id,
+        disabled_trace.candidates
+    );
+
+    let enabled = recall(
+        &store,
+        RecallRequest {
+            tenant_id,
+            scope_id,
+            actor_id,
+            allowed_scope_ids: vec![scope_id],
+            query: query.to_string(),
+            k: 2,
+            budget_tokens: 96,
+            mode: RecallMode::Balanced,
+            include_beliefs: false,
+            edge_expansion_enabled: true,
+            context_packing_abstention_enabled: true,
+            rerank_enabled: true,
+            query_decomposition_enabled: true,
+            engine_version: "engine-rung9-test".to_string(),
+        },
+    )
+    .await
+    .expect("recall succeeds with decomposition enabled");
+    assert!(enabled.candidate_whitelist.contains(&file_id));
+    assert!(enabled.candidate_whitelist.contains(&approval_id));
+
+    let trace = store.trace_by_id(enabled.trace_id).expect("trace exists");
+    assert!(
+        trace
+            .feature_flags
+            .iter()
+            .any(|flag| flag == "query_decomposition_enabled")
+    );
+    assert!(trace.subquery_ids.len() >= 2);
+    assert!(
+        trace
+            .decomposition_reason
+            .contains("multi_constraint_conjunction")
+    );
+
+    let approval_trace = trace
+        .candidates
+        .iter()
+        .find(|candidate| candidate.unit_id == approval_id)
+        .expect("approval candidate traced");
+    assert!(!approval_trace.subquery_ids.is_empty());
 }
 
 #[derive(Debug, Deserialize)]
@@ -1000,6 +1193,7 @@ async fn recall_golden_fixtures_pass() {
                 edge_expansion_enabled: true,
                 context_packing_abstention_enabled: true,
                 rerank_enabled: true,
+                query_decomposition_enabled: true,
                 engine_version: "engine-wsc-test".to_string(),
             },
         )

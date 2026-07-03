@@ -136,6 +136,8 @@ pub struct RecallRequest {
     pub context_packing_abstention_enabled: bool,
     #[serde(default = "default_true")]
     pub rerank_enabled: bool,
+    #[serde(default = "default_true")]
+    pub query_decomposition_enabled: bool,
     pub engine_version: String,
 }
 
@@ -149,6 +151,8 @@ pub struct RecallCandidateTrace {
     pub fused_score: Option<f32>,
     pub rerank_rank: Option<usize>,
     pub rerank_score: f32,
+    #[serde(default)]
+    pub subquery_ids: Vec<String>,
     pub trust_level: TrustLevel,
     pub state: UnitState,
     pub discard_reason: Option<RecallDropReason>,
@@ -209,6 +213,9 @@ pub struct RetrievalTrace {
     pub reranker_id: String,
     pub rerank_input_count: usize,
     pub rerank_overfetch_ratio: f32,
+    #[serde(default)]
+    pub subquery_ids: Vec<String>,
+    pub decomposition_reason: String,
     pub abstention_signal: bool,
     pub latency_ms: u64,
     pub token_estimate: usize,
@@ -687,6 +694,7 @@ pub struct RecallHttpRequest {
     pub edge_expansion_enabled: Option<bool>,
     pub context_packing_abstention_enabled: Option<bool>,
     pub rerank_enabled: Option<bool>,
+    pub query_decomposition_enabled: Option<bool>,
     pub include_trace: Option<bool>,
 }
 

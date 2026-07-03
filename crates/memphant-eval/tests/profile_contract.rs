@@ -359,3 +359,70 @@ fn rung8_promotion_requires_bounded_rerank_sample_and_control() {
     assert!(text.contains("rung_decision:8:missing_bounded_rerank_sample"));
     assert!(text.contains("rung_decision:8:missing_no_rerank_control"));
 }
+
+#[test]
+fn rung9_profile_archives_query_decomposition_promotion() {
+    let archive_dir = tempfile::tempdir().expect("tempdir");
+    let archive_path = archive_dir.path().join("rung9-profile.json");
+    let report = run_profile_file(
+        &repo_root().join("examples/evals/rung9-query-decomposition-profile.yaml"),
+        "rungs-0-8-baseline",
+        Some(archive_path.clone()),
+    )
+    .expect("rung9 profile should pass");
+
+    let decision = report
+        .rung_decisions
+        .iter()
+        .find(|decision| decision.rung == 9)
+        .expect("rung 9 decision");
+    assert_eq!(decision.item, "query decomposition");
+    assert_eq!(decision.status, "promoted");
+    assert_eq!(decision.axes, ["outcome", "long_horizon", "interactive"]);
+    assert!(decision.delta_vs_baseline > 0.0);
+    assert!(decision.ci[0] > 0.0);
+    assert!(
+        decision
+            .benchmark_sample_refs
+            .iter()
+            .any(|sample| sample.contains("query_decomposition_deploy_release"))
+    );
+    assert!(
+        decision
+            .benchmark_sample_refs
+            .iter()
+            .any(|sample| sample.contains("no-decomposition"))
+    );
+
+    let archived: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&archive_path).expect("read archive"))
+            .expect("archive json");
+    assert_eq!(archived["rung_decisions"][0]["rung"], 9);
+}
+
+#[test]
+fn rung9_promotion_requires_composite_sample_and_no_decomposition_control() {
+    let source = fs::read_to_string(
+        repo_root().join("examples/evals/rung9-query-decomposition-profile.yaml"),
+    )
+    .expect("read fixture");
+    let bad = source
+        .replace(
+            "      - memphant:examples/evals/golden/query_decomposition_deploy_release.yaml\n",
+            "",
+        )
+        .replace(
+            "      - no-decomposition:benchmarks/rung9-baseline-sampled.yaml\n",
+            "",
+        );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("bad-rung9-profile.yaml");
+    fs::write(&path, bad).expect("write fixture");
+
+    let error = run_profile_file(&path, "rungs-0-8-baseline", None)
+        .expect_err("rung9 promotion without sample/control should fail");
+
+    let text = error.to_string();
+    assert!(text.contains("rung_decision:9:missing_query_decomposition_sample"));
+    assert!(text.contains("rung_decision:9:missing_no_decomposition_control"));
+}
