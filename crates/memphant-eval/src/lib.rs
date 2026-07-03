@@ -1087,6 +1087,9 @@ fn validate_rung_decision(
     if decision.rung == 13 && decision.status == "promoted" {
         validate_rung13_learned_rerank_promotion(decision, axes, &prefix, findings);
     }
+    if decision.rung == 14 && decision.status == "retired" {
+        validate_rung14_external_engine_retirement(decision, axes, &prefix, findings);
+    }
 }
 
 fn validate_rung4_contextual_chunk_promotion(
@@ -1531,6 +1534,60 @@ fn validate_rung13_learned_rerank_promotion(
             Some(result) if result.delta_vs_baseline.unwrap_or_default() > 0.0 => {}
             Some(_) => findings.push(format!("{prefix}:{axis}:non_positive_axis_delta")),
             None => {}
+        }
+    }
+}
+
+fn validate_rung14_external_engine_retirement(
+    decision: &RungDecision,
+    axes: &BTreeMap<String, SotaAxisResult>,
+    prefix: &str,
+    findings: &mut Vec<String>,
+) {
+    if decision.item != "external graph/vector escape hatch" {
+        findings.push(format!("{prefix}:invalid_item:{}", decision.item));
+    }
+    for required_axis in ["outcome", "long_horizon", "scale", "systems_cost"] {
+        if !decision.axes.iter().any(|axis| axis == required_axis) {
+            findings.push(format!("{prefix}:missing_{required_axis}_axis"));
+        }
+    }
+    if !decision
+        .benchmark_sample_refs
+        .iter()
+        .any(|sample| sample.contains("edge_expansion_runbook_lineage"))
+    {
+        findings.push(format!("{prefix}:missing_relational_edge_sample"));
+    }
+    if !decision
+        .benchmark_sample_refs
+        .iter()
+        .any(|sample| sample.contains("no-edges"))
+    {
+        findings.push(format!("{prefix}:missing_no_edges_control"));
+    }
+    if !decision
+        .benchmark_sample_refs
+        .iter()
+        .any(|sample| sample.contains("pgvector-default:wsi-local-sota-profile"))
+    {
+        findings.push(format!("{prefix}:missing_pgvector_profile_ref"));
+    }
+    if !decision.before_trace_ref.contains("wsi-local-sota-profile") {
+        findings.push(format!("{prefix}:missing_wsi_profile_trace"));
+    }
+    if !decision
+        .after_trace_ref
+        .contains("rung13-learned-rerank-profile")
+    {
+        findings.push(format!("{prefix}:missing_rung13_no_bottleneck_trace"));
+    }
+    if decision.delta_vs_baseline != 0.0 || decision.ci != [0.0, 0.0] {
+        findings.push(format!("{prefix}:retired_with_material_delta"));
+    }
+    for axis in ["outcome", "long_horizon", "scale", "systems_cost"] {
+        if !axes.contains_key(axis) {
+            findings.push(format!("{prefix}:missing_axis:{axis}"));
         }
     }
 }

@@ -732,3 +732,88 @@ fn rung13_promotion_requires_learned_sample_control_and_training_set() {
     assert!(text.contains("rung_decision:13:missing_no_learned_rerank_control"));
     assert!(text.contains("rung_decision:13:missing_training_set_ref"));
 }
+
+#[test]
+fn rung14_profile_archives_external_engine_retirement() {
+    let archive_dir = tempfile::tempdir().expect("tempdir");
+    let archive_path = archive_dir.path().join("rung14-profile.json");
+    let report = run_profile_file(
+        &repo_root().join("examples/evals/rung14-external-engine-retirement-profile.yaml"),
+        "rungs-0-13-baseline",
+        Some(archive_path.clone()),
+    )
+    .expect("rung14 profile should pass");
+
+    let decision = report
+        .rung_decisions
+        .iter()
+        .find(|decision| decision.rung == 14)
+        .expect("rung 14 decision");
+    assert_eq!(decision.item, "external graph/vector escape hatch");
+    assert_eq!(decision.status, "retired");
+    assert!(!decision.gate_met);
+    assert_eq!(
+        decision.axes,
+        ["outcome", "long_horizon", "scale", "systems_cost"]
+    );
+    assert_eq!(decision.delta_vs_baseline, 0.0);
+    assert_eq!(decision.ci, [0.0, 0.0]);
+    assert!(
+        decision
+            .benchmark_sample_refs
+            .iter()
+            .any(|sample| sample.contains("edge_expansion_runbook_lineage"))
+    );
+    assert!(
+        decision
+            .benchmark_sample_refs
+            .iter()
+            .any(|sample| sample.contains("no-edges"))
+    );
+    assert!(
+        decision
+            .benchmark_sample_refs
+            .iter()
+            .any(|sample| sample.contains("pgvector-default:wsi-local-sota-profile"))
+    );
+    assert!(
+        report
+            .retired_levers
+            .iter()
+            .any(|item| item == "External graph DB / dedicated vector engine")
+    );
+
+    let archived: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&archive_path).expect("read archive"))
+            .expect("archive json");
+    assert_eq!(archived["rung_decisions"][0]["rung"], 14);
+}
+
+#[test]
+fn rung14_retirement_requires_relational_edge_control_and_pgvector_evidence() {
+    let source = fs::read_to_string(
+        repo_root().join("examples/evals/rung14-external-engine-retirement-profile.yaml"),
+    )
+    .expect("read fixture");
+    let bad = source
+        .replace(
+            "      - relational-edge:examples/evals/golden/edge_expansion_runbook_lineage.yaml\n",
+            "",
+        )
+        .replace(
+            "      - no-edges:benchmarks/rung6-no-edges-sampled.yaml\n",
+            "",
+        )
+        .replace("      - pgvector-default:wsi-local-sota-profile\n", "");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("bad-rung14-profile.yaml");
+    fs::write(&path, bad).expect("write fixture");
+
+    let error = run_profile_file(&path, "rungs-0-13-baseline", None)
+        .expect_err("rung14 retirement without relational/pgvector proof should fail");
+
+    let text = error.to_string();
+    assert!(text.contains("rung_decision:14:missing_relational_edge_sample"));
+    assert!(text.contains("rung_decision:14:missing_no_edges_control"));
+    assert!(text.contains("rung_decision:14:missing_pgvector_profile_ref"));
+}
