@@ -55,6 +55,7 @@ pub struct EvalRunOptions {
     pub query_decomposition_enabled: bool,
     pub procedure_recall_enabled: bool,
     pub decay_enabled: bool,
+    pub l4_exhaustive_enabled: bool,
     pub filesystem_control_enabled: bool,
 }
 
@@ -71,6 +72,7 @@ impl Default for EvalRunOptions {
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
             decay_enabled: true,
+            l4_exhaustive_enabled: true,
             filesystem_control_enabled: false,
         }
     }
@@ -493,6 +495,7 @@ struct GoldenRunControls {
     query_decomposition_enabled: bool,
     procedure_recall_enabled: bool,
     decay_enabled: bool,
+    l4_exhaustive_enabled: bool,
     filesystem_control_enabled: bool,
 }
 
@@ -507,6 +510,7 @@ impl Default for GoldenRunControls {
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
             decay_enabled: true,
+            l4_exhaustive_enabled: true,
             filesystem_control_enabled: false,
         }
     }
@@ -523,6 +527,7 @@ impl From<&EvalRunOptions> for GoldenRunControls {
             query_decomposition_enabled: options.query_decomposition_enabled,
             procedure_recall_enabled: options.procedure_recall_enabled,
             decay_enabled: options.decay_enabled,
+            l4_exhaustive_enabled: options.l4_exhaustive_enabled,
             filesystem_control_enabled: options.filesystem_control_enabled,
         }
     }
@@ -577,6 +582,7 @@ pub fn run_eval_file(path: &Path, options: EvalRunOptions) -> EvalResult<EvalRep
                 "query_decomposition_enabled": options.query_decomposition_enabled,
                 "procedure_recall_enabled": options.procedure_recall_enabled,
                 "decay_enabled": options.decay_enabled,
+                "l4_exhaustive_enabled": options.l4_exhaustive_enabled,
                 "filesystem_control_enabled": options.filesystem_control_enabled,
             },
             "case_results": report.case_results,
@@ -1063,6 +1069,9 @@ fn validate_rung_decision(
     if decision.rung == 11 && decision.status == "promoted" {
         validate_rung11_dsr_decay_promotion(decision, axes, &prefix, findings);
     }
+    if decision.rung == 12 && decision.status == "promoted" {
+        validate_rung12_l4_exhaustive_promotion(decision, axes, &prefix, findings);
+    }
 }
 
 fn validate_rung4_contextual_chunk_promotion(
@@ -1408,6 +1417,56 @@ fn validate_rung11_dsr_decay_promotion(
     }
 }
 
+fn validate_rung12_l4_exhaustive_promotion(
+    decision: &RungDecision,
+    axes: &BTreeMap<String, SotaAxisResult>,
+    prefix: &str,
+    findings: &mut Vec<String>,
+) {
+    if decision.item != "L4 exhaustive recall" {
+        findings.push(format!("{prefix}:invalid_item:{}", decision.item));
+    }
+    for required_axis in ["long_horizon", "scale", "interactive"] {
+        if !decision.axes.iter().any(|axis| axis == required_axis) {
+            findings.push(format!("{prefix}:missing_{required_axis}_axis"));
+        }
+    }
+    if !decision
+        .benchmark_sample_refs
+        .iter()
+        .any(|sample| sample.contains("l4_exhaustive_raw_episode_buried"))
+    {
+        findings.push(format!("{prefix}:missing_l4_exhaustive_sample"));
+    }
+    if !decision
+        .benchmark_sample_refs
+        .iter()
+        .any(|sample| sample.contains("no-l4"))
+    {
+        findings.push(format!("{prefix}:missing_no_l4_control"));
+    }
+    if !decision
+        .benchmark_sample_refs
+        .iter()
+        .any(|sample| sample.contains("rung12-l4-exhaustive"))
+    {
+        findings.push(format!("{prefix}:missing_l4_sampled_suite"));
+    }
+    if !decision.before_trace_ref.contains("rung12-baseline") {
+        findings.push(format!("{prefix}:missing_rung12_baseline_trace"));
+    }
+    if !decision.after_trace_ref.contains("rung12-l4-exhaustive") {
+        findings.push(format!("{prefix}:missing_rung12_l4_trace"));
+    }
+    for axis in ["long_horizon", "scale", "interactive"] {
+        match axes.get(axis) {
+            Some(result) if result.delta_vs_baseline.unwrap_or_default() > 0.0 => {}
+            Some(_) => findings.push(format!("{prefix}:{axis}:non_positive_axis_delta")),
+            None => {}
+        }
+    }
+}
+
 fn validate_ci(prefix: &str, delta: Option<f64>, ci: Option<[f64; 2]>, findings: &mut Vec<String>) {
     let Some(delta) = delta else {
         findings.push(format!("{prefix}:missing_delta"));
@@ -1568,6 +1627,12 @@ async fn run_golden_case_inner(
     .await?;
     let recall_edge_expansion_enabled =
         controls.edge_expansion_enabled && !controls.filesystem_control_enabled;
+    let requested_mode = case.mode.unwrap_or(RecallMode::Fast);
+    let mode = if requested_mode == RecallMode::Exhaustive && !controls.l4_exhaustive_enabled {
+        RecallMode::Balanced
+    } else {
+        requested_mode
+    };
     let response = recall(
         &context.store,
         RecallRequest {
@@ -1578,7 +1643,7 @@ async fn run_golden_case_inner(
             query: case.query.clone(),
             k: case.k.unwrap_or(8),
             budget_tokens: case.budget_tokens.unwrap_or(256),
-            mode: case.mode.unwrap_or(RecallMode::Fast),
+            mode,
             include_beliefs: case.include_beliefs,
             edge_expansion_enabled: recall_edge_expansion_enabled,
             context_packing_abstention_enabled: controls.context_packing_abstention_enabled,

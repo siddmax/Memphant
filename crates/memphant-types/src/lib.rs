@@ -97,6 +97,7 @@ pub enum RecallChannel {
     Vector,
     Temporal,
     Edge,
+    Exhaustive,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -246,6 +247,10 @@ pub struct RetrievalTrace {
     pub cost_micros: u64,
     #[serde(default)]
     pub decay_model_id: String,
+    #[serde(default)]
+    pub l4_sandbox_id: Option<String>,
+    #[serde(default)]
+    pub l4_gathered_evidence_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

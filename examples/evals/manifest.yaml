@@ -3,6 +3,7 @@ golden:
   - query_decomposition_deploy_release
   - procedural_memory_replay_validation
   - dsr_decay_fold_review_event
+  - l4_exhaustive_raw_episode_buried
   - checkout_region
   - contextual_chunk_breaker
   - deleted_secret_filter

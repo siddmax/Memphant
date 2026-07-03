@@ -18,6 +18,7 @@ use memphant_types::{NewResource, ResourceExtractorState, ResourceId};
 
 const CURRENT_VALIDITY_CUTOFF: &str = "2026-07-03T00:00:00Z";
 const DECAY_MODEL_ID: &str = "fixed-prior-dsr-v1";
+const L4_SANDBOX_ID: &str = "deterministic-local-l4-v1";
 const DEFAULT_STABILITY_DAYS: f32 = 7.0;
 const DEFAULT_DIFFICULTY: f32 = 5.0;
 
@@ -780,6 +781,8 @@ pub async fn recall(
             token_estimate: 0,
             cost_micros: 0,
             decay_model_id: decay_model_id(&request).to_string(),
+            l4_sandbox_id: None,
+            l4_gathered_evidence_ids: Vec::new(),
         };
         state
             .retrieval_traces
@@ -802,6 +805,11 @@ pub async fn recall(
         .unwrap_or_default();
     let tenant_edges = state
         .memory_edges
+        .get(&request.tenant_id)
+        .cloned()
+        .unwrap_or_default();
+    let tenant_episodes = state
+        .episodes
         .get(&request.tenant_id)
         .cloned()
         .unwrap_or_default();
@@ -863,6 +871,7 @@ pub async fn recall(
                     rerank_rank: None,
                     rerank_score: 0.0,
                     decay,
+                    l4_score: 0.0,
                     subquery_ids: Vec::new(),
                     decomposition_rank: None,
                     channels: vec![(channel, channel_rank, score)],
@@ -928,6 +937,7 @@ pub async fn recall(
                             rerank_rank: None,
                             rerank_score: 0.0,
                             decay,
+                            l4_score: 0.0,
                             subquery_ids: vec![subquery.id.clone()],
                             decomposition_rank: None,
                             channels: vec![(channel, channel_rank, score)],
@@ -958,6 +968,63 @@ pub async fn recall(
                 &subquery.query,
                 subquery_index + 1,
             );
+        }
+    }
+
+    let mut l4_gathered_evidence_ids = Vec::new();
+    if request.mode == RecallMode::Exhaustive {
+        let mut ranked =
+            l4_exhaustive_candidates(&tenant_units, &tenant_episodes, &request, &query_tokens);
+        ranked.sort_by(|left, right| {
+            right
+                .1
+                .partial_cmp(&left.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.0.body.cmp(&right.0.body))
+        });
+        for (rank, (unit, score, evidence_id)) in ranked.into_iter().enumerate() {
+            let channel_rank = rank + 1;
+            let decay = decay_score_for(&unit, &tenant_review_events, request.decay_enabled);
+            let contribution = 8.0 + score + (1.0 / (50.0 + channel_rank as f32));
+            push_unique(&mut l4_gathered_evidence_ids, evidence_id.clone());
+            candidates_by_unit
+                .entry(unit.id)
+                .and_modify(|candidate| {
+                    candidate.fused_score += contribution;
+                    candidate.l4_score = candidate.l4_score.max(score);
+                    candidate
+                        .channels
+                        .push((RecallChannel::Exhaustive, channel_rank, score));
+                })
+                .or_insert_with(|| CandidateAccumulator {
+                    unit: unit.clone(),
+                    fused_score: contribution,
+                    rerank_rank: None,
+                    rerank_score: 0.0,
+                    decay,
+                    l4_score: score,
+                    subquery_ids: Vec::new(),
+                    decomposition_rank: None,
+                    channels: vec![(RecallChannel::Exhaustive, channel_rank, score)],
+                });
+            candidate_traces.push(RecallCandidateTrace {
+                unit_id: unit.id,
+                channel: RecallChannel::Exhaustive,
+                channel_rank,
+                channel_score: score,
+                fused_rank: None,
+                fused_score: None,
+                rerank_rank: None,
+                rerank_score: 0.0,
+                subquery_ids: Vec::new(),
+                decay_retrievability: decay.retrievability,
+                dsr_stability_days: decay.stability_days,
+                dsr_difficulty: decay.difficulty,
+                dsr_reinforcement_count: decay.reinforcement_count,
+                trust_level: unit.trust_level,
+                state: unit.state,
+                discard_reason: None,
+            });
         }
     }
 
@@ -994,7 +1061,15 @@ pub async fn recall(
         }
     }
 
-    let packed = pack_recall_context(fused, &request, &tenant_edges, &query_tokens, dropped_items);
+    let iterative_scan_depth = recall_pack_scan_limit(&request, fused.len());
+    let packed = pack_recall_context(
+        fused,
+        &request,
+        &tenant_edges,
+        &query_tokens,
+        dropped_items,
+        iterative_scan_depth,
+    );
     let token_estimate = packed.token_estimate;
     let items = packed.items;
     let dropped_items = packed.dropped_items;
@@ -1042,7 +1117,7 @@ pub async fn recall(
         dropped_items,
         citations: citations.clone(),
         filter_selectivity,
-        iterative_scan_depth: Some(1),
+        iterative_scan_depth: Some(iterative_scan_depth as u32),
         consolidation_lag_ms: 0,
         weight_vector_id: "default".to_string(),
         mode_requested: request.mode,
@@ -1064,6 +1139,8 @@ pub async fn recall(
         token_estimate,
         cost_micros: 0,
         decay_model_id: decay_model_id(&request).to_string(),
+        l4_sandbox_id: (request.mode == RecallMode::Exhaustive).then(|| L4_SANDBOX_ID.to_string()),
+        l4_gathered_evidence_ids,
     };
     state
         .retrieval_traces
@@ -1463,6 +1540,7 @@ struct CandidateAccumulator {
     rerank_rank: Option<usize>,
     rerank_score: f32,
     decay: DecayScore,
+    l4_score: f32,
     subquery_ids: Vec<String>,
     decomposition_rank: Option<usize>,
     channels: Vec<(RecallChannel, usize, f32)>,
@@ -1529,6 +1607,7 @@ fn pack_recall_context(
     tenant_edges: &[StoredMemoryEdge],
     query_tokens: &[String],
     mut dropped_items: Vec<RecallDroppedItem>,
+    scan_limit: usize,
 ) -> PackedRecallContext {
     let mut token_estimate = 0;
     let mut items: Vec<RecallContextItem> = Vec::new();
@@ -1582,7 +1661,8 @@ fn pack_recall_context(
         });
     }
 
-    for candidate in fused.into_iter().take(request.k) {
+    let output_limit = request.k.max(1);
+    for candidate in fused.into_iter().take(scan_limit) {
         if request.context_packing_abstention_enabled
             && let Some(subject_key) = candidate.unit.subject_key.as_deref()
         {
@@ -1603,30 +1683,58 @@ fn pack_recall_context(
         }
 
         let unit_tokens = candidate.unit.body.split_whitespace().count();
+        let candidate_score = packing_relevance_score(&candidate, query_tokens);
+        if items.len() >= output_limit {
+            if let Some(replace_index) = replacement_index(
+                &packed_token_counts,
+                &packed_relevance_scores,
+                token_estimate,
+                unit_tokens,
+                candidate_score,
+                request.budget_tokens,
+            ) {
+                let replaced = items.remove(replace_index);
+                let replaced_tokens = packed_token_counts.remove(replace_index);
+                packed_relevance_scores.remove(replace_index);
+                token_estimate = token_estimate - replaced_tokens + unit_tokens;
+                dropped_items.push(RecallDroppedItem {
+                    unit_id: replaced.unit_id,
+                    reason: RecallDropReason::Rerank,
+                });
+                packed_token_counts.push(unit_tokens);
+                packed_relevance_scores.push(candidate_score);
+                items.push(context_item_for(candidate, tenant_edges, query_tokens));
+                continue;
+            }
+            dropped_items.push(RecallDroppedItem {
+                unit_id: candidate.unit.id,
+                reason: RecallDropReason::Rerank,
+            });
+            continue;
+        }
         if token_estimate + unit_tokens > request.budget_tokens {
-            if request.context_packing_abstention_enabled {
-                let candidate_score = packing_relevance_score(&candidate, query_tokens);
-                if let Some(replace_index) = replacement_index(
+            if request.context_packing_abstention_enabled
+                && let Some(replace_index) = replacement_index(
                     &packed_token_counts,
                     &packed_relevance_scores,
                     token_estimate,
                     unit_tokens,
                     candidate_score,
                     request.budget_tokens,
-                ) {
-                    let replaced = items.remove(replace_index);
-                    let replaced_tokens = packed_token_counts.remove(replace_index);
-                    packed_relevance_scores.remove(replace_index);
-                    token_estimate = token_estimate - replaced_tokens + unit_tokens;
-                    dropped_items.push(RecallDroppedItem {
-                        unit_id: replaced.unit_id,
-                        reason: RecallDropReason::Budget,
-                    });
-                    packed_token_counts.push(unit_tokens);
-                    packed_relevance_scores.push(candidate_score);
-                    items.push(context_item_for(candidate, tenant_edges, query_tokens));
-                    continue;
-                }
+                )
+            {
+                let replaced = items.remove(replace_index);
+                let replaced_tokens = packed_token_counts.remove(replace_index);
+                packed_relevance_scores.remove(replace_index);
+                token_estimate = token_estimate - replaced_tokens + unit_tokens;
+                dropped_items.push(RecallDroppedItem {
+                    unit_id: replaced.unit_id,
+                    reason: RecallDropReason::Budget,
+                });
+                packed_token_counts.push(unit_tokens);
+                packed_relevance_scores.push(candidate_score);
+                items.push(context_item_for(candidate, tenant_edges, query_tokens));
+                continue;
             }
             dropped_items.push(RecallDroppedItem {
                 unit_id: candidate.unit.id,
@@ -1636,7 +1744,7 @@ fn pack_recall_context(
         }
         token_estimate += unit_tokens;
         packed_token_counts.push(unit_tokens);
-        packed_relevance_scores.push(packing_relevance_score(&candidate, query_tokens));
+        packed_relevance_scores.push(candidate_score);
         items.push(context_item_for(candidate, tenant_edges, query_tokens));
     }
 
@@ -1653,6 +1761,16 @@ fn pack_recall_context(
         dropped_items,
         token_estimate,
         abstention,
+    }
+}
+
+fn recall_pack_scan_limit(request: &RecallRequest, candidate_count: usize) -> usize {
+    let output_limit = request.k.max(1);
+    match request.mode {
+        RecallMode::Exhaustive => candidate_count
+            .min(output_limit.saturating_mul(25).max(25))
+            .max(output_limit),
+        RecallMode::Fast | RecallMode::Balanced => output_limit.min(candidate_count).max(1),
     }
 }
 
@@ -1702,6 +1820,8 @@ fn context_item_for(
         "validated_failure_pattern"
     } else if candidate.unit.kind == MemoryKind::Procedural {
         "validated_procedure"
+    } else if candidate.l4_score > 0.0 {
+        "l4_exhaustive"
     } else if matched_contextual_chunk {
         "contextual_chunk"
     } else {
@@ -1811,8 +1931,47 @@ fn channel_candidates(
                     query_tokens,
                     request.procedure_recall_enabled,
                 ),
+                RecallChannel::Exhaustive => 0.0,
             };
             (score > 0.0).then(|| (unit.clone(), score))
+        })
+        .collect()
+}
+
+fn l4_exhaustive_candidates(
+    units: &[StoredMemoryUnit],
+    episodes: &[StoredEpisode],
+    request: &RecallRequest,
+    query_tokens: &[String],
+) -> Vec<(StoredMemoryUnit, f32, String)> {
+    units
+        .iter()
+        .filter(|unit| request.allowed_scope_ids.contains(&unit.scope_id))
+        .filter(|unit| {
+            recallable(
+                unit,
+                request.include_beliefs,
+                request.procedure_recall_enabled,
+                &request.query,
+            )
+        })
+        .filter_map(|unit| {
+            let episode = unit
+                .source_episode_id
+                .and_then(|episode_id| episodes.iter().find(|episode| episode.id == episode_id))?;
+            let raw_score = vector_text_score(&episode.body, query_tokens);
+            let direct_score = exact_score(unit, query_tokens)
+                .max(lexical_score(unit, query_tokens))
+                .max(vector_score(unit, query_tokens))
+                .max(temporal_score(unit, &request.query));
+            let score = raw_score - direct_score;
+            (score > 0.0).then(|| {
+                (
+                    unit.clone(),
+                    score,
+                    format!("episode:{}", episode.id.as_uuid()),
+                )
+            })
         })
         .collect()
 }
@@ -2017,6 +2176,7 @@ fn channel_weight(channel: RecallChannel, query: &str) -> f32 {
         }
         RecallChannel::Temporal => 0.5,
         RecallChannel::Edge => 0.5,
+        RecallChannel::Exhaustive => 4.0,
     }
 }
 
@@ -2151,6 +2311,7 @@ fn recall_stage_facts() -> Vec<ReflectStageFact> {
         "stage0_policy",
         "query_decomposition",
         "procedure_recall",
+        "l4_exhaustive",
         "exact",
         "lexical",
         "vector",
@@ -2194,6 +2355,9 @@ fn recall_feature_flags(request: &RecallRequest) -> Vec<String> {
     }
     if request.decay_enabled {
         flags.push("decay_enabled".to_string());
+    }
+    if request.mode == RecallMode::Exhaustive {
+        flags.push("l4_exhaustive_enabled".to_string());
     }
     flags
 }

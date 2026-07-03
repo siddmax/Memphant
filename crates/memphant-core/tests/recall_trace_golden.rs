@@ -212,6 +212,184 @@ async fn dsr_decay_fold_promotes_reinforced_memory_over_ignored_stale_candidate(
 }
 
 #[tokio::test]
+async fn exhaustive_mode_gathers_buried_raw_episode_evidence_without_changing_fast_mode() {
+    let store = InMemoryStore::default();
+    let tenant_id = tenant(71_500);
+    let scope_id = scope(71_501);
+    let actor_id = actor(71_502);
+
+    let mut tx = store.begin().await;
+    let decoy_episode = store
+        .stage_episode(
+            &mut tx,
+            NewEpisode {
+                tenant_id,
+                scope_id,
+                actor_id,
+                source_kind: "fixture".to_string(),
+                source_trust: TrustLevel::TrustedSystem,
+                dedup_key: "rung12-decoy".to_string(),
+                body: "Stargate deploy requires a routine restart.".to_string(),
+            },
+        )
+        .await
+        .expect("decoy episode seeded");
+    let decoy_id = store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id,
+                scope_id,
+                kind: MemoryKind::Semantic,
+                state: UnitState::Active,
+                subject_key: Some("stargate deploy".to_string()),
+                body: "Stargate deploy requires a routine restart.".to_string(),
+                trust_level: TrustLevel::TrustedSystem,
+                churn_class: None,
+                freshness_due: false,
+                actor_id: Some(actor_id),
+                source_kind: Some("fixture".to_string()),
+                source_episode_id: Some(decoy_episode.episode_id),
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
+            },
+        )
+        .await
+        .expect("decoy unit seeded");
+    let answer_episode = store
+        .stage_episode(
+            &mut tx,
+            NewEpisode {
+                tenant_id,
+                scope_id,
+                actor_id,
+                source_kind: "fixture".to_string(),
+                source_trust: TrustLevel::TrustedSystem,
+                dedup_key: "rung12-answer".to_string(),
+                body: "The archived raw episode says Stargate deploy was blocked until heliotrope approval landed.".to_string(),
+            },
+        )
+        .await
+        .expect("answer episode seeded");
+    let answer_id = store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id,
+                scope_id,
+                kind: MemoryKind::Semantic,
+                state: UnitState::Active,
+                subject_key: Some("approval codename".to_string()),
+                body: "Heliotrope.".to_string(),
+                trust_level: TrustLevel::TrustedSystem,
+                churn_class: None,
+                freshness_due: false,
+                actor_id: Some(actor_id),
+                source_kind: Some("fixture".to_string()),
+                source_episode_id: Some(answer_episode.episode_id),
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
+            },
+        )
+        .await
+        .expect("answer unit seeded");
+    store.commit(tx).await.expect("seed committed");
+
+    let query = "What is required before Stargate deploy?".to_string();
+    let fast = recall(
+        &store,
+        RecallRequest {
+            tenant_id,
+            scope_id,
+            actor_id,
+            allowed_scope_ids: vec![scope_id],
+            query: query.clone(),
+            k: 1,
+            budget_tokens: 20,
+            mode: RecallMode::Fast,
+            include_beliefs: false,
+            edge_expansion_enabled: true,
+            context_packing_abstention_enabled: true,
+            rerank_enabled: true,
+            query_decomposition_enabled: true,
+            procedure_recall_enabled: true,
+            decay_enabled: true,
+            engine_version: "engine-rung12-test".to_string(),
+        },
+    )
+    .await
+    .expect("fast recall succeeds");
+
+    assert_eq!(fast.candidate_whitelist, vec![decoy_id]);
+    assert!(!fast.candidate_whitelist.contains(&answer_id));
+
+    let exhaustive = recall(
+        &store,
+        RecallRequest {
+            tenant_id,
+            scope_id,
+            actor_id,
+            allowed_scope_ids: vec![scope_id],
+            query,
+            k: 1,
+            budget_tokens: 20,
+            mode: RecallMode::Exhaustive,
+            include_beliefs: false,
+            edge_expansion_enabled: true,
+            context_packing_abstention_enabled: true,
+            rerank_enabled: true,
+            query_decomposition_enabled: true,
+            procedure_recall_enabled: true,
+            decay_enabled: true,
+            engine_version: "engine-rung12-test".to_string(),
+        },
+    )
+    .await
+    .expect("exhaustive recall succeeds");
+
+    assert_eq!(exhaustive.candidate_whitelist, vec![answer_id]);
+    assert_eq!(exhaustive.items[0].inclusion_reason, "l4_exhaustive");
+
+    let trace = store
+        .trace_by_id(exhaustive.trace_id)
+        .expect("trace recorded for exhaustive recall");
+    assert_eq!(trace.mode_requested, RecallMode::Exhaustive);
+    assert_eq!(trace.mode_executed, RecallMode::Exhaustive);
+    assert_eq!(trace.escalation_reason, "none");
+    assert!(
+        trace
+            .feature_flags
+            .iter()
+            .any(|flag| flag == "l4_exhaustive_enabled")
+    );
+    assert!(trace.iterative_scan_depth.unwrap_or_default() > 1);
+    assert_eq!(
+        trace.l4_sandbox_id.as_deref(),
+        Some("deterministic-local-l4-v1")
+    );
+    assert!(
+        trace
+            .l4_gathered_evidence_ids
+            .iter()
+            .any(|evidence_id| evidence_id
+                .contains(&answer_episode.episode_id.as_uuid().to_string()))
+    );
+    assert!(trace.candidates.iter().any(|candidate| {
+        candidate.unit_id == answer_id && candidate.channel == RecallChannel::Exhaustive
+    }));
+}
+
+#[tokio::test]
 async fn contextual_chunk_recall_finds_source_unit_and_traces_flag() {
     let store = InMemoryStore::default();
     let tenant_id = tenant(72_000);

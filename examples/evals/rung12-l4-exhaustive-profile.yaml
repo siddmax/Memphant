@@ -1,0 +1,355 @@
+id: rung12_l4_exhaustive_profile_001
+profile_version: sota-profile-0.2.0
+benchmark_version: l4-exhaustive-raw-episode-2026-07-03
+compare_to: rungs-0-11-baseline
+harness_pin:
+  answer_model: retrieval-only-oracle
+  embedding_profile: deterministic-local
+  reranker: deterministic-local-v1
+  query_decomposer: deterministic-structural-v1
+  decay_model: fixed-prior-dsr-v1
+  l4_mode: deterministic-local-l4-v1
+  memphant_commit_scope: rung12-l4-exhaustive
+axes:
+  outcome:
+    benchmark: memphant-golden
+    metric: pass_rate
+    source_status: internal_golden
+    trace_ref: docs/build-log/artifacts/pr-golden-traces.json
+    score: 1.0
+    baseline_score: 0.92
+    delta_vs_baseline: 0.08
+    ci: [0.08, 0.08]
+    gate: pass
+  long_horizon:
+    benchmark: lme-v2-raw-episode-style
+    metric: buried_answer_bearing_top_k
+    source_status: sampled_public_style
+    trace_ref: docs/build-log/artifacts/rung12-l4-exhaustive-sampled-traces.json
+    score: 1.0
+    baseline_score: 0.0
+    delta_vs_baseline: 1.0
+    ci: [1.0, 1.0]
+    gate: pass
+  scale:
+    benchmark: beam-raw-episode-style
+    metric: buried_answer_bearing_top_k
+    source_status: sampled_public_style
+    trace_ref: docs/build-log/artifacts/rung12-l4-exhaustive-sampled-traces.json
+    score: 1.0
+    baseline_score: 0.0
+    delta_vs_baseline: 1.0
+    ci: [1.0, 1.0]
+    gate: pass
+  longitudinal:
+    benchmark: memorystress-style
+    metric: degradation_auc
+    source_status: sampled_public_style
+    trace_ref: docs/build-log/artifacts/rung11-memorystress-sampled-traces.json
+    score: 1.0
+    baseline_score: 1.0
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    gate: pass
+  restraint:
+    benchmark: state-style-packing-abstention
+    metric: packed_answer_or_abstain
+    source_status: sampled_public_style
+    trace_ref: docs/build-log/artifacts/rung7-state-style-sampled-traces.json
+    score: 1.0
+    baseline_score: 1.0
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    gate: pass
+  interactive:
+    benchmark: state-style-raw-episode-recall
+    metric: explicit_exhaustive_recovery
+    source_status: internal_mimic
+    trace_ref: docs/build-log/artifacts/rung12-l4-exhaustive-sampled-traces.json
+    score: 1.0
+    baseline_score: 0.0
+    delta_vs_baseline: 1.0
+    ci: [1.0, 1.0]
+    gate: pass
+  embedding_selection:
+    benchmark: lmeb
+    metric: mean_n_at_10
+    source_status: not_run
+    trace_ref: not-run
+    gate: external_profile_required
+  procedural:
+    benchmark: skillos-state-style
+    metric: pass_k
+    source_status: sampled_public_style
+    trace_ref: docs/build-log/artifacts/rung10-state-style-sampled-traces.json
+    score: 1.0
+    baseline_score: 1.0
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    gate: pass
+  systems_cost:
+    benchmark: local-static
+    metric: packaging_contract
+    source_status: local_static
+    trace_ref: docs/build-log/2026-07-03-wsh-progress.md
+    score: 1.0
+    baseline_score: 1.0
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    gate: pass
+  internal_syndai:
+    benchmark: syndai-agent-file-memory
+    metric: answer_bearing_recall
+    source_status: internal_trace_compare
+    trace_ref: docs/build-log/artifacts/syndai_agent_file_memory_001-trace-compare.json
+    score: 1.0
+    baseline_score: 1.0
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    gate: pass
+rung_decisions:
+  - rung: 12
+    item: L4 exhaustive recall
+    status: promoted
+    gate_met: true
+    decision: promote_explicit_exhaustive_raw_episode_scan
+    reason: Explicit exhaustive mode recovered the buried heliotrope approval from raw episode evidence while the no-L4 control returned only the topical deploy decoy.
+    axes: [long_horizon, scale, interactive]
+    benchmark_sample_refs:
+      - memphant:examples/evals/golden/l4_exhaustive_raw_episode_buried.yaml
+      - l4:benchmarks/rung12-l4-exhaustive-sampled.yaml
+      - no-l4:benchmarks/rung12-baseline-sampled.yaml
+    before_trace_ref: docs/build-log/artifacts/rung12-baseline-sampled-traces.json
+    after_trace_ref: docs/build-log/artifacts/rung12-l4-exhaustive-sampled-traces.json
+    delta_vs_baseline: 1.0
+    ci: [1.0, 1.0]
+    p95_ms: 1.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+activation_decisions:
+  - item: L4 exhaustive recall behavior
+    status: activated
+    gate_met: true
+    decision: build_explicit_exhaustive_raw_episode_scan
+    reason: The paired Rung 12 profile recovered answer-bearing raw episode evidence only when explicit exhaustive mode was enabled.
+    before_trace_ref: docs/build-log/artifacts/rung12-baseline-sampled-traces.json
+    after_trace_ref: docs/build-log/artifacts/rung12-l4-exhaustive-sampled-traces.json
+    delta_vs_baseline: 1.0
+    ci: [1.0, 1.0]
+    p95_ms: 1.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: fast
+    exhaustive_mode: deterministic-local-l4-v1
+  - item: Learned reranker
+    status: dormant
+    gate_met: false
+    decision: keep_fixed_rules
+    reason: Rung 12 proves explicit raw episode scan depth, not a learned-reranker data floor.
+    before_trace_ref: docs/build-log/artifacts/rung12-baseline-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: fixed-rrf
+    exhaustive_mode: deterministic-local-v1
+  - item: Learned DSR/FSRS fitter
+    status: dormant
+    gate_met: false
+    decision: keep_fixed_priors
+    reason: Fixed-prior DSR remains active; no learned fitting threshold is met by this raw episode sample.
+    before_trace_ref: docs/build-log/artifacts/rung11-baseline-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: fixed-prior-dsr
+    exhaustive_mode: fixed-prior-dsr
+  - item: DSR decay fold
+    status: activated
+    gate_met: true
+    decision: keep_fixed_prior_fold
+    reason: Rung 11 remains active and independent of L4 exhaustive scan depth.
+    before_trace_ref: docs/build-log/artifacts/rung11-baseline-sampled-traces.json
+    after_trace_ref: docs/build-log/artifacts/rung11-memorystress-sampled-traces.json
+    delta_vs_baseline: 1.0
+    ci: [1.0, 1.0]
+    p95_ms: 1.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: fixed-prior-dsr
+    exhaustive_mode: fixed-prior-dsr
+  - item: Procedural replay-validation harness
+    status: activated
+    gate_met: true
+    decision: keep_validated_replay_gate
+    reason: Rung 10 remains active and independent of L4 exhaustive scan depth.
+    before_trace_ref: docs/build-log/artifacts/rung10-baseline-sampled-traces.json
+    after_trace_ref: docs/build-log/artifacts/rung10-state-style-sampled-traces.json
+    delta_vs_baseline: 1.0
+    ci: [1.0, 1.0]
+    p95_ms: 1.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: validated-procedure-recall
+    exhaustive_mode: validated-procedure-recall
+  - item: 3-tier DEK envelope encryption
+    status: dormant
+    gate_met: false
+    decision: keep_customer-gated
+    reason: No BYOC enterprise customer contract requires customer-held KEK yet.
+    before_trace_ref: docs/build-log/2026-07-03-wsh-progress.md
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: provider-sse
+    exhaustive_mode: disabled
+  - item: Ablation-voting recall
+    status: dormant
+    gate_met: false
+    decision: keep_disabled
+    reason: Rung 12 does not test randomized ablation voting or memory-poison containment gain.
+    before_trace_ref: docs/build-log/artifacts/rung12-baseline-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: single-profile-recall
+    exhaustive_mode: disabled
+  - item: Delta recall
+    status: dormant
+    gate_met: false
+    decision: keep_disabled
+    reason: No paired ablation proves delta recall improves a target axis.
+    before_trace_ref: docs/build-log/artifacts/rung12-baseline-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: full-pack
+    exhaustive_mode: full-pack
+  - item: Miss-repair re-extraction
+    status: dormant
+    gate_met: false
+    decision: keep_disabled
+    reason: The raw episode was already written and citeable; no query-conditioned re-extraction gate fired.
+    before_trace_ref: docs/build-log/artifacts/rung12-baseline-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: no-reextract
+    exhaustive_mode: no-reextract
+  - item: Retrievability probe
+    status: dormant
+    gate_met: false
+    decision: keep_disabled
+    reason: The L4 raw episode sample does not prove a separate retrievability-probe win.
+    before_trace_ref: docs/build-log/artifacts/rung12-baseline-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: no-probe
+    exhaustive_mode: no-probe
+  - item: Consolidation event delivery
+    status: dormant
+    gate_met: false
+    decision: keep_polling_contract
+    reason: No external integrator needs push delivery yet.
+    before_trace_ref: docs/build-log/2026-07-03-wsb-progress.md
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: event-log-shape-only
+    exhaustive_mode: disabled
+  - item: Hermes memory-provider adapter
+    status: dormant
+    gate_met: false
+    decision: keep_contract_frozen
+    reason: No Hermes design partner or launch-window demand is present.
+    before_trace_ref: docs/build-log/artifacts/wsi-local-sota-profile.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: public-api
+    exhaustive_mode: public-api
+  - item: External graph DB / dedicated vector engine
+    status: dormant
+    gate_met: false
+    decision: keep_postgres_path
+    reason: No Postgres or pgvector bottleneck proof exists after the L4 sampled profile.
+    before_trace_ref: docs/build-log/artifacts/wsi-local-sota-profile.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: postgres
+    exhaustive_mode: postgres
+  - item: Cache cluster
+    status: dormant
+    gate_met: false
+    decision: keep_single_node_cache
+    reason: The local sampled profile does not show repeated recall cost requiring a cache cluster.
+    before_trace_ref: docs/build-log/artifacts/rung12-l4-exhaustive-sampled-traces.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: in-process
+    exhaustive_mode: in-process
+  - item: TypeScript SDK
+    status: dormant
+    gate_met: false
+    decision: keep_openapi_contract_only
+    reason: No first TypeScript consumer or launch-window requirement is present.
+    before_trace_ref: docs/build-log/artifacts/wsi-local-sota-profile.json
+    after_trace_ref: null
+    delta_vs_baseline: 0.0
+    ci: [0.0, 0.0]
+    p95_ms: 0.0
+    cost_per_1k_recalls_usd: 0.0
+    security_result: pass
+    deletion_result: pass
+    default_mode: openapi
+    exhaustive_mode: openapi

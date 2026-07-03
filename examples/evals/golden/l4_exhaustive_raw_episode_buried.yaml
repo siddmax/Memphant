@@ -1,0 +1,40 @@
+id: l4_exhaustive_raw_episode_buried
+second_author_confirmed: true
+query: "What is required before Stargate deploy?"
+mode: exhaustive
+k: 1
+budget_tokens: 20
+seed:
+  units:
+    - name: mem_stargate_decoy
+      episode_body: "Stargate deploy requires a routine restart."
+      kind: semantic
+      state: active
+      subject_key: "stargate deploy"
+      body: "Stargate deploy requires a routine restart."
+      trust_level: trusted_system
+    - name: mem_stargate_raw_episode_answer
+      episode_body: "The archived raw episode says Stargate deploy was blocked until heliotrope approval landed."
+      kind: semantic
+      state: active
+      subject_key: "approval codename"
+      body: "Heliotrope."
+      trust_level: trusted_system
+expect:
+  answer_bearing_ids:
+    - mem_stargate_raw_episode_answer
+  top_k_contains:
+    - mem_stargate_raw_episode_answer
+  forbidden_units:
+    - mem_stargate_decoy
+  citations_include:
+    - mem_stargate_raw_episode_answer
+  packed_context_contains:
+    - mem_stargate_raw_episode_answer
+  packed_position_max:
+    mem_stargate_raw_episode_answer: 1
+  trace_stages_include:
+    - l4_exhaustive
+    - trace
+  trace_feature_flags_include:
+    - l4_exhaustive_enabled

@@ -571,3 +571,75 @@ fn rung11_promotion_requires_memorystress_and_no_decay_control() {
     assert!(text.contains("rung_decision:11:missing_memorystress_sample"));
     assert!(text.contains("rung_decision:11:missing_no_decay_control"));
 }
+
+#[test]
+fn rung12_profile_archives_l4_exhaustive_promotion() {
+    let archive_dir = tempfile::tempdir().expect("tempdir");
+    let archive_path = archive_dir.path().join("rung12-profile.json");
+    let report = run_profile_file(
+        &repo_root().join("examples/evals/rung12-l4-exhaustive-profile.yaml"),
+        "rungs-0-11-baseline",
+        Some(archive_path.clone()),
+    )
+    .expect("rung12 profile should pass");
+
+    let decision = report
+        .rung_decisions
+        .iter()
+        .find(|decision| decision.rung == 12)
+        .expect("rung 12 decision");
+    assert_eq!(decision.item, "L4 exhaustive recall");
+    assert_eq!(decision.status, "promoted");
+    assert_eq!(decision.axes, ["long_horizon", "scale", "interactive"]);
+    assert!(decision.delta_vs_baseline > 0.0);
+    assert!(decision.ci[0] > 0.0);
+    assert!(
+        decision
+            .benchmark_sample_refs
+            .iter()
+            .any(|sample| sample.contains("l4_exhaustive_raw_episode_buried"))
+    );
+    assert!(
+        decision
+            .benchmark_sample_refs
+            .iter()
+            .any(|sample| sample.contains("no-l4"))
+    );
+    assert!(
+        report
+            .activated_levers
+            .iter()
+            .any(|item| item == "L4 exhaustive recall behavior")
+    );
+
+    let archived: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&archive_path).expect("read archive"))
+            .expect("archive json");
+    assert_eq!(archived["rung_decisions"][0]["rung"], 12);
+}
+
+#[test]
+fn rung12_promotion_requires_l4_sample_and_no_l4_control() {
+    let source =
+        fs::read_to_string(repo_root().join("examples/evals/rung12-l4-exhaustive-profile.yaml"))
+            .expect("read fixture");
+    let bad = source
+        .replace(
+            "      - memphant:examples/evals/golden/l4_exhaustive_raw_episode_buried.yaml\n",
+            "",
+        )
+        .replace(
+            "      - no-l4:benchmarks/rung12-baseline-sampled.yaml\n",
+            "",
+        );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("bad-rung12-profile.yaml");
+    fs::write(&path, bad).expect("write fixture");
+
+    let error = run_profile_file(&path, "rungs-0-11-baseline", None)
+        .expect_err("rung12 promotion without L4 sample/control should fail");
+
+    let text = error.to_string();
+    assert!(text.contains("rung_decision:12:missing_l4_exhaustive_sample"));
+    assert!(text.contains("rung_decision:12:missing_no_l4_control"));
+}
