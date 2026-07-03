@@ -82,6 +82,140 @@ pub struct RetainResourceRequest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum RecallMode {
+    Fast,
+    Balanced,
+    Exhaustive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecallChannel {
+    Exact,
+    Lexical,
+    Vector,
+    Temporal,
+    Edge,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecallDropReason {
+    Tenant,
+    Scope,
+    Privacy,
+    Trust,
+    State,
+    Stale,
+    Budget,
+    Duplicate,
+    Rerank,
+    Deleted,
+    Invalidated,
+    Unknown,
+    ProtectedCategory,
+    BelowTrustFloor,
+    Irrelevant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecallRequest {
+    pub tenant_id: TenantId,
+    pub scope_id: ScopeId,
+    pub actor_id: ActorId,
+    pub allowed_scope_ids: Vec<ScopeId>,
+    pub query: String,
+    pub k: usize,
+    pub budget_tokens: usize,
+    pub mode: RecallMode,
+    pub include_beliefs: bool,
+    pub engine_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecallCandidateTrace {
+    pub unit_id: UnitId,
+    pub channel: RecallChannel,
+    pub channel_rank: usize,
+    pub channel_score: f32,
+    pub fused_rank: Option<usize>,
+    pub fused_score: Option<f32>,
+    pub trust_level: TrustLevel,
+    pub state: UnitState,
+    pub discard_reason: Option<RecallDropReason>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecallPolicyFilter {
+    pub reason: RecallDropReason,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecallCitation {
+    pub unit_id: UnitId,
+    pub episode_id: Option<EpisodeId>,
+    pub resource_id: Option<ResourceId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecallContextItem {
+    pub unit_id: UnitId,
+    pub body: String,
+    pub kind: MemoryKind,
+    pub inclusion_reason: String,
+    pub citation_episode_id: Option<EpisodeId>,
+    pub citation_resource_id: Option<ResourceId>,
+    pub suppression_labels: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecallDroppedItem {
+    pub unit_id: UnitId,
+    pub reason: RecallDropReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RetrievalTrace {
+    pub id: TraceId,
+    pub tenant_id: TenantId,
+    pub scope_id: ScopeId,
+    pub actor_id: ActorId,
+    pub query_hash: String,
+    pub engine_version: String,
+    pub feature_flags: Vec<String>,
+    pub channel_runs: Vec<ReflectStageFact>,
+    pub candidates: Vec<RecallCandidateTrace>,
+    pub policy_filters: Vec<RecallPolicyFilter>,
+    pub context_items: Vec<RecallContextItem>,
+    pub dropped_items: Vec<RecallDroppedItem>,
+    pub citations: Vec<RecallCitation>,
+    pub filter_selectivity: Option<f32>,
+    pub iterative_scan_depth: Option<u32>,
+    pub consolidation_lag_ms: u64,
+    pub weight_vector_id: String,
+    pub mode_requested: RecallMode,
+    pub mode_executed: RecallMode,
+    pub escalation_reason: String,
+    pub abstention_signal: bool,
+    pub latency_ms: u64,
+    pub token_estimate: usize,
+    pub cost_micros: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecallResponse {
+    pub trace_id: TraceId,
+    pub items: Vec<RecallContextItem>,
+    pub candidate_whitelist: Vec<UnitId>,
+    pub citations: Vec<RecallCitation>,
+    pub abstention: bool,
+    pub degraded: bool,
+    pub suppression_labels: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MemoryKind {
     Episodic,
     Semantic,
@@ -188,6 +322,13 @@ pub struct NewMemoryUnit {
     pub subject_key: Option<String>,
     pub body: String,
     pub trust_level: TrustLevel,
+    pub churn_class: Option<String>,
+    pub freshness_due: bool,
+    pub actor_id: Option<ActorId>,
+    pub source_kind: Option<String>,
+    pub source_episode_id: Option<EpisodeId>,
+    pub source_resource_id: Option<ResourceId>,
+    pub deletion_generation: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,6 +345,9 @@ pub struct StoredMemoryUnit {
     pub freshness_due: bool,
     pub actor_id: Option<ActorId>,
     pub source_kind: Option<String>,
+    pub source_episode_id: Option<EpisodeId>,
+    pub source_resource_id: Option<ResourceId>,
+    pub deletion_generation: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,6 +364,15 @@ pub enum MemoryEdgeKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredMemoryEdge {
     pub id: EdgeId,
+    pub tenant_id: TenantId,
+    pub scope_id: ScopeId,
+    pub src_id: UnitId,
+    pub dst_id: UnitId,
+    pub kind: MemoryEdgeKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewMemoryEdge {
     pub tenant_id: TenantId,
     pub scope_id: ScopeId,
     pub src_id: UnitId,

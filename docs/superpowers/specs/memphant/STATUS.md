@@ -5,12 +5,13 @@
 > ## ✅ DONE definition (deterministic)
 > **MemPhant is FULLY COMPLETED when every checkbox in §1–§6 is checked and the banner below reads COMPLETE.** No section may be skipped; an activation-gated item (§5) counts as done when it is either ACTIVATED (gate met + built + proof) or RETIRED (its disable-when fired, recorded in `24`). Nothing else — no vibe, no partial credit — flips the banner.
 >
-> # CURRENT PHASE: `WS-C READY — WS-B EXIT PACKET COMPLETE`
+> # CURRENT PHASE: `WS-D READY — WS-C EXIT PACKET COMPLETE`
 >
 > WS-0 proof artifact: `docs/build-log/artifacts/ws0-two-language-spike.json`.
 > R83 spike measured warm no-recompile Rust policy-change iteration at **0.073×** Python (`rust_proceeds`).
 > WS-A proof artifact: `docs/build-log/2026-07-03-wsa-progress.md` (fresh `pgvector/pgvector:0.8.4-pg17` bootstrap + provider lint + store seam tests).
-> WS-B proof artifact: `docs/build-log/2026-07-03-wsb-progress.md` (retain/reflect/dedup/admission/freshness goldens + outbox shape + full local gates). Next build workstream: WS-C.
+> WS-B proof artifact: `docs/build-log/2026-07-03-wsb-progress.md` (retain/reflect/dedup/admission/freshness goldens + outbox shape + full local gates).
+> WS-C proof artifact: `docs/build-log/2026-07-03-wsc-progress.md` (recall trace spine + oracle/isolation/citation/filter goldens + full local gates). Next build workstream: WS-D.
 > Syndai spec/preflight proof: `docs/build-log/2026-07-03-syndai-preflight.md` (`Syndai/main` `fe17bc488`, preflight green in 764s).
 
 ## 1. Spec corpus
@@ -25,7 +26,7 @@
 - [x] **WS-0** Spec/repo freeze — repo skeleton, `memphant.lock`, spec-drift checklist, **two-language spike result recorded (R83 result: 0.073×, `rust_proceeds`; proof: `docs/build-log/2026-07-03-ws0-progress.md` + `docs/build-log/artifacts/ws0-two-language-spike.json`)**
 - [x] **WS-A** Schema, core types, store seam — all tables incl. `belief_observation`/`review_event`/`scope_block`; bootstrap + provider lint green (proof: `docs/build-log/2026-07-03-wsa-progress.md`)
 - [x] **WS-B** Write path + memory compiler — retain/reflect/dedup/contradiction/corroboration golden fixtures pass (proof: `docs/build-log/2026-07-03-wsb-progress.md`)
-- [ ] **WS-C** Read path + trace spine — every recall traced; oracle + isolation + citation + small-tenant fixtures pass
+- [x] **WS-C** Read path + trace spine — every recall traced; oracle + isolation + citation + small-tenant fixtures pass (proof: `docs/build-log/2026-07-03-wsc-progress.md`)
 - [ ] **WS-D** Public surfaces — REST/MCP/Python SDK round-trip; schemas validate; `memphant verify` works
 - [ ] **WS-E** Eval, security, ops — golden oracle + manifest guard + security suites + nightly sampled runner + deletion-completeness lane
 - [ ] **WS-F** Syndai dogfood cutover — first low-risk surface exported + trace-compared (stop-rule honored; launch not hostage to full cutover)

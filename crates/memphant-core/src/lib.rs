@@ -4,10 +4,13 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use memphant_types::{
     AdmissionAction, DedupOutcome, EdgeId, EpisodeId, JobId, MemoryEdgeKind, MemoryKind,
-    NewEpisode, NewMemoryUnit, QueuedReflectJob, ReflectInput, ReflectJob, ReflectJobKind,
+    NewEpisode, NewMemoryEdge, NewMemoryUnit, QueuedReflectJob, RecallCandidateTrace,
+    RecallChannel, RecallCitation, RecallContextItem, RecallDropReason, RecallDroppedItem,
+    RecallPolicyFilter, RecallRequest, RecallResponse, ReflectInput, ReflectJob, ReflectJobKind,
     ReflectStageFact, ReflectTrace, RetainInput, RetainOutcome, RetainRequest,
-    RetainResourceOutcome, RetainResourceRequest, RetainResult, StoredEpisode, StoredMemoryEdge,
-    StoredMemoryUnit, StoredResource, TenantId, TrustLevel, UnitId, UnitState,
+    RetainResourceOutcome, RetainResourceRequest, RetainResult, RetrievalTrace, StoredEpisode,
+    StoredMemoryEdge, StoredMemoryUnit, StoredResource, TenantId, TraceId, TrustLevel, UnitId,
+    UnitState,
 };
 use memphant_types::{NewResource, ResourceExtractorState, ResourceId};
 
@@ -23,6 +26,8 @@ pub enum StoreError {
 pub enum CoreError {
     #[error("retain body cannot be empty")]
     EmptyBody,
+    #[error("policy denied: {0}")]
+    PolicyDenied(String),
     #[error(transparent)]
     Store(#[from] StoreError),
 }
@@ -59,6 +64,11 @@ pub trait MemoryStore: Send + Sync {
         tx: &mut Self::Txn,
         resource: NewResource,
     ) -> Result<ResourceId, StoreError>;
+    async fn stage_memory_edge(
+        &self,
+        tx: &mut Self::Txn,
+        edge: NewMemoryEdge,
+    ) -> Result<EdgeId, StoreError>;
     async fn enqueue_reflect(
         &self,
         tx: &mut Self::Txn,
@@ -79,6 +89,7 @@ struct InMemoryState {
     memory_edges: HashMap<TenantId, Vec<StoredMemoryEdge>>,
     reflect_jobs: HashMap<TenantId, Vec<QueuedReflectJob>>,
     reflect_traces: HashMap<TenantId, Vec<ReflectTrace>>,
+    retrieval_traces: HashMap<TenantId, Vec<RetrievalTrace>>,
 }
 
 #[derive(Default)]
@@ -87,6 +98,7 @@ pub struct InMemoryTxn {
     episode_observation_updates: Vec<(TenantId, EpisodeId)>,
     resources: Vec<StoredResource>,
     memory_units: Vec<StoredMemoryUnit>,
+    memory_edges: Vec<StoredMemoryEdge>,
     reflect_jobs: Vec<QueuedReflectJob>,
     committed: bool,
 }
@@ -185,6 +197,19 @@ impl InMemoryStore {
             })
             .unwrap_or_default()
     }
+
+    pub fn retrieval_traces(&self, tenant_id: TenantId) -> Vec<RetrievalTrace> {
+        self.inner
+            .lock()
+            .map(|state| {
+                state
+                    .retrieval_traces
+                    .get(&tenant_id)
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
+    }
 }
 
 #[async_trait]
@@ -233,6 +258,13 @@ impl MemoryStore for InMemoryStore {
                 .entry(unit.tenant_id)
                 .or_default()
                 .push(unit);
+        }
+        for edge in tx.memory_edges {
+            state
+                .memory_edges
+                .entry(edge.tenant_id)
+                .or_default()
+                .push(edge);
         }
         for job in tx.reflect_jobs {
             state
@@ -332,10 +364,13 @@ impl MemoryStore for InMemoryStore {
             subject_key: unit.subject_key,
             body: unit.body,
             trust_level: unit.trust_level,
-            churn_class: None,
-            freshness_due: false,
-            actor_id: None,
-            source_kind: None,
+            churn_class: unit.churn_class,
+            freshness_due: unit.freshness_due,
+            actor_id: unit.actor_id,
+            source_kind: unit.source_kind,
+            source_episode_id: unit.source_episode_id,
+            source_resource_id: unit.source_resource_id,
+            deletion_generation: unit.deletion_generation,
         });
         Ok(id)
     }
@@ -360,6 +395,27 @@ impl MemoryStore for InMemoryStore {
             mime_type: resource.mime_type,
             source_trust: resource.source_trust,
             extractor_state: ResourceExtractorState::Registered,
+        });
+        Ok(id)
+    }
+
+    async fn stage_memory_edge(
+        &self,
+        tx: &mut Self::Txn,
+        edge: NewMemoryEdge,
+    ) -> Result<EdgeId, StoreError> {
+        if tx.committed {
+            return Err(StoreError::TransactionAlreadyCommitted);
+        }
+
+        let id = EdgeId::new();
+        tx.memory_edges.push(StoredMemoryEdge {
+            id,
+            tenant_id: edge.tenant_id,
+            scope_id: edge.scope_id,
+            src_id: edge.src_id,
+            dst_id: edge.dst_id,
+            kind: edge.kind,
         });
         Ok(id)
     }
@@ -474,6 +530,285 @@ where
     Ok(RetainResourceOutcome { resource_id })
 }
 
+pub async fn recall(
+    store: &InMemoryStore,
+    request: RecallRequest,
+) -> Result<RecallResponse, CoreError> {
+    let mut state = store.inner.lock().map_err(|_| StoreError::Poisoned)?;
+    let allowed = request.allowed_scope_ids.contains(&request.scope_id);
+
+    if !allowed {
+        let trace_id = TraceId::new();
+        let trace = RetrievalTrace {
+            id: trace_id,
+            tenant_id: request.tenant_id,
+            scope_id: request.scope_id,
+            actor_id: request.actor_id,
+            query_hash: hash_query(&request.query),
+            engine_version: request.engine_version,
+            feature_flags: Vec::new(),
+            channel_runs: vec![ReflectStageFact {
+                stage: "stage0_policy".to_string(),
+                detail: "denied_scope".to_string(),
+            }],
+            candidates: Vec::new(),
+            policy_filters: vec![RecallPolicyFilter {
+                reason: RecallDropReason::Scope,
+                detail: "scope not in allowed_scope_ids".to_string(),
+            }],
+            context_items: Vec::new(),
+            dropped_items: Vec::new(),
+            citations: Vec::new(),
+            filter_selectivity: None,
+            iterative_scan_depth: None,
+            consolidation_lag_ms: 0,
+            weight_vector_id: "none".to_string(),
+            mode_requested: request.mode,
+            mode_executed: request.mode,
+            escalation_reason: "none".to_string(),
+            abstention_signal: true,
+            latency_ms: 0,
+            token_estimate: 0,
+            cost_micros: 0,
+        };
+        state
+            .retrieval_traces
+            .entry(request.tenant_id)
+            .or_default()
+            .push(trace);
+        return Err(CoreError::PolicyDenied("scope".to_string()));
+    }
+
+    let all_units = state
+        .memory_units
+        .values()
+        .map(Vec::len)
+        .sum::<usize>()
+        .max(1);
+    let tenant_units = state
+        .memory_units
+        .get(&request.tenant_id)
+        .cloned()
+        .unwrap_or_default();
+    let tenant_edges = state
+        .memory_edges
+        .get(&request.tenant_id)
+        .cloned()
+        .unwrap_or_default();
+    let mut dropped_items = trace_filter_drops(&tenant_units, &request);
+    let scope_units = tenant_units
+        .iter()
+        .filter(|unit| request.allowed_scope_ids.contains(&unit.scope_id))
+        .count();
+    let filter_selectivity = Some(scope_units as f32 / all_units as f32);
+    let query_tokens = tokenize(&request.query);
+    let mut candidates_by_unit: HashMap<UnitId, CandidateAccumulator> = HashMap::new();
+    let mut candidate_traces = Vec::new();
+
+    for channel in [
+        RecallChannel::Exact,
+        RecallChannel::Lexical,
+        RecallChannel::Vector,
+        RecallChannel::Temporal,
+        RecallChannel::Edge,
+    ] {
+        let mut ranked = channel_candidates(
+            channel,
+            &tenant_units,
+            &tenant_edges,
+            &request,
+            &query_tokens,
+        );
+        ranked.sort_by(|left, right| {
+            right
+                .1
+                .partial_cmp(&left.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.0.body.cmp(&right.0.body))
+        });
+        for (rank, (unit, score)) in ranked.into_iter().enumerate() {
+            let channel_rank = rank + 1;
+            let contribution =
+                channel_weight(channel, &request.query) / (60.0 + channel_rank as f32);
+            candidates_by_unit
+                .entry(unit.id)
+                .and_modify(|candidate| {
+                    candidate.fused_score += contribution;
+                    candidate.channels.push((channel, channel_rank, score));
+                })
+                .or_insert_with(|| CandidateAccumulator {
+                    unit: unit.clone(),
+                    fused_score: contribution,
+                    channels: vec![(channel, channel_rank, score)],
+                });
+            candidate_traces.push(RecallCandidateTrace {
+                unit_id: unit.id,
+                channel,
+                channel_rank,
+                channel_score: score,
+                fused_rank: None,
+                fused_score: None,
+                trust_level: unit.trust_level,
+                state: unit.state,
+                discard_reason: None,
+            });
+        }
+    }
+
+    let mut fused: Vec<_> = candidates_by_unit.into_values().collect();
+    fused.sort_by(|left, right| {
+        right
+            .fused_score
+            .partial_cmp(&left.fused_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.unit.body.cmp(&right.unit.body))
+    });
+    for (rank, candidate) in fused.iter().enumerate() {
+        for trace_candidate in candidate_traces
+            .iter_mut()
+            .filter(|trace_candidate| trace_candidate.unit_id == candidate.unit.id)
+        {
+            trace_candidate.fused_rank = Some(rank + 1);
+            trace_candidate.fused_score = Some(candidate.fused_score);
+        }
+    }
+
+    let mut token_estimate = 0;
+    let mut items = Vec::new();
+    for candidate in fused.into_iter().take(request.k) {
+        let unit_tokens = candidate.unit.body.split_whitespace().count();
+        if token_estimate + unit_tokens > request.budget_tokens {
+            dropped_items.push(RecallDroppedItem {
+                unit_id: candidate.unit.id,
+                reason: RecallDropReason::Budget,
+            });
+            continue;
+        }
+        token_estimate += unit_tokens;
+        let suppression_labels = suppression_labels_for(&candidate.unit, &tenant_edges);
+        items.push(RecallContextItem {
+            unit_id: candidate.unit.id,
+            body: candidate.unit.body,
+            kind: candidate.unit.kind,
+            inclusion_reason: "fused_top_k".to_string(),
+            citation_episode_id: candidate.unit.source_episode_id,
+            citation_resource_id: candidate.unit.source_resource_id,
+            suppression_labels,
+        });
+    }
+
+    let candidate_whitelist: Vec<_> = items.iter().map(|item| item.unit_id).collect();
+    let mut suppression_labels = Vec::new();
+    for label in items
+        .iter()
+        .flat_map(|item| item.suppression_labels.iter().cloned())
+    {
+        if !suppression_labels.contains(&label) {
+            suppression_labels.push(label);
+        }
+    }
+    let citations: Vec<_> = items
+        .iter()
+        .filter(|item| item.citation_episode_id.is_some() || item.citation_resource_id.is_some())
+        .map(|item| RecallCitation {
+            unit_id: item.unit_id,
+            episode_id: item.citation_episode_id,
+            resource_id: item.citation_resource_id,
+        })
+        .collect();
+    let trace_id = TraceId::new();
+    let abstention = items.is_empty();
+    let trace = RetrievalTrace {
+        id: trace_id,
+        tenant_id: request.tenant_id,
+        scope_id: request.scope_id,
+        actor_id: request.actor_id,
+        query_hash: hash_query(&request.query),
+        engine_version: request.engine_version,
+        feature_flags: vec![
+            "entity_exact_enabled".to_string(),
+            "fts_enabled".to_string(),
+            "vector_enabled".to_string(),
+            "temporal_enabled".to_string(),
+            "context_packing_abstention_enabled".to_string(),
+        ],
+        channel_runs: recall_stage_facts(),
+        candidates: candidate_traces,
+        policy_filters: Vec::new(),
+        context_items: items.clone(),
+        dropped_items,
+        citations: citations.clone(),
+        filter_selectivity,
+        iterative_scan_depth: Some(1),
+        consolidation_lag_ms: 0,
+        weight_vector_id: "default".to_string(),
+        mode_requested: request.mode,
+        mode_executed: request.mode,
+        escalation_reason: "none".to_string(),
+        abstention_signal: abstention,
+        latency_ms: 0,
+        token_estimate,
+        cost_micros: 0,
+    };
+    state
+        .retrieval_traces
+        .entry(request.tenant_id)
+        .or_default()
+        .push(trace);
+
+    Ok(RecallResponse {
+        trace_id,
+        items,
+        candidate_whitelist,
+        citations,
+        abstention,
+        degraded: false,
+        suppression_labels,
+    })
+}
+
+fn trace_filter_drops(
+    units: &[StoredMemoryUnit],
+    request: &RecallRequest,
+) -> Vec<RecallDroppedItem> {
+    units
+        .iter()
+        .filter_map(|unit| {
+            let reason = if !request.allowed_scope_ids.contains(&unit.scope_id) {
+                Some(RecallDropReason::Scope)
+            } else if unit.deletion_generation.is_some() {
+                Some(RecallDropReason::Deleted)
+            } else {
+                match unit.state {
+                    UnitState::Deleted => Some(RecallDropReason::Deleted),
+                    UnitState::Invalidated => Some(RecallDropReason::Invalidated),
+                    UnitState::Superseded | UnitState::Expired | UnitState::Retired => {
+                        Some(RecallDropReason::Stale)
+                    }
+                    UnitState::Quarantined => Some(RecallDropReason::Trust),
+                    UnitState::Candidate
+                        if unit.kind == MemoryKind::Belief && !request.include_beliefs =>
+                    {
+                        Some(RecallDropReason::Trust)
+                    }
+                    _ => None,
+                }
+            };
+            reason.map(|reason| RecallDroppedItem {
+                unit_id: unit.id,
+                reason,
+            })
+        })
+        .collect()
+}
+
+#[derive(Clone)]
+struct CandidateAccumulator {
+    unit: StoredMemoryUnit,
+    fused_score: f32,
+    channels: Vec<(RecallChannel, usize, f32)>,
+}
+
 fn derive_dedup_key(
     scope_id: impl std::fmt::Display,
     source_kind: &str,
@@ -500,6 +835,185 @@ fn normalize_component(value: &str) -> String {
         .join(" ")
         .trim()
         .to_ascii_lowercase()
+}
+
+fn hash_query(query: &str) -> String {
+    format!("{:016x}", stable_hash(&normalize_component(query)))
+}
+
+fn stable_hash(value: &str) -> u64 {
+    value
+        .bytes()
+        .fold(14_695_981_039_346_656_037, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(1_099_511_628_211)
+        })
+}
+
+fn tokenize(value: &str) -> Vec<String> {
+    normalize_component(value)
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn channel_candidates(
+    channel: RecallChannel,
+    units: &[StoredMemoryUnit],
+    edges: &[StoredMemoryEdge],
+    request: &RecallRequest,
+    query_tokens: &[String],
+) -> Vec<(StoredMemoryUnit, f32)> {
+    units
+        .iter()
+        .filter(|unit| request.allowed_scope_ids.contains(&unit.scope_id))
+        .filter(|unit| recallable(unit, request.include_beliefs))
+        .filter_map(|unit| {
+            let score = match channel {
+                RecallChannel::Exact => exact_score(unit, query_tokens),
+                RecallChannel::Lexical => lexical_score(unit, query_tokens),
+                RecallChannel::Vector => vector_score(unit, query_tokens),
+                RecallChannel::Temporal => temporal_score(unit, &request.query),
+                RecallChannel::Edge => edge_score(unit, units, edges, query_tokens),
+            };
+            (score > 0.0).then(|| (unit.clone(), score))
+        })
+        .collect()
+}
+
+fn edge_score(
+    unit: &StoredMemoryUnit,
+    units: &[StoredMemoryUnit],
+    edges: &[StoredMemoryEdge],
+    query_tokens: &[String],
+) -> f32 {
+    let related_match = edges.iter().any(|edge| {
+        if edge.src_id != unit.id && edge.dst_id != unit.id {
+            return false;
+        }
+        let other_id = if edge.src_id == unit.id {
+            edge.dst_id
+        } else {
+            edge.src_id
+        };
+        units
+            .iter()
+            .find(|candidate| candidate.id == other_id)
+            .is_some_and(|candidate| {
+                recallable(candidate, true)
+                    && (lexical_score(candidate, query_tokens) > 0.0
+                        || exact_score(candidate, query_tokens) > 0.0)
+            })
+    });
+    if related_match { 1.0 } else { 0.0 }
+}
+
+fn suppression_labels_for(unit: &StoredMemoryUnit, edges: &[StoredMemoryEdge]) -> Vec<String> {
+    if edges.iter().any(|edge| {
+        edge.kind == MemoryEdgeKind::Contradicts
+            && (edge.src_id == unit.id || edge.dst_id == unit.id)
+    }) {
+        vec!["unresolved_contradiction".to_string()]
+    } else {
+        Vec::new()
+    }
+}
+
+fn recallable(unit: &StoredMemoryUnit, include_beliefs: bool) -> bool {
+    if unit.deletion_generation.is_some() {
+        return false;
+    }
+    matches!(unit.state, UnitState::Active | UnitState::Validated)
+        && (include_beliefs || unit.kind != MemoryKind::Belief)
+}
+
+fn exact_score(unit: &StoredMemoryUnit, query_tokens: &[String]) -> f32 {
+    let Some(subject_key) = unit.subject_key.as_deref() else {
+        return 0.0;
+    };
+    let subject_tokens = tokenize(subject_key);
+    let matches = subject_tokens
+        .iter()
+        .filter(|token| query_tokens.contains(token))
+        .count();
+    if matches == 0 {
+        0.0
+    } else {
+        matches as f32 / subject_tokens.len().max(1) as f32
+    }
+}
+
+fn lexical_score(unit: &StoredMemoryUnit, query_tokens: &[String]) -> f32 {
+    let body_tokens = tokenize(&unit.body);
+    let overlap = body_tokens
+        .iter()
+        .filter(|token| query_tokens.contains(token))
+        .count();
+    overlap as f32 / body_tokens.len().max(1) as f32
+}
+
+fn vector_score(unit: &StoredMemoryUnit, query_tokens: &[String]) -> f32 {
+    let body_tokens = tokenize(&unit.body);
+    let union = body_tokens
+        .iter()
+        .chain(query_tokens.iter())
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    let intersection = body_tokens
+        .iter()
+        .filter(|token| query_tokens.contains(token))
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    if union == 0 {
+        0.0
+    } else {
+        intersection as f32 / union as f32
+    }
+}
+
+fn temporal_score(unit: &StoredMemoryUnit, query: &str) -> f32 {
+    let query = normalize_component(query);
+    let recency_query =
+        query.contains("current") || query.contains("latest") || query.contains("now");
+    if recency_query && unit.kind == MemoryKind::Semantic && unit.state == UnitState::Active {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+fn channel_weight(channel: RecallChannel, query: &str) -> f32 {
+    let query = normalize_component(query);
+    match channel {
+        RecallChannel::Exact if query.contains("how") => 2.5,
+        RecallChannel::Exact => 1.0,
+        RecallChannel::Lexical if query.contains("error") => 3.0,
+        RecallChannel::Lexical => 1.0,
+        RecallChannel::Vector => 2.0,
+        RecallChannel::Temporal if query.contains("current") => 2.5,
+        RecallChannel::Temporal => 0.5,
+        RecallChannel::Edge => 0.5,
+    }
+}
+
+fn recall_stage_facts() -> Vec<ReflectStageFact> {
+    [
+        "stage0_policy",
+        "exact",
+        "lexical",
+        "vector",
+        "temporal",
+        "edge",
+        "fusion",
+        "assemble",
+        "trace",
+    ]
+    .into_iter()
+    .map(|stage| ReflectStageFact {
+        stage: stage.to_string(),
+        detail: "completed".to_string(),
+    })
+    .collect()
 }
 
 pub async fn reflect_recorded(
@@ -567,6 +1081,9 @@ pub async fn reflect_recorded(
                         churn_class: candidate.churn_class,
                         actor_id: Some(candidate.actor_id),
                         source_kind: Some(candidate.source_kind),
+                        source_episode_id: Some(input.episode_id),
+                        source_resource_id: None,
+                        deletion_generation: None,
                     });
                     edges.push(StoredMemoryEdge {
                         id: EdgeId::new(),
@@ -607,6 +1124,9 @@ pub async fn reflect_recorded(
                         churn_class: candidate.churn_class,
                         actor_id: Some(candidate.actor_id),
                         source_kind: Some(candidate.source_kind),
+                        source_episode_id: Some(input.episode_id),
+                        source_resource_id: None,
+                        deletion_generation: None,
                     });
                     AdmissionAction::Quarantine
                 } else {
@@ -649,6 +1169,9 @@ pub async fn reflect_recorded(
                         churn_class: candidate.churn_class,
                         actor_id: Some(candidate.actor_id),
                         source_kind: Some(candidate.source_kind),
+                        source_episode_id: Some(input.episode_id),
+                        source_resource_id: None,
+                        deletion_generation: None,
                     });
                     action
                 }
@@ -667,6 +1190,9 @@ pub async fn reflect_recorded(
                         churn_class: candidate.churn_class,
                         actor_id: Some(candidate.actor_id),
                         source_kind: Some(candidate.source_kind),
+                        source_episode_id: Some(input.episode_id),
+                        source_resource_id: None,
+                        deletion_generation: None,
                     });
                     AdmissionAction::Quarantine
                 } else {
@@ -683,6 +1209,9 @@ pub async fn reflect_recorded(
                         churn_class: candidate.churn_class,
                         actor_id: Some(candidate.actor_id),
                         source_kind: Some(candidate.source_kind),
+                        source_episode_id: Some(input.episode_id),
+                        source_resource_id: None,
+                        deletion_generation: None,
                     });
                     AdmissionAction::Append
                 }

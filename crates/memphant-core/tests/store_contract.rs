@@ -159,6 +159,13 @@ async fn committed_transaction_publishes_staged_episode_and_unit() {
                 subject_key: Some("deploy_channel:value".to_string()),
                 body: "Deploy channel is #launch.".to_string(),
                 trust_level: TrustLevel::TrustedUser,
+                churn_class: None,
+                freshness_due: false,
+                actor_id: None,
+                source_kind: None,
+                source_episode_id: Some(episode.episode_id),
+                source_resource_id: None,
+                deletion_generation: None,
             },
         )
         .await
@@ -219,6 +226,13 @@ fn new_episode_and_unit_shapes_require_tenant_and_scope_ids() {
         subject_key: None,
         body: episode.body.clone(),
         trust_level: episode.source_trust,
+        churn_class: None,
+        freshness_due: false,
+        actor_id: Some(episode.actor_id),
+        source_kind: Some(episode.source_kind.clone()),
+        source_episode_id: None,
+        source_resource_id: None,
+        deletion_generation: None,
     };
 
     assert_eq!(episode.tenant_id, unit.tenant_id);
