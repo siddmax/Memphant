@@ -71,15 +71,15 @@
 - Modify: `crates/memphant-types/src/lib.rs`
 - Modify: `crates/memphant-core/src/lib.rs`
 
-- [ ] **Step 1: Write failing golden tests**
+- [x] **Step 1: Write failing golden tests**
   - Add fixtures for noisy-write rejection, duplicate collapse, contradiction detection, corroboration-farming resistance, and stale fact handling.
   - Add a Rust test that loads the JSON fixture, runs retain + reflect against `InMemoryStore`, and asserts expected `AdmissionAction`, unit states, edge kinds, and trace stage facts.
 
-- [ ] **Step 2: Run the tests to verify RED**
+- [x] **Step 2: Run the tests to verify RED**
   - Run: `cargo test -p memphant-core --test write_compiler_golden`
   - Expected: compile failure for missing reflect compiler API and admission types.
 
-- [ ] **Step 3: Implement deterministic reflect compiler**
+- [x] **Step 3: Implement deterministic reflect compiler**
   - Add `AdmissionAction` with `reject`, `append`, `merge`, `supersede`, `invalidate`, and `quarantine`.
   - Add deterministic subject-key canonicalization for fixture facts.
   - Add record-replay extraction input in fixture data; no live LLM calls.
@@ -88,7 +88,7 @@
   - Add active freshness fields for stale/volatile semantic facts.
   - Emit a `ReflectTrace` with stage names, action, cost estimate, and consumed job id.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
   - Run: `cargo test -p memphant-core --test write_compiler_golden`
   - Expected: pass.
 
@@ -98,19 +98,19 @@
 - Create: `docs/build-log/2026-07-03-wsb-progress.md`
 - Modify only if the exit packet is fully proven: `docs/superpowers/specs/memphant/STATUS.md`
 
-- [ ] **Step 1: Run focused gates**
+- [x] **Step 1: Run focused gates**
   - `cargo fmt --check`
   - `cargo test -p memphant-core --test store_contract`
   - `cargo test -p memphant-core --test write_compiler_golden`
   - `python3 scripts/check_spec_drift.py`
 
-- [ ] **Step 2: Run full local gates**
+- [x] **Step 2: Run full local gates**
   - `python3 -m pytest tests`
   - `cargo clippy --all-targets --all-features -- -D warnings`
   - `cargo test --all-targets --all-features`
   - `cargo test --doc`
 
-- [ ] **Step 3: Update build log**
+- [x] **Step 3: Update build log**
   - Record exact command outputs.
   - State whether WS-B is complete or which exit-packet proof remains.
 

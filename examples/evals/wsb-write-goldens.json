@@ -1,0 +1,152 @@
+[
+  {
+    "id": "noisy_write_rejection",
+    "episodes": [
+      {
+        "source_kind": "agent",
+        "trust_level": "agent_output",
+        "actor": 1,
+        "subject": null,
+        "predicate": null,
+        "body": "ok"
+      }
+    ],
+    "expected_actions": ["reject"],
+    "expected_unit_count": 0,
+    "expected_semantic_bodies": [],
+    "expected_belief_bodies": [],
+    "expected_edge_kinds": []
+  },
+  {
+    "id": "duplicate_collapse",
+    "episodes": [
+      {
+        "source_kind": "tool",
+        "trust_level": "verified_tool",
+        "actor": 2,
+        "subject": "node version",
+        "predicate": "value",
+        "body": "Staging pins Node 24.15.0."
+      },
+      {
+        "source_kind": "tool",
+        "trust_level": "verified_tool",
+        "actor": 2,
+        "subject": "node version",
+        "predicate": "value",
+        "body": "Staging pins Node 24.15.0."
+      }
+    ],
+    "expected_actions": ["append", "merge"],
+    "expected_unit_count": 1,
+    "expected_semantic_bodies": [],
+    "expected_belief_bodies": ["Staging pins Node 24.15.0."],
+    "expected_edge_kinds": []
+  },
+  {
+    "id": "contradiction_detection",
+    "episodes": [
+      {
+        "source_kind": "user",
+        "trust_level": "trusted_user",
+        "actor": 3,
+        "subject": "callback token version",
+        "predicate": "value",
+        "body": "Callback token version is v1."
+      },
+      {
+        "source_kind": "user",
+        "trust_level": "trusted_user",
+        "actor": 3,
+        "subject": "callback token version",
+        "predicate": "value",
+        "body": "Callback token version is v2."
+      }
+    ],
+    "expected_actions": ["append", "supersede"],
+    "expected_unit_count": 2,
+    "expected_semantic_bodies": ["Callback token version is v2."],
+    "expected_belief_bodies": [],
+    "expected_edge_kinds": ["contradicts", "supersedes"]
+  },
+  {
+    "id": "corroboration_farming_resistance",
+    "episodes": [
+      {
+        "source_kind": "web",
+        "trust_level": "web_content",
+        "actor": 4,
+        "subject": "release date",
+        "predicate": "value",
+        "body": "The release date is tomorrow."
+      },
+      {
+        "source_kind": "web",
+        "trust_level": "web_content",
+        "actor": 4,
+        "subject": "release date",
+        "predicate": "value",
+        "body": "The release date is tomorrow."
+      }
+    ],
+    "expected_actions": ["append", "merge"],
+    "expected_unit_count": 1,
+    "expected_semantic_bodies": [],
+    "expected_belief_bodies": ["The release date is tomorrow."],
+    "expected_edge_kinds": []
+  },
+  {
+    "id": "independent_corroboration_promotes_belief",
+    "episodes": [
+      {
+        "source_kind": "web",
+        "trust_level": "web_content",
+        "actor": 6,
+        "subject": "refund window",
+        "predicate": "value",
+        "body": "Refund window is 30 days."
+      },
+      {
+        "source_kind": "tool",
+        "trust_level": "unverified_tool",
+        "actor": 7,
+        "subject": "refund window",
+        "predicate": "value",
+        "body": "Refund window is 30 days."
+      }
+    ],
+    "expected_actions": ["append", "append"],
+    "expected_unit_count": 2,
+    "expected_semantic_bodies": ["Refund window is 30 days."],
+    "expected_belief_bodies": ["Refund window is 30 days."],
+    "expected_edge_kinds": ["derived_from"]
+  },
+  {
+    "id": "stale_fact_handling",
+    "episodes": [
+      {
+        "source_kind": "user",
+        "trust_level": "trusted_user",
+        "actor": 5,
+        "subject": "current project",
+        "predicate": "value",
+        "body": "Current project is Apollo.",
+        "churn_class": "volatile"
+      },
+      {
+        "source_kind": "user",
+        "trust_level": "trusted_user",
+        "actor": 5,
+        "subject": "current project",
+        "predicate": "value",
+        "body": "Current project is Borealis.",
+        "churn_class": "volatile"
+      }
+    ],
+    "expected_actions": ["append", "supersede"],
+    "expected_unit_count": 2,
+    "expected_semantic_bodies": ["Current project is Borealis."],
+    "expected_belief_bodies": [],
+    "expected_edge_kinds": ["contradicts", "supersedes"]
+  }
+]

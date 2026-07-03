@@ -3,9 +3,10 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use memphant_types::{
-    DedupOutcome, EpisodeId, JobId, NewEpisode, NewMemoryUnit, QueuedReflectJob, ReflectJob,
-    ReflectJobKind, RetainInput, RetainOutcome, RetainRequest, RetainResult, StoredEpisode,
-    StoredMemoryUnit, TenantId, UnitId,
+    AdmissionAction, DedupOutcome, EdgeId, EpisodeId, JobId, MemoryEdgeKind, MemoryKind,
+    NewEpisode, NewMemoryUnit, QueuedReflectJob, ReflectInput, ReflectJob, ReflectJobKind,
+    ReflectStageFact, ReflectTrace, RetainInput, RetainOutcome, RetainRequest, RetainResult,
+    StoredEpisode, StoredMemoryEdge, StoredMemoryUnit, TenantId, TrustLevel, UnitId, UnitState,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -67,7 +68,9 @@ pub struct InMemoryStore {
 struct InMemoryState {
     episodes: HashMap<TenantId, Vec<StoredEpisode>>,
     memory_units: HashMap<TenantId, Vec<StoredMemoryUnit>>,
+    memory_edges: HashMap<TenantId, Vec<StoredMemoryEdge>>,
     reflect_jobs: HashMap<TenantId, Vec<QueuedReflectJob>>,
+    reflect_traces: HashMap<TenantId, Vec<ReflectTrace>>,
 }
 
 #[derive(Default)]
@@ -106,6 +109,46 @@ impl InMemoryStore {
             .map(|state| {
                 state
                     .reflect_jobs
+                    .get(&tenant_id)
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn active_semantic_units(&self, tenant_id: TenantId) -> Vec<StoredMemoryUnit> {
+        self.memory_units(tenant_id)
+            .into_iter()
+            .filter(|unit| unit.kind == MemoryKind::Semantic && unit.state == UnitState::Active)
+            .collect()
+    }
+
+    pub fn belief_units(&self, tenant_id: TenantId) -> Vec<StoredMemoryUnit> {
+        self.memory_units(tenant_id)
+            .into_iter()
+            .filter(|unit| unit.kind == MemoryKind::Belief)
+            .collect()
+    }
+
+    pub fn memory_edges(&self, tenant_id: TenantId) -> Vec<StoredMemoryEdge> {
+        self.inner
+            .lock()
+            .map(|state| {
+                state
+                    .memory_edges
+                    .get(&tenant_id)
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn reflect_traces(&self, tenant_id: TenantId) -> Vec<ReflectTrace> {
+        self.inner
+            .lock()
+            .map(|state| {
+                state
+                    .reflect_traces
                     .get(&tenant_id)
                     .cloned()
                     .unwrap_or_default()
@@ -252,6 +295,10 @@ impl MemoryStore for InMemoryStore {
             subject_key: unit.subject_key,
             body: unit.body,
             trust_level: unit.trust_level,
+            churn_class: None,
+            freshness_due: false,
+            actor_id: None,
+            source_kind: None,
         });
         Ok(id)
     }
@@ -351,4 +398,200 @@ fn normalize_component(value: &str) -> String {
         .join(" ")
         .trim()
         .to_ascii_lowercase()
+}
+
+pub async fn reflect_recorded(
+    store: &InMemoryStore,
+    input: ReflectInput,
+) -> Result<ReflectTrace, CoreError> {
+    let mut state = store.inner.lock().map_err(|_| StoreError::Poisoned)?;
+    if let Some(existing) = state
+        .reflect_traces
+        .get(&input.tenant_id)
+        .and_then(|traces| {
+            traces.iter().find(|trace| {
+                trace.job_id == input.job_id && trace.compiler_version == input.compiler_version
+            })
+        })
+    {
+        return Ok(existing.clone());
+    }
+
+    let mut actions = Vec::new();
+
+    for candidate in input.candidates {
+        let Some(subject_key) =
+            derive_subject_key(candidate.subject.as_deref(), candidate.predicate.as_deref())
+        else {
+            actions.push(AdmissionAction::Reject);
+            continue;
+        };
+
+        if candidate.body.split_whitespace().count() < 3 {
+            actions.push(AdmissionAction::Reject);
+            continue;
+        }
+
+        let high_trust = matches!(
+            candidate.trust_level,
+            TrustLevel::TrustedUser | TrustLevel::TrustedSystem
+        );
+        let mut edges = Vec::new();
+        let action = {
+            let units = state.memory_units.entry(input.tenant_id).or_default();
+            if let Some(existing_index) = units.iter().position(|unit| {
+                unit.scope_id == input.scope_id
+                    && unit.subject_key.as_deref() == Some(subject_key.as_str())
+                    && unit.body == candidate.body
+                    && unit.state != UnitState::Deleted
+                    && unit.state != UnitState::Invalidated
+            }) {
+                if !high_trust
+                    && units[existing_index].kind == MemoryKind::Belief
+                    && is_independent_source(&units[existing_index], &candidate)
+                {
+                    let belief_id = units[existing_index].id;
+                    let semantic_id = UnitId::new();
+                    units.push(StoredMemoryUnit {
+                        id: semantic_id,
+                        tenant_id: input.tenant_id,
+                        scope_id: input.scope_id,
+                        kind: MemoryKind::Semantic,
+                        state: UnitState::Active,
+                        subject_key: Some(subject_key),
+                        body: candidate.body,
+                        trust_level: candidate.trust_level,
+                        freshness_due: candidate.churn_class.as_deref() == Some("volatile"),
+                        churn_class: candidate.churn_class,
+                        actor_id: Some(candidate.actor_id),
+                        source_kind: Some(candidate.source_kind),
+                    });
+                    edges.push(StoredMemoryEdge {
+                        id: EdgeId::new(),
+                        tenant_id: input.tenant_id,
+                        scope_id: input.scope_id,
+                        src_id: semantic_id,
+                        dst_id: belief_id,
+                        kind: MemoryEdgeKind::DerivedFrom,
+                    });
+                    AdmissionAction::Append
+                } else {
+                    AdmissionAction::Merge
+                }
+            } else if high_trust {
+                let new_id = UnitId::new();
+                let mut action = AdmissionAction::Append;
+                if let Some(existing_index) = units.iter().position(|unit| {
+                    unit.scope_id == input.scope_id
+                        && unit.subject_key.as_deref() == Some(subject_key.as_str())
+                        && unit.state == UnitState::Active
+                        && unit.kind == MemoryKind::Semantic
+                }) {
+                    action = AdmissionAction::Supersede;
+                    let old_id = units[existing_index].id;
+                    units[existing_index].state = UnitState::Superseded;
+                    edges.push(StoredMemoryEdge {
+                        id: EdgeId::new(),
+                        tenant_id: input.tenant_id,
+                        scope_id: input.scope_id,
+                        src_id: old_id,
+                        dst_id: new_id,
+                        kind: MemoryEdgeKind::Contradicts,
+                    });
+                    edges.push(StoredMemoryEdge {
+                        id: EdgeId::new(),
+                        tenant_id: input.tenant_id,
+                        scope_id: input.scope_id,
+                        src_id: new_id,
+                        dst_id: old_id,
+                        kind: MemoryEdgeKind::Supersedes,
+                    });
+                }
+                units.push(StoredMemoryUnit {
+                    id: new_id,
+                    tenant_id: input.tenant_id,
+                    scope_id: input.scope_id,
+                    kind: MemoryKind::Semantic,
+                    state: UnitState::Active,
+                    subject_key: Some(subject_key),
+                    body: candidate.body,
+                    trust_level: candidate.trust_level,
+                    freshness_due: candidate.churn_class.as_deref() == Some("volatile"),
+                    churn_class: candidate.churn_class,
+                    actor_id: Some(candidate.actor_id),
+                    source_kind: Some(candidate.source_kind),
+                });
+                action
+            } else {
+                units.push(StoredMemoryUnit {
+                    id: UnitId::new(),
+                    tenant_id: input.tenant_id,
+                    scope_id: input.scope_id,
+                    kind: MemoryKind::Belief,
+                    state: UnitState::Candidate,
+                    subject_key: Some(subject_key),
+                    body: candidate.body,
+                    trust_level: candidate.trust_level,
+                    freshness_due: candidate.churn_class.as_deref() == Some("volatile"),
+                    churn_class: candidate.churn_class,
+                    actor_id: Some(candidate.actor_id),
+                    source_kind: Some(candidate.source_kind),
+                });
+                AdmissionAction::Append
+            }
+        };
+        state
+            .memory_edges
+            .entry(input.tenant_id)
+            .or_default()
+            .extend(edges);
+        actions.push(action);
+    }
+
+    let trace = ReflectTrace {
+        tenant_id: input.tenant_id,
+        scope_id: input.scope_id,
+        job_id: input.job_id,
+        episode_id: input.episode_id,
+        compiler_version: input.compiler_version,
+        cost_units: actions.len().max(1) as u32,
+        actions,
+        stages: [
+            "extract",
+            "detect",
+            "corroborate",
+            "promote",
+            "decay",
+            "trust",
+        ]
+        .into_iter()
+        .map(|stage| ReflectStageFact {
+            stage: stage.to_string(),
+            detail: "completed".to_string(),
+        })
+        .collect(),
+    };
+    state
+        .reflect_traces
+        .entry(input.tenant_id)
+        .or_default()
+        .push(trace.clone());
+    Ok(trace)
+}
+
+fn derive_subject_key(subject: Option<&str>, predicate: Option<&str>) -> Option<String> {
+    let subject = subject.map(normalize_component)?;
+    let predicate = predicate.map(normalize_component)?;
+    if subject.is_empty() || predicate.is_empty() {
+        return None;
+    }
+    Some(format!("{}:{}", subject.replace(' ', "_"), predicate))
+}
+
+fn is_independent_source(
+    existing: &StoredMemoryUnit,
+    candidate: &memphant_types::ReflectCandidate,
+) -> bool {
+    existing.actor_id != Some(candidate.actor_id)
+        && existing.source_kind.as_deref() != Some(candidate.source_kind.as_str())
 }

@@ -29,6 +29,7 @@ macro_rules! id_type {
 }
 
 id_type!(ActorId);
+id_type!(EdgeId);
 id_type!(EpisodeId);
 id_type!(JobId);
 id_type!(ScopeId);
@@ -150,6 +151,42 @@ pub struct StoredMemoryUnit {
     pub subject_key: Option<String>,
     pub body: String,
     pub trust_level: TrustLevel,
+    pub churn_class: Option<String>,
+    pub freshness_due: bool,
+    pub actor_id: Option<ActorId>,
+    pub source_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryEdgeKind {
+    Supersedes,
+    Contradicts,
+    DerivedFrom,
+    Cites,
+    SameSubject,
+    DependsOn,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredMemoryEdge {
+    pub id: EdgeId,
+    pub tenant_id: TenantId,
+    pub scope_id: ScopeId,
+    pub src_id: UnitId,
+    pub dst_id: UnitId,
+    pub kind: MemoryEdgeKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionAction {
+    Reject,
+    Append,
+    Merge,
+    Supersede,
+    Invalidate,
+    Quarantine,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -175,6 +212,55 @@ pub struct QueuedReflectJob {
     pub episode_id: EpisodeId,
     pub kind: ReflectJobKind,
     pub compiler_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReflectCandidate {
+    pub source_kind: String,
+    pub trust_level: TrustLevel,
+    pub actor_id: ActorId,
+    pub subject: Option<String>,
+    pub predicate: Option<String>,
+    pub body: String,
+    pub churn_class: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReflectInput {
+    pub tenant_id: TenantId,
+    pub scope_id: ScopeId,
+    pub actor_id: ActorId,
+    pub episode_id: EpisodeId,
+    pub job_id: JobId,
+    pub compiler_version: String,
+    pub candidates: Vec<ReflectCandidate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReflectStageFact {
+    pub stage: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReflectTrace {
+    pub tenant_id: TenantId,
+    pub scope_id: ScopeId,
+    pub job_id: JobId,
+    pub episode_id: EpisodeId,
+    pub compiler_version: String,
+    pub actions: Vec<AdmissionAction>,
+    pub stages: Vec<ReflectStageFact>,
+    pub cost_units: u32,
+}
+
+impl ReflectTrace {
+    pub fn stage_names(&self) -> Vec<&str> {
+        self.stages
+            .iter()
+            .map(|stage| stage.stage.as_str())
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
