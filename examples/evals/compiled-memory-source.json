@@ -1,0 +1,17 @@
+{
+  "scope": "project:checkout",
+  "entries": [
+    {
+      "id": "mem_checkout_taipei",
+      "title": "Checkout Rollout Region",
+      "body": "Checkout rollout region is Taipei.",
+      "citations": ["ep_checkout_taipei"]
+    },
+    {
+      "id": "mem_release_checklist",
+      "title": "Release Checklist",
+      "body": "Run the checked release checklist before deploy.",
+      "citations": ["ep_release_checklist"]
+    }
+  ]
+}

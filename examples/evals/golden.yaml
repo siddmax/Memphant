@@ -1,0 +1,5 @@
+id: pr-golden
+manifest: manifest.yaml
+cases:
+  - golden/checkout_region.yaml
+  - golden/deleted_secret_filter.yaml

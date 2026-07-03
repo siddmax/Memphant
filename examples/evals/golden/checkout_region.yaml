@@ -1,0 +1,24 @@
+id: checkout_region
+second_author_confirmed: true
+query: "Where is the checkout rollout region?"
+seed:
+  units:
+    - name: mem_checkout_taipei
+      episode_body: "Checkout rollout region is Taipei."
+      kind: semantic
+      state: active
+      subject_key: "checkout rollout region"
+      body: "Checkout rollout region is Taipei."
+      trust_level: trusted_system
+expect:
+  answer_bearing_ids:
+    - mem_checkout_taipei
+  top_k_contains:
+    - mem_checkout_taipei
+  citations_include:
+    - mem_checkout_taipei
+  trace_stages_include:
+    - exact
+    - lexical
+    - vector
+    - trace

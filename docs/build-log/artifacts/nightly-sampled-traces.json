@@ -1,0 +1,22 @@
+{
+  "case_results": [
+    {
+      "dropped_mismatches": [],
+      "error": null,
+      "forbidden_present": [],
+      "id": "checkout_region",
+      "missing_citations": [],
+      "missing_trace_stages": [],
+      "missing_units": [],
+      "passed": true,
+      "trace_id": "019f26cf-3355-7122-92ce-1f83923d5272"
+    }
+  ],
+  "eval_id": "nightly-sampled",
+  "metrics": {
+    "passed_cases": 1,
+    "total_cases": 1
+  },
+  "runner": "memphant-eval",
+  "trace_schema_version": "trace-0.1.0-ws0"
+}

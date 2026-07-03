@@ -1,0 +1,4 @@
+id: release
+cases:
+  - ../examples/evals/golden/checkout_region.yaml
+  - ../examples/evals/golden/deleted_secret_filter.yaml

@@ -1,0 +1,31 @@
+id: ops-smoke
+checks:
+  - id: deleted_blob_collected_after_completeness
+    kind: blob_gc
+    min_age_seconds: 86400
+    live_blob_hashes:
+      - sha256:live-shared
+    tombstoned_blob_hashes:
+      - sha256:deleted-only
+    ledger_blob_hashes:
+      - sha256:live-shared
+      - sha256:deleted-only
+    expect_collect:
+      - sha256:deleted-only
+  - id: forget_saga_readback_confirmed
+    kind: deletion_saga_readback
+    deletion_generation_bumped: true
+    readback_paths:
+      vector: clear
+      lexical: clear
+      cache: clear
+      derived: clear
+      blob: gc_pending
+      edge: clear
+  - id: hnsw_compaction_sla_triggered
+    kind: reindex_compaction_sla
+    dead_ratio: 0.18
+    threshold: 0.1
+    tombstone_age_hours: 6
+    max_tombstone_age_hours: 12
+    expect_reindex_required: true

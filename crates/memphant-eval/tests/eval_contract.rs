@@ -1,0 +1,130 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use memphant_eval::{
+    EvalRunOptions, generate_trace_schema, run_eval_file, run_ops_file, run_security_file,
+    validate_manifest, verify_golden_file,
+};
+
+#[test]
+fn oracle_suite_runs_and_verifies_load_bearing_labels() {
+    let root = repo_root();
+    let suite = root.join("examples/evals/golden.yaml");
+
+    let report = run_eval_file(&suite, EvalRunOptions::default()).expect("golden run");
+    assert_eq!(report.total_cases, 2);
+    assert_eq!(report.passed_cases, report.total_cases);
+    assert!(report.case_results.iter().all(|case| case.passed));
+
+    let verify = verify_golden_file(&suite).expect("verify golden");
+    assert_eq!(verify.verified_cases, 2);
+    assert!(verify.case_results.iter().all(|case| case.load_bearing));
+}
+
+#[test]
+fn verify_golden_accepts_whole_corpus_directory() {
+    let verify =
+        verify_golden_file(&repo_root().join("examples/evals")).expect("verify golden directory");
+
+    assert_eq!(verify.verified_cases, 2);
+    assert!(verify.case_results.iter().all(|case| case.load_bearing));
+}
+
+#[test]
+fn manifest_guard_rejects_orphans_and_missing_entries() {
+    let temp = tempfile::tempdir().unwrap();
+    let lane = temp.path().join("golden");
+    fs::create_dir(&lane).unwrap();
+    fs::write(lane.join("listed.yaml"), "id: listed\n").unwrap();
+    fs::write(lane.join("orphan.yaml"), "id: orphan\n").unwrap();
+    fs::write(
+        temp.path().join("manifest.yaml"),
+        "golden:\n  - listed\n  - missing\n",
+    )
+    .unwrap();
+
+    let error = validate_manifest(&temp.path().join("manifest.yaml"), &lane)
+        .expect_err("manifest should fail");
+    let text = error.to_string();
+    assert!(text.contains("orphan"));
+    assert!(text.contains("missing"));
+}
+
+#[test]
+fn security_smoke_covers_required_attack_lanes() {
+    let report = run_security_file(&repo_root().join("examples/evals/security-smoke.yaml"))
+        .expect("security smoke");
+
+    assert!(report.passed);
+    assert_eq!(
+        report.covered_lanes,
+        [
+            "poisoning",
+            "query_filter_injection",
+            "high_risk_action_suppression",
+            "tenant_leakage",
+            "deletion_completeness",
+        ]
+    );
+    assert!(
+        report
+            .lane_results
+            .iter()
+            .any(|lane| lane.kind == "deletion_completeness" && lane.passed)
+    );
+}
+
+#[test]
+fn ops_smoke_covers_blob_gc_deletion_saga_and_compaction() {
+    let report = run_ops_file(&repo_root().join("examples/evals/ops-smoke.yaml")).expect("ops");
+
+    assert!(report.passed);
+    assert_eq!(
+        report.covered_checks,
+        [
+            "blob_gc",
+            "deletion_saga_readback",
+            "reindex_compaction_sla",
+        ]
+    );
+}
+
+#[test]
+fn benchmark_runner_archives_traces() {
+    let temp = tempfile::tempdir().unwrap();
+    let suite = repo_root().join("benchmarks/nightly-sampled.yaml");
+    let report = run_eval_file(
+        &suite,
+        EvalRunOptions {
+            archive_traces: true,
+            archive_dir: Some(temp.path().to_path_buf()),
+        },
+    )
+    .expect("nightly sampled run");
+
+    let archive = report.archived_trace_path.expect("archive path");
+    assert!(archive.starts_with(temp.path()));
+    let archive_json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(archive).unwrap()).unwrap();
+    assert_eq!(archive_json["eval_id"], "nightly-sampled");
+    assert_eq!(archive_json["trace_schema_version"], "trace-0.1.0-ws0");
+    assert!(!archive_json["case_results"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn trace_schema_snapshot_is_current() {
+    let expected: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(repo_root().join("examples/evals/trace-schema.v1.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(generate_trace_schema(), expected);
+}
+
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf()
+}

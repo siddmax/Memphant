@@ -1,0 +1,3 @@
+id: nightly-sampled
+cases:
+  - ../examples/evals/golden/checkout_region.yaml
