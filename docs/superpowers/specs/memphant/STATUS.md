@@ -5,7 +5,7 @@
 > ## ✅ DONE definition (deterministic)
 > **MemPhant is FULLY COMPLETED when every checkbox in §1–§6 is checked and the banner below reads COMPLETE.** No section may be skipped; an activation-gated item (§5) counts as done when it is either ACTIVATED (gate met + built + proof) or RETIRED (its disable-when fired, recorded in `24`). Nothing else — no vibe, no partial credit — flips the banner.
 >
-> # CURRENT PHASE: `RUNG-15 PROMOTED — NEXT DOGFOOD GATE`
+> # CURRENT PHASE: `DOGFOOD GATE PROMOTED — NEXT PUBLIC LAUNCH GATE`
 >
 > WS-0 proof artifact: `docs/build-log/artifacts/ws0-two-language-spike.json`.
 > R83 spike measured warm no-recompile Rust policy-change iteration at **0.073×** Python (`rust_proceeds`).
@@ -31,6 +31,7 @@
 > Rung-13 promotion proof artifact: `docs/build-log/2026-07-03-rung13-learned-rerank-profile.md` + `docs/build-log/artifacts/rung13-learned-rerank-profile.json` + `docs/build-log/artifacts/rung13-baseline-sampled-traces.json` + `docs/build-log/artifacts/rung13-learned-rerank-sampled-traces.json` (memory-tuned learned rerank profile recovered the protected-top-k atlas rollback runbook while the no-learned-rerank control returned the lexical decoy; learned DSR fitter remains data-gated).
 > Rung-14 retirement proof artifact: `docs/build-log/2026-07-03-rung14-external-engine-retirement.md` + `docs/build-log/artifacts/rung14-external-engine-retirement-profile.json` (relational edge expansion already beat no-edges controls and no archived Postgres/pgvector bottleneck proof exists through Rung 13, so the external graph/vector engine is retired for the current public architecture).
 > Rung-15 promotion proof artifact: `docs/build-log/2026-07-03-rung15-inferred-belief-composition-profile.md` + `docs/build-log/artifacts/rung15-inferred-belief-composition-profile.json` + `docs/build-log/artifacts/rung15-baseline-sampled-traces.json` + `docs/build-log/artifacts/rung15-inferred-belief-sampled-traces.json` (guardrailed reflect-stage composition mints belief-tier abstractions with `derived_by=composition`, requires direct observation before semantic promotion, and records no OP-Bench-style restraint regression).
+> Dogfood active-read proof artifact: `docs/build-log/2026-07-03-dogfood-active-read-gate.md` + `docs/build-log/artifacts/syndai_agent_file_memory_001-trace-compare.json` (Syndai's L1+ agent-scoped file-memory surface actively reads through public `/v1/recall`, preserves MemPhant trace/citation IDs in backend context rows, keeps L1+ user memory blocked, and leaves web/mobile clients outside MemPhant DB/REST).
 > Syndai spec/preflight proof: `docs/build-log/2026-07-03-syndai-preflight.md` (`Syndai/main` `fe17bc488`, preflight green in 764s).
 
 ## 1. Spec corpus
@@ -63,7 +64,7 @@
 ## 4. Launch gates (contracts owned by `29` §5–§7)
 
 - [x] **Alpha gate** (`29` §5) — all eleven criteria green (proof: `docs/build-log/2026-07-03-wsi-progress.md`)
-- [ ] **Dogfood gate** (`29` §6) — first surface actively read by Syndai through public contracts
+- [x] **Dogfood gate** (`29` §6) — first surface actively read by Syndai through public contracts (proof: `docs/build-log/2026-07-03-dogfood-active-read-gate.md`)
 - [ ] **Public launch gate** (`29` §7) — incl. one reproduced public benchmark profile + no hidden Syndai-only behavior
 - [ ] **Restraint launch gate** (`27` §1) — OP-Bench drop ≤15% vs memory-free baseline (pinned-block content in scope)
 - [ ] **GateMem conditional gate** (`27` §1, R90) — first internal reproduction done; then simultaneous pass on utility+access-control+forgetting
