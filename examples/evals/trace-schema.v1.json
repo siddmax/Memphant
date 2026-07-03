@@ -18,6 +18,29 @@
       ],
       "type": "string"
     },
+    "ProcedureTraceFact": {
+      "properties": {
+        "safety_status": {
+          "type": "string"
+        },
+        "signal_kind": {
+          "type": "string"
+        },
+        "unit_id": {
+          "$ref": "#/$defs/UnitId"
+        },
+        "validation_state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "unit_id",
+        "validation_state",
+        "signal_kind",
+        "safety_status"
+      ],
+      "type": "object"
+    },
     "RecallCandidateTrace": {
       "properties": {
         "channel": {
@@ -406,6 +429,20 @@
     "policy_filters": {
       "items": {
         "$ref": "#/$defs/RecallPolicyFilter"
+      },
+      "type": "array"
+    },
+    "procedure_ids": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/UnitId"
+      },
+      "type": "array"
+    },
+    "procedure_validation_states": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ProcedureTraceFact"
       },
       "type": "array"
     },

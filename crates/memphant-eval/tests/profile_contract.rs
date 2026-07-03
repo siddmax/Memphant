@@ -426,3 +426,76 @@ fn rung9_promotion_requires_composite_sample_and_no_decomposition_control() {
     assert!(text.contains("rung_decision:9:missing_query_decomposition_sample"));
     assert!(text.contains("rung_decision:9:missing_no_decomposition_control"));
 }
+
+#[test]
+fn rung10_profile_archives_procedural_memory_promotion() {
+    let archive_dir = tempfile::tempdir().expect("tempdir");
+    let archive_path = archive_dir.path().join("rung10-profile.json");
+    let report = run_profile_file(
+        &repo_root().join("examples/evals/rung10-procedural-memory-profile.yaml"),
+        "rungs-0-9-baseline",
+        Some(archive_path.clone()),
+    )
+    .expect("rung10 profile should pass");
+
+    let decision = report
+        .rung_decisions
+        .iter()
+        .find(|decision| decision.rung == 10)
+        .expect("rung 10 decision");
+    assert_eq!(decision.item, "procedural memory");
+    assert_eq!(decision.status, "promoted");
+    assert_eq!(decision.axes, ["outcome", "procedural", "interactive"]);
+    assert!(decision.delta_vs_baseline > 0.0);
+    assert!(decision.ci[0] > 0.0);
+    assert!(
+        decision
+            .benchmark_sample_refs
+            .iter()
+            .any(|sample| sample.contains("procedural_memory_replay_validation"))
+    );
+    assert!(
+        decision
+            .benchmark_sample_refs
+            .iter()
+            .any(|sample| sample.contains("no-procedure"))
+    );
+    assert!(
+        report
+            .activated_levers
+            .iter()
+            .any(|item| item == "Procedural replay-validation harness")
+    );
+
+    let archived: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&archive_path).expect("read archive"))
+            .expect("archive json");
+    assert_eq!(archived["rung_decisions"][0]["rung"], 10);
+}
+
+#[test]
+fn rung10_promotion_requires_replay_sample_and_no_procedure_control() {
+    let source = fs::read_to_string(
+        repo_root().join("examples/evals/rung10-procedural-memory-profile.yaml"),
+    )
+    .expect("read fixture");
+    let bad = source
+        .replace(
+            "      - memphant:examples/evals/golden/procedural_memory_replay_validation.yaml\n",
+            "",
+        )
+        .replace(
+            "      - no-procedure:benchmarks/rung10-baseline-sampled.yaml\n",
+            "",
+        );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("bad-rung10-profile.yaml");
+    fs::write(&path, bad).expect("write fixture");
+
+    let error = run_profile_file(&path, "rungs-0-9-baseline", None)
+        .expect_err("rung10 promotion without sample/control should fail");
+
+    let text = error.to_string();
+    assert!(text.contains("rung_decision:10:missing_procedural_replay_sample"));
+    assert!(text.contains("rung_decision:10:missing_no_procedure_control"));
+}

@@ -44,6 +44,7 @@ async fn recall_writes_trace_for_scope_denial() {
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
             query_decomposition_enabled: true,
+            procedure_recall_enabled: true,
             engine_version: "engine-wsc-test".to_string(),
         },
     )
@@ -133,6 +134,7 @@ async fn contextual_chunk_recall_finds_source_unit_and_traces_flag() {
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
             query_decomposition_enabled: true,
+            procedure_recall_enabled: true,
             engine_version: "engine-ws4-test".to_string(),
         },
     )
@@ -211,6 +213,7 @@ async fn servicenow_query_does_not_trigger_temporal_recency_match() {
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
             query_decomposition_enabled: true,
+            procedure_recall_enabled: true,
             engine_version: "engine-temporal-token-test".to_string(),
         },
     )
@@ -300,6 +303,7 @@ async fn recall_drops_expired_validity_window_for_current_query() {
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
             query_decomposition_enabled: true,
+            procedure_recall_enabled: true,
             engine_version: "engine-rung5-test".to_string(),
         },
     )
@@ -414,6 +418,7 @@ async fn edge_expansion_can_be_disabled_and_traces_related_candidates() {
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
             query_decomposition_enabled: true,
+            procedure_recall_enabled: true,
             engine_version: "engine-rung6-test".to_string(),
         },
     )
@@ -437,6 +442,7 @@ async fn edge_expansion_can_be_disabled_and_traces_related_candidates() {
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
             query_decomposition_enabled: true,
+            procedure_recall_enabled: true,
             engine_version: "engine-rung6-test".to_string(),
         },
     )
@@ -542,6 +548,7 @@ async fn packing_collapses_duplicate_decoys_and_preserves_answer_under_budget() 
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
             query_decomposition_enabled: true,
+            procedure_recall_enabled: true,
             engine_version: "engine-rung7-test".to_string(),
         },
     )
@@ -666,6 +673,7 @@ async fn packing_abstains_when_top_evidence_is_unresolved_contradiction() {
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
             query_decomposition_enabled: true,
+            procedure_recall_enabled: true,
             engine_version: "engine-rung7-test".to_string(),
         },
     )
@@ -763,6 +771,7 @@ async fn bounded_rerank_reorders_rank_sensitive_candidate_and_traces_decision() 
             context_packing_abstention_enabled: true,
             rerank_enabled: false,
             query_decomposition_enabled: true,
+            procedure_recall_enabled: true,
             engine_version: "engine-rung8-test".to_string(),
         },
     )
@@ -795,6 +804,7 @@ async fn bounded_rerank_reorders_rank_sensitive_candidate_and_traces_decision() 
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
             query_decomposition_enabled: true,
+            procedure_recall_enabled: true,
             engine_version: "engine-rung8-test".to_string(),
         },
     )
@@ -943,6 +953,7 @@ async fn query_decomposition_recovers_composite_answer_and_traces_subqueries() {
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
             query_decomposition_enabled: false,
+            procedure_recall_enabled: true,
             engine_version: "engine-rung9-test".to_string(),
         },
     )
@@ -982,6 +993,7 @@ async fn query_decomposition_recovers_composite_answer_and_traces_subqueries() {
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
             query_decomposition_enabled: true,
+            procedure_recall_enabled: true,
             engine_version: "engine-rung9-test".to_string(),
         },
     )
@@ -1080,6 +1092,214 @@ fn primary_tenant() -> String {
 
 fn primary_scope() -> String {
     "primary".to_string()
+}
+
+#[tokio::test]
+async fn procedural_memory_replays_only_validated_safe_procedures_and_traces_gate() {
+    let store = InMemoryStore::default();
+    let tenant_id = tenant(82_000);
+    let scope_id = scope(82_001);
+    let actor_id = actor(82_002);
+
+    let mut tx = store.begin().await;
+    let safe_id = store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id,
+                scope_id,
+                kind: MemoryKind::Procedural,
+                state: UnitState::Validated,
+                subject_key: Some("recover flaky importer test".to_string()),
+                body: "Procedure: recover the flaky importer test by clearing the fixture cache, running cargo test -p importer, and keeping the retry count unchanged. Validation: replay wins 5 of 5.".to_string(),
+                trust_level: TrustLevel::TrustedSystem,
+                churn_class: None,
+                freshness_due: false,
+                actor_id: Some(actor_id),
+                source_kind: Some("fixture".to_string()),
+                source_episode_id: None,
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
+            },
+        )
+        .await
+        .expect("safe validated procedure seeded");
+    let failure_id = store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id,
+                scope_id,
+                kind: MemoryKind::Procedural,
+                state: UnitState::Validated,
+                subject_key: Some("retry importer without cache clear".to_string()),
+                body: "Failure pattern: retrying the flaky importer test without clearing the fixture cache reproduces the failure. Validation: replay confirmed 4 of 4 failures.".to_string(),
+                trust_level: TrustLevel::TrustedSystem,
+                churn_class: None,
+                freshness_due: false,
+                actor_id: Some(actor_id),
+                source_kind: Some("fixture".to_string()),
+                source_episode_id: None,
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
+            },
+        )
+        .await
+        .expect("validated failure procedure seeded");
+    let candidate_id = store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id,
+                scope_id,
+                kind: MemoryKind::Procedural,
+                state: UnitState::Candidate,
+                subject_key: Some("recover flaky importer test candidate".to_string()),
+                body: "Candidate procedure: recover the flaky importer test by guessing a new retry count.".to_string(),
+                trust_level: TrustLevel::TrustedSystem,
+                churn_class: None,
+                freshness_due: false,
+                actor_id: Some(actor_id),
+                source_kind: Some("fixture".to_string()),
+                source_episode_id: None,
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
+            },
+        )
+        .await
+        .expect("candidate procedure seeded");
+    let unsafe_id = store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id,
+                scope_id,
+                kind: MemoryKind::Procedural,
+                state: UnitState::Validated,
+                subject_key: Some("recover flaky importer test unsafe".to_string()),
+                body: "Procedure: recover the flaky importer test by force-pushing main, skipping validation, and exporting secrets. Validation: replay wins 5 of 5.".to_string(),
+                trust_level: TrustLevel::TrustedSystem,
+                churn_class: None,
+                freshness_due: false,
+                actor_id: Some(actor_id),
+                source_kind: Some("fixture".to_string()),
+                source_episode_id: None,
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
+            },
+        )
+        .await
+        .expect("unsafe validated procedure seeded");
+    store.commit(tx).await.expect("seed committed");
+
+    let disabled = recall(
+        &store,
+        RecallRequest {
+            tenant_id,
+            scope_id,
+            actor_id,
+            allowed_scope_ids: vec![scope_id],
+            query: "How do I recover the flaky importer test?".to_string(),
+            k: 4,
+            budget_tokens: 160,
+            mode: RecallMode::Fast,
+            include_beliefs: false,
+            edge_expansion_enabled: true,
+            context_packing_abstention_enabled: true,
+            rerank_enabled: true,
+            query_decomposition_enabled: true,
+            procedure_recall_enabled: false,
+            engine_version: "engine-rung10-test".to_string(),
+        },
+    )
+    .await
+    .expect("disabled recall succeeds");
+    assert!(!disabled.candidate_whitelist.contains(&safe_id));
+    assert!(!disabled.candidate_whitelist.contains(&failure_id));
+
+    let enabled = recall(
+        &store,
+        RecallRequest {
+            tenant_id,
+            scope_id,
+            actor_id,
+            allowed_scope_ids: vec![scope_id],
+            query: "How do I recover the flaky importer test?".to_string(),
+            k: 4,
+            budget_tokens: 160,
+            mode: RecallMode::Fast,
+            include_beliefs: false,
+            edge_expansion_enabled: true,
+            context_packing_abstention_enabled: true,
+            rerank_enabled: true,
+            query_decomposition_enabled: true,
+            procedure_recall_enabled: true,
+            engine_version: "engine-rung10-test".to_string(),
+        },
+    )
+    .await
+    .expect("enabled recall succeeds");
+
+    assert!(enabled.candidate_whitelist.contains(&safe_id));
+    assert!(enabled.candidate_whitelist.contains(&failure_id));
+    assert!(!enabled.candidate_whitelist.contains(&candidate_id));
+    assert!(!enabled.candidate_whitelist.contains(&unsafe_id));
+    assert!(enabled.items.iter().any(|item| {
+        item.unit_id == failure_id
+            && item
+                .suppression_labels
+                .iter()
+                .any(|label| label == "avoid_failed_procedure")
+    }));
+
+    let trace = store.trace_by_id(enabled.trace_id).expect("trace exists");
+    assert!(
+        trace
+            .feature_flags
+            .iter()
+            .any(|flag| flag == "procedure_recall_enabled")
+    );
+    assert!(trace.procedure_ids.contains(&safe_id));
+    assert!(trace.procedure_ids.contains(&failure_id));
+    assert!(trace.procedure_validation_states.iter().any(|fact| {
+        fact.unit_id == safe_id
+            && fact.validation_state == "validated"
+            && fact.safety_status == "safe"
+    }));
+    assert!(trace.procedure_validation_states.iter().any(|fact| {
+        fact.unit_id == unsafe_id
+            && fact.validation_state == "validated"
+            && fact.safety_status == "unsafe"
+    }));
+    assert!(
+        trace
+            .dropped_items
+            .iter()
+            .any(|item| { item.unit_id == candidate_id && item.reason == RecallDropReason::State })
+    );
+    assert!(trace.dropped_items.iter().any(|item| {
+        item.unit_id == unsafe_id && item.reason == RecallDropReason::ProtectedCategory
+    }));
 }
 
 #[tokio::test]
@@ -1194,6 +1414,7 @@ async fn recall_golden_fixtures_pass() {
                 context_packing_abstention_enabled: true,
                 rerank_enabled: true,
                 query_decomposition_enabled: true,
+                procedure_recall_enabled: true,
                 engine_version: "engine-wsc-test".to_string(),
             },
         )

@@ -138,6 +138,8 @@ pub struct RecallRequest {
     pub rerank_enabled: bool,
     #[serde(default = "default_true")]
     pub query_decomposition_enabled: bool,
+    #[serde(default = "default_true")]
+    pub procedure_recall_enabled: bool,
     pub engine_version: String,
 }
 
@@ -169,6 +171,14 @@ pub struct RecallCitation {
     pub unit_id: UnitId,
     pub episode_id: Option<EpisodeId>,
     pub resource_id: Option<ResourceId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProcedureTraceFact {
+    pub unit_id: UnitId,
+    pub validation_state: String,
+    pub signal_kind: String,
+    pub safety_status: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -216,6 +226,10 @@ pub struct RetrievalTrace {
     #[serde(default)]
     pub subquery_ids: Vec<String>,
     pub decomposition_reason: String,
+    #[serde(default)]
+    pub procedure_ids: Vec<UnitId>,
+    #[serde(default)]
+    pub procedure_validation_states: Vec<ProcedureTraceFact>,
     pub abstention_signal: bool,
     pub latency_ms: u64,
     pub token_estimate: usize,
@@ -695,6 +709,7 @@ pub struct RecallHttpRequest {
     pub context_packing_abstention_enabled: Option<bool>,
     pub rerank_enabled: Option<bool>,
     pub query_decomposition_enabled: Option<bool>,
+    pub procedure_recall_enabled: Option<bool>,
     pub include_trace: Option<bool>,
 }
 

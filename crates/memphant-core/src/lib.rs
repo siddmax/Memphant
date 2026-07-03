@@ -5,10 +5,10 @@ use async_trait::async_trait;
 use memphant_types::{
     AdmissionAction, CorrectRequest, CorrectResult, DedupOutcome, EdgeId, EpisodeId, ForgetRequest,
     ForgetResult, JobId, MarkRequest, MarkResult, MemoryEdgeKind, MemoryKind, NewEpisode,
-    NewMemoryEdge, NewMemoryUnit, QueuedReflectJob, RecallCandidateTrace, RecallChannel,
-    RecallCitation, RecallContextItem, RecallDropReason, RecallDroppedItem, RecallMode,
-    RecallPolicyFilter, RecallRequest, RecallResponse, ReflectInput, ReflectJob, ReflectJobKind,
-    ReflectStageFact, ReflectTrace, RetainInput, RetainOutcome, RetainRequest,
+    NewMemoryEdge, NewMemoryUnit, ProcedureTraceFact, QueuedReflectJob, RecallCandidateTrace,
+    RecallChannel, RecallCitation, RecallContextItem, RecallDropReason, RecallDroppedItem,
+    RecallMode, RecallPolicyFilter, RecallRequest, RecallResponse, ReflectInput, ReflectJob,
+    ReflectJobKind, ReflectStageFact, ReflectTrace, RetainInput, RetainOutcome, RetainRequest,
     RetainResourceOutcome, RetainResourceRequest, RetainResult, RetrievalTrace, ReviewEvent,
     ScopeId, StoredEpisode, StoredMemoryEdge, StoredMemoryUnit, StoredResource, TenantId, TraceId,
     TrustLevel, UnitId, UnitState,
@@ -763,6 +763,8 @@ pub async fn recall(
             rerank_overfetch_ratio: 0.0,
             subquery_ids: Vec::new(),
             decomposition_reason: "none".to_string(),
+            procedure_ids: Vec::new(),
+            procedure_validation_states: Vec::new(),
             abstention_signal: true,
             latency_ms: 0,
             token_estimate: 0,
@@ -988,6 +990,12 @@ pub async fn recall(
             resource_id: item.citation_resource_id,
         })
         .collect();
+    let procedure_ids = items
+        .iter()
+        .filter(|item| item.kind == MemoryKind::Procedural)
+        .map(|item| item.unit_id)
+        .collect::<Vec<_>>();
+    let procedure_validation_states = procedure_trace_facts(&tenant_units, &request);
     let trace_id = TraceId::new();
     let feature_flags = recall_feature_flags(&request);
     let trace = RetrievalTrace {
@@ -1020,6 +1028,8 @@ pub async fn recall(
             .map(|subquery| subquery.id.clone())
             .collect(),
         decomposition_reason: decomposition.reason,
+        procedure_ids,
+        procedure_validation_states,
         abstention_signal: abstention,
         latency_ms: 0,
         token_estimate,
@@ -1055,6 +1065,8 @@ fn trace_filter_drops(
                 Some(RecallDropReason::Deleted)
             } else if unit.transaction_to.is_some() || !valid_for_query(unit, &request.query) {
                 Some(RecallDropReason::Stale)
+            } else if let Some(reason) = procedure_drop_reason(unit, request) {
+                Some(reason)
             } else {
                 match unit.state {
                     UnitState::Deleted => Some(RecallDropReason::Deleted),
@@ -1077,6 +1089,100 @@ fn trace_filter_drops(
             })
         })
         .collect()
+}
+
+fn procedure_drop_reason(
+    unit: &StoredMemoryUnit,
+    request: &RecallRequest,
+) -> Option<RecallDropReason> {
+    if unit.kind != MemoryKind::Procedural {
+        return None;
+    }
+    if !request.procedure_recall_enabled || unit.state != UnitState::Validated {
+        return Some(RecallDropReason::State);
+    }
+    if unsafe_procedure_step(unit) {
+        return Some(RecallDropReason::ProtectedCategory);
+    }
+    None
+}
+
+fn procedure_trace_facts(
+    units: &[StoredMemoryUnit],
+    request: &RecallRequest,
+) -> Vec<ProcedureTraceFact> {
+    units
+        .iter()
+        .filter(|unit| {
+            unit.kind == MemoryKind::Procedural
+                && request.allowed_scope_ids.contains(&unit.scope_id)
+                && unit.deletion_generation.is_none()
+                && unit.transaction_to.is_none()
+        })
+        .map(|unit| ProcedureTraceFact {
+            unit_id: unit.id,
+            validation_state: procedure_validation_state(unit).to_string(),
+            signal_kind: procedure_signal_kind(unit).to_string(),
+            safety_status: procedure_safety_status(unit).to_string(),
+        })
+        .collect()
+}
+
+fn procedure_validation_state(unit: &StoredMemoryUnit) -> &'static str {
+    match unit.state {
+        UnitState::Validated => "validated",
+        UnitState::Candidate => "candidate",
+        UnitState::Active => "active",
+        UnitState::Retired => "retired",
+        _ => "not_validated",
+    }
+}
+
+fn procedure_signal_kind(unit: &StoredMemoryUnit) -> &'static str {
+    let body = normalize_component(&unit.body);
+    let subject = unit
+        .subject_key
+        .as_deref()
+        .map(normalize_component)
+        .unwrap_or_default();
+    if body.contains("failure pattern")
+        || body.contains("reproduces the failure")
+        || subject.contains("failure")
+    {
+        "failure"
+    } else {
+        "success"
+    }
+}
+
+fn procedure_safety_status(unit: &StoredMemoryUnit) -> &'static str {
+    if unsafe_procedure_step(unit) {
+        "unsafe"
+    } else {
+        "safe"
+    }
+}
+
+fn unsafe_procedure_step(unit: &StoredMemoryUnit) -> bool {
+    if unit.kind != MemoryKind::Procedural {
+        return false;
+    }
+    let body = normalize_component(&unit.body);
+    [
+        "force-push",
+        "force push",
+        "skip validation",
+        "skipping validation",
+        "bypass approval",
+        "bypass auth",
+        "export secrets",
+        "exfiltrat",
+        "rm -rf",
+        "delete production",
+        "disable tests",
+    ]
+    .iter()
+    .any(|phrase| body.contains(phrase))
 }
 
 fn decompose_query(request: &RecallRequest) -> QueryDecompositionFacts {
@@ -1538,15 +1644,22 @@ fn context_item_for(
 ) -> RecallContextItem {
     let suppression_labels = suppression_labels_for(&candidate.unit, tenant_edges);
     let matched_contextual_chunk = contextual_chunk_score(&candidate.unit, query_tokens) > 0.0;
+    let inclusion_reason = if candidate.unit.kind == MemoryKind::Procedural
+        && procedure_signal_kind(&candidate.unit) == "failure"
+    {
+        "validated_failure_pattern"
+    } else if candidate.unit.kind == MemoryKind::Procedural {
+        "validated_procedure"
+    } else if matched_contextual_chunk {
+        "contextual_chunk"
+    } else {
+        "fused_top_k"
+    };
     RecallContextItem {
         unit_id: candidate.unit.id,
         body: candidate.unit.body,
         kind: candidate.unit.kind,
-        inclusion_reason: if matched_contextual_chunk {
-            "contextual_chunk".to_string()
-        } else {
-            "fused_top_k".to_string()
-        },
+        inclusion_reason: inclusion_reason.to_string(),
         citation_episode_id: candidate.unit.source_episode_id,
         citation_resource_id: candidate.unit.source_resource_id,
         suppression_labels,
@@ -1625,14 +1738,27 @@ fn channel_candidates(
     units
         .iter()
         .filter(|unit| request.allowed_scope_ids.contains(&unit.scope_id))
-        .filter(|unit| recallable(unit, request.include_beliefs, &request.query))
+        .filter(|unit| {
+            recallable(
+                unit,
+                request.include_beliefs,
+                request.procedure_recall_enabled,
+                &request.query,
+            )
+        })
         .filter_map(|unit| {
             let score = match channel {
                 RecallChannel::Exact => exact_score(unit, query_tokens),
                 RecallChannel::Lexical => lexical_score(unit, query_tokens),
                 RecallChannel::Vector => vector_score(unit, query_tokens),
                 RecallChannel::Temporal => temporal_score(unit, &request.query),
-                RecallChannel::Edge => edge_score(unit, units, edges, query_tokens),
+                RecallChannel::Edge => edge_score(
+                    unit,
+                    units,
+                    edges,
+                    query_tokens,
+                    request.procedure_recall_enabled,
+                ),
             };
             (score > 0.0).then(|| (unit.clone(), score))
         })
@@ -1644,6 +1770,7 @@ fn edge_score(
     units: &[StoredMemoryUnit],
     edges: &[StoredMemoryEdge],
     query_tokens: &[String],
+    procedure_recall_enabled: bool,
 ) -> f32 {
     let related_match = edges.iter().any(|edge| {
         if edge.src_id != unit.id && edge.dst_id != unit.id {
@@ -1658,7 +1785,7 @@ fn edge_score(
             .iter()
             .find(|candidate| candidate.id == other_id)
             .is_some_and(|candidate| {
-                recallable(candidate, true, "")
+                recallable(candidate, true, procedure_recall_enabled, "")
                     && (lexical_score(candidate, query_tokens) > 0.0
                         || exact_score(candidate, query_tokens) > 0.0)
             })
@@ -1667,22 +1794,35 @@ fn edge_score(
 }
 
 fn suppression_labels_for(unit: &StoredMemoryUnit, edges: &[StoredMemoryEdge]) -> Vec<String> {
+    let mut labels = Vec::new();
     if edges.iter().any(|edge| {
         edge.kind == MemoryEdgeKind::Contradicts
             && (edge.src_id == unit.id || edge.dst_id == unit.id)
     }) {
-        vec!["unresolved_contradiction".to_string()]
-    } else {
-        Vec::new()
+        labels.push("unresolved_contradiction".to_string());
     }
+    if unit.kind == MemoryKind::Procedural && procedure_signal_kind(unit) == "failure" {
+        labels.push("avoid_failed_procedure".to_string());
+    }
+    labels
 }
 
-fn recallable(unit: &StoredMemoryUnit, include_beliefs: bool, query: &str) -> bool {
+fn recallable(
+    unit: &StoredMemoryUnit,
+    include_beliefs: bool,
+    procedure_recall_enabled: bool,
+    query: &str,
+) -> bool {
     if unit.deletion_generation.is_some() {
         return false;
     }
     if unit.transaction_to.is_some() || !valid_for_query(unit, query) {
         return false;
+    }
+    if unit.kind == MemoryKind::Procedural {
+        return procedure_recall_enabled
+            && unit.state == UnitState::Validated
+            && !unsafe_procedure_step(unit);
     }
     matches!(unit.state, UnitState::Active | UnitState::Validated)
         && (include_beliefs || unit.kind != MemoryKind::Belief)
@@ -1813,6 +1953,7 @@ fn channel_weight(channel: RecallChannel, query: &str) -> f32 {
         RecallChannel::Exact if query.contains("how") => 2.5,
         RecallChannel::Exact => 1.0,
         RecallChannel::Lexical if query.contains("error") => 3.0,
+        RecallChannel::Lexical if query.contains("how") => 2.0,
         RecallChannel::Lexical => 1.0,
         RecallChannel::Vector => 2.0,
         RecallChannel::Temporal
@@ -1831,6 +1972,7 @@ fn recall_stage_facts() -> Vec<ReflectStageFact> {
     [
         "stage0_policy",
         "query_decomposition",
+        "procedure_recall",
         "exact",
         "lexical",
         "vector",
@@ -1868,6 +2010,9 @@ fn recall_feature_flags(request: &RecallRequest) -> Vec<String> {
     }
     if request.query_decomposition_enabled {
         flags.push("query_decomposition_enabled".to_string());
+    }
+    if request.procedure_recall_enabled {
+        flags.push("procedure_recall_enabled".to_string());
     }
     flags
 }

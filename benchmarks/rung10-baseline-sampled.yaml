@@ -1,0 +1,3 @@
+id: rung10-baseline-sampled
+cases:
+  - ../examples/evals/golden/procedural_memory_replay_validation.yaml

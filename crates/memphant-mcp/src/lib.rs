@@ -170,6 +170,7 @@ impl McpRuntime {
                         query_decomposition_enabled: request
                             .query_decomposition_enabled
                             .unwrap_or(true),
+                        procedure_recall_enabled: request.procedure_recall_enabled.unwrap_or(true),
                         engine_version: ENGINE_VERSION.to_string(),
                     },
                 )

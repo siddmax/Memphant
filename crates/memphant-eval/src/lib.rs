@@ -53,6 +53,7 @@ pub struct EvalRunOptions {
     pub context_packing_abstention_enabled: bool,
     pub rerank_enabled: bool,
     pub query_decomposition_enabled: bool,
+    pub procedure_recall_enabled: bool,
     pub filesystem_control_enabled: bool,
 }
 
@@ -67,6 +68,7 @@ impl Default for EvalRunOptions {
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
             query_decomposition_enabled: true,
+            procedure_recall_enabled: true,
             filesystem_control_enabled: false,
         }
     }
@@ -478,6 +480,7 @@ struct GoldenRunControls {
     context_packing_abstention_enabled: bool,
     rerank_enabled: bool,
     query_decomposition_enabled: bool,
+    procedure_recall_enabled: bool,
     filesystem_control_enabled: bool,
 }
 
@@ -490,6 +493,7 @@ impl Default for GoldenRunControls {
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
             query_decomposition_enabled: true,
+            procedure_recall_enabled: true,
             filesystem_control_enabled: false,
         }
     }
@@ -504,6 +508,7 @@ impl From<&EvalRunOptions> for GoldenRunControls {
             context_packing_abstention_enabled: options.context_packing_abstention_enabled,
             rerank_enabled: options.rerank_enabled,
             query_decomposition_enabled: options.query_decomposition_enabled,
+            procedure_recall_enabled: options.procedure_recall_enabled,
             filesystem_control_enabled: options.filesystem_control_enabled,
         }
     }
@@ -556,6 +561,7 @@ pub fn run_eval_file(path: &Path, options: EvalRunOptions) -> EvalResult<EvalRep
                 "context_packing_abstention_enabled": options.context_packing_abstention_enabled,
                 "rerank_enabled": options.rerank_enabled,
                 "query_decomposition_enabled": options.query_decomposition_enabled,
+                "procedure_recall_enabled": options.procedure_recall_enabled,
                 "filesystem_control_enabled": options.filesystem_control_enabled,
             },
             "case_results": report.case_results,
@@ -1036,6 +1042,9 @@ fn validate_rung_decision(
     if decision.rung == 9 && decision.status == "promoted" {
         validate_rung9_query_decomposition_promotion(decision, axes, &prefix, findings);
     }
+    if decision.rung == 10 && decision.status == "promoted" {
+        validate_rung10_procedural_memory_promotion(decision, axes, &prefix, findings);
+    }
 }
 
 fn validate_rung4_contextual_chunk_promotion(
@@ -1293,6 +1302,50 @@ fn validate_rung9_query_decomposition_promotion(
     }
 }
 
+fn validate_rung10_procedural_memory_promotion(
+    decision: &RungDecision,
+    axes: &BTreeMap<String, SotaAxisResult>,
+    prefix: &str,
+    findings: &mut Vec<String>,
+) {
+    if decision.item != "procedural memory" {
+        findings.push(format!("{prefix}:invalid_item:{}", decision.item));
+    }
+    for required_axis in ["outcome", "procedural", "interactive"] {
+        if !decision.axes.iter().any(|axis| axis == required_axis) {
+            findings.push(format!("{prefix}:missing_{required_axis}_axis"));
+        }
+    }
+    if !decision
+        .benchmark_sample_refs
+        .iter()
+        .any(|sample| sample.contains("procedural_memory_replay_validation"))
+    {
+        findings.push(format!("{prefix}:missing_procedural_replay_sample"));
+    }
+    if !decision
+        .benchmark_sample_refs
+        .iter()
+        .any(|sample| sample.contains("no-procedure"))
+    {
+        findings.push(format!("{prefix}:missing_no_procedure_control"));
+    }
+    if !decision
+        .benchmark_sample_refs
+        .iter()
+        .any(|sample| sample.contains("rung10-state-style"))
+    {
+        findings.push(format!("{prefix}:missing_state_style_sample_ref"));
+    }
+    for axis in ["outcome", "procedural", "interactive"] {
+        match axes.get(axis) {
+            Some(result) if result.delta_vs_baseline.unwrap_or_default() > 0.0 => {}
+            Some(_) => findings.push(format!("{prefix}:{axis}:non_positive_axis_delta")),
+            None => {}
+        }
+    }
+}
+
 fn validate_ci(prefix: &str, delta: Option<f64>, ci: Option<[f64; 2]>, findings: &mut Vec<String>) {
     let Some(delta) = delta else {
         findings.push(format!("{prefix}:missing_delta"));
@@ -1365,6 +1418,7 @@ async fn run_syndai_trace_compare(
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
             query_decomposition_enabled: true,
+            procedure_recall_enabled: true,
             engine_version: ENGINE_VERSION.to_string(),
         },
     )
@@ -1465,6 +1519,7 @@ async fn run_golden_case_inner(
             context_packing_abstention_enabled: controls.context_packing_abstention_enabled,
             rerank_enabled: controls.rerank_enabled,
             query_decomposition_enabled: controls.query_decomposition_enabled,
+            procedure_recall_enabled: controls.procedure_recall_enabled,
             engine_version: ENGINE_VERSION.to_string(),
         },
     )
@@ -1723,6 +1778,7 @@ async fn run_high_risk_lane(lane: &SecurityLane) -> EvalResult<String> {
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
             query_decomposition_enabled: true,
+            procedure_recall_enabled: true,
             engine_version: ENGINE_VERSION.to_string(),
         },
     )
@@ -1828,6 +1884,7 @@ async fn run_deletion_lane(lane: &SecurityLane) -> EvalResult<String> {
             context_packing_abstention_enabled: true,
             rerank_enabled: true,
             query_decomposition_enabled: true,
+            procedure_recall_enabled: true,
             engine_version: ENGINE_VERSION.to_string(),
         },
     )

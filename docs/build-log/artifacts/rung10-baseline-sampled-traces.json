@@ -1,0 +1,37 @@
+{
+  "case_results": [
+    {
+      "dropped_mismatches": [
+        "mem_importer_unsafe_procedure:ProtectedCategory",
+        "trace_feature_flag_missing:procedure_recall_enabled",
+        "abstention_signal:expected=false:trace=true:response=true"
+      ],
+      "error": null,
+      "forbidden_present": [],
+      "id": "procedural_memory_replay_validation",
+      "missing_citations": [],
+      "missing_trace_stages": [],
+      "missing_units": [
+        "mem_importer_recovery_procedure",
+        "mem_importer_failure_pattern"
+      ],
+      "passed": false,
+      "trace_id": "019f27cb-91e0-7b02-8b02-4cca04e67cd9"
+    }
+  ],
+  "eval_id": "rung10-baseline-sampled",
+  "metrics": {
+    "context_packing_abstention_enabled": true,
+    "contextual_chunks_enabled": true,
+    "edge_expansion_enabled": true,
+    "filesystem_control_enabled": false,
+    "passed_cases": 0,
+    "procedure_recall_enabled": false,
+    "query_decomposition_enabled": true,
+    "rerank_enabled": true,
+    "temporal_validity_enabled": true,
+    "total_cases": 1
+  },
+  "runner": "memphant-eval",
+  "trace_schema_version": "trace-0.1.0-ws0"
+}

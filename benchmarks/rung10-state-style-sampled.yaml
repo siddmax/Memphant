@@ -1,0 +1,3 @@
+id: rung10-state-style-sampled
+cases:
+  - ../examples/evals/golden/procedural_memory_replay_validation.yaml
