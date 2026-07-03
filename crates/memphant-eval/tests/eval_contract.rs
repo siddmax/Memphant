@@ -98,6 +98,7 @@ fn benchmark_runner_archives_traces() {
         EvalRunOptions {
             archive_traces: true,
             archive_dir: Some(temp.path().to_path_buf()),
+            ..EvalRunOptions::default()
         },
     )
     .expect("nightly sampled run");
@@ -109,6 +110,30 @@ fn benchmark_runner_archives_traces() {
     assert_eq!(archive_json["eval_id"], "nightly-sampled");
     assert_eq!(archive_json["trace_schema_version"], "trace-0.1.0-ws0");
     assert!(!archive_json["case_results"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn sampled_public_rung4_suite_proves_contextual_chunk_delta() {
+    let suite = repo_root().join("benchmarks/rung4-lme-beam-sampled.yaml");
+    let with_chunks = run_eval_file(&suite, EvalRunOptions::default()).expect("with chunks");
+    assert_eq!(with_chunks.passed_cases, with_chunks.total_cases);
+
+    let without_chunks = run_eval_file(
+        &suite,
+        EvalRunOptions {
+            contextual_chunks_enabled: false,
+            ..EvalRunOptions::default()
+        },
+    )
+    .expect("without chunks");
+    assert_eq!(without_chunks.total_cases, with_chunks.total_cases);
+    assert_eq!(without_chunks.passed_cases, 0);
+    assert!(
+        without_chunks
+            .case_results
+            .iter()
+            .all(|case| !case.missing_units.is_empty())
+    );
 }
 
 #[test]

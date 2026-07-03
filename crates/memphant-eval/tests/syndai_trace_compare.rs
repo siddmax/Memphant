@@ -11,6 +11,7 @@ fn syndai_file_memory_trace_compare_passes_and_archives() {
         EvalRunOptions {
             archive_traces: true,
             archive_dir: Some(temp.path().to_path_buf()),
+            ..EvalRunOptions::default()
         },
     )
     .expect("trace compare");

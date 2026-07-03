@@ -1,0 +1,27 @@
+id: beam_100k_contradiction_contextual_chunk
+second_author_confirmed: true
+query: "Have I worked with Flask routes and handled HTTP requests in this project?"
+seed:
+  units:
+    - name: beam_100k_flask_route_contradiction
+      episode_body: "BEAM 100K conversation 1 includes a contradiction-resolution probe about Flask route and HTTP request handling claims."
+      kind: semantic
+      state: active
+      subject_key: null
+      body: "qrxl vemb stoz."
+      trust_level: trusted_system
+      contextual_chunks:
+        - id: chunk-beam-100k-conv1-flask-routes
+          header: "BEAM 100K conversation 1 / contradiction_resolution"
+          body: "The probe asks whether Craig worked with Flask routes and handled HTTP requests; the cited chat has contradictory statements: one says he never wrote Flask routes or handled HTTP requests, while another says he implemented a basic homepage route with Flask."
+          source_span: "hf:Mohammadta/BEAM@2026-01-30/data/100K-00000-of-00001.parquet:conversation_id=1"
+expect:
+  answer_bearing_ids:
+    - beam_100k_flask_route_contradiction
+  top_k_contains:
+    - beam_100k_flask_route_contradiction
+  citations_include:
+    - beam_100k_flask_route_contradiction
+  trace_stages_include:
+    - vector
+    - trace

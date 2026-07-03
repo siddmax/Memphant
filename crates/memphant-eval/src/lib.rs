@@ -43,10 +43,21 @@ const REQUIRED_ACTIVATION_DECISIONS: &[&str] = &[
     "TypeScript SDK",
 ];
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct EvalRunOptions {
     pub archive_traces: bool,
     pub archive_dir: Option<PathBuf>,
+    pub contextual_chunks_enabled: bool,
+}
+
+impl Default for EvalRunOptions {
+    fn default() -> Self {
+        Self {
+            archive_traces: false,
+            archive_dir: None,
+            contextual_chunks_enabled: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -142,6 +153,7 @@ pub struct SotaProfileReport {
     pub compare_to: String,
     pub harness_pin: BTreeMap<String, String>,
     pub axes: BTreeMap<String, SotaAxisResult>,
+    pub rung_decisions: Vec<RungDecision>,
     pub activation_decisions: Vec<ActivationDecision>,
     pub activated_levers: Vec<String>,
     pub dormant_levers: Vec<String>,
@@ -160,6 +172,26 @@ pub struct SotaAxisResult {
     pub delta_vs_baseline: Option<f64>,
     pub ci: Option<[f64; 2]>,
     pub gate: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RungDecision {
+    pub rung: u8,
+    pub item: String,
+    pub status: String,
+    pub gate_met: bool,
+    pub decision: String,
+    pub reason: String,
+    pub axes: Vec<String>,
+    pub benchmark_sample_refs: Vec<String>,
+    pub before_trace_ref: String,
+    pub after_trace_ref: String,
+    pub delta_vs_baseline: f64,
+    pub ci: [f64; 2],
+    pub p95_ms: f64,
+    pub cost_per_1k_recalls_usd: f64,
+    pub security_result: String,
+    pub deletion_result: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -357,6 +389,8 @@ struct SotaProfileSuite {
     compare_to: String,
     harness_pin: BTreeMap<String, String>,
     axes: BTreeMap<String, SotaAxisResult>,
+    #[serde(default)]
+    rung_decisions: Vec<RungDecision>,
     activation_decisions: Vec<ActivationDecision>,
 }
 
@@ -411,7 +445,11 @@ pub fn run_eval_file(path: &Path, options: EvalRunOptions) -> EvalResult<EvalRep
     let mut case_results = Vec::new();
     for case_path in &suite.cases {
         let case: GoldenCase = read_yaml(&base.join(case_path))?;
-        let result = runtime.block_on(run_golden_case(&case, &BTreeSet::new()));
+        let result = runtime.block_on(run_golden_case(
+            &case,
+            &BTreeSet::new(),
+            options.contextual_chunks_enabled,
+        ));
         case_results.push(result);
     }
 
@@ -440,6 +478,7 @@ pub fn run_eval_file(path: &Path, options: EvalRunOptions) -> EvalResult<EvalRep
             "metrics": {
                 "total_cases": report.total_cases,
                 "passed_cases": report.passed_cases,
+                "contextual_chunks_enabled": options.contextual_chunks_enabled,
             },
             "case_results": report.case_results,
         });
@@ -464,8 +503,8 @@ pub fn verify_golden_file(path: &Path) -> EvalResult<GoldenVerifyReport> {
     for case_path in &suite.cases {
         let case: GoldenCase = read_yaml(&base.join(case_path))?;
         let answer_bearing: BTreeSet<_> = case.expect.answer_bearing_ids.iter().cloned().collect();
-        let normal = runtime.block_on(run_golden_case(&case, &BTreeSet::new()));
-        let masked = runtime.block_on(run_golden_case(&case, &answer_bearing));
+        let normal = runtime.block_on(run_golden_case(&case, &BTreeSet::new(), true));
+        let masked = runtime.block_on(run_golden_case(&case, &answer_bearing, true));
         let load_bearing = normal.passed
             && !masked.passed
             && case.second_author_confirmed
@@ -664,6 +703,7 @@ pub fn run_profile_file(
         compare_to: suite.compare_to,
         harness_pin: suite.harness_pin,
         axes: suite.axes,
+        rung_decisions: suite.rung_decisions,
         activation_decisions: suite.activation_decisions,
         activated_levers,
         dormant_levers,
@@ -706,6 +746,9 @@ fn validate_profile_suite(suite: &SotaProfileSuite) -> Vec<String> {
     }
     for decision in &suite.activation_decisions {
         validate_activation_decision(decision, &mut findings);
+    }
+    for decision in &suite.rung_decisions {
+        validate_rung_decision(decision, &suite.axes, &mut findings);
     }
 
     findings
@@ -814,6 +857,124 @@ fn validate_activation_decision(decision: &ActivationDecision, findings: &mut Ve
     }
 }
 
+fn validate_rung_decision(
+    decision: &RungDecision,
+    axes: &BTreeMap<String, SotaAxisResult>,
+    findings: &mut Vec<String>,
+) {
+    let prefix = format!("rung_decision:{}", decision.rung);
+    if !["promoted", "dormant", "retired"].contains(&decision.status.as_str()) {
+        findings.push(format!("{prefix}:invalid_status:{}", decision.status));
+    }
+    if decision.item.trim().is_empty() {
+        findings.push(format!("{prefix}:missing_item"));
+    }
+    if decision.decision.trim().is_empty() {
+        findings.push(format!("{prefix}:missing_decision"));
+    }
+    if decision.reason.trim().is_empty() {
+        findings.push(format!("{prefix}:missing_reason"));
+    }
+    if decision.security_result != "pass" {
+        findings.push(format!(
+            "{prefix}:security_not_pass:{}",
+            decision.security_result
+        ));
+    }
+    if decision.deletion_result != "pass" {
+        findings.push(format!(
+            "{prefix}:deletion_not_pass:{}",
+            decision.deletion_result
+        ));
+    }
+    if decision.before_trace_ref.trim().is_empty() {
+        findings.push(format!("{prefix}:missing_before_trace"));
+    }
+    if decision.after_trace_ref.trim().is_empty() {
+        findings.push(format!("{prefix}:missing_after_trace"));
+    }
+    if decision.p95_ms <= 0.0 {
+        findings.push(format!("{prefix}:missing_p95"));
+    }
+    if decision.cost_per_1k_recalls_usd < 0.0 {
+        findings.push(format!("{prefix}:negative_cost"));
+    }
+    if decision.ci[0] > decision.ci[1] {
+        findings.push(format!("{prefix}:ci_bounds_inverted"));
+    }
+    if decision.delta_vs_baseline < decision.ci[0] || decision.delta_vs_baseline > decision.ci[1] {
+        findings.push(format!("{prefix}:delta_outside_ci"));
+    }
+    for axis in &decision.axes {
+        if !axes.contains_key(axis) {
+            findings.push(format!("{prefix}:unknown_axis:{axis}"));
+        }
+    }
+
+    if decision.status == "promoted" {
+        if !decision.gate_met {
+            findings.push(format!("{prefix}:promoted_without_gate"));
+        }
+        if decision.delta_vs_baseline <= 0.0 {
+            findings.push(format!("{prefix}:non_positive_delta"));
+        }
+        if decision.ci[0] <= 0.0 {
+            findings.push(format!("{prefix}:ci_includes_zero"));
+        }
+        for axis in &decision.axes {
+            if let Some(result) = axes.get(axis)
+                && result.source_status == "not_run"
+            {
+                findings.push(format!("{prefix}:axis_not_run:{axis}"));
+            }
+        }
+    } else if decision.gate_met {
+        findings.push(format!("{prefix}:gate_met_without_promotion"));
+    }
+
+    if decision.rung == 4 && decision.status == "promoted" {
+        validate_rung4_contextual_chunk_promotion(decision, axes, &prefix, findings);
+    }
+}
+
+fn validate_rung4_contextual_chunk_promotion(
+    decision: &RungDecision,
+    axes: &BTreeMap<String, SotaAxisResult>,
+    prefix: &str,
+    findings: &mut Vec<String>,
+) {
+    if decision.item != "contextual chunks" {
+        findings.push(format!("{prefix}:invalid_item:{}", decision.item));
+    }
+    if !decision.axes.iter().any(|axis| axis == "long_horizon") {
+        findings.push(format!("{prefix}:missing_long_horizon_axis"));
+    }
+    if !decision.axes.iter().any(|axis| axis == "scale") {
+        findings.push(format!("{prefix}:missing_scale_axis"));
+    }
+    if !decision
+        .benchmark_sample_refs
+        .iter()
+        .any(|sample| sample.to_ascii_lowercase().contains("longmemeval"))
+    {
+        findings.push(format!("{prefix}:missing_lme_v2_sample_ref"));
+    }
+    if !decision
+        .benchmark_sample_refs
+        .iter()
+        .any(|sample| sample.to_ascii_lowercase().contains("beam"))
+    {
+        findings.push(format!("{prefix}:missing_beam_sample_ref"));
+    }
+    for axis in ["long_horizon", "scale"] {
+        match axes.get(axis) {
+            Some(result) if result.delta_vs_baseline.unwrap_or_default() > 0.0 => {}
+            Some(_) => findings.push(format!("{prefix}:{axis}:non_positive_axis_delta")),
+            None => {}
+        }
+    }
+}
+
 fn validate_ci(prefix: &str, delta: Option<f64>, ci: Option<[f64; 2]>, findings: &mut Vec<String>) {
     let Some(delta) = delta else {
         findings.push(format!("{prefix}:missing_delta"));
@@ -867,7 +1028,7 @@ async fn run_syndai_trace_compare(
             .collect(),
         edges: Vec::new(),
     };
-    let context = seed_store(&seed, &BTreeSet::new()).await?;
+    let context = seed_store(&seed, &BTreeSet::new(), true).await?;
     let response = recall(
         &context.store,
         RecallRequest {
@@ -928,8 +1089,12 @@ async fn run_syndai_trace_compare(
     })
 }
 
-async fn run_golden_case(case: &GoldenCase, masked_units: &BTreeSet<String>) -> EvalCaseResult {
-    match run_golden_case_inner(case, masked_units).await {
+async fn run_golden_case(
+    case: &GoldenCase,
+    masked_units: &BTreeSet<String>,
+    contextual_chunks_enabled: bool,
+) -> EvalCaseResult {
+    match run_golden_case_inner(case, masked_units, contextual_chunks_enabled).await {
         Ok(result) => result,
         Err(error) => EvalCaseResult {
             id: case.id.clone(),
@@ -948,8 +1113,9 @@ async fn run_golden_case(case: &GoldenCase, masked_units: &BTreeSet<String>) -> 
 async fn run_golden_case_inner(
     case: &GoldenCase,
     masked_units: &BTreeSet<String>,
+    contextual_chunks_enabled: bool,
 ) -> EvalResult<EvalCaseResult> {
-    let context = seed_store(&case.seed, masked_units).await?;
+    let context = seed_store(&case.seed, masked_units, contextual_chunks_enabled).await?;
     let response = recall(
         &context.store,
         RecallRequest {
@@ -1098,7 +1264,7 @@ async fn run_fixture_security_lane(lane: &SecurityLane) -> EvalResult<String> {
         seed: lane.seed.clone(),
         expect: lane.expect.clone(),
     };
-    let result = run_golden_case_inner(&case, &BTreeSet::new()).await?;
+    let result = run_golden_case_inner(&case, &BTreeSet::new(), true).await?;
     if result.passed {
         Ok("fixture assertions passed".to_string())
     } else {
@@ -1121,7 +1287,7 @@ fn run_selector_injection_lane(lane: &SecurityLane) -> EvalResult<String> {
 }
 
 async fn run_high_risk_lane(lane: &SecurityLane) -> EvalResult<String> {
-    let context = seed_store(&lane.seed, &BTreeSet::new()).await?;
+    let context = seed_store(&lane.seed, &BTreeSet::new(), true).await?;
     let response = recall(
         &context.store,
         RecallRequest {
@@ -1175,7 +1341,7 @@ async fn run_high_risk_lane(lane: &SecurityLane) -> EvalResult<String> {
 }
 
 async fn run_deletion_lane(lane: &SecurityLane) -> EvalResult<String> {
-    let context = seed_store(&lane.seed, &BTreeSet::new()).await?;
+    let context = seed_store(&lane.seed, &BTreeSet::new(), true).await?;
     let forget = lane
         .forget
         .as_ref()
@@ -1346,7 +1512,11 @@ fn run_reindex_sla_check(check: &OpsCheck) -> EvalResult<String> {
     }
 }
 
-async fn seed_store(seed: &GoldenSeed, masked_units: &BTreeSet<String>) -> EvalResult<SeedContext> {
+async fn seed_store(
+    seed: &GoldenSeed,
+    masked_units: &BTreeSet<String>,
+    contextual_chunks_enabled: bool,
+) -> EvalResult<SeedContext> {
     let store = InMemoryStore::default();
     let tenant_id = TenantId::from_u128(90_000);
     let other_tenant_id = TenantId::from_u128(90_001);
@@ -1404,7 +1574,11 @@ async fn seed_store(seed: &GoldenSeed, masked_units: &BTreeSet<String>) -> EvalR
                     source_episode_id: Some(episode.episode_id),
                     source_resource_id: None,
                     deletion_generation: unit.deletion_generation,
-                    contextual_chunks: unit.contextual_chunks.clone(),
+                    contextual_chunks: if contextual_chunks_enabled {
+                        unit.contextual_chunks.clone()
+                    } else {
+                        Vec::new()
+                    },
                 },
             )
             .await

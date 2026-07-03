@@ -1170,9 +1170,10 @@ fn vector_text_score(text: &str, query_tokens: &[String]) -> f32 {
 }
 
 fn temporal_score(unit: &StoredMemoryUnit, query: &str) -> f32 {
-    let query = normalize_component(query);
-    let recency_query =
-        query.contains("current") || query.contains("latest") || query.contains("now");
+    let query_tokens = tokenize(query);
+    let recency_query = query_tokens
+        .iter()
+        .any(|token| matches!(token.as_str(), "current" | "latest" | "now"));
     if recency_query && unit.kind == MemoryKind::Semantic && unit.state == UnitState::Active {
         1.0
     } else {
@@ -1182,13 +1183,20 @@ fn temporal_score(unit: &StoredMemoryUnit, query: &str) -> f32 {
 
 fn channel_weight(channel: RecallChannel, query: &str) -> f32 {
     let query = normalize_component(query);
+    let query_tokens = tokenize(&query);
     match channel {
         RecallChannel::Exact if query.contains("how") => 2.5,
         RecallChannel::Exact => 1.0,
         RecallChannel::Lexical if query.contains("error") => 3.0,
         RecallChannel::Lexical => 1.0,
         RecallChannel::Vector => 2.0,
-        RecallChannel::Temporal if query.contains("current") => 2.5,
+        RecallChannel::Temporal
+            if query_tokens
+                .iter()
+                .any(|token| matches!(token.as_str(), "current" | "latest" | "now")) =>
+        {
+            2.5
+        }
         RecallChannel::Temporal => 0.5,
         RecallChannel::Edge => 0.5,
     }

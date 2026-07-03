@@ -1,0 +1,42 @@
+{
+  "case_results": [
+    {
+      "dropped_mismatches": [],
+      "error": null,
+      "forbidden_present": [],
+      "id": "lme_v2_static_state_contextual_chunk",
+      "missing_citations": [
+        "lme_v2_dell_xps_ssd_delta"
+      ],
+      "missing_trace_stages": [],
+      "missing_units": [
+        "lme_v2_dell_xps_ssd_delta"
+      ],
+      "passed": false,
+      "trace_id": "019f273b-1856-71d1-8e2a-ba0cb08861c6"
+    },
+    {
+      "dropped_mismatches": [],
+      "error": null,
+      "forbidden_present": [],
+      "id": "beam_100k_contradiction_contextual_chunk",
+      "missing_citations": [
+        "beam_100k_flask_route_contradiction"
+      ],
+      "missing_trace_stages": [],
+      "missing_units": [
+        "beam_100k_flask_route_contradiction"
+      ],
+      "passed": false,
+      "trace_id": "019f273b-1857-79b0-b123-22edf1010849"
+    }
+  ],
+  "eval_id": "rung4-baseline-sampled",
+  "metrics": {
+    "contextual_chunks_enabled": false,
+    "passed_cases": 0,
+    "total_cases": 2
+  },
+  "runner": "memphant-eval",
+  "trace_schema_version": "trace-0.1.0-ws0"
+}

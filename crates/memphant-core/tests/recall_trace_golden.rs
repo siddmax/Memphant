@@ -146,6 +146,60 @@ async fn contextual_chunk_recall_finds_source_unit_and_traces_flag() {
     }));
 }
 
+#[tokio::test]
+async fn servicenow_query_does_not_trigger_temporal_recency_match() {
+    let store = InMemoryStore::default();
+    let tenant_id = tenant(73_000);
+    let scope_id = scope(73_001);
+    let actor_id = actor(73_002);
+
+    let mut tx = store.begin().await;
+    let unit_id = store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id,
+                scope_id,
+                kind: MemoryKind::Semantic,
+                state: UnitState::Active,
+                subject_key: None,
+                body: "zzqv mrpl ntnk".to_string(),
+                trust_level: TrustLevel::TrustedSystem,
+                churn_class: None,
+                freshness_due: false,
+                actor_id: Some(actor_id),
+                source_kind: Some("fixture".to_string()),
+                source_episode_id: None,
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+            },
+        )
+        .await
+        .expect("unit seeded");
+    store.commit(tx).await.expect("seed committed");
+
+    let response = recall(
+        &store,
+        RecallRequest {
+            tenant_id,
+            scope_id,
+            actor_id,
+            allowed_scope_ids: vec![scope_id],
+            query: "I am working with our ServiceNow portal".to_string(),
+            k: 8,
+            budget_tokens: 256,
+            mode: RecallMode::Fast,
+            include_beliefs: false,
+            engine_version: "engine-temporal-token-test".to_string(),
+        },
+    )
+    .await
+    .expect("recall succeeds");
+
+    assert!(!response.candidate_whitelist.contains(&unit_id));
+}
+
 #[derive(Debug, Deserialize)]
 struct GoldenCase {
     id: String,

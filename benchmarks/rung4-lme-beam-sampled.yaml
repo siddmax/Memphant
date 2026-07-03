@@ -1,0 +1,4 @@
+id: rung4-public-sampled
+cases:
+  - ../examples/evals/public-sampled/lme_v2_static_state_contextual_chunk.yaml
+  - ../examples/evals/public-sampled/beam_100k_contradiction_contextual_chunk.yaml
