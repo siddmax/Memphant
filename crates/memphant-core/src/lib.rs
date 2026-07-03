@@ -3,12 +3,13 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use memphant_types::{
-    AdmissionAction, DedupOutcome, EdgeId, EpisodeId, JobId, MemoryEdgeKind, MemoryKind,
-    NewEpisode, NewMemoryEdge, NewMemoryUnit, QueuedReflectJob, RecallCandidateTrace,
-    RecallChannel, RecallCitation, RecallContextItem, RecallDropReason, RecallDroppedItem,
-    RecallPolicyFilter, RecallRequest, RecallResponse, ReflectInput, ReflectJob, ReflectJobKind,
-    ReflectStageFact, ReflectTrace, RetainInput, RetainOutcome, RetainRequest,
-    RetainResourceOutcome, RetainResourceRequest, RetainResult, RetrievalTrace, StoredEpisode,
+    AdmissionAction, CorrectRequest, CorrectResult, DedupOutcome, EdgeId, EpisodeId, ForgetRequest,
+    ForgetResult, JobId, MarkRequest, MarkResult, MemoryEdgeKind, MemoryKind, NewEpisode,
+    NewMemoryEdge, NewMemoryUnit, QueuedReflectJob, RecallCandidateTrace, RecallChannel,
+    RecallCitation, RecallContextItem, RecallDropReason, RecallDroppedItem, RecallPolicyFilter,
+    RecallRequest, RecallResponse, ReflectInput, ReflectJob, ReflectJobKind, ReflectStageFact,
+    ReflectTrace, RetainInput, RetainOutcome, RetainRequest, RetainResourceOutcome,
+    RetainResourceRequest, RetainResult, RetrievalTrace, ReviewEvent, ScopeId, StoredEpisode,
     StoredMemoryEdge, StoredMemoryUnit, StoredResource, TenantId, TraceId, TrustLevel, UnitId,
     UnitState,
 };
@@ -26,6 +27,10 @@ pub enum StoreError {
 pub enum CoreError {
     #[error("retain body cannot be empty")]
     EmptyBody,
+    #[error("not found: {0}")]
+    NotFound(String),
+    #[error("invalid request: {0}")]
+    Invalid(String),
     #[error("policy denied: {0}")]
     PolicyDenied(String),
     #[error(transparent)]
@@ -90,6 +95,8 @@ struct InMemoryState {
     reflect_jobs: HashMap<TenantId, Vec<QueuedReflectJob>>,
     reflect_traces: HashMap<TenantId, Vec<ReflectTrace>>,
     retrieval_traces: HashMap<TenantId, Vec<RetrievalTrace>>,
+    review_events: HashMap<TenantId, Vec<ReviewEvent>>,
+    deletion_generation: u64,
 }
 
 #[derive(Default)]
@@ -204,6 +211,37 @@ impl InMemoryStore {
             .map(|state| {
                 state
                     .retrieval_traces
+                    .get(&tenant_id)
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn trace_by_id(&self, trace_id: TraceId) -> Option<RetrievalTrace> {
+        self.inner.lock().ok().and_then(|state| {
+            state
+                .retrieval_traces
+                .values()
+                .flat_map(|traces| traces.iter())
+                .find(|trace| trace.id == trace_id)
+                .cloned()
+        })
+    }
+
+    pub fn scope_memory(&self, tenant_id: TenantId, scope_id: ScopeId) -> Vec<StoredMemoryUnit> {
+        self.memory_units(tenant_id)
+            .into_iter()
+            .filter(|unit| unit.scope_id == scope_id)
+            .collect()
+    }
+
+    pub fn review_events(&self, tenant_id: TenantId) -> Vec<ReviewEvent> {
+        self.inner
+            .lock()
+            .map(|state| {
+                state
+                    .review_events
                     .get(&tenant_id)
                     .cloned()
                     .unwrap_or_default()
@@ -528,6 +566,148 @@ where
         .await?;
     store.commit(tx).await?;
     Ok(RetainResourceOutcome { resource_id })
+}
+
+pub async fn correct_memory(
+    store: &InMemoryStore,
+    request: CorrectRequest,
+) -> Result<CorrectResult, CoreError> {
+    if request.correction.value.trim().is_empty() {
+        return Err(CoreError::Invalid(
+            "correction value cannot be empty".to_string(),
+        ));
+    }
+
+    let mut state = store.inner.lock().map_err(|_| StoreError::Poisoned)?;
+    let units = state
+        .memory_units
+        .get_mut(&request.tenant_id)
+        .ok_or_else(|| CoreError::NotFound("memory_unit".to_string()))?;
+    let old_index = units
+        .iter()
+        .position(|unit| {
+            unit.id == request.selector.memory_unit_id
+                && unit.scope_id == request.scope_id
+                && unit.state != UnitState::Deleted
+        })
+        .ok_or_else(|| CoreError::NotFound("memory_unit".to_string()))?;
+    let mut replacement = units[old_index].clone();
+    let old_id = replacement.id;
+    let new_id = UnitId::new();
+
+    units[old_index].state = UnitState::Superseded;
+    replacement.id = new_id;
+    replacement.body = request.correction.value;
+    replacement.state = UnitState::Active;
+    replacement.actor_id = Some(request.actor_id);
+    replacement.deletion_generation = None;
+    units.push(replacement);
+
+    state
+        .memory_edges
+        .entry(request.tenant_id)
+        .or_default()
+        .push(StoredMemoryEdge {
+            id: EdgeId::new(),
+            tenant_id: request.tenant_id,
+            scope_id: request.scope_id,
+            src_id: new_id,
+            dst_id: old_id,
+            kind: MemoryEdgeKind::Supersedes,
+        });
+
+    Ok(CorrectResult {
+        correction_id: format!("cor_{}", new_id.as_uuid()),
+        superseded: vec![old_id],
+        created: vec![new_id],
+        correction_kind: if request.correction.valid_from.is_some()
+            || request.correction.valid_to.is_some()
+        {
+            "retroactive".to_string()
+        } else {
+            "current".to_string()
+        },
+        trace_ref: None,
+    })
+}
+
+pub async fn forget_memory(
+    store: &InMemoryStore,
+    request: ForgetRequest,
+) -> Result<ForgetResult, CoreError> {
+    if request.selector.memory_unit_id.is_none() && request.selector.scope_id.is_none() {
+        return Err(CoreError::Invalid(
+            "forget selector must include memory_unit_id or scope_id".to_string(),
+        ));
+    }
+
+    let mut state = store.inner.lock().map_err(|_| StoreError::Poisoned)?;
+    state.deletion_generation = state.deletion_generation.saturating_add(1);
+    let deletion_generation = state.deletion_generation;
+    let Some(units) = state.memory_units.get_mut(&request.tenant_id) else {
+        return Ok(ForgetResult {
+            deletion_generation,
+            policy: "hard_delete".to_string(),
+            invalidated_units: Vec::new(),
+            verification: "no_recall_path_returns_forgotten".to_string(),
+            trace_ref: None,
+        });
+    };
+
+    let selector_scope = request.selector.scope_id.unwrap_or(request.scope_id);
+    let invalidated_units = units
+        .iter_mut()
+        .filter(|unit| {
+            if unit.tenant_id != request.tenant_id {
+                return false;
+            }
+            if let Some(unit_id) = request.selector.memory_unit_id {
+                unit.id == unit_id && unit.scope_id == selector_scope
+            } else {
+                unit.scope_id == selector_scope
+            }
+        })
+        .map(|unit| {
+            unit.state = UnitState::Deleted;
+            unit.deletion_generation = Some(deletion_generation);
+            unit.id
+        })
+        .collect();
+
+    Ok(ForgetResult {
+        deletion_generation,
+        policy: "hard_delete".to_string(),
+        invalidated_units,
+        verification: "no_recall_path_returns_forgotten".to_string(),
+        trace_ref: None,
+    })
+}
+
+pub async fn record_mark(
+    store: &InMemoryStore,
+    request: MarkRequest,
+) -> Result<MarkResult, CoreError> {
+    if request.caller_id.trim().is_empty() {
+        return Err(CoreError::Invalid("caller_id cannot be empty".to_string()));
+    }
+
+    let mut state = store.inner.lock().map_err(|_| StoreError::Poisoned)?;
+    state
+        .review_events
+        .entry(request.tenant_id)
+        .or_default()
+        .push(ReviewEvent {
+            tenant_id: request.tenant_id,
+            trace_id: request.trace_id,
+            caller_id: request.caller_id,
+            used_ids: request.used_ids,
+            outcome: request.outcome,
+        });
+
+    Ok(MarkResult {
+        accepted: true,
+        trace_id: request.trace_id,
+    })
 }
 
 pub async fn recall(

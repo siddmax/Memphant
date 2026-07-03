@@ -1,0 +1,15 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "memphant"
+version = "0.1.0"
+requires-python = ">=3.11"
+description = "Thin HTTP SDK for MemPhant"
+license = "Apache-2.0"
+
+[tool.maturin]
+module-name = "memphant._native"
+python-source = "."
+features = ["pyo3/extension-module"]

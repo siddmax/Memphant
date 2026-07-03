@@ -1,0 +1,1841 @@
+{
+  "components": {
+    "schemas": {
+      "CorrectRequest": {
+        "$defs": {
+          "ActorId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "CorrectSelector": {
+            "properties": {
+              "memory_unit_id": {
+                "$ref": "#/$defs/UnitId"
+              }
+            },
+            "required": [
+              "memory_unit_id"
+            ],
+            "type": "object"
+          },
+          "CorrectionPayload": {
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "valid_from": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "valid_to": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "value",
+              "reason"
+            ],
+            "type": "object"
+          },
+          "ScopeId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "TenantId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "UnitId": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "actor_id": {
+            "$ref": "#/$defs/ActorId"
+          },
+          "correction": {
+            "$ref": "#/$defs/CorrectionPayload"
+          },
+          "scope_id": {
+            "$ref": "#/$defs/ScopeId"
+          },
+          "selector": {
+            "$ref": "#/$defs/CorrectSelector"
+          },
+          "tenant_id": {
+            "$ref": "#/$defs/TenantId"
+          }
+        },
+        "required": [
+          "tenant_id",
+          "scope_id",
+          "actor_id",
+          "selector",
+          "correction"
+        ],
+        "title": "CorrectRequest",
+        "type": "object"
+      },
+      "CorrectResult": {
+        "$defs": {
+          "UnitId": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "correction_id": {
+            "type": "string"
+          },
+          "correction_kind": {
+            "type": "string"
+          },
+          "created": {
+            "items": {
+              "$ref": "#/$defs/UnitId"
+            },
+            "type": "array"
+          },
+          "superseded": {
+            "items": {
+              "$ref": "#/$defs/UnitId"
+            },
+            "type": "array"
+          },
+          "trace_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "correction_id",
+          "superseded",
+          "created",
+          "correction_kind"
+        ],
+        "title": "CorrectResult",
+        "type": "object"
+      },
+      "ErrorEnvelope": {
+        "$defs": {
+          "ErrorBody": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "details": true,
+              "message": {
+                "type": "string"
+              },
+              "request_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "request_id",
+              "details"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "error": {
+            "$ref": "#/$defs/ErrorBody"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "title": "ErrorEnvelope",
+        "type": "object"
+      },
+      "ForgetRequest": {
+        "$defs": {
+          "ActorId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "ForgetSelector": {
+            "properties": {
+              "memory_unit_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/UnitId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "scope_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ScopeId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "type": "object"
+          },
+          "ScopeId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "TenantId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "UnitId": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "actor_id": {
+            "$ref": "#/$defs/ActorId"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "scope_id": {
+            "$ref": "#/$defs/ScopeId"
+          },
+          "selector": {
+            "$ref": "#/$defs/ForgetSelector"
+          },
+          "tenant_id": {
+            "$ref": "#/$defs/TenantId"
+          }
+        },
+        "required": [
+          "tenant_id",
+          "scope_id",
+          "actor_id",
+          "selector",
+          "reason"
+        ],
+        "title": "ForgetRequest",
+        "type": "object"
+      },
+      "ForgetResult": {
+        "$defs": {
+          "UnitId": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "deletion_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "invalidated_units": {
+            "items": {
+              "$ref": "#/$defs/UnitId"
+            },
+            "type": "array"
+          },
+          "policy": {
+            "type": "string"
+          },
+          "trace_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verification": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "deletion_generation",
+          "policy",
+          "invalidated_units",
+          "verification"
+        ],
+        "title": "ForgetResult",
+        "type": "object"
+      },
+      "MarkRequest": {
+        "$defs": {
+          "MarkOutcome": {
+            "enum": [
+              "success",
+              "failure",
+              "corrected",
+              "ignored"
+            ],
+            "type": "string"
+          },
+          "TenantId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "TraceId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "UnitId": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "caller_id": {
+            "type": "string"
+          },
+          "outcome": {
+            "$ref": "#/$defs/MarkOutcome"
+          },
+          "tenant_id": {
+            "$ref": "#/$defs/TenantId"
+          },
+          "trace_id": {
+            "$ref": "#/$defs/TraceId"
+          },
+          "used_ids": {
+            "items": {
+              "$ref": "#/$defs/UnitId"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "tenant_id",
+          "trace_id",
+          "caller_id",
+          "used_ids",
+          "outcome"
+        ],
+        "title": "MarkRequest",
+        "type": "object"
+      },
+      "MarkResult": {
+        "$defs": {
+          "TraceId": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "accepted": {
+            "type": "boolean"
+          },
+          "trace_id": {
+            "$ref": "#/$defs/TraceId"
+          }
+        },
+        "required": [
+          "accepted",
+          "trace_id"
+        ],
+        "title": "MarkResult",
+        "type": "object"
+      },
+      "RecallHttpRequest": {
+        "$defs": {
+          "ActorId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "RecallMode": {
+            "enum": [
+              "fast",
+              "balanced",
+              "exhaustive"
+            ],
+            "type": "string"
+          },
+          "ScopeId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "TenantId": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "actor_id": {
+            "$ref": "#/$defs/ActorId"
+          },
+          "allowed_scope_ids": {
+            "items": {
+              "$ref": "#/$defs/ScopeId"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "budget_tokens": {
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "include_beliefs": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "include_trace": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "limit": {
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RecallMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "query": {
+            "type": "string"
+          },
+          "scope_id": {
+            "$ref": "#/$defs/ScopeId"
+          },
+          "tenant_id": {
+            "$ref": "#/$defs/TenantId"
+          }
+        },
+        "required": [
+          "tenant_id",
+          "scope_id",
+          "actor_id",
+          "query"
+        ],
+        "title": "RecallHttpRequest",
+        "type": "object"
+      },
+      "RecallResponse": {
+        "$defs": {
+          "EpisodeId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "MemoryKind": {
+            "enum": [
+              "episodic",
+              "semantic",
+              "procedural",
+              "belief",
+              "resource"
+            ],
+            "type": "string"
+          },
+          "RecallCitation": {
+            "properties": {
+              "episode_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/EpisodeId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "resource_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ResourceId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "unit_id": {
+                "$ref": "#/$defs/UnitId"
+              }
+            },
+            "required": [
+              "unit_id"
+            ],
+            "type": "object"
+          },
+          "RecallContextItem": {
+            "properties": {
+              "body": {
+                "type": "string"
+              },
+              "citation_episode_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/EpisodeId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "citation_resource_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ResourceId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "inclusion_reason": {
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/MemoryKind"
+              },
+              "suppression_labels": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "unit_id": {
+                "$ref": "#/$defs/UnitId"
+              }
+            },
+            "required": [
+              "unit_id",
+              "body",
+              "kind",
+              "inclusion_reason",
+              "suppression_labels"
+            ],
+            "type": "object"
+          },
+          "ResourceId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "TraceId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "UnitId": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "abstention": {
+            "type": "boolean"
+          },
+          "candidate_whitelist": {
+            "items": {
+              "$ref": "#/$defs/UnitId"
+            },
+            "type": "array"
+          },
+          "citations": {
+            "items": {
+              "$ref": "#/$defs/RecallCitation"
+            },
+            "type": "array"
+          },
+          "degraded": {
+            "type": "boolean"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/$defs/RecallContextItem"
+            },
+            "type": "array"
+          },
+          "suppression_labels": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "trace_id": {
+            "$ref": "#/$defs/TraceId"
+          }
+        },
+        "required": [
+          "trace_id",
+          "items",
+          "candidate_whitelist",
+          "citations",
+          "abstention",
+          "degraded",
+          "suppression_labels"
+        ],
+        "title": "RecallResponse",
+        "type": "object"
+      },
+      "ReflectRequest": {
+        "$defs": {
+          "ActorId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "ScopeId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "TenantId": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "actor_id": {
+            "$ref": "#/$defs/ActorId"
+          },
+          "compiler_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scope_id": {
+            "$ref": "#/$defs/ScopeId"
+          },
+          "tenant_id": {
+            "$ref": "#/$defs/TenantId"
+          }
+        },
+        "required": [
+          "tenant_id",
+          "scope_id",
+          "actor_id"
+        ],
+        "title": "ReflectRequest",
+        "type": "object"
+      },
+      "ReflectResult": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "candidates_created": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "episodes_consumed": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "reflect_id": {
+            "type": "string"
+          },
+          "trace_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "reflect_id",
+          "episodes_consumed",
+          "candidates_created"
+        ],
+        "title": "ReflectResult",
+        "type": "object"
+      },
+      "RetainEpisodeHttpRequest": {
+        "$defs": {
+          "ActorId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "ScopeId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "TenantId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "TrustLevel": {
+            "enum": [
+              "trusted_user",
+              "trusted_system",
+              "verified_tool",
+              "unverified_tool",
+              "web_content",
+              "agent_output",
+              "imported_external",
+              "quarantined"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "actor_id": {
+            "$ref": "#/$defs/ActorId"
+          },
+          "body": {
+            "type": "string"
+          },
+          "compiler_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scope_id": {
+            "$ref": "#/$defs/ScopeId"
+          },
+          "source_kind": {
+            "type": "string"
+          },
+          "source_trust": {
+            "$ref": "#/$defs/TrustLevel"
+          },
+          "subject_hint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tenant_id": {
+            "$ref": "#/$defs/TenantId"
+          }
+        },
+        "required": [
+          "tenant_id",
+          "scope_id",
+          "actor_id",
+          "source_kind",
+          "source_trust",
+          "body"
+        ],
+        "title": "RetainEpisodeHttpRequest",
+        "type": "object"
+      },
+      "RetainEpisodeHttpResponse": {
+        "$defs": {
+          "DedupOutcome": {
+            "properties": {
+              "matched": {
+                "type": "boolean"
+              },
+              "observation_count": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "matched",
+              "observation_count"
+            ],
+            "type": "object"
+          },
+          "EpisodeId": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "dedup": {
+            "$ref": "#/$defs/DedupOutcome"
+          },
+          "enqueued": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "episode_id": {
+            "$ref": "#/$defs/EpisodeId"
+          },
+          "trace_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "episode_id",
+          "dedup",
+          "enqueued"
+        ],
+        "title": "RetainEpisodeHttpResponse",
+        "type": "object"
+      },
+      "RetrievalTrace": {
+        "$defs": {
+          "ActorId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "EpisodeId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "MemoryKind": {
+            "enum": [
+              "episodic",
+              "semantic",
+              "procedural",
+              "belief",
+              "resource"
+            ],
+            "type": "string"
+          },
+          "RecallCandidateTrace": {
+            "properties": {
+              "channel": {
+                "$ref": "#/$defs/RecallChannel"
+              },
+              "channel_rank": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "channel_score": {
+                "format": "float",
+                "type": "number"
+              },
+              "discard_reason": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RecallDropReason"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "fused_rank": {
+                "format": "uint",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "fused_score": {
+                "format": "float",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "state": {
+                "$ref": "#/$defs/UnitState"
+              },
+              "trust_level": {
+                "$ref": "#/$defs/TrustLevel"
+              },
+              "unit_id": {
+                "$ref": "#/$defs/UnitId"
+              }
+            },
+            "required": [
+              "unit_id",
+              "channel",
+              "channel_rank",
+              "channel_score",
+              "trust_level",
+              "state"
+            ],
+            "type": "object"
+          },
+          "RecallChannel": {
+            "enum": [
+              "exact",
+              "lexical",
+              "vector",
+              "temporal",
+              "edge"
+            ],
+            "type": "string"
+          },
+          "RecallCitation": {
+            "properties": {
+              "episode_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/EpisodeId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "resource_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ResourceId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "unit_id": {
+                "$ref": "#/$defs/UnitId"
+              }
+            },
+            "required": [
+              "unit_id"
+            ],
+            "type": "object"
+          },
+          "RecallContextItem": {
+            "properties": {
+              "body": {
+                "type": "string"
+              },
+              "citation_episode_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/EpisodeId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "citation_resource_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ResourceId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "inclusion_reason": {
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/MemoryKind"
+              },
+              "suppression_labels": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "unit_id": {
+                "$ref": "#/$defs/UnitId"
+              }
+            },
+            "required": [
+              "unit_id",
+              "body",
+              "kind",
+              "inclusion_reason",
+              "suppression_labels"
+            ],
+            "type": "object"
+          },
+          "RecallDropReason": {
+            "enum": [
+              "tenant",
+              "scope",
+              "privacy",
+              "trust",
+              "state",
+              "stale",
+              "budget",
+              "duplicate",
+              "rerank",
+              "deleted",
+              "invalidated",
+              "unknown",
+              "protected_category",
+              "below_trust_floor",
+              "irrelevant"
+            ],
+            "type": "string"
+          },
+          "RecallDroppedItem": {
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/RecallDropReason"
+              },
+              "unit_id": {
+                "$ref": "#/$defs/UnitId"
+              }
+            },
+            "required": [
+              "unit_id",
+              "reason"
+            ],
+            "type": "object"
+          },
+          "RecallMode": {
+            "enum": [
+              "fast",
+              "balanced",
+              "exhaustive"
+            ],
+            "type": "string"
+          },
+          "RecallPolicyFilter": {
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "reason": {
+                "$ref": "#/$defs/RecallDropReason"
+              }
+            },
+            "required": [
+              "reason",
+              "detail"
+            ],
+            "type": "object"
+          },
+          "ReflectStageFact": {
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "stage": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "stage",
+              "detail"
+            ],
+            "type": "object"
+          },
+          "ResourceId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "ScopeId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "TenantId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "TraceId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "TrustLevel": {
+            "enum": [
+              "trusted_user",
+              "trusted_system",
+              "verified_tool",
+              "unverified_tool",
+              "web_content",
+              "agent_output",
+              "imported_external",
+              "quarantined"
+            ],
+            "type": "string"
+          },
+          "UnitId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "UnitState": {
+            "enum": [
+              "captured",
+              "extracted",
+              "candidate",
+              "active",
+              "superseded",
+              "invalidated",
+              "deleted",
+              "quarantined",
+              "expired",
+              "validated",
+              "retired"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "abstention_signal": {
+            "type": "boolean"
+          },
+          "actor_id": {
+            "$ref": "#/$defs/ActorId"
+          },
+          "candidates": {
+            "items": {
+              "$ref": "#/$defs/RecallCandidateTrace"
+            },
+            "type": "array"
+          },
+          "channel_runs": {
+            "items": {
+              "$ref": "#/$defs/ReflectStageFact"
+            },
+            "type": "array"
+          },
+          "citations": {
+            "items": {
+              "$ref": "#/$defs/RecallCitation"
+            },
+            "type": "array"
+          },
+          "consolidation_lag_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "context_items": {
+            "items": {
+              "$ref": "#/$defs/RecallContextItem"
+            },
+            "type": "array"
+          },
+          "cost_micros": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "dropped_items": {
+            "items": {
+              "$ref": "#/$defs/RecallDroppedItem"
+            },
+            "type": "array"
+          },
+          "engine_version": {
+            "type": "string"
+          },
+          "escalation_reason": {
+            "type": "string"
+          },
+          "feature_flags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "filter_selectivity": {
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "id": {
+            "$ref": "#/$defs/TraceId"
+          },
+          "iterative_scan_depth": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "latency_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mode_executed": {
+            "$ref": "#/$defs/RecallMode"
+          },
+          "mode_requested": {
+            "$ref": "#/$defs/RecallMode"
+          },
+          "policy_filters": {
+            "items": {
+              "$ref": "#/$defs/RecallPolicyFilter"
+            },
+            "type": "array"
+          },
+          "query_hash": {
+            "type": "string"
+          },
+          "scope_id": {
+            "$ref": "#/$defs/ScopeId"
+          },
+          "tenant_id": {
+            "$ref": "#/$defs/TenantId"
+          },
+          "token_estimate": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "weight_vector_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "tenant_id",
+          "scope_id",
+          "actor_id",
+          "query_hash",
+          "engine_version",
+          "feature_flags",
+          "channel_runs",
+          "candidates",
+          "policy_filters",
+          "context_items",
+          "dropped_items",
+          "citations",
+          "consolidation_lag_ms",
+          "weight_vector_id",
+          "mode_requested",
+          "mode_executed",
+          "escalation_reason",
+          "abstention_signal",
+          "latency_ms",
+          "token_estimate",
+          "cost_micros"
+        ],
+        "title": "RetrievalTrace",
+        "type": "object"
+      },
+      "ScopeMemoryResponse": {
+        "$defs": {
+          "ActorId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "EpisodeId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "MemoryKind": {
+            "enum": [
+              "episodic",
+              "semantic",
+              "procedural",
+              "belief",
+              "resource"
+            ],
+            "type": "string"
+          },
+          "ResourceId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "ScopeId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "StoredMemoryUnit": {
+            "properties": {
+              "actor_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ActorId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "body": {
+                "type": "string"
+              },
+              "churn_class": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "deletion_generation": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "freshness_due": {
+                "type": "boolean"
+              },
+              "id": {
+                "$ref": "#/$defs/UnitId"
+              },
+              "kind": {
+                "$ref": "#/$defs/MemoryKind"
+              },
+              "scope_id": {
+                "$ref": "#/$defs/ScopeId"
+              },
+              "source_episode_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/EpisodeId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "source_kind": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "source_resource_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ResourceId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "state": {
+                "$ref": "#/$defs/UnitState"
+              },
+              "subject_key": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tenant_id": {
+                "$ref": "#/$defs/TenantId"
+              },
+              "trust_level": {
+                "$ref": "#/$defs/TrustLevel"
+              }
+            },
+            "required": [
+              "id",
+              "tenant_id",
+              "scope_id",
+              "kind",
+              "state",
+              "body",
+              "trust_level",
+              "freshness_due"
+            ],
+            "type": "object"
+          },
+          "TenantId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "TrustLevel": {
+            "enum": [
+              "trusted_user",
+              "trusted_system",
+              "verified_tool",
+              "unverified_tool",
+              "web_content",
+              "agent_output",
+              "imported_external",
+              "quarantined"
+            ],
+            "type": "string"
+          },
+          "UnitId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "UnitState": {
+            "enum": [
+              "captured",
+              "extracted",
+              "candidate",
+              "active",
+              "superseded",
+              "invalidated",
+              "deleted",
+              "quarantined",
+              "expired",
+              "validated",
+              "retired"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "has_more": {
+            "type": "boolean"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/$defs/StoredMemoryUnit"
+            },
+            "type": "array"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scope_id": {
+            "$ref": "#/$defs/ScopeId"
+          },
+          "tenant_id": {
+            "$ref": "#/$defs/TenantId"
+          }
+        },
+        "required": [
+          "tenant_id",
+          "scope_id",
+          "items",
+          "has_more"
+        ],
+        "title": "ScopeMemoryResponse",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "MemPhant API",
+    "version": "0.1.0-ws0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/v1/correct": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CorrectRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CorrectResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/episodes": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetainEpisodeHttpRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetainEpisodeHttpResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/forget": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ForgetRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForgetResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/health": {
+      "get": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HealthResponse"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/mark": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MarkRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MarkResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/memory": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetainEpisodeHttpRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetainEpisodeHttpResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/recall": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecallHttpRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecallResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/reflect": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReflectRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReflectResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/scopes/{id}/block": {
+      "get": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScopeId"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/scopes/{id}/memory": {
+      "get": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScopeId"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScopeMemoryResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/scopes/{id}/stats": {
+      "get": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScopeId"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/traces/{id}": {
+      "get": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TraceId"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetrievalTrace"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
