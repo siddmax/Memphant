@@ -11,7 +11,8 @@ async fn main() {
         return;
     }
 
-    let addr: SocketAddr = "127.0.0.1:3000".parse().expect("valid bind address");
+    let bind = std::env::var("MEMPHANT_BIND").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
+    let addr: SocketAddr = bind.parse().expect("valid bind address");
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("bind memphant-server");

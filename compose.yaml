@@ -1,0 +1,52 @@
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.4-pg17
+    environment:
+      POSTGRES_DB: memphant
+      POSTGRES_USER: memphant
+      POSTGRES_PASSWORD: memphant
+    ports:
+      - "127.0.0.1:${MEMPHANT_POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memphant -d memphant"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - memphant-postgres:/var/lib/postgresql/data
+
+  server:
+    build: .
+    command: ["memphant-server"]
+    environment:
+      DATABASE_URL: postgres://memphant:memphant@postgres:5432/memphant
+      MEMPHANT_PROVIDER: plain-postgres
+      MEMPHANT_SCHEMA: memphant
+      MEMPHANT_BIND: 0.0.0.0:3000
+      RUST_LOG: ${RUST_LOG:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${MEMPHANT_HTTP_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/v1/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  worker:
+    build: .
+    command: ["memphant-worker"]
+    environment:
+      DATABASE_URL: postgres://memphant:memphant@postgres:5432/memphant
+      MEMPHANT_PROVIDER: plain-postgres
+      MEMPHANT_SCHEMA: memphant
+      RUST_LOG: ${RUST_LOG:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  memphant-postgres:
+

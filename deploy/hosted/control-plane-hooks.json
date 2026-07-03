@@ -1,0 +1,39 @@
+{
+  "version": "2026-07-03.wsh",
+  "open_core_contract": "Hosted cells run the same memphant-server, memphant-worker, and /v1 API behavior as self-hosted deployments.",
+  "global_state_boundary": {
+    "allowed": ["tenant_id", "home_region", "billing_account_id", "status", "plan"],
+    "forbidden": ["memory_body", "raw_episode", "resource_uri", "quote", "embedding_vector"]
+  },
+  "hooks": [
+    {
+      "name": "tenant.provision.requested",
+      "direction": "control-plane-to-cell",
+      "required_fields": ["tenant_id", "home_region", "plan", "billing_account_id"],
+      "cell_action": "create tenant with immutable region before issuing API keys",
+      "fail_closed_on": ["missing_region", "region_not_supported", "duplicate_tenant"]
+    },
+    {
+      "name": "tenant.region.resolve",
+      "direction": "edge-router-to-control-plane",
+      "required_fields": ["tenant_id"],
+      "cell_action": "return home_region only; never return memory payloads",
+      "fail_closed_on": ["unknown_tenant", "suspended_tenant", "directory_stale"]
+    },
+    {
+      "name": "billing.metered_event.recorded",
+      "direction": "cell-to-control-plane",
+      "required_fields": ["tenant_id", "event_id", "event_type", "count", "occurred_at"],
+      "cell_action": "emit PII-stripped metering event after the core API transaction commits",
+      "fail_closed_on": ["missing_event_id", "tenant_status_inactive"]
+    },
+    {
+      "name": "tenant.status.changed",
+      "direction": "control-plane-to-cell",
+      "required_fields": ["tenant_id", "status", "effective_at"],
+      "cell_action": "apply admission status without deleting tenant memory",
+      "fail_closed_on": ["unknown_tenant", "invalid_status_transition"]
+    }
+  ]
+}
+

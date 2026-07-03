@@ -1,0 +1,118 @@
+use std::fs;
+use std::path::Path;
+use std::process::Command;
+
+fn repo_root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root")
+}
+
+#[test]
+fn default_provider_profiles_pass_bootstrap_check() {
+    for provider in ["plain-postgres", "supabase", "neon"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_memphant-cli"))
+            .current_dir(repo_root())
+            .args(["db", "bootstrap-check", "--provider", provider])
+            .output()
+            .expect("run bootstrap check");
+
+        assert!(
+            output.status.success(),
+            "provider {provider} failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn bootstrap_check_rejects_region_mismatch() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let profile = dir.path().join("plain.env");
+    fs::write(
+        &profile,
+        r#"
+MEMPHANT_PROVIDER=plain-postgres
+DATABASE_URL=postgresql://memphant:secret@db.example.com:5432/memphant?sslmode=require
+MEMPHANT_SCHEMA=memphant
+MEMPHANT_PG_REGION=us-east-1
+MEMPHANT_OBJECT_STORE=s3
+MEMPHANT_OBJECT_STORE_BUCKET=customer-memphant-prod
+MEMPHANT_OBJECT_STORE_REGION=eu-west-1
+MEMPHANT_OBJECT_VERSIONING_REQUIRED=true
+MEMPHANT_PITR_WINDOW_DAYS=7
+MEMPHANT_OBJECT_RETENTION_DAYS=14
+"#,
+    )
+    .expect("write profile");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_memphant-cli"))
+        .current_dir(repo_root())
+        .args([
+            "db",
+            "bootstrap-check",
+            "--provider",
+            "plain-postgres",
+            "--profile",
+            profile.to_str().expect("profile path"),
+        ])
+        .output()
+        .expect("run bootstrap check");
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("residency:region_mismatch"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn bootstrap_check_rejects_supabase_memphant_schema_exposure() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let profile = dir.path().join("supabase.env");
+    fs::write(
+        &profile,
+        r#"
+MEMPHANT_PROVIDER=supabase
+DATABASE_URL=postgresql://postgres.example:secret@aws-0-us-east-1.pooler.supabase.com:6543/postgres?sslmode=require
+MEMPHANT_SCHEMA=memphant
+MEMPHANT_PG_REGION=us-east-1
+MEMPHANT_OBJECT_STORE=s3
+MEMPHANT_OBJECT_STORE_BUCKET=customer-memphant-prod
+MEMPHANT_OBJECT_STORE_REGION=us-east-1
+MEMPHANT_OBJECT_VERSIONING_REQUIRED=true
+MEMPHANT_PITR_WINDOW_DAYS=7
+MEMPHANT_OBJECT_RETENTION_DAYS=14
+MEMPHANT_SUPABASE_EXPOSED_SCHEMAS=public,memphant
+MEMPHANT_SUPABASE_ANON_HAS_MEMPHANT_ACCESS=false
+MEMPHANT_SUPABASE_AUTHENTICATED_HAS_MEMPHANT_ACCESS=false
+MEMPHANT_SUPABASE_ADVISORS_REQUIRED=true
+MEMPHANT_SUPABASE_LINT_COMMAND="supabase db lint --db-url $DATABASE_URL --schema memphant --fail-on warning"
+"#,
+    )
+    .expect("write profile");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_memphant-cli"))
+        .current_dir(repo_root())
+        .args([
+            "db",
+            "bootstrap-check",
+            "--provider",
+            "supabase",
+            "--profile",
+            profile.to_str().expect("profile path"),
+        ])
+        .output()
+        .expect("run bootstrap check");
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("supabase:memphant_schema_exposed_to_postgrest"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

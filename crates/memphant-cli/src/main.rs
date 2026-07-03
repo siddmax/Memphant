@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -7,6 +8,9 @@ use std::str::FromStr;
 use memphant_store_postgres::{Provider, lint_migrations};
 use memphant_types::{MemphantLock, VerifyReport};
 use serde::{Deserialize, Serialize};
+
+const DEFAULT_PROVIDER_PROFILE_DIR: &str = "deploy/provider-profiles";
+const PITR_RETENTION_MARGIN_DAYS: u64 = 1;
 
 #[derive(Debug, Deserialize)]
 struct CompileSource {
@@ -73,9 +77,22 @@ fn main() -> ExitCode {
                 }
             }
         }
+        [db, command, provider_flag, provider]
+            if db == "db" && command == "bootstrap-check" && provider_flag == "--provider" =>
+        {
+            bootstrap_check(provider, None)
+        }
+        [db, command, provider_flag, provider, profile_flag, profile]
+            if db == "db"
+                && command == "bootstrap-check"
+                && provider_flag == "--provider"
+                && profile_flag == "--profile" =>
+        {
+            bootstrap_check(provider, Some(Path::new(profile)))
+        }
         _ => {
             eprintln!(
-                "usage: memphant lock --out <path|-> | memphant verify --lock <path> [--export <dir>] | memphant compile --scope <scope> --out <dir> --source <json> | memphant db lint --provider <plain-postgres|supabase|neon>"
+                "usage: memphant lock --out <path|-> | memphant verify --lock <path> [--export <dir>] | memphant compile --scope <scope> --out <dir> --source <json> | memphant db lint --provider <plain-postgres|supabase|neon> | memphant db bootstrap-check --provider <plain-postgres|supabase|neon> [--profile <env-file>]"
             );
             ExitCode::from(2)
         }
@@ -231,6 +248,249 @@ fn compile_markdown(scope: &str, out_dir: &Path, source_path: &Path) -> ExitCode
         source.entries.len()
     );
     ExitCode::SUCCESS
+}
+
+fn bootstrap_check(provider: &str, profile_path: Option<&Path>) -> ExitCode {
+    let provider = match Provider::from_str(provider) {
+        Ok(provider) => provider,
+        Err(error) => {
+            eprintln!("bootstrap_check=dirty provider={provider}");
+            eprintln!("{error}");
+            return ExitCode::from(1);
+        }
+    };
+    let profile_path = profile_path.map(Path::to_path_buf).unwrap_or_else(|| {
+        PathBuf::from(DEFAULT_PROVIDER_PROFILE_DIR).join(format!("{provider}.env.example"))
+    });
+
+    let mut findings = Vec::new();
+    if let Err(error) = lint_migrations(provider) {
+        findings.extend(
+            error
+                .findings()
+                .iter()
+                .map(|finding| format!("migration:{finding}")),
+        );
+    }
+
+    match read_provider_profile(&profile_path) {
+        Ok(profile) => findings.extend(validate_provider_profile(provider, &profile)),
+        Err(error) => findings.push(format!("profile:unreadable:{error}")),
+    }
+
+    if findings.is_empty() {
+        println!(
+            "bootstrap_check=clean provider={provider} profile={}",
+            profile_path.display()
+        );
+        println!("migration_lint=clean provider={provider}");
+        return ExitCode::SUCCESS;
+    }
+
+    eprintln!(
+        "bootstrap_check=dirty provider={provider} profile={}",
+        profile_path.display()
+    );
+    for finding in findings {
+        eprintln!("{finding}");
+    }
+    ExitCode::from(1)
+}
+
+fn read_provider_profile(path: &Path) -> Result<BTreeMap<String, String>, String> {
+    let content = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    parse_env_profile(&content)
+}
+
+fn parse_env_profile(content: &str) -> Result<BTreeMap<String, String>, String> {
+    let mut profile = BTreeMap::new();
+    for (index, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            return Err(format!("line:{}:missing_equals", index + 1));
+        };
+        let key = key.trim();
+        if key.is_empty()
+            || !key
+                .chars()
+                .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
+        {
+            return Err(format!("line:{}:invalid_key", index + 1));
+        }
+        profile.insert(key.to_string(), unquote_env_value(value.trim()).to_string());
+    }
+    Ok(profile)
+}
+
+fn unquote_env_value(value: &str) -> &str {
+    if value.len() >= 2 {
+        let bytes = value.as_bytes();
+        if (bytes[0] == b'"' && bytes[value.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[value.len() - 1] == b'\'')
+        {
+            return &value[1..value.len() - 1];
+        }
+    }
+    value
+}
+
+fn validate_provider_profile(
+    provider: Provider,
+    profile: &BTreeMap<String, String>,
+) -> Vec<String> {
+    let mut findings = Vec::new();
+    let expected_provider = provider.to_string();
+    if let Some(value) = require_key(profile, "MEMPHANT_PROVIDER", &mut findings)
+        && value != expected_provider
+    {
+        findings.push(format!(
+            "profile:provider_mismatch:expected={expected_provider}:actual={value}"
+        ));
+    }
+    if let Some(schema) = require_key(profile, "MEMPHANT_SCHEMA", &mut findings)
+        && schema != "memphant"
+    {
+        findings.push(format!("profile:schema_mismatch:actual={schema}"));
+    }
+    if let Some(database_url) = require_key(profile, "DATABASE_URL", &mut findings) {
+        validate_database_url(provider, database_url, &mut findings);
+    }
+    validate_residency_and_retention(profile, &mut findings);
+
+    match provider {
+        Provider::PlainPostgres => {}
+        Provider::Supabase => validate_supabase_profile(profile, &mut findings),
+        Provider::Neon => validate_neon_profile(profile, &mut findings),
+    }
+
+    findings
+}
+
+fn validate_database_url(provider: Provider, database_url: &str, findings: &mut Vec<String>) {
+    if !(database_url.starts_with("postgres://") || database_url.starts_with("postgresql://")) {
+        findings.push("database_url:must_use_postgres_scheme".to_string());
+    }
+    if provider == Provider::Neon && !database_url.contains("sslmode=require") {
+        findings.push("neon:database_url_missing_sslmode_require".to_string());
+    }
+    if database_url.contains("public.") || database_url.contains("syndai.") {
+        findings.push("database_url:forbidden_schema_reference".to_string());
+    }
+}
+
+fn validate_residency_and_retention(
+    profile: &BTreeMap<String, String>,
+    findings: &mut Vec<String>,
+) {
+    let pg_region = require_key(profile, "MEMPHANT_PG_REGION", findings).map(str::to_string);
+    let object_region =
+        require_key(profile, "MEMPHANT_OBJECT_STORE_REGION", findings).map(str::to_string);
+    if let (Some(pg_region), Some(object_region)) = (pg_region, object_region)
+        && pg_region != object_region
+    {
+        findings.push(format!(
+            "residency:region_mismatch:pg={pg_region}:object_store={object_region}"
+        ));
+    }
+
+    require_key(profile, "MEMPHANT_OBJECT_STORE", findings);
+    require_key(profile, "MEMPHANT_OBJECT_STORE_BUCKET", findings);
+
+    expect_true(profile, "MEMPHANT_OBJECT_VERSIONING_REQUIRED", findings);
+    let pitr_days = parse_u64_key(profile, "MEMPHANT_PITR_WINDOW_DAYS", findings);
+    let retention_days = parse_u64_key(profile, "MEMPHANT_OBJECT_RETENTION_DAYS", findings);
+    if let (Some(pitr_days), Some(retention_days)) = (pitr_days, retention_days)
+        && retention_days < pitr_days + PITR_RETENTION_MARGIN_DAYS
+    {
+        findings.push(format!(
+            "restore_retention_floor_violation:pitr_days={pitr_days}:object_retention_days={retention_days}:required_min={}",
+            pitr_days + PITR_RETENTION_MARGIN_DAYS
+        ));
+    }
+}
+
+fn validate_supabase_profile(profile: &BTreeMap<String, String>, findings: &mut Vec<String>) {
+    if let Some(exposed) = require_key(profile, "MEMPHANT_SUPABASE_EXPOSED_SCHEMAS", findings) {
+        let exposed_schemas = exposed
+            .split(',')
+            .map(|value| value.trim().to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        if exposed_schemas.iter().any(|schema| schema == "memphant") {
+            findings.push("supabase:memphant_schema_exposed_to_postgrest".to_string());
+        }
+    }
+    expect_false(
+        profile,
+        "MEMPHANT_SUPABASE_ANON_HAS_MEMPHANT_ACCESS",
+        findings,
+    );
+    expect_false(
+        profile,
+        "MEMPHANT_SUPABASE_AUTHENTICATED_HAS_MEMPHANT_ACCESS",
+        findings,
+    );
+    expect_true(profile, "MEMPHANT_SUPABASE_ADVISORS_REQUIRED", findings);
+    if let Some(command) = require_key(profile, "MEMPHANT_SUPABASE_LINT_COMMAND", findings) {
+        let command = command.to_ascii_lowercase();
+        for needle in ["supabase db lint", "--schema memphant", "--fail-on warning"] {
+            if !command.contains(needle) {
+                findings.push(format!("supabase:lint_command_missing:{needle}"));
+            }
+        }
+    }
+}
+
+fn validate_neon_profile(profile: &BTreeMap<String, String>, findings: &mut Vec<String>) {
+    require_key(profile, "MEMPHANT_NEON_BRANCH", findings);
+    expect_true(profile, "MEMPHANT_NEON_BRANCHING_FOR_EVALS", findings);
+}
+
+fn require_key<'a>(
+    profile: &'a BTreeMap<String, String>,
+    key: &str,
+    findings: &mut Vec<String>,
+) -> Option<&'a str> {
+    match profile.get(key) {
+        Some(value) if !value.trim().is_empty() => Some(value.as_str()),
+        _ => {
+            findings.push(format!("profile:missing:{key}"));
+            None
+        }
+    }
+}
+
+fn parse_u64_key(
+    profile: &BTreeMap<String, String>,
+    key: &str,
+    findings: &mut Vec<String>,
+) -> Option<u64> {
+    let value = require_key(profile, key, findings)?;
+    match value.parse::<u64>() {
+        Ok(value) => Some(value),
+        Err(_) => {
+            findings.push(format!("profile:invalid_u64:{key}:{value}"));
+            None
+        }
+    }
+}
+
+fn expect_true(profile: &BTreeMap<String, String>, key: &str, findings: &mut Vec<String>) {
+    if let Some(value) = require_key(profile, key, findings)
+        && value != "true"
+    {
+        findings.push(format!("profile:expected_true:{key}:actual={value}"));
+    }
+}
+
+fn expect_false(profile: &BTreeMap<String, String>, key: &str, findings: &mut Vec<String>) {
+    if let Some(value) = require_key(profile, key, findings)
+        && value != "false"
+    {
+        findings.push(format!("profile:expected_false:{key}:actual={value}"));
+    }
 }
 
 fn verify_export(export_dir: &Path) -> Result<(), Vec<String>> {

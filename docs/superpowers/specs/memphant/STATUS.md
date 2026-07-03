@@ -5,7 +5,7 @@
 > ## ✅ DONE definition (deterministic)
 > **MemPhant is FULLY COMPLETED when every checkbox in §1–§6 is checked and the banner below reads COMPLETE.** No section may be skipped; an activation-gated item (§5) counts as done when it is either ACTIVATED (gate met + built + proof) or RETIRED (its disable-when fired, recorded in `24`). Nothing else — no vibe, no partial credit — flips the banner.
 >
-> # CURRENT PHASE: `WS-H READY — WS-G EXIT PACKET COMPLETE`
+> # CURRENT PHASE: `WS-I READY — WS-H EXIT PACKET COMPLETE`
 >
 > WS-0 proof artifact: `docs/build-log/artifacts/ws0-two-language-spike.json`.
 > R83 spike measured warm no-recompile Rust policy-change iteration at **0.073×** Python (`rust_proceeds`).
@@ -16,6 +16,7 @@
 > WS-E proof artifact: `docs/build-log/2026-07-03-wse-progress.md` (YAML oracle + manifest guard + trace schema snapshot + security/ops suites + nightly sampled archive + Markdown compile/verify + full local gates). Next build workstream: WS-F.
 > WS-F proof artifact: `docs/build-log/2026-07-03-wsf-progress.md` (Syndai L1+ agent file-memory export + trace compare + config-gated public active-read adapter + focused Syndai gates). Next build workstream: WS-G.
 > WS-G proof artifact: `docs/build-log/2026-07-03-wsg-progress.md` (public docs/dashboard/trace/memory/API-key/eval/export surface + Playwright route/accessibility/no-DB gates). Next build workstream: WS-H.
+> WS-H proof artifact: `docs/build-log/2026-07-03-wsh-progress.md` (Docker/Compose packaging + plain Postgres/Supabase/Neon bootstrap profiles + BYOC preflight + hosted hooks + PITR runbooks + full local gates). Next build workstream: WS-I.
 > Syndai spec/preflight proof: `docs/build-log/2026-07-03-syndai-preflight.md` (`Syndai/main` `fe17bc488`, preflight green in 764s).
 
 ## 1. Spec corpus
@@ -35,7 +36,7 @@
 - [x] **WS-E** Eval, security, ops — golden oracle + manifest guard + security suites + nightly sampled runner + deletion-completeness lane (proof: `docs/build-log/2026-07-03-wse-progress.md`)
 - [x] **WS-F** Syndai dogfood cutover — first low-risk surface exported + trace-compared (proof: `docs/build-log/2026-07-03-wsf-progress.md`; stop-rule honored; launch not hostage to full cutover)
 - [x] **WS-G** Public UI/docs/launch surface (proof: `docs/build-log/2026-07-03-wsg-progress.md`)
-- [ ] **WS-H** BYOC + hosted packaging
+- [x] **WS-H** BYOC + hosted packaging (proof: `docs/build-log/2026-07-03-wsh-progress.md`)
 - [ ] **WS-I** Advanced lever activation (tracked per-item in §5)
 
 ## 3. SOTA ladder rungs (activation/disable contracts owned by `27` §2; check = advance-when met with archived profile proof)
@@ -73,7 +74,7 @@
 
 ## 6. Standing quality bars (never one-and-done; checked at every release while building)
 
-- [ ] Security suites green at latest release (tenant isolation, deletion completeness, corroboration-farming, filter injection — `05` §10)
+- [x] Security suites green at latest release (tenant isolation, deletion completeness, corroboration-farming, filter injection — `05` §10; proof: `docs/build-log/2026-07-03-wsh-progress.md`)
 - [ ] Hot-path SLO holding (fast p50 <200ms / p95 <500ms — `02` §4)
 - [ ] `memory_utility_trend` SLI wired on the dogfood lane (`22` §1.3)
 - [ ] Landscape-completeness rule satisfied at latest review pass (`13` §1.4)
