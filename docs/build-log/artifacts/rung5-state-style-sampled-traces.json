@@ -1,0 +1,24 @@
+{
+  "case_results": [
+    {
+      "dropped_mismatches": [],
+      "error": null,
+      "forbidden_present": [],
+      "id": "temporal_validity_current_office",
+      "missing_citations": [],
+      "missing_trace_stages": [],
+      "missing_units": [],
+      "passed": true,
+      "trace_id": "019f2755-6544-74d2-8a2a-91dd38167f64"
+    }
+  ],
+  "eval_id": "rung5-state-style-sampled",
+  "metrics": {
+    "contextual_chunks_enabled": true,
+    "passed_cases": 1,
+    "temporal_validity_enabled": true,
+    "total_cases": 1
+  },
+  "runner": "memphant-eval",
+  "trace_schema_version": "trace-0.1.0-ws0"
+}

@@ -2,3 +2,4 @@ golden:
   - checkout_region
   - contextual_chunk_breaker
   - deleted_secret_filter
+  - temporal_validity_current_office

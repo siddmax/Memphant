@@ -1,0 +1,3 @@
+id: rung5-state-style-sampled
+cases:
+  - ../examples/evals/golden/temporal_validity_current_office.yaml

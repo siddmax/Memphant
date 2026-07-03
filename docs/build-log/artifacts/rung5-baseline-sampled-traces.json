@@ -1,0 +1,28 @@
+{
+  "case_results": [
+    {
+      "dropped_mismatches": [
+        "mem_launch_office_seattle_old:Stale"
+      ],
+      "error": null,
+      "forbidden_present": [
+        "mem_launch_office_seattle_old"
+      ],
+      "id": "temporal_validity_current_office",
+      "missing_citations": [],
+      "missing_trace_stages": [],
+      "missing_units": [],
+      "passed": false,
+      "trace_id": "019f2755-3d16-71e3-bd78-26715648e11b"
+    }
+  ],
+  "eval_id": "rung5-baseline-sampled",
+  "metrics": {
+    "contextual_chunks_enabled": true,
+    "passed_cases": 0,
+    "temporal_validity_enabled": false,
+    "total_cases": 1
+  },
+  "runner": "memphant-eval",
+  "trace_schema_version": "trace-0.1.0-ws0"
+}

@@ -243,6 +243,8 @@ impl McpRuntime {
                         churn_class: None,
                         admission_hint: None,
                         contextual_chunks: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
                     }],
                 },
             )

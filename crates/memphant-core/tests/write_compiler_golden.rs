@@ -101,6 +101,8 @@ async fn write_compiler_golden_fixtures_pass() {
                         churn_class: episode.churn_class.clone(),
                         admission_hint: episode.admission_hint,
                         contextual_chunks: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
                     }],
                 },
             )
@@ -221,6 +223,8 @@ async fn reflect_recorded_is_idempotent_for_duplicate_job_delivery() {
             churn_class: None,
             admission_hint: None,
             contextual_chunks: Vec::new(),
+            valid_from: None,
+            valid_to: None,
         }],
     };
 
@@ -284,6 +288,8 @@ async fn reflect_candidate_contextual_chunks_are_stored_with_source_episode() {
                     body: "The emergency breaker codeword is albatross.".to_string(),
                     source_span: Some("episode:0-72".to_string()),
                 }],
+                valid_from: None,
+                valid_to: None,
             }],
         },
     )

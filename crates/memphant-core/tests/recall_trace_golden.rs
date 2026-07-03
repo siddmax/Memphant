@@ -103,6 +103,10 @@ async fn contextual_chunk_recall_finds_source_unit_and_traces_flag() {
                     body: "The emergency breaker codeword is albatross.".to_string(),
                     source_span: Some("episode:0-74".to_string()),
                 }],
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
             },
         )
         .await
@@ -173,6 +177,10 @@ async fn servicenow_query_does_not_trigger_temporal_recency_match() {
                 source_resource_id: None,
                 deletion_generation: None,
                 contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
             },
         )
         .await
@@ -198,6 +206,103 @@ async fn servicenow_query_does_not_trigger_temporal_recency_match() {
     .expect("recall succeeds");
 
     assert!(!response.candidate_whitelist.contains(&unit_id));
+}
+
+#[tokio::test]
+async fn recall_drops_expired_validity_window_for_current_query() {
+    let store = InMemoryStore::default();
+    let tenant_id = tenant(74_000);
+    let scope_id = scope(74_001);
+    let actor_id = actor(74_002);
+
+    let mut tx = store.begin().await;
+    let stale_id = store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id,
+                scope_id,
+                kind: MemoryKind::Semantic,
+                state: UnitState::Active,
+                subject_key: Some("launch review office".to_string()),
+                body: "Launch review office is Seattle.".to_string(),
+                trust_level: TrustLevel::TrustedSystem,
+                churn_class: None,
+                freshness_due: false,
+                actor_id: Some(actor_id),
+                source_kind: Some("fixture".to_string()),
+                source_episode_id: None,
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: Some("2026-01-01T00:00:00Z".to_string()),
+                valid_to: Some("2026-06-01T00:00:00Z".to_string()),
+                transaction_from: None,
+                transaction_to: None,
+            },
+        )
+        .await
+        .expect("stale unit seeded");
+    let current_id = store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id,
+                scope_id,
+                kind: MemoryKind::Semantic,
+                state: UnitState::Active,
+                subject_key: Some("launch review office".to_string()),
+                body: "Launch review office is Taipei.".to_string(),
+                trust_level: TrustLevel::TrustedSystem,
+                churn_class: None,
+                freshness_due: false,
+                actor_id: Some(actor_id),
+                source_kind: Some("fixture".to_string()),
+                source_episode_id: None,
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: Some("2026-06-01T00:00:00Z".to_string()),
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
+            },
+        )
+        .await
+        .expect("current unit seeded");
+    store.commit(tx).await.expect("seed committed");
+
+    let response = recall(
+        &store,
+        RecallRequest {
+            tenant_id,
+            scope_id,
+            actor_id,
+            allowed_scope_ids: vec![scope_id],
+            query: "Which office is current for the launch review?".to_string(),
+            k: 8,
+            budget_tokens: 256,
+            mode: RecallMode::Fast,
+            include_beliefs: false,
+            engine_version: "engine-rung5-test".to_string(),
+        },
+    )
+    .await
+    .expect("recall succeeds");
+
+    assert!(response.candidate_whitelist.contains(&current_id));
+    assert!(!response.candidate_whitelist.contains(&stale_id));
+    let trace = store
+        .retrieval_traces(tenant_id)
+        .into_iter()
+        .next()
+        .expect("trace recorded");
+    assert!(
+        trace
+            .dropped_items
+            .iter()
+            .any(|item| { item.unit_id == stale_id && item.reason == RecallDropReason::Stale })
+    );
 }
 
 #[derive(Debug, Deserialize)]
@@ -332,6 +437,10 @@ async fn recall_golden_fixtures_pass() {
                         source_resource_id: None,
                         deletion_generation: unit.deletion_generation,
                         contextual_chunks: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                        transaction_from: None,
+                        transaction_to: None,
                     },
                 )
                 .await

@@ -15,6 +15,8 @@ use memphant_types::{
 };
 use memphant_types::{NewResource, ResourceExtractorState, ResourceId};
 
+const CURRENT_VALIDITY_CUTOFF: &str = "2026-07-03T00:00:00Z";
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("transaction already committed")]
@@ -410,6 +412,10 @@ impl MemoryStore for InMemoryStore {
             source_resource_id: unit.source_resource_id,
             deletion_generation: unit.deletion_generation,
             contextual_chunks: unit.contextual_chunks,
+            valid_from: unit.valid_from,
+            valid_to: unit.valid_to,
+            transaction_from: unit.transaction_from,
+            transaction_to: unit.transaction_to,
         });
         Ok(id)
     }
@@ -595,13 +601,20 @@ pub async fn correct_memory(
     let mut replacement = units[old_index].clone();
     let old_id = replacement.id;
     let new_id = UnitId::new();
+    let is_retroactive =
+        request.correction.valid_from.is_some() || request.correction.valid_to.is_some();
 
     units[old_index].state = UnitState::Superseded;
+    units[old_index].transaction_to = Some(CURRENT_VALIDITY_CUTOFF.to_string());
     replacement.id = new_id;
     replacement.body = request.correction.value;
     replacement.state = UnitState::Active;
     replacement.actor_id = Some(request.actor_id);
     replacement.deletion_generation = None;
+    replacement.valid_from = request.correction.valid_from;
+    replacement.valid_to = request.correction.valid_to;
+    replacement.transaction_from = Some(CURRENT_VALIDITY_CUTOFF.to_string());
+    replacement.transaction_to = None;
     units.push(replacement);
 
     state
@@ -621,9 +634,7 @@ pub async fn correct_memory(
         correction_id: format!("cor_{}", new_id.as_uuid()),
         superseded: vec![old_id],
         created: vec![new_id],
-        correction_kind: if request.correction.valid_from.is_some()
-            || request.correction.valid_to.is_some()
-        {
+        correction_kind: if is_retroactive {
             "retroactive".to_string()
         } else {
             "current".to_string()
@@ -965,6 +976,8 @@ fn trace_filter_drops(
                 Some(RecallDropReason::Scope)
             } else if unit.deletion_generation.is_some() {
                 Some(RecallDropReason::Deleted)
+            } else if unit.transaction_to.is_some() || !valid_for_query(unit, &request.query) {
+                Some(RecallDropReason::Stale)
             } else {
                 match unit.state {
                     UnitState::Deleted => Some(RecallDropReason::Deleted),
@@ -1054,7 +1067,7 @@ fn channel_candidates(
     units
         .iter()
         .filter(|unit| request.allowed_scope_ids.contains(&unit.scope_id))
-        .filter(|unit| recallable(unit, request.include_beliefs))
+        .filter(|unit| recallable(unit, request.include_beliefs, &request.query))
         .filter_map(|unit| {
             let score = match channel {
                 RecallChannel::Exact => exact_score(unit, query_tokens),
@@ -1087,7 +1100,7 @@ fn edge_score(
             .iter()
             .find(|candidate| candidate.id == other_id)
             .is_some_and(|candidate| {
-                recallable(candidate, true)
+                recallable(candidate, true, "")
                     && (lexical_score(candidate, query_tokens) > 0.0
                         || exact_score(candidate, query_tokens) > 0.0)
             })
@@ -1106,12 +1119,43 @@ fn suppression_labels_for(unit: &StoredMemoryUnit, edges: &[StoredMemoryEdge]) -
     }
 }
 
-fn recallable(unit: &StoredMemoryUnit, include_beliefs: bool) -> bool {
+fn recallable(unit: &StoredMemoryUnit, include_beliefs: bool, query: &str) -> bool {
     if unit.deletion_generation.is_some() {
+        return false;
+    }
+    if unit.transaction_to.is_some() || !valid_for_query(unit, query) {
         return false;
     }
     matches!(unit.state, UnitState::Active | UnitState::Validated)
         && (include_beliefs || unit.kind != MemoryKind::Belief)
+}
+
+fn valid_for_query(unit: &StoredMemoryUnit, query: &str) -> bool {
+    if unit.kind != MemoryKind::Semantic || is_historical_query(query) {
+        return true;
+    }
+    if is_current_query(query) {
+        return unit
+            .valid_to
+            .as_deref()
+            .is_none_or(|valid_to| valid_to > CURRENT_VALIDITY_CUTOFF);
+    }
+    true
+}
+
+fn is_current_query(query: &str) -> bool {
+    tokenize(query)
+        .iter()
+        .any(|token| matches!(token.as_str(), "current" | "latest" | "now"))
+}
+
+fn is_historical_query(query: &str) -> bool {
+    tokenize(query).iter().any(|token| {
+        matches!(
+            token.as_str(),
+            "historical" | "history" | "previous" | "old"
+        )
+    })
 }
 
 fn exact_score(unit: &StoredMemoryUnit, query_tokens: &[String]) -> f32 {
@@ -1291,6 +1335,10 @@ pub async fn reflect_recorded(
                         source_resource_id: None,
                         deletion_generation: None,
                         contextual_chunks: candidate.contextual_chunks,
+                        valid_from: candidate.valid_from,
+                        valid_to: candidate.valid_to,
+                        transaction_from: Some(CURRENT_VALIDITY_CUTOFF.to_string()),
+                        transaction_to: None,
                     });
                     edges.push(StoredMemoryEdge {
                         id: EdgeId::new(),
@@ -1335,6 +1383,10 @@ pub async fn reflect_recorded(
                         source_resource_id: None,
                         deletion_generation: None,
                         contextual_chunks: candidate.contextual_chunks,
+                        valid_from: candidate.valid_from,
+                        valid_to: candidate.valid_to,
+                        transaction_from: Some(CURRENT_VALIDITY_CUTOFF.to_string()),
+                        transaction_to: None,
                     });
                     AdmissionAction::Quarantine
                 } else {
@@ -1347,6 +1399,8 @@ pub async fn reflect_recorded(
                         action = AdmissionAction::Supersede;
                         let old_id = units[existing_index].id;
                         units[existing_index].state = UnitState::Superseded;
+                        units[existing_index].transaction_to =
+                            Some(CURRENT_VALIDITY_CUTOFF.to_string());
                         edges.push(StoredMemoryEdge {
                             id: EdgeId::new(),
                             tenant_id: input.tenant_id,
@@ -1381,6 +1435,10 @@ pub async fn reflect_recorded(
                         source_resource_id: None,
                         deletion_generation: None,
                         contextual_chunks: candidate.contextual_chunks,
+                        valid_from: candidate.valid_from,
+                        valid_to: candidate.valid_to,
+                        transaction_from: Some(CURRENT_VALIDITY_CUTOFF.to_string()),
+                        transaction_to: None,
                     });
                     action
                 }
@@ -1403,6 +1461,10 @@ pub async fn reflect_recorded(
                         source_resource_id: None,
                         deletion_generation: None,
                         contextual_chunks: candidate.contextual_chunks,
+                        valid_from: candidate.valid_from,
+                        valid_to: candidate.valid_to,
+                        transaction_from: Some(CURRENT_VALIDITY_CUTOFF.to_string()),
+                        transaction_to: None,
                     });
                     AdmissionAction::Quarantine
                 } else {
@@ -1423,6 +1485,10 @@ pub async fn reflect_recorded(
                         source_resource_id: None,
                         deletion_generation: None,
                         contextual_chunks: candidate.contextual_chunks,
+                        valid_from: candidate.valid_from,
+                        valid_to: candidate.valid_to,
+                        transaction_from: Some(CURRENT_VALIDITY_CUTOFF.to_string()),
+                        transaction_to: None,
                     });
                     AdmissionAction::Append
                 }

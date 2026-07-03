@@ -5,7 +5,7 @@
 > ## ✅ DONE definition (deterministic)
 > **MemPhant is FULLY COMPLETED when every checkbox in §1–§6 is checked and the banner below reads COMPLETE.** No section may be skipped; an activation-gated item (§5) counts as done when it is either ACTIVATED (gate met + built + proof) or RETIRED (its disable-when fired, recorded in `24`). Nothing else — no vibe, no partial credit — flips the banner.
 >
-> # CURRENT PHASE: `RUNG-4 PROMOTED — NEXT RUNG 5 TEMPORAL VALIDITY`
+> # CURRENT PHASE: `RUNG-5 PROMOTED — NEXT RUNG 6 EDGE EXPANSION`
 >
 > WS-0 proof artifact: `docs/build-log/artifacts/ws0-two-language-spike.json`.
 > R83 spike measured warm no-recompile Rust policy-change iteration at **0.073×** Python (`rust_proceeds`).
@@ -20,6 +20,7 @@
 > WS-I proof artifact: `docs/build-log/2026-07-03-wsi-progress.md` + `docs/build-log/artifacts/wsi-local-sota-profile.json` (SOTA profile gate + activation audit: rungs 0-3 built, 15 advanced levers remain dormant because promotion gates are not met).
 > Rung-4 local proof artifact: `docs/build-log/2026-07-03-rung4-contextual-chunks-progress.md` + `docs/build-log/artifacts/pr-golden-traces.json` + `docs/build-log/artifacts/nightly-sampled-traces.json` (contextual chunk write/read path green locally; rung remains unchecked until LME-V2/BEAM sampled profile proves top-k gain).
 > Rung-4 promotion proof artifact: `docs/build-log/2026-07-03-rung4-contextual-chunks-profile.md` + `docs/build-log/artifacts/rung4-contextual-chunks-profile.json` + `docs/build-log/artifacts/rung4-baseline-sampled-traces.json` + `docs/build-log/artifacts/rung4-public-sampled-traces.json` (paired sampled-public LME-V2/BEAM top-k delta promoted contextual chunks).
+> Rung-5 promotion proof artifact: `docs/build-log/2026-07-03-rung5-temporal-validity-profile.md` + `docs/build-log/artifacts/rung5-temporal-validity-profile.json` + `docs/build-log/artifacts/rung5-baseline-sampled-traces.json` + `docs/build-log/artifacts/rung5-state-style-sampled-traces.json` (paired stale/current golden + STATE-style sampled profile promoted temporal validity).
 > Syndai spec/preflight proof: `docs/build-log/2026-07-03-syndai-preflight.md` (`Syndai/main` `fe17bc488`, preflight green in 764s).
 
 ## 1. Spec corpus
@@ -45,7 +46,7 @@
 ## 3. SOTA ladder rungs (activation/disable contracts owned by `27` §2; check = advance-when met with archived profile proof)
 
 - [x] 0 trace/eval harness · [x] 1 raw episodes+citations · [x] 2 write/extraction policy · [x] 3 hybrid baseline (proof: `docs/build-log/2026-07-03-wsi-progress.md`; profile `wsi_local_gate_profile_001`)
-- [x] 4 contextual chunks (proof: `docs/build-log/2026-07-03-rung4-contextual-chunks-profile.md`; profile `rung4_contextual_chunks_sampled_profile_001`) · [ ] 5 temporal validity · [ ] 6 edge expansion (vs no-edges + filesystem controls) · [ ] 7 packing+abstention
+- [x] 4 contextual chunks (proof: `docs/build-log/2026-07-03-rung4-contextual-chunks-profile.md`; profile `rung4_contextual_chunks_sampled_profile_001`) · [x] 5 temporal validity (proof: `docs/build-log/2026-07-03-rung5-temporal-validity-profile.md`; profile `rung5_temporal_validity_profile_001`) · [ ] 6 edge expansion (vs no-edges + filesystem controls) · [ ] 7 packing+abstention
 - [ ] 8 bounded rerank · [ ] 9 query decomposition · [ ] 10 procedural memory · [ ] 11 DSR decay fold · [ ] 12 L4 exhaustive
 - [ ] 13 learned rerank/DSR · [ ] 14 external graph/vector escape hatch (or RETIRED) · [ ] 15 inferred-belief composition
 

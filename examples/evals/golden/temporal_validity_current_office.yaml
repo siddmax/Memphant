@@ -1,0 +1,37 @@
+id: temporal_validity_current_office
+second_author_confirmed: true
+query: "Which office is current for the launch review?"
+seed:
+  units:
+    - name: mem_launch_office_seattle_old
+      episode_body: "The launch review office was Seattle until the move completed."
+      kind: semantic
+      state: active
+      subject_key: "launch review office"
+      body: "Launch review office is Seattle."
+      trust_level: trusted_system
+      valid_from: "2026-01-01T00:00:00Z"
+      valid_to: "2026-06-01T00:00:00Z"
+    - name: mem_launch_office_taipei_current
+      episode_body: "The launch review office moved to Taipei and remains current."
+      kind: semantic
+      state: active
+      subject_key: "launch review office"
+      body: "Launch review office is Taipei."
+      trust_level: trusted_system
+      valid_from: "2026-06-01T00:00:00Z"
+expect:
+  answer_bearing_ids:
+    - mem_launch_office_taipei_current
+  top_k_contains:
+    - mem_launch_office_taipei_current
+  forbidden_units:
+    - mem_launch_office_seattle_old
+  citations_include:
+    - mem_launch_office_taipei_current
+  trace_stages_include:
+    - temporal
+    - trace
+  dropped:
+    - unit: mem_launch_office_seattle_old
+      reason: stale

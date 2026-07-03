@@ -112,3 +112,51 @@ fn rung4_promotion_requires_lme_and_beam_axes() {
             .contains("rung_decision:4:missing_scale_axis")
     );
 }
+
+#[test]
+fn rung5_profile_archives_temporal_validity_promotion() {
+    let archive_dir = tempfile::tempdir().expect("tempdir");
+    let archive_path = archive_dir.path().join("rung5-profile.json");
+    let report = run_profile_file(
+        &repo_root().join("examples/evals/rung5-temporal-validity-profile.yaml"),
+        "rungs-0-4-baseline",
+        Some(archive_path.clone()),
+    )
+    .expect("rung5 profile should pass");
+
+    let decision = report
+        .rung_decisions
+        .iter()
+        .find(|decision| decision.rung == 5)
+        .expect("rung 5 decision");
+    assert_eq!(decision.item, "temporal validity");
+    assert_eq!(decision.status, "promoted");
+    assert_eq!(decision.axes, ["outcome", "interactive"]);
+    assert!(decision.delta_vs_baseline > 0.0);
+    assert!(decision.ci[0] > 0.0);
+
+    let archived: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&archive_path).expect("read archive"))
+            .expect("archive json");
+    assert_eq!(archived["rung_decisions"][0]["rung"], 5);
+}
+
+#[test]
+fn rung5_promotion_requires_state_style_axis() {
+    let source =
+        fs::read_to_string(repo_root().join("examples/evals/rung5-temporal-validity-profile.yaml"))
+            .expect("read fixture");
+    let bad = source.replace("axes: [outcome, interactive]", "axes: [outcome]");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("bad-rung5-profile.yaml");
+    fs::write(&path, bad).expect("write fixture");
+
+    let error = run_profile_file(&path, "rungs-0-4-baseline", None)
+        .expect_err("rung5 promotion without STATE-style axis should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("rung_decision:5:missing_interactive_axis")
+    );
+}

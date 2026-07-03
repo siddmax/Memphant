@@ -47,7 +47,7 @@ async fn correct_supersedes_old_generation_and_recall_returns_new_value() {
             correction: CorrectionPayload {
                 value: "Callback token is v2.".to_string(),
                 reason: "stale_fact".to_string(),
-                valid_from: None,
+                valid_from: Some("2026-07-01T00:00:00Z".to_string()),
                 valid_to: None,
             },
         },
@@ -57,19 +57,30 @@ async fn correct_supersedes_old_generation_and_recall_returns_new_value() {
 
     assert_eq!(corrected.superseded, vec![old_id]);
     assert_eq!(corrected.created.len(), 1);
+    assert_eq!(corrected.correction_kind, "retroactive");
     let units = store.memory_units(tenant_id);
+    let old_unit = units.iter().find(|unit| unit.id == old_id).unwrap();
+    assert_eq!(old_unit.state, UnitState::Superseded);
     assert_eq!(
-        units.iter().find(|unit| unit.id == old_id).unwrap().state,
-        UnitState::Superseded
+        old_unit.transaction_to.as_deref(),
+        Some("2026-07-03T00:00:00Z")
     );
+
+    let replacement = units
+        .iter()
+        .find(|unit| unit.id == corrected.created[0])
+        .unwrap();
+    assert_eq!(replacement.body, "Callback token is v2.");
     assert_eq!(
-        units
-            .iter()
-            .find(|unit| unit.id == corrected.created[0])
-            .unwrap()
-            .body,
-        "Callback token is v2."
+        replacement.valid_from.as_deref(),
+        Some("2026-07-01T00:00:00Z")
     );
+    assert_eq!(replacement.valid_to, None);
+    assert_eq!(
+        replacement.transaction_from.as_deref(),
+        Some("2026-07-03T00:00:00Z")
+    );
+    assert_eq!(replacement.transaction_to, None);
 
     let recalled = recall(
         &store,
@@ -240,6 +251,10 @@ async fn seed_active_unit(
                 source_resource_id: None,
                 deletion_generation: None,
                 contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
             },
         )
         .await

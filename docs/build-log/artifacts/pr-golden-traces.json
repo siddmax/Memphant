@@ -9,7 +9,7 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2727-6c80-76f1-a33f-7af45af3d2c0"
+      "trace_id": "019f2754-fc46-7692-a378-5dae46abbdcc"
     },
     {
       "dropped_mismatches": [],
@@ -20,7 +20,7 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2727-6c80-76f1-a33f-7b21697fb277"
+      "trace_id": "019f2754-fc47-7821-893b-1429d7f1e5da"
     },
     {
       "dropped_mismatches": [],
@@ -31,13 +31,26 @@
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2727-6c80-76f1-a33f-7b73f0efe615"
+      "trace_id": "019f2754-fc47-7821-893b-147c4f8b84af"
+    },
+    {
+      "dropped_mismatches": [],
+      "error": null,
+      "forbidden_present": [],
+      "id": "temporal_validity_current_office",
+      "missing_citations": [],
+      "missing_trace_stages": [],
+      "missing_units": [],
+      "passed": true,
+      "trace_id": "019f2754-fc47-7821-893b-14c967eb3e1e"
     }
   ],
   "eval_id": "pr-golden",
   "metrics": {
-    "passed_cases": 3,
-    "total_cases": 3
+    "contextual_chunks_enabled": true,
+    "passed_cases": 4,
+    "temporal_validity_enabled": true,
+    "total_cases": 4
   },
   "runner": "memphant-eval",
   "trace_schema_version": "trace-0.1.0-ws0"

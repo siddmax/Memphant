@@ -340,6 +340,14 @@ pub struct NewMemoryUnit {
     pub deletion_generation: Option<u64>,
     #[serde(default)]
     pub contextual_chunks: Vec<ContextualChunk>,
+    #[serde(default)]
+    pub valid_from: Option<String>,
+    #[serde(default)]
+    pub valid_to: Option<String>,
+    #[serde(default)]
+    pub transaction_from: Option<String>,
+    #[serde(default)]
+    pub transaction_to: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -360,6 +368,10 @@ pub struct StoredMemoryUnit {
     pub source_resource_id: Option<ResourceId>,
     pub deletion_generation: Option<u64>,
     pub contextual_chunks: Vec<ContextualChunk>,
+    pub valid_from: Option<String>,
+    pub valid_to: Option<String>,
+    pub transaction_from: Option<String>,
+    pub transaction_to: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -443,6 +455,10 @@ pub struct ReflectCandidate {
     pub admission_hint: Option<AdmissionAction>,
     #[serde(default)]
     pub contextual_chunks: Vec<ContextualChunk>,
+    #[serde(default)]
+    pub valid_from: Option<String>,
+    #[serde(default)]
+    pub valid_to: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

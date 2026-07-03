@@ -38,6 +38,7 @@ fn run_command(args: Vec<String>) -> ExitCode {
     let mut archive_traces = false;
     let mut archive_dir = None;
     let mut contextual_chunks_enabled = true;
+    let mut temporal_validity_enabled = true;
     let mut index = 1;
     while index < args.len() {
         match args[index].as_str() {
@@ -47,6 +48,10 @@ fn run_command(args: Vec<String>) -> ExitCode {
             }
             "--disable-contextual-chunks" => {
                 contextual_chunks_enabled = false;
+                index += 1;
+            }
+            "--disable-temporal-validity" => {
+                temporal_validity_enabled = false;
                 index += 1;
             }
             "--archive-dir" if index + 1 < args.len() => {
@@ -66,6 +71,7 @@ fn run_command(args: Vec<String>) -> ExitCode {
             archive_traces,
             archive_dir,
             contextual_chunks_enabled,
+            temporal_validity_enabled,
         },
     ) {
         Ok(report) if report.passed_cases == report.total_cases => {
@@ -211,6 +217,7 @@ fn syndai_trace_compare_command(args: Vec<String>) -> ExitCode {
             archive_traces,
             archive_dir,
             contextual_chunks_enabled: true,
+            temporal_validity_enabled: true,
         },
     ) {
         Ok(report) if report.passed => {
@@ -350,6 +357,6 @@ fn profile_command(args: Vec<String>) -> ExitCode {
 
 fn usage() {
     eprintln!(
-        "usage: memphant-eval run <suite.yaml> [--archive-traces] [--archive-dir <dir>] [--disable-contextual-chunks] | memphant-eval verify-golden <suite.yaml> | memphant-eval security <suite.yaml> | memphant-eval ops <suite.yaml> | memphant-eval syndai-trace-compare <fixture.yaml> [--archive-traces] [--archive-dir <dir>] | memphant-eval profile <profile.yaml> --compare-to <baseline> [--archive <path>] | memphant-eval schema trace"
+        "usage: memphant-eval run <suite.yaml> [--archive-traces] [--archive-dir <dir>] [--disable-contextual-chunks] [--disable-temporal-validity] | memphant-eval verify-golden <suite.yaml> | memphant-eval security <suite.yaml> | memphant-eval ops <suite.yaml> | memphant-eval syndai-trace-compare <fixture.yaml> [--archive-traces] [--archive-dir <dir>] | memphant-eval profile <profile.yaml> --compare-to <baseline> [--archive <path>] | memphant-eval schema trace"
     );
 }

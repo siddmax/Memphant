@@ -4,3 +4,4 @@ cases:
   - golden/checkout_region.yaml
   - golden/contextual_chunk_breaker.yaml
   - golden/deleted_secret_filter.yaml
+  - golden/temporal_validity_current_office.yaml

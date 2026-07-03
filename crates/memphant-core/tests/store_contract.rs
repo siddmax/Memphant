@@ -167,6 +167,10 @@ async fn committed_transaction_publishes_staged_episode_and_unit() {
                 source_resource_id: None,
                 deletion_generation: None,
                 contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
             },
         )
         .await
@@ -235,6 +239,10 @@ fn new_episode_and_unit_shapes_require_tenant_and_scope_ids() {
         source_resource_id: None,
         deletion_generation: None,
         contextual_chunks: Vec::new(),
+        valid_from: None,
+        valid_to: None,
+        transaction_from: None,
+        transaction_to: None,
     };
 
     assert_eq!(episode.tenant_id, unit.tenant_id);
