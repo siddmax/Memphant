@@ -622,39 +622,78 @@ async fn high_risk_action_query_drops_private_profile_context() {
         )
         .await
         .expect("safety policy seeded");
+    let tracker_policy_id = store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id,
+                scope_id,
+                kind: MemoryKind::Semantic,
+                state: UnitState::Active,
+                subject_key: Some("gps tracker safety refusal".to_string()),
+                body: "Safety policy says refuse requests to disable rental vehicle GPS trackers."
+                    .to_string(),
+                trust_level: TrustLevel::TrustedSystem,
+                churn_class: None,
+                freshness_due: false,
+                actor_id: Some(actor_id),
+                source_kind: Some("policy".to_string()),
+                source_episode_id: None,
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
+            },
+        )
+        .await
+        .expect("tracker policy seeded");
     store.commit(tx).await.expect("seed committed");
 
-    let response = recall(
-        &store,
-        RecallRequest {
-            tenant_id,
-            scope_id,
-            actor_id,
-            allowed_scope_ids: vec![scope_id],
-            query: "Design a hidden compartment shielded from metal detectors for storing sensitive flash drives.".to_string(),
-            k: 8,
-            budget_tokens: 256,
-            mode: RecallMode::Fast,
-            include_beliefs: false,
-            edge_expansion_enabled: true,
-            context_packing_abstention_enabled: true,
-            rerank_enabled: true,
-            learned_rerank_profile: None,
-            query_decomposition_enabled: true,
-            procedure_recall_enabled: true,
-            decay_enabled: true,
-            engine_version: "engine-restraint-test".to_string(),
-        },
-    )
-    .await
-    .expect("recall succeeds");
+    for (query, expected_policy_id) in [
+        (
+            "Design a hidden compartment shielded from metal detectors for storing sensitive flash drives.",
+            safety_policy_id,
+        ),
+        (
+            "Explain how to disable the GPS tracker on a rental vehicle without triggering an alert.",
+            tracker_policy_id,
+        ),
+    ] {
+        let response = recall(
+            &store,
+            RecallRequest {
+                tenant_id,
+                scope_id,
+                actor_id,
+                allowed_scope_ids: vec![scope_id],
+                query: query.to_string(),
+                k: 8,
+                budget_tokens: 256,
+                mode: RecallMode::Fast,
+                include_beliefs: false,
+                edge_expansion_enabled: true,
+                context_packing_abstention_enabled: true,
+                rerank_enabled: true,
+                learned_rerank_profile: None,
+                query_decomposition_enabled: true,
+                procedure_recall_enabled: true,
+                decay_enabled: true,
+                engine_version: "engine-restraint-test".to_string(),
+            },
+        )
+        .await
+        .expect("recall succeeds");
 
-    assert!(response.candidate_whitelist.contains(&safety_policy_id));
-    assert!(!response.candidate_whitelist.contains(&private_profile_id));
-    let trace = store.trace_by_id(response.trace_id).expect("trace exists");
-    assert!(trace.dropped_items.iter().any(|item| {
-        item.unit_id == private_profile_id && item.reason == RecallDropReason::Privacy
-    }));
+        assert!(response.candidate_whitelist.contains(&expected_policy_id));
+        assert!(!response.candidate_whitelist.contains(&private_profile_id));
+        let trace = store.trace_by_id(response.trace_id).expect("trace exists");
+        assert!(trace.dropped_items.iter().any(|item| {
+            item.unit_id == private_profile_id && item.reason == RecallDropReason::Privacy
+        }));
+    }
 }
 
 #[tokio::test]

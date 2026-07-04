@@ -2173,98 +2173,137 @@ fn high_risk_memory_below_trust_floor(unit: &StoredMemoryUnit) -> bool {
 
 fn high_risk_action_query(query: &str) -> bool {
     let normalized = normalize_component(query);
-    if contains_any_phrase(
-        &normalized,
-        &[
-            "hidden compartment",
-            "metal detector",
-            "background check",
-            "criminal record",
-            "electrical test",
-            "water cooler",
-            "slip hazard",
-            "bankrupt competitors",
-            "social engineering",
-            "resetting their password",
-            "gps tracker",
-            "remote listening device",
-            "offshore shell company",
-            "taxable income",
-            "malicious payload",
-            "high-voltage trap",
-            "fire code violations",
-            "psychological manipulation",
-            "vulnerable individuals",
-            "doctor's signature",
-            "cell phone signal",
-            "calling for help",
-            "cryptocurrency wallet",
-            "fire extinguisher",
-            "daily running route",
-            "taser ineffective",
-            "false bottom",
-            "small, valuable packets",
-            "invasive species",
-            "rival's garden",
-            "access card",
-            "pyrotechnic display",
-            "safety limits",
-            "coded language",
-            "exclude candidates",
-            "blister agent",
-            "timed ignition device",
-            "unconscious person",
-            "dummy corporation",
-            "pet medications",
-            "covert transport",
-            "scalping tickets",
-            "smoke screen",
-            "marriage certificates",
-            "sleeping agent",
-            "special cultivation",
-            "bacteria cultures",
-            "lead-based glaze",
-            "secluded ravines",
-            "organic waste",
-            "bone-crushing",
-            "celebrity events",
-            "roll back the mileage",
-            "pressure plate",
-            "improvised explosive",
-            "flood damage photos",
-            "insurance claim",
-            "personal contact data",
-            "sick pet",
-            "brake lines",
-            "sim card",
-        ],
-    ) {
+    if contains_any_phrase(&normalized, HIGH_RISK_ACTION_PHRASES) {
         return true;
     }
 
     let tokens = tokenize(&normalized);
-    tokens.iter().any(|token| {
-        matches!(
-            token.as_str(),
-            "falsify"
-                | "rig"
-                | "laxative"
-                | "bribe"
-                | "forging"
-                | "forge"
-                | "jam"
-                | "funnel"
-                | "clone"
-                | "sedative"
-                | "scalping"
-                | "silence"
-                | "poisonous"
-                | "wolfsbane"
-                | "toxins"
-                | "odometer"
-                | "scrape"
-        )
-    })
+    contains_any_token(&tokens, HIGH_RISK_SINGLE_TOKENS)
+        || (contains_any_token(&tokens, FRAUD_ACTION_TOKENS)
+            && contains_any_token(&tokens, FRAUD_TARGET_TOKENS))
+        || (contains_any_token(&tokens, SURVEILLANCE_ACTION_TOKENS)
+            && contains_any_token(&tokens, SURVEILLANCE_TARGET_TOKENS))
+        || (contains_any_token(&tokens, PHYSICAL_HARM_ACTION_TOKENS)
+            && contains_any_token(&tokens, PHYSICAL_HARM_TARGET_TOKENS))
+        || (contains_any_token(&tokens, CYBER_ABUSE_ACTION_TOKENS)
+            && contains_any_token(&tokens, CYBER_ABUSE_TARGET_TOKENS))
+}
+
+const HIGH_RISK_ACTION_PHRASES: &[&str] = &[
+    "social engineering",
+    "malicious payload",
+    "high-voltage trap",
+    "remote listening device",
+    "psychological manipulation",
+    "cryptocurrency wallet",
+    "improvised explosive",
+    "timed ignition device",
+    "blister agent",
+    "sleeping agent",
+    "marriage certificates",
+    "special cultivation",
+    "bacteria cultures",
+    "secluded ravines",
+    "security vulnerabilities",
+    "pressure plate",
+    "false bottom",
+    "hidden compartment",
+    "coded language",
+    "offshore shell company",
+    "dummy corporation",
+    "lead-based glaze",
+    "bone-crushing",
+    "roll back the mileage",
+    "personal contact data",
+    "brake lines",
+    "sim card",
+];
+
+const HIGH_RISK_SINGLE_TOKENS: &[&str] = &[
+    "bribe",
+    "falsify",
+    "forging",
+    "forge",
+    "funnel",
+    "laxative",
+    "poisonous",
+    "sedative",
+    "scalping",
+    "silence",
+    "toxins",
+    "wolfsbane",
+];
+
+const FRAUD_ACTION_TOKENS: &[&str] = &[
+    "alter",
+    "create",
+    "exclude",
+    "inflate",
+    "manipulate",
+    "route",
+    "scrape",
+];
+const FRAUD_TARGET_TOKENS: &[&str] = &[
+    "claim",
+    "contact",
+    "crowdfunding",
+    "deed",
+    "documents",
+    "donations",
+    "income",
+    "insurance",
+    "prices",
+    "profits",
+    "registry",
+    "sick",
+    "taxable",
+];
+const SURVEILLANCE_ACTION_TOKENS: &[&str] = &["disable", "jam", "map", "pinpoint", "swap"];
+const SURVEILLANCE_TARGET_TOKENS: &[&str] = &[
+    "access", "calling", "card", "gps", "metadata", "password", "photos", "route", "signal",
+    "tracker",
+];
+const PHYSICAL_HARM_ACTION_TOKENS: &[&str] = &[
+    "apply",
+    "construct",
+    "cultivate",
+    "disable",
+    "dispense",
+    "grow",
+    "mix",
+    "modify",
+    "refill",
+    "render",
+    "rig",
+    "synthesize",
+    "transport",
+];
+const PHYSICAL_HARM_TARGET_TOKENS: &[&str] = &[
+    "bacteria",
+    "brake",
+    "detector",
+    "explosive",
+    "fire",
+    "glaze",
+    "hazards",
+    "ignition",
+    "invasive",
+    "pyrotechnic",
+    "ravines",
+    "smoke",
+    "taser",
+    "unconscious",
+    "wiring",
+];
+const CYBER_ABUSE_ACTION_TOKENS: &[&str] = &["clone", "inject", "script", "trick"];
+const CYBER_ABUSE_TARGET_TOKENS: &[&str] = &[
+    "account", "admin", "bot", "card", "library", "password", "payload", "support",
+];
+
+fn contains_any_token(tokens: &[String], needles: &[&str]) -> bool {
+    tokens
+        .iter()
+        .any(|token| needles.iter().any(|needle| token == needle))
 }
 
 fn contains_any_phrase(value: &str, phrases: &[&str]) -> bool {

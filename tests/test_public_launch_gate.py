@@ -14,10 +14,7 @@ def load_scorecard() -> dict:
 
 def status_marks_public_launch_complete() -> bool:
     status = (ROOT / "docs/superpowers/specs/memphant/STATUS.md").read_text(encoding="utf-8")
-    return (
-        "CURRENT PHASE: `COMPLETE`" in status
-        or "- [x] **Public launch gate**" in status
-    )
+    return "- [x] **Public launch gate**" in status
 
 
 def test_public_launch_scorecard_covers_every_gate_criterion() -> None:

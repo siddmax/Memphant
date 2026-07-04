@@ -9,15 +9,17 @@ content explicitly in scope.
 ## Artifacts
 
 - Restraint scorecard: `docs/launch/restraint-launch-scorecard.json`
-- Profile artifact: `docs/build-log/artifacts/rung15-inferred-belief-composition-profile.json`
-- Trace archive: `docs/build-log/artifacts/rung15-inferred-belief-sampled-traces.json`
+- Profile artifact: `docs/build-log/artifacts/real-launch-evidence-20260704-v1/sota-profile.json`
+- Trace archive: `docs/build-log/artifacts/real-launch-evidence-20260704-v1/restraint-ps-bench-sampled-traces.json`
 
 ## Result
 
+- Status: `pass`
 - Threshold: max relative drop `0.15`
 - Measured drop: `0.0`
 - Memory-free baseline score: `1.0`
 - MemPhant score: `1.0`
+- Sample count: `50`
 - Pinned-block content: in scope by `27` §1, `05` §1.5, and `04` §12
 - Relevance gate rule: mandatory if measured drop exceeds threshold
 
@@ -26,21 +28,15 @@ No public SOTA claim is made from this gate.
 ## Verification
 
 ```text
-python3 -m pytest tests/test_restraint_launch_gate.py -q
-PASS: 4 passed
+python3 scripts/ingest_public_bench.py --sample-count 50
+PASS: wrote docs/build-log/artifacts/real-launch-evidence-20260704-v1/sample-manifest.json
 ```
 
 ```text
-cargo run -p memphant-eval -- profile examples/evals/rung15-inferred-belief-composition-profile.yaml --compare-to rungs-0-14-baseline --archive docs/build-log/artifacts/rung15-inferred-belief-composition-profile.json
-PASS: profile=pass id=rung15_inferred_belief_composition_profile_001 compare_to=rungs-0-14-baseline activated=4 dormant=10 retired=1 archive=docs/build-log/artifacts/rung15-inferred-belief-composition-profile.json
-```
-
-```text
-python3 -m pytest tests -q
-PASS: 35 passed
+python3 -m pytest tests/test_restraint_launch_gate.py tests/test_launch_evidence_contract.py -q
+PASS
 ```
 
 ## Status
 
-Restraint launch gate is complete. The next unchecked launch gate is the GateMem
-conditional gate.
+Restraint launch gate is complete.

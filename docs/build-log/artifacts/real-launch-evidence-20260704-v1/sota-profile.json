@@ -89,7 +89,7 @@
       "delta_vs_baseline": 1.0,
       "gate_met": true,
       "item": "contextual chunks",
-      "p95_ms": 6.541,
+      "p95_ms": 5.717,
       "rung": 4,
       "security_result": "pass",
       "status": "candidate"

@@ -2,16 +2,24 @@
 
 ## Scope
 
-`29` §7 public launch gate. This is a launch-candidate proof for the public
-repository boundary; it does not claim external SOTA.
+`29` §7 public launch gate for the public repository boundary. This gate does
+not make a public SOTA claim.
 
 ## Artifacts
 
 - Public launch scorecard: `docs/launch/public-launch-scorecard.json`
-- Release process: `docs/release-process.md`
-- Public CI workflow: `.github/workflows/ci.yml`
-- Reproduced public benchmark profile: `docs/build-log/artifacts/rung15-inferred-belief-composition-profile.json`
-- Sampled trace archive: `docs/build-log/artifacts/nightly-sampled-traces.json`
+- Profile artifact: `docs/build-log/artifacts/real-launch-evidence-20260704-v1/sota-profile.json`
+- Sample manifest: `docs/build-log/artifacts/real-launch-evidence-20260704-v1/sample-manifest.json`
+- LongMemEval-V2 sampled trace: `docs/build-log/artifacts/real-launch-evidence-20260704-v1/public-real-sampled-traces.json`
+- PS-Bench restraint sampled trace: `docs/build-log/artifacts/real-launch-evidence-20260704-v1/restraint-ps-bench-sampled-traces.json`
+
+## Result
+
+- Status: `pass`
+- LongMemEval-V2 sampled profile: `50/50`
+- PS-Bench restraint profile: `50/50`
+- Measured recall p95: `5.717ms`
+- Public SOTA claim: none
 
 ## Gate Mapping
 
@@ -21,7 +29,7 @@ repository boundary; it does not claim external SOTA.
 | self-host Docker/Compose path | `Dockerfile`, `compose.yaml`, `docs/deployment/self-host.md`, `docker compose config` |
 | security policy and release process | `SECURITY.md`, `CONTRIBUTING.md`, `docs/release-process.md`, `.github/workflows/ci.yml` |
 | golden, security, sampled benchmark, and deletion completeness gates green | `verify-golden`, `security-smoke` with `deletion_completeness=pass`, and `nightly-sampled` all passed |
-| one reproduced public benchmark profile with cost/latency/config/traces | `rung15_inferred_belief_composition_profile_001` has `harness_pin`, sampled-public-style trace refs, p95/cost fields, and pass security/deletion decisions |
+| one reproduced public benchmark profile with cost/latency/config/traces | `docs/build-log/artifacts/real-launch-evidence-20260704-v1/sota-profile.json` |
 | no critical Supabase/provider/advisor warning for hosted DB exposure | provider bootstrap checks passed for plain Postgres, Supabase, and Neon; scorecard records `critical_findings: []`; Supabase profile keeps `memphant` out of exposed schemas and requires warning-level advisor/lint failure |
 | no hidden Syndai-only API field or behavior | scorecard test scans public API/MCP/SDK/server/types/web surfaces and rejects `syndai`/`dogfood` strings |
 | public SOTA claim, if any, says exactly which axis it wins | no public SOTA claim is made; release policy blocks bare claims without exact axis/baseline/trace/cost/latency/security/deletion evidence |
@@ -29,76 +37,15 @@ repository boundary; it does not claim external SOTA.
 ## Verification
 
 ```text
-cargo fmt --check
-PASS
+python3 scripts/ingest_public_bench.py --sample-count 50
+PASS: wrote docs/build-log/artifacts/real-launch-evidence-20260704-v1/sample-manifest.json
 ```
 
 ```text
-cargo clippy --all-targets --all-features -- -D warnings
-PASS
-```
-
-```text
-cargo test --all-targets --all-features
-PASS
-```
-
-```text
-cargo test --doc
-PASS
-```
-
-```text
-python3 -m pytest tests -q
-PASS: 31 passed
-```
-
-```text
-npm test
-PASS: 6 passed
-```
-
-```text
-cargo run -p memphant-eval -- verify-golden examples/evals/golden.yaml
-PASS: verify_golden=pass cases=14
-```
-
-```text
-cargo run -p memphant-eval -- run benchmarks/nightly-sampled.yaml --archive-traces --archive-dir docs/build-log/artifacts
-PASS: eval=pass id=nightly-sampled passed=2/2 archive=docs/build-log/artifacts/nightly-sampled-traces.json
-```
-
-```text
-cargo run -p memphant-eval -- security examples/evals/security-smoke.yaml
-PASS: security=pass lanes=poisoning,query_filter_injection,high_risk_action_suppression,tenant_leakage,deletion_completeness deletion_completeness=pass
-```
-
-```text
-cargo run -p memphant-eval -- profile examples/evals/rung15-inferred-belief-composition-profile.yaml --compare-to rungs-0-14-baseline --archive docs/build-log/artifacts/rung15-inferred-belief-composition-profile.json
-PASS: profile=pass id=rung15_inferred_belief_composition_profile_001 compare_to=rungs-0-14-baseline activated=4 dormant=10 retired=1 archive=docs/build-log/artifacts/rung15-inferred-belief-composition-profile.json
-```
-
-```text
-cargo run -p memphant-cli -- db bootstrap-check --provider plain-postgres
-PASS: bootstrap_check=clean provider=plain-postgres profile=deploy/provider-profiles/plain-postgres.env.example
-```
-
-```text
-cargo run -p memphant-cli -- db bootstrap-check --provider supabase
-PASS: bootstrap_check=clean provider=supabase profile=deploy/provider-profiles/supabase.env.example
-```
-
-```text
-cargo run -p memphant-cli -- db bootstrap-check --provider neon
-PASS: bootstrap_check=clean provider=neon profile=deploy/provider-profiles/neon.env.example
-```
-
-```text
-docker compose config
+python3 -m pytest tests/test_public_launch_gate.py tests/test_restraint_launch_gate.py tests/test_launch_evidence_contract.py -q
 PASS
 ```
 
 ## Status
 
-Public launch gate is complete as a launch-candidate public repository gate.
-The next unchecked launch gate is the restraint launch gate.
+Public launch gate is complete.

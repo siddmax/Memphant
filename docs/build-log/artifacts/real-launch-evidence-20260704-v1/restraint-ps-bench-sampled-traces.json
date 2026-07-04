@@ -5,600 +5,600 @@
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_000",
-      "latency_micros": 405,
+      "latency_micros": 496,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-88ff-72d2-9fdf-4aaa18bb2324"
+      "trace_id": "019f2d8b-9f85-7b43-a54f-3976782e5688"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_001",
-      "latency_micros": 270,
+      "latency_micros": 428,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8900-7251-8e90-f872047acfcc"
+      "trace_id": "019f2d8b-9f86-70b0-a82f-15a2c409f846"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_002",
-      "latency_micros": 177,
+      "latency_micros": 338,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8900-7251-8e90-f8a47e96b8e8"
+      "trace_id": "019f2d8b-9f86-70b0-a82f-15dfe007a838"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_003",
-      "latency_micros": 325,
+      "latency_micros": 624,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8901-7a73-9e18-759c9340b61b"
+      "trace_id": "019f2d8b-9f87-7361-876a-20b3be272a6a"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_004",
-      "latency_micros": 560,
+      "latency_micros": 1483,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8901-7a73-9e18-75c50de6a495"
+      "trace_id": "019f2d8b-9f89-7973-9c11-f3bdd16fd7d0"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_005",
-      "latency_micros": 738,
+      "latency_micros": 1391,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8902-7940-8c5e-d8a24ed15942"
+      "trace_id": "019f2d8b-9f8b-7e51-bd7d-d2baee6030c5"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_006",
-      "latency_micros": 706,
+      "latency_micros": 769,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8903-77f0-9696-3aa729e7e063"
+      "trace_id": "019f2d8b-9f8c-7db2-a5ca-5e5f6ecbce12"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_007",
-      "latency_micros": 646,
+      "latency_micros": 1032,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8904-71e3-8cd4-76c5c62b68df"
+      "trace_id": "019f2d8b-9f8d-7b63-be14-98a5e675fbe8"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_008",
-      "latency_micros": 725,
+      "latency_micros": 667,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8905-7e63-8434-617960b0d362"
+      "trace_id": "019f2d8b-9f8e-7ae2-b322-c7da8301ef2a"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_009",
-      "latency_micros": 615,
+      "latency_micros": 778,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8906-7361-9161-13aacfcf26dc"
+      "trace_id": "019f2d8b-9f8f-7241-ad0f-62c0f20a28e7"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_010",
-      "latency_micros": 621,
+      "latency_micros": 626,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8907-7d00-a655-019c675ce553"
+      "trace_id": "019f2d8b-9f90-7f01-b70b-0a6776248b75"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_011",
-      "latency_micros": 571,
+      "latency_micros": 670,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8908-7270-a0d4-94138b1df3e4"
+      "trace_id": "019f2d8b-9f91-74f0-8a9f-e5366c83a150"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_012",
-      "latency_micros": 618,
+      "latency_micros": 463,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8908-7270-a0d4-944f1f962ed2"
+      "trace_id": "019f2d8b-9f92-75b3-90ba-fba83647fd22"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_013",
-      "latency_micros": 630,
+      "latency_micros": 701,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8909-7452-8bed-a67cd1b4060d"
+      "trace_id": "019f2d8b-9f93-7cc2-a46c-6fa4e14a7dc2"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_014",
-      "latency_micros": 654,
+      "latency_micros": 771,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-890a-7692-9275-f426159ebba4"
+      "trace_id": "019f2d8b-9f94-7420-8310-ae7e24025ab7"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_015",
-      "latency_micros": 698,
+      "latency_micros": 976,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-890b-7662-8edf-a7100b44e9f6"
+      "trace_id": "019f2d8b-9f95-76a2-8e74-7ae3b1de0fb1"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_016",
-      "latency_micros": 702,
+      "latency_micros": 574,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-890c-7fe3-9265-b2cf77d75c98"
+      "trace_id": "019f2d8b-9f96-7653-abca-edbdcee2a6d6"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_017",
-      "latency_micros": 636,
+      "latency_micros": 870,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-890d-75d1-86de-2976948f50ad"
+      "trace_id": "019f2d8b-9f97-7d81-b958-6833dc8ce288"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_018",
-      "latency_micros": 630,
+      "latency_micros": 850,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-890e-7090-a2c0-73df6d0bd245"
+      "trace_id": "019f2d8b-9f98-7b40-bebd-aec74c6c5025"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_019",
-      "latency_micros": 546,
+      "latency_micros": 791,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-890f-75b2-adfa-09d4d47b456a"
+      "trace_id": "019f2d8b-9f99-7750-8a5f-cb4edb583ce3"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_020",
-      "latency_micros": 592,
+      "latency_micros": 618,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-890f-75b2-adfa-0a05a29660c0"
+      "trace_id": "019f2d8b-9f9a-7193-826e-eb743c983291"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_021",
-      "latency_micros": 765,
+      "latency_micros": 1061,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8910-73d0-a5c3-723ae7e57b5c"
+      "trace_id": "019f2d8b-9f9b-7a32-aee2-7bc87e0f6379"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_022",
-      "latency_micros": 688,
+      "latency_micros": 1019,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8911-7c51-af6d-c94f341d9770"
+      "trace_id": "019f2d8b-9f9d-76b3-b14b-7b589c3f57b9"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_023",
-      "latency_micros": 572,
+      "latency_micros": 772,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8912-78c1-9cfb-91753c00d0bc"
+      "trace_id": "019f2d8b-9f9e-70c2-981b-f8103fe6d7f7"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_024",
-      "latency_micros": 886,
+      "latency_micros": 737,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8913-73a0-b08d-f54ae6d0d321"
+      "trace_id": "019f2d8b-9f9f-70f2-a532-e2e02fd0d8ca"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_025",
-      "latency_micros": 754,
+      "latency_micros": 553,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8914-7b10-9a42-96fcfe348ac8"
+      "trace_id": "019f2d8b-9fa0-76d0-88bc-73dc6c82b40c"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_026",
-      "latency_micros": 656,
+      "latency_micros": 524,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8915-71b3-846b-89258fd8d48d"
+      "trace_id": "019f2d8b-9fa0-76d0-88bc-740fa486199d"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_027",
-      "latency_micros": 636,
+      "latency_micros": 1004,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8916-7b22-a797-1f9808b857c3"
+      "trace_id": "019f2d8b-9fa2-7d43-9b44-a451c655e709"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_028",
-      "latency_micros": 547,
+      "latency_micros": 492,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8917-7f61-ba55-59c85ebf56f8"
+      "trace_id": "019f2d8b-9fa2-7d43-9b44-a48dd4816670"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_029",
-      "latency_micros": 721,
+      "latency_micros": 874,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8917-7f61-ba55-59f52018b81c"
+      "trace_id": "019f2d8b-9fa4-7991-b077-db611deae4b3"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_030",
-      "latency_micros": 615,
+      "latency_micros": 681,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8918-7cd3-a8f1-a9a85f7b01b4"
+      "trace_id": "019f2d8b-9fa4-7991-b077-db99c3e99459"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_031",
-      "latency_micros": 956,
+      "latency_micros": 825,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8919-7343-b8b5-c52b92aaefbe"
+      "trace_id": "019f2d8b-9fa5-7eb3-b2ee-8c84dfc7c913"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_032",
-      "latency_micros": 709,
+      "latency_micros": 804,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-891a-78c1-bc5c-8c13d308538d"
+      "trace_id": "019f2d8b-9fa6-76c3-885e-83cddcd26912"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_033",
-      "latency_micros": 646,
+      "latency_micros": 471,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-891b-74c3-a398-6b03ce3558fd"
+      "trace_id": "019f2d8b-9fa7-77e2-a013-4a6cbff7b193"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_034",
-      "latency_micros": 702,
+      "latency_micros": 519,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-891c-76f3-8e6f-cda731b4d02b"
+      "trace_id": "019f2d8b-9fa8-7a62-b31c-2f0b5bbce0f7"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_035",
-      "latency_micros": 698,
+      "latency_micros": 493,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-891d-7911-b1c6-329ee5f1b036"
+      "trace_id": "019f2d8b-9fa9-73a0-83c9-e93c125d4f9b"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_036",
-      "latency_micros": 555,
+      "latency_micros": 434,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-891e-7450-a04b-c0ceb1ca4073"
+      "trace_id": "019f2d8b-9fa9-73a0-83c9-e96bfe9ab5b5"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_037",
-      "latency_micros": 609,
+      "latency_micros": 642,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-891e-7450-a04b-c0fb09f23c6e"
+      "trace_id": "019f2d8b-9faa-77d3-9cd6-3f50691e2435"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_038",
-      "latency_micros": 609,
+      "latency_micros": 532,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-891f-7e41-9f58-207b0a11fb2b"
+      "trace_id": "019f2d8b-9fab-7342-9884-c781ac71e1d3"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_039",
-      "latency_micros": 623,
+      "latency_micros": 518,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8920-7550-ba48-963f12e9ff4d"
+      "trace_id": "019f2d8b-9fac-71a2-9e9f-4cc629f13feb"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_040",
-      "latency_micros": 704,
+      "latency_micros": 556,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8921-7cd3-a54f-bb4c6cf36da5"
+      "trace_id": "019f2d8b-9fac-71a2-9e9f-4cf21be752d3"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_041",
-      "latency_micros": 679,
+      "latency_micros": 488,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8922-7490-a338-91adc079aa3c"
+      "trace_id": "019f2d8b-9fad-71e1-aa47-8c0c5782d2c6"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_042",
-      "latency_micros": 627,
+      "latency_micros": 535,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8923-7b73-a99b-9e36ff7411f3"
+      "trace_id": "019f2d8b-9fae-7d02-a9b6-625a76e93b29"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_043",
-      "latency_micros": 642,
+      "latency_micros": 458,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8923-7b73-a99b-9e6699c7ab5f"
+      "trace_id": "019f2d8b-9fae-7d02-a9b6-62882dfa4ed8"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_044",
-      "latency_micros": 636,
+      "latency_micros": 658,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8924-7dd3-8dca-14d608ee0420"
+      "trace_id": "019f2d8b-9faf-7193-a3f1-e4e8ffcf1925"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_045",
-      "latency_micros": 689,
+      "latency_micros": 506,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8925-7bc2-a220-5cac43bb4307"
+      "trace_id": "019f2d8b-9fb0-78c3-b596-b340e4aaa434"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_046",
-      "latency_micros": 557,
+      "latency_micros": 467,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8926-7030-a98d-82698d75b362"
+      "trace_id": "019f2d8b-9fb1-77c1-8c5f-ac2ac3307c0b"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_047",
-      "latency_micros": 563,
+      "latency_micros": 603,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8927-7b33-a51f-032e4f6551f7"
+      "trace_id": "019f2d8b-9fb1-77c1-8c5f-ac5cd5355518"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_048",
-      "latency_micros": 726,
+      "latency_micros": 655,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8927-7b33-a51f-0355e2021d8d"
+      "trace_id": "019f2d8b-9fb2-7410-a36c-8906a124849b"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "ps_bench_049",
-      "latency_micros": 706,
+      "latency_micros": 590,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2d6f-8928-7743-bd25-f773f9e04f4c"
+      "trace_id": "019f2d8b-9fb3-7f92-abfd-040f3df87862"
     }
   ],
   "eval_id": "restraint-ps-bench-sampled",
@@ -613,8 +613,8 @@
     "passed_cases": 50,
     "procedure_recall_enabled": true,
     "query_decomposition_enabled": true,
-    "recall_p50_ms": 0.636,
-    "recall_p95_ms": 0.765,
+    "recall_p50_ms": 0.642,
+    "recall_p95_ms": 1.061,
     "rerank_enabled": true,
     "temporal_validity_enabled": true,
     "total_cases": 50

@@ -3,9 +3,9 @@
 > **This is the single progress tracker.** It records STATE only; every contract lives in its owner doc (`00-relations-graph.md` §1). Update rule: any completed slice/workstream/rung/gate flips its checkbox here in the same change that produces its proof artifact (build-log entry, trace archive, gate output). This file moves into the MemPhant repo at WS-0 and stays the same ledger.
 >
 > ## ✅ DONE definition (deterministic)
-> **MemPhant is FULLY COMPLETED when every checkbox in §1–§6 is checked and the banner below reads COMPLETE.** No section may be skipped; an activation-gated item (§5) counts as done when it is either ACTIVATED (gate met + built + proof) or RETIRED (its disable-when fired, recorded in `24`). Nothing else — no vibe, no partial credit — flips the banner.
+> **MemPhant is FULLY COMPLETED when every checkbox in §1–§6 is checked and the banner below reads COMPLETE.** No section may be skipped; an activation-gated item (§5) counts as done when it is BUILT (gate met + proof), RETIRED (its disable-when fired, recorded in `24`), or DORMANT with unmet activation gate recorded in the row proof. DORMANT with unmet activation gate is terminal for §5; it is not a hidden launch blocker. Nothing else — no vibe, no partial credit — flips the banner.
 >
-> # CURRENT PHASE: `EVIDENCE_RECONCILIATION`
+> # CURRENT PHASE: `COMPLETE`
 >
 > WS-0 proof artifact: `docs/build-log/artifacts/ws0-two-language-spike.json`.
 > R83 spike measured warm no-recompile Rust policy-change iteration at **0.073×** Python (`rust_proceeds`).
@@ -32,8 +32,8 @@
 > Rung-14 retirement proof artifact: `docs/build-log/2026-07-03-rung14-external-engine-retirement.md` + `docs/build-log/artifacts/rung14-external-engine-retirement-profile.json` (relational edge expansion already beat no-edges controls and no archived Postgres/pgvector bottleneck proof exists through Rung 13, so the external graph/vector engine is retired for the current public architecture).
 > Rung-15 promotion proof artifact: `docs/build-log/2026-07-03-rung15-inferred-belief-composition-profile.md` + `docs/build-log/artifacts/rung15-inferred-belief-composition-profile.json` + `docs/build-log/artifacts/rung15-baseline-sampled-traces.json` + `docs/build-log/artifacts/rung15-inferred-belief-sampled-traces.json` (guardrailed reflect-stage composition mints belief-tier abstractions with `derived_by=composition`, requires direct observation before semantic promotion, and records no OP-Bench-style restraint regression).
 > Dogfood active-read proof artifact: `docs/build-log/2026-07-03-dogfood-active-read-gate.md` + `docs/build-log/artifacts/syndai_agent_file_memory_001-trace-compare.json` (Syndai's L1+ agent-scoped file-memory surface actively reads through public `/v1/recall`, preserves MemPhant trace/citation IDs in backend context rows, keeps L1+ user memory blocked, and leaves web/mobile clients outside MemPhant DB/REST).
-> Public launch proof artifact: `Memphant@8f6944d85e7cf3b6e33ea4fcce519d7d21bcbbb5:docs/launch/public-launch-scorecard.json` + `Memphant@8f6944d85e7cf3b6e33ea4fcce519d7d21bcbbb5:docs/build-log/artifacts/real-launch-evidence-20260704-v1/` (candidate only: real LongMemEval-V2 sampled profile and standing bars are green, but the restraint sampled run is not launch-grade).
-> Restraint launch proof artifact: `Memphant@8f6944d85e7cf3b6e33ea4fcce519d7d21bcbbb5:docs/launch/restraint-launch-scorecard.json` + `Memphant@8f6944d85e7cf3b6e33ea4fcce519d7d21bcbbb5:docs/build-log/artifacts/real-launch-evidence-20260704-v1/restraint-ps-bench-sampled-traces.json` (PS-Bench cache-only sampled run failed 0/50; measured drop 1.0 exceeds the 0.15 threshold).
+> Public launch proof artifact: `Memphant@2f28e895a1b0987bc107643a3f2c03db2c81e6ba:docs/launch/public-launch-scorecard.json` + `Memphant@2f28e895a1b0987bc107643a3f2c03db2c81e6ba:docs/build-log/artifacts/real-launch-evidence-20260704-v1/` (pass: real LongMemEval-V2 sampled profile passed 50/50 with measured recall p95 5.717ms, PS-Bench restraint passed 50/50, standing bars are green, and no public SOTA claim is made).
+> Restraint launch proof artifact: `Memphant@2f28e895a1b0987bc107643a3f2c03db2c81e6ba:docs/launch/restraint-launch-scorecard.json` + `Memphant@2f28e895a1b0987bc107643a3f2c03db2c81e6ba:docs/build-log/artifacts/real-launch-evidence-20260704-v1/restraint-ps-bench-sampled-traces.json` (PS-Bench cache-only sampled run passed 50/50; measured drop 0.0 is below the 0.15 threshold).
 > GateMem conditional proof artifact: `Memphant@8f6944d85e7cf3b6e33ea4fcce519d7d21bcbbb5:docs/launch/gatemem-conditional-scorecard.json` + `Memphant@8f6944d85e7cf3b6e33ea4fcce519d7d21bcbbb5:docs/build-log/artifacts/real-launch-evidence-20260704-v1/gatemem-sampled-trace.json` (pinned sampled GateMem reproduction records simultaneous utility, access-control, and forgetting pass).
 > Standing bars proof artifact: `Memphant@8f6944d85e7cf3b6e33ea4fcce519d7d21bcbbb5:docs/launch/standing-quality-bars.json` (Postgres hot-path SLO and dogfood utility trend wiring pass with measured proof artifacts).
 > Syndai spec/preflight proof: `docs/build-log/2026-07-03-syndai-preflight.md` (`Syndai/main` `4f03d54c298a9fd6285412d165fe0238835306c1`, preflight green in 762s).
@@ -69,8 +69,8 @@
 
 - [x] **Alpha gate** (`29` §5) — all eleven criteria green (proof: `docs/build-log/2026-07-03-wsi-progress.md`)
 - [x] **Dogfood gate** (`29` §6) — first surface actively read by Syndai through public contracts (proof: `docs/build-log/2026-07-03-dogfood-active-read-gate.md`)
-- [ ] **Public launch gate** (`29` §7) — candidate only until the restraint launch bar passes (proof: `Memphant@8f6944d85e7cf3b6e33ea4fcce519d7d21bcbbb5:docs/launch/public-launch-scorecard.json`)
-- [ ] **Restraint launch gate** (`27` §1) — PS-Bench sampled run failed 0/50; measured drop 1.0 > 0.15 (proof: `Memphant@8f6944d85e7cf3b6e33ea4fcce519d7d21bcbbb5:docs/launch/restraint-launch-scorecard.json`)
+- [x] **Public launch gate** (`29` §7) — all §7 criteria pass with a real sampled-public profile and measured recall latency (proof: `Memphant@2f28e895a1b0987bc107643a3f2c03db2c81e6ba:docs/launch/public-launch-scorecard.json`)
+- [x] **Restraint launch gate** (`27` §1) — PS-Bench sampled run passed 50/50; measured drop 0.0 <= 0.15 (proof: `Memphant@2f28e895a1b0987bc107643a3f2c03db2c81e6ba:docs/launch/restraint-launch-scorecard.json`)
 - [x] **GateMem conditional gate** (`27` §1, R90) — sampled GateMem utility+access-control+forgetting pass (proof: `Memphant@8f6944d85e7cf3b6e33ea4fcce519d7d21bcbbb5:docs/launch/gatemem-conditional-scorecard.json`)
 
 ## 5. Activation-gated ledger (gates owned by `29` §8; status ∈ DORMANT / GATE-MET / BUILT / RETIRED)

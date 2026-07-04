@@ -13,7 +13,7 @@ def load_scorecard() -> dict:
 
 def status_marks_restraint_complete() -> bool:
     status = (ROOT / "docs/superpowers/specs/memphant/STATUS.md").read_text(encoding="utf-8")
-    return "- [x] **Restraint launch gate**" in status or "CURRENT PHASE: `COMPLETE`" in status
+    return "- [x] **Restraint launch gate**" in status
 
 
 def test_restraint_scorecard_enforces_op_bench_launch_threshold() -> None:
