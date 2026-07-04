@@ -1,0 +1,15 @@
+{
+  "baseline_count": 1,
+  "baseline_proof": "docs/build-log/artifacts/syndai_agent_file_memory_001-trace-compare.json",
+  "baseline_success_rate": 1.0,
+  "baseline_window": "2026-07-03-dogfood-trace-compare",
+  "current_count": 1,
+  "current_proof": "docs/build-log/artifacts/real-launch-evidence-20260704-v1/syndai_agent_file_memory_001-trace-compare.json",
+  "current_success_rate": 1.0,
+  "current_window": "2026-07-04-real-launch-evidence",
+  "declined_vs_baseline": false,
+  "focused_syndai_test_command": "cd /Users/sidsharma/Syndai/backend && uv run pytest --no-cov tests/unit/features/memory/test_memphant_dogfood_adapter.py tests/features/config/test_config_bounds.py::TestConfigBounds::test_memphant_dogfood_env_values_parse tests/features/config/test_config_bounds.py::TestConfigBounds::test_memphant_timeout_bounds -q",
+  "focused_syndai_test_result": "9 passed in 0.29s",
+  "lane": "syndai_agent_file_memory_001",
+  "status": "pass"
+}

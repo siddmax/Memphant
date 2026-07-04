@@ -35,7 +35,7 @@
 > Public launch proof artifact: `docs/launch/public-launch-scorecard.json` + `docs/build-log/artifacts/real-launch-evidence-20260704-v1/` (candidate only: real LongMemEval-V2 sampled profile is green, but restraint and Postgres standing bars are not launch-grade).
 > Restraint launch proof artifact: `docs/launch/restraint-launch-scorecard.json` + `docs/build-log/artifacts/real-launch-evidence-20260704-v1/restraint-ps-bench-sampled-traces.json` (PS-Bench cache-only sampled run failed 0/50; measured drop 1.0 exceeds the 0.15 threshold).
 > GateMem conditional proof artifact: `docs/launch/gatemem-conditional-scorecard.json` + `docs/build-log/artifacts/real-launch-evidence-20260704-v1/gatemem-sampled-trace.json` (pinned sampled GateMem reproduction records simultaneous utility, access-control, and forgetting pass).
-> Standing bars proof artifact: `docs/launch/standing-quality-bars.json` (candidate only: hot-path Postgres SLO is measured, but dogfood utility trend still needs real baseline/current windows).
+> Standing bars proof artifact: `docs/launch/standing-quality-bars.json` (Postgres hot-path SLO and dogfood utility trend wiring pass with measured proof artifacts).
 > Syndai spec/preflight proof: `docs/build-log/2026-07-03-syndai-preflight.md` (`Syndai/main` `fe17bc488`, preflight green in 764s).
 
 ## 1. Spec corpus
@@ -96,7 +96,7 @@
 
 - [x] Security suites green at latest release (tenant isolation, deletion completeness, corroboration-farming, filter injection — `05` §10; proof: `docs/build-log/2026-07-03-rung15-inferred-belief-composition-profile.md`)
 - [x] Hot-path SLO holding (fast p50 <200ms / p95 <500ms — `02` §4; Postgres p50 0.005ms / p95 0.0505ms; proof: `docs/build-log/artifacts/real-launch-evidence-20260704-v1/postgres-slo.json`)
-- [ ] `memory_utility_trend` SLI wired on the dogfood lane (`22` §1.3; needs real baseline/current windows; current candidate: `docs/launch/standing-quality-bars.json`)
+- [x] `memory_utility_trend` SLI wired on the dogfood lane (`22` §1.3; baseline/current trace windows recorded; proof: `docs/build-log/artifacts/real-launch-evidence-20260704-v1/memory-utility-trend.json`)
 - [x] Landscape-completeness rule satisfied at latest review pass (`13` §1.4; proof: `docs/build-log/2026-07-03-standing-quality-bars.md`)
 
 ## Update protocol

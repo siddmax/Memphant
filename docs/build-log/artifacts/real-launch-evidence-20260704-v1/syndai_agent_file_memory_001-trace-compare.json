@@ -1,0 +1,10 @@
+{
+  "answer_bearing_recall": 1.0,
+  "case_id": "syndai_agent_file_memory_001",
+  "forbidden_returned": [],
+  "missing_answer_bearing": [],
+  "runner": "memphant-eval",
+  "surface": "agent_file_memory",
+  "trace_id": "019f2b3a-1138-71f3-90fd-08fbb78805c8",
+  "trace_schema_version": "trace-0.1.0-ws0"
+}

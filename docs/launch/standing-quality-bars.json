@@ -67,8 +67,14 @@
       "threshold_stars_gte": 50000
     },
     "memory_utility_trend": {
+      "baseline_count": 1,
+      "baseline_proof": "docs/build-log/artifacts/syndai_agent_file_memory_001-trace-compare.json",
       "baseline_success_rate": 1.0,
+      "baseline_window": "2026-07-03-dogfood-trace-compare",
+      "current_count": 1,
+      "current_proof": "docs/build-log/artifacts/real-launch-evidence-20260704-v1/syndai_agent_file_memory_001-trace-compare.json",
       "current_success_rate": 1.0,
+      "current_window": "2026-07-04-real-launch-evidence",
       "declined_vs_baseline": false,
       "lane": "syndai_agent_file_memory_001",
       "mark_contract": {
@@ -88,14 +94,15 @@
       ],
       "owner": "docs/superpowers/specs/memphant/22-observability-telemetry-and-self-improvement-spec.md#13-ranking-quality-slis-with-alert-thresholds",
       "proofs": [
-        "docs/build-log/artifacts/syndai_agent_file_memory_001-trace-compare.json"
+        "docs/build-log/artifacts/real-launch-evidence-20260704-v1/syndai_agent_file_memory_001-trace-compare.json",
+        "docs/build-log/artifacts/real-launch-evidence-20260704-v1/memory-utility-trend.json"
       ],
-      "status": "candidate",
+      "status": "pass",
       "tenant_scope": "dogfood"
     }
   },
   "checked_at": "2026-07-04T00:00:00Z",
   "id": "standing_quality_bars_2026_07_04",
   "owner": "docs/superpowers/specs/memphant/STATUS.md#6-standing-quality-bars",
-  "status": "candidate"
+  "status": "pass"
 }
