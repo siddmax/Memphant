@@ -40,14 +40,14 @@
       "baseline_score": 1.0,
       "benchmark": "ps-bench",
       "ci": [
-        1.0,
-        1.0
+        0.0,
+        0.0
       ],
-      "delta_vs_baseline": 1.0,
-      "gate": "fail",
+      "delta_vs_baseline": 0.0,
+      "gate": "pass",
       "sample_count": 50,
       "sample_manifest": "docs/build-log/artifacts/real-launch-evidence-20260704-v1/sample-manifest.json",
-      "score": 0.0,
+      "score": 1.0,
       "source_status": "sampled_public",
       "trace_ref": "docs/build-log/artifacts/real-launch-evidence-20260704-v1/restraint-ps-bench-sampled-traces.json"
     },
@@ -89,7 +89,7 @@
       "delta_vs_baseline": 1.0,
       "gate_met": true,
       "item": "contextual chunks",
-      "p95_ms": 0.0,
+      "p95_ms": 6.541,
       "rung": 4,
       "security_result": "pass",
       "status": "candidate"

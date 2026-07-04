@@ -1,13 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use memphant_core::{InMemoryStore, MemoryStore, forget_memory, recall, record_mark};
 use memphant_types::{
     ActorId, ContextualChunk, ENGINE_VERSION, ForgetRequest, ForgetSelector, LearnedRerankProfile,
     MarkOutcome, MarkRequest, MemoryEdgeKind, MemoryKind, NewEpisode, NewMemoryEdge, NewMemoryUnit,
-    RecallDropReason, RecallMode, RecallRequest, ScopeId, StoredMemoryUnit, TRACE_SCHEMA_VERSION,
-    TenantId, TraceId, TrustLevel, UnitId, UnitState,
+    RecallDropReason, RecallMode, RecallRequest, ScopeId, TRACE_SCHEMA_VERSION, TenantId, TraceId,
+    TrustLevel, UnitId, UnitState,
 };
 use schemars::schema_for;
 use serde::{Deserialize, Serialize};
@@ -93,6 +94,7 @@ pub struct EvalReport {
 pub struct EvalCaseResult {
     pub id: String,
     pub passed: bool,
+    pub latency_micros: u64,
     pub trace_id: Option<String>,
     pub missing_units: Vec<String>,
     pub forbidden_present: Vec<String>,
@@ -496,7 +498,6 @@ struct SeedContext {
     scope_id: ScopeId,
     actor_id: ActorId,
     named_units: HashMap<String, UnitId>,
-    unit_records: HashMap<String, StoredMemoryUnit>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -550,6 +551,16 @@ impl From<&EvalRunOptions> for GoldenRunControls {
     }
 }
 
+fn percentile_ms(values: &[u64], percentile: f64) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let index = ((sorted.len() as f64 - 1.0) * percentile).ceil() as usize;
+    Some(sorted[index] as f64 / 1000.0)
+}
+
 pub fn run_eval_file(path: &Path, options: EvalRunOptions) -> EvalResult<EvalReport> {
     let suite: EvalSuite = read_yaml(path)?;
     let base = path.parent().unwrap_or_else(|| Path::new("."));
@@ -567,6 +578,11 @@ pub fn run_eval_file(path: &Path, options: EvalRunOptions) -> EvalResult<EvalRep
     }
 
     let passed_cases = case_results.iter().filter(|case| case.passed).count();
+    let recall_latencies = case_results
+        .iter()
+        .map(|case| case.latency_micros)
+        .filter(|latency| *latency > 0)
+        .collect::<Vec<_>>();
     let mut report = EvalReport {
         eval_id: suite.id,
         total_cases: case_results.len(),
@@ -591,6 +607,8 @@ pub fn run_eval_file(path: &Path, options: EvalRunOptions) -> EvalResult<EvalRep
             "metrics": {
                 "total_cases": report.total_cases,
                 "passed_cases": report.passed_cases,
+                "recall_p50_ms": percentile_ms(&recall_latencies, 0.50),
+                "recall_p95_ms": percentile_ms(&recall_latencies, 0.95),
                 "contextual_chunks_enabled": options.contextual_chunks_enabled,
                 "temporal_validity_enabled": options.temporal_validity_enabled,
                 "edge_expansion_enabled": options.edge_expansion_enabled,
@@ -1798,6 +1816,7 @@ async fn run_golden_case(
             id: case.id.clone(),
             passed: false,
             trace_id: None,
+            latency_micros: 0,
             missing_units: Vec::new(),
             forbidden_present: Vec::new(),
             missing_citations: Vec::new(),
@@ -1829,6 +1848,7 @@ async fn run_golden_case_inner(
     } else {
         requested_mode
     };
+    let recall_started_at = Instant::now();
     let response = recall(
         &context.store,
         RecallRequest {
@@ -1856,6 +1876,7 @@ async fn run_golden_case_inner(
     )
     .await
     .map_err(|error| EvalError::Core(error.to_string()))?;
+    let latency_micros = u64::try_from(recall_started_at.elapsed().as_micros()).unwrap_or(u64::MAX);
 
     let trace = context
         .store
@@ -2071,6 +2092,7 @@ async fn run_golden_case_inner(
     Ok(EvalCaseResult {
         id: case.id.clone(),
         passed,
+        latency_micros,
         trace_id: Some(response.trace_id.as_uuid().to_string()),
         missing_units,
         forbidden_present,
@@ -2182,14 +2204,14 @@ async fn run_high_risk_lane(lane: &SecurityLane) -> EvalResult<String> {
     }
 
     for suppressed in &lane.expect.high_risk_suppressed {
-        let Some(unit) = context.unit_records.get(suppressed) else {
+        let Some(suppressed_id) = context.named_units.get(suppressed) else {
             return Err(EvalError::Failed(format!(
                 "unknown suppressed unit {suppressed}"
             )));
         };
-        if high_risk_action_eligible(unit) {
+        if response.candidate_whitelist.contains(suppressed_id) {
             return Err(EvalError::Failed(format!(
-                "low-trust unit {suppressed} remained high-risk eligible"
+                "suppressed high-risk context {suppressed} was returned"
             )));
         }
     }
@@ -2397,8 +2419,6 @@ async fn seed_store(
     let denied_scope_id = ScopeId::from_u128(90_011);
     let actor_id = ActorId::from_u128(90_020);
     let mut named_units = HashMap::new();
-    let mut unit_records = HashMap::new();
-
     let mut tx = store.begin().await;
     for unit in &seed.units {
         if masked_units.contains(&unit.name) {
@@ -2526,24 +2546,12 @@ async fn seed_store(
         }
     }
 
-    for (name, id) in &named_units {
-        if let Some(unit) = store
-            .memory_units(tenant_id)
-            .into_iter()
-            .chain(store.memory_units(other_tenant_id))
-            .find(|unit| unit.id == *id)
-        {
-            unit_records.insert(name.clone(), unit);
-        }
-    }
-
     Ok(SeedContext {
         store,
         tenant_id,
         scope_id,
         actor_id,
         named_units,
-        unit_records,
     })
 }
 
@@ -2555,15 +2563,6 @@ fn selector_requires_parameterization(selector: &str) -> bool {
         || normalized.contains("/*")
         || normalized.contains("*/")
         || normalized.contains('=')
-}
-
-fn high_risk_action_eligible(unit: &StoredMemoryUnit) -> bool {
-    matches!(
-        unit.trust_level,
-        TrustLevel::TrustedUser | TrustLevel::TrustedSystem | TrustLevel::VerifiedTool
-    ) && unit.kind != MemoryKind::Belief
-        && matches!(unit.state, UnitState::Active | UnitState::Validated)
-        && unit.deletion_generation.is_none()
 }
 
 fn required_security_lanes() -> [&'static str; 5] {

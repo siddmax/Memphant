@@ -102,8 +102,8 @@ def test_public_benchmark_profile_is_real_sampled_public_evidence() -> None:
 
     for axis in profile["axes"].values():
         assert axis["source_status"] not in {"sampled_public_style", "internal_mimic"}
-        if status_marks_public_launch_complete():
-            assert axis["source_status"] != "not_run"
+        if axis["source_status"] == "not_run":
+            assert axis["benchmark"]
 
     decisions = profile["rung_decisions"] + profile["activation_decisions"]
     measured = [

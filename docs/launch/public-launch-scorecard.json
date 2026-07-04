@@ -42,7 +42,10 @@
     {
       "name": "reproduced_public_benchmark_profile",
       "proofs": [
-        "docs/build-log/artifacts/rung15-inferred-belief-composition-profile.json"
+        "docs/build-log/artifacts/real-launch-evidence-20260704-v1/sota-profile.json",
+        "docs/build-log/artifacts/real-launch-evidence-20260704-v1/sample-manifest.json",
+        "docs/build-log/artifacts/real-launch-evidence-20260704-v1/public-real-sampled-traces.json",
+        "docs/build-log/artifacts/real-launch-evidence-20260704-v1/restraint-ps-bench-sampled-traces.json"
       ]
     },
     {
@@ -99,5 +102,5 @@
     "claim_made": false,
     "statement": "No public SOTA claim is made from this launch scorecard."
   },
-  "status": "candidate_pass"
+  "status": "pass"
 }

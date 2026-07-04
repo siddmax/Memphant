@@ -5,550 +5,600 @@
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_8bc6d989",
+      "latency_micros": 5301,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-286d-7a33-8fda-c3375a3a773b"
+      "trace_id": "019f2d6f-86fe-7740-ba7a-09294387d095"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_73cbefdc",
+      "latency_micros": 12406,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-2876-7383-b65f-8b2fe44facc9"
+      "trace_id": "019f2d6f-870c-77c3-9184-b20ae7a1fd4f"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_b82d0dd6",
+      "latency_micros": 4361,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-287a-7f32-96bb-12699ebf8e58"
+      "trace_id": "019f2d6f-8711-7bc1-88e4-3ca41c2bb253"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_aca57021",
+      "latency_micros": 6269,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-287f-73e3-9237-5110bb469dea"
+      "trace_id": "019f2d6f-8718-7082-b6ce-b56a8a5ddf3a"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_b54161f8",
+      "latency_micros": 3003,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-2881-72c1-8c3f-e0616918e1dc"
+      "trace_id": "019f2d6f-871b-7e43-8418-a8f29b924a12"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_bfb3bcc4",
+      "latency_micros": 10303,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-2889-7413-9abf-4cb176a7dcf9"
+      "trace_id": "019f2d6f-8726-7f71-821f-be1173e35ce7"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_679111c6",
+      "latency_micros": 3237,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-288b-7061-9337-46f22815e336"
+      "trace_id": "019f2d6f-872a-7fb0-b6c6-97a61a5b97a9"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_fc0dbc35",
+      "latency_micros": 2557,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-288d-7c52-8ebb-b400a7241fab"
+      "trace_id": "019f2d6f-872d-72c3-8108-cc5039e5183d"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_8e21c6e5",
+      "latency_micros": 4184,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-2891-7512-88fe-d5cd9c375324"
+      "trace_id": "019f2d6f-8731-79e3-9ad2-d8cddd51b3af"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_edea0219",
+      "latency_micros": 1801,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-2893-7d91-8d98-73427966662e"
+      "trace_id": "019f2d6f-8733-7d43-8f1e-6db794ad9880"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_4cb090a9",
+      "latency_micros": 6290,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-2897-71f1-9a96-e19f96c77658"
+      "trace_id": "019f2d6f-873a-7ca1-9f63-3d460191ea7e"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_a42071db",
+      "latency_micros": 2737,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-289a-77c1-9701-515d2ec36393"
+      "trace_id": "019f2d6f-873d-7a11-b906-dd2265c715e0"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_ebad58ed",
+      "latency_micros": 2352,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-289b-7d92-9e51-ad5d4b8b9d87"
+      "trace_id": "019f2d6f-873f-7ca1-a669-6a4f05b08d0e"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_eb8cf28b",
+      "latency_micros": 2917,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-289e-7bf0-a275-1d19ed8d567c"
+      "trace_id": "019f2d6f-8743-7a81-ad5b-111646e40516"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_5387d23d",
+      "latency_micros": 1774,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28a0-7810-864a-2ff7d06493ce"
+      "trace_id": "019f2d6f-8745-75e0-b302-6825f5874d34"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_0ace674b",
+      "latency_micros": 2185,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28a1-7421-a853-5798e1737d12"
+      "trace_id": "019f2d6f-8747-7a01-b3c1-707209176f4b"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_06e965cf",
+      "latency_micros": 3075,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28a4-73c1-a2e8-8e98d7724a58"
+      "trace_id": "019f2d6f-874a-7780-9dd2-1e9e2f1408ef"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_f078f429",
+      "latency_micros": 2692,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28a6-7a41-8637-292db395da51"
+      "trace_id": "019f2d6f-874d-7762-8158-49a972906bc4"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_c843c4ec",
+      "latency_micros": 2476,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28a8-72e0-a9b5-4b668190855e"
+      "trace_id": "019f2d6f-8750-7453-95a0-e6b6e0c31be0"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_0382ed92",
+      "latency_micros": 5362,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28ac-7d63-90fe-1c2c9b24cd20"
+      "trace_id": "019f2d6f-8756-77b0-92de-1e8edf405110"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_87711b62",
+      "latency_micros": 2331,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28ae-7101-8db3-021d6857949d"
+      "trace_id": "019f2d6f-8758-7211-b8a4-f28c18ee6c81"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_1d864942",
+      "latency_micros": 2038,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28b0-78e2-951b-6dceac532210"
+      "trace_id": "019f2d6f-875b-7812-853a-6dbd1f7ea8dc"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_af2ebaed",
+      "latency_micros": 2934,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28b2-7c21-bd07-b207c67d30e6"
+      "trace_id": "019f2d6f-875e-7a62-9ee0-2b2471ef32c5"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_0738c1ac",
+      "latency_micros": 1459,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28b3-7181-a0fe-adafeee13adc"
+      "trace_id": "019f2d6f-8760-7583-9dfc-acbe39a74e0f"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_2ca2d443",
+      "latency_micros": 4011,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28b6-7170-abae-22110ce7b7fb"
+      "trace_id": "019f2d6f-8764-7060-b1c4-cf3bf0381945"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_549c0657",
+      "latency_micros": 1486,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28b8-75e0-b93e-2ff3439148c4"
+      "trace_id": "019f2d6f-8766-78a2-a900-60f6e7e37004"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_2f6a21cd",
+      "latency_micros": 4040,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28bb-7cf2-919e-a71e2f4f617c"
+      "trace_id": "019f2d6f-876a-7551-993d-416e76053088"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_52dd33bb",
+      "latency_micros": 6541,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28bf-75b0-813d-24a236b49c24"
+      "trace_id": "019f2d6f-8771-71e0-8009-041b65886392"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_4f92aa38",
+      "latency_micros": 4923,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28c2-7450-ad46-6b67fbc4bff6"
+      "trace_id": "019f2d6f-8776-75a1-ab25-2ce08bd73b97"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_14a823df",
+      "latency_micros": 2352,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28c4-7d10-aea7-3be9dc8156e2"
+      "trace_id": "019f2d6f-8779-7493-b74e-73de5534dab5"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_5db4899c",
+      "latency_micros": 2648,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28c6-73c2-8075-a19fe90dcfe1"
+      "trace_id": "019f2d6f-877c-7ed1-8a90-c4b70f5572a6"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_ad903be2",
+      "latency_micros": 1931,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28c7-7ed1-b072-a0681cbcaaa6"
+      "trace_id": "019f2d6f-877e-7493-8af9-5889a19a56e7"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_9b34f55b",
+      "latency_micros": 2571,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28c9-7002-9884-b8a8e3c39801"
+      "trace_id": "019f2d6f-8781-7e11-94aa-fe3921601e0b"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_11cc7ac2",
+      "latency_micros": 2378,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28cb-7ec0-8652-cf75f1d371d3"
+      "trace_id": "019f2d6f-8783-7033-91f7-b500a8126544"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_3c0c1b19",
+      "latency_micros": 4525,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28ce-78a2-85c5-ce4970c7b3aa"
+      "trace_id": "019f2d6f-8788-7e11-9a36-1e809932fdae"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_18f9d965",
+      "latency_micros": 1830,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28cf-7ec1-9ad2-6530378f8b57"
+      "trace_id": "019f2d6f-878a-7a92-989a-6b99f91f9260"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_89a20f48",
+      "latency_micros": 1735,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28d1-7313-8196-9ca5185d6f7e"
+      "trace_id": "019f2d6f-878c-79b1-b3df-004d3ed323f3"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_fdeddf71",
+      "latency_micros": 1708,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28d2-7230-be98-1814bf58917a"
+      "trace_id": "019f2d6f-878e-7983-9a75-856394e02de9"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_41bb40df",
+      "latency_micros": 1750,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28d3-7d72-903c-273d42dbe3a3"
+      "trace_id": "019f2d6f-8790-7a52-9580-bd03d597cf1f"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_a2a71197",
+      "latency_micros": 2613,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28d5-7d01-8863-31b6e912e905"
+      "trace_id": "019f2d6f-8793-7051-b79f-23d9253a0584"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_626e401e",
+      "latency_micros": 1192,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28d6-7802-aa12-6b304b68ffc9"
+      "trace_id": "019f2d6f-8795-7ca0-a83b-7c909ee7293a"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_436c58d5",
+      "latency_micros": 1821,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28d7-77d2-a7bf-08f29bab2aaf"
+      "trace_id": "019f2d6f-8797-7492-b1ae-7208431f1601"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_d886b018",
+      "latency_micros": 2114,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28d9-7ae3-8562-efce306efa0b"
+      "trace_id": "019f2d6f-8799-7162-b89a-ad6c78a62490"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_f93031d2",
+      "latency_micros": 2181,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28da-7911-a073-cd0b10cacb87"
+      "trace_id": "019f2d6f-879b-7bc1-b7ca-17ed9098f340"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_aa64a8bd",
+      "latency_micros": 2135,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28dc-7a00-846a-1be7de7ea639"
+      "trace_id": "019f2d6f-879e-7863-8202-0af1c2c7bba2"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_a7da9ab3",
+      "latency_micros": 2391,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28de-7e32-a020-88e13777d52f"
+      "trace_id": "019f2d6f-87a0-7782-bc72-037b8df84d06"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_a363341d",
+      "latency_micros": 2612,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28df-7822-9355-97f77f655e5c"
+      "trace_id": "019f2d6f-87a3-7500-8838-19e001735d06"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_4a4aad22",
+      "latency_micros": 4909,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28e3-7182-96c3-1ee51dcd613c"
+      "trace_id": "019f2d6f-87a8-7781-af35-3031df30850c"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_eaba5c44",
+      "latency_micros": 2134,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28e5-7332-9456-d587fff2bf1b"
+      "trace_id": "019f2d6f-87ab-77b3-b3e6-7576f8979f1a"
     },
     {
       "dropped_mismatches": [],
       "error": null,
       "forbidden_present": [],
       "id": "lme_v2_0fe2c676",
+      "latency_micros": 4015,
       "missing_citations": [],
       "missing_trace_stages": [],
       "missing_units": [],
       "passed": true,
-      "trace_id": "019f2b34-28e7-7770-aca8-e2e86bf893b1"
+      "trace_id": "019f2d6f-87af-79e0-8cf1-5abb1b678c4a"
     }
   ],
   "eval_id": "public-real-sampled",
@@ -563,6 +613,8 @@
     "passed_cases": 50,
     "procedure_recall_enabled": true,
     "query_decomposition_enabled": true,
+    "recall_p50_ms": 2.612,
+    "recall_p95_ms": 6.541,
     "rerank_enabled": true,
     "temporal_validity_enabled": true,
     "total_cases": 50

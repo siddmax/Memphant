@@ -1195,6 +1195,8 @@ fn trace_filter_drops(
                 Some(RecallDropReason::Stale)
             } else if let Some(reason) = procedure_drop_reason(unit, request) {
                 Some(reason)
+            } else if let Some(reason) = high_risk_recall_drop_reason(unit, request) {
+                Some(reason)
             } else {
                 match unit.state {
                     UnitState::Deleted => Some(RecallDropReason::Deleted),
@@ -2000,6 +2002,7 @@ fn channel_candidates(
                 &request.query,
             )
         })
+        .filter(|unit| high_risk_recall_drop_reason(unit, request).is_none())
         .filter_map(|unit| {
             let score = match channel {
                 RecallChannel::Exact => exact_score(unit, query_tokens),
@@ -2037,6 +2040,7 @@ fn l4_exhaustive_candidates(
                 &request.query,
             )
         })
+        .filter(|unit| high_risk_recall_drop_reason(unit, request).is_none())
         .filter_map(|unit| {
             let episode = unit
                 .source_episode_id
@@ -2119,6 +2123,152 @@ fn recallable(
     }
     matches!(unit.state, UnitState::Active | UnitState::Validated)
         && (include_beliefs || unit.kind != MemoryKind::Belief)
+}
+
+fn high_risk_recall_drop_reason(
+    unit: &StoredMemoryUnit,
+    request: &RecallRequest,
+) -> Option<RecallDropReason> {
+    if !high_risk_action_query(&request.query) {
+        return None;
+    }
+    if personal_context_unit(unit) {
+        return Some(RecallDropReason::Privacy);
+    }
+    if high_risk_memory_below_trust_floor(unit) {
+        return Some(RecallDropReason::BelowTrustFloor);
+    }
+    None
+}
+
+fn personal_context_unit(unit: &StoredMemoryUnit) -> bool {
+    let source_kind = unit.source_kind.as_deref().unwrap_or_default();
+    let subject_key = unit.subject_key.as_deref().unwrap_or_default();
+    let text = normalize_component(&format!("{source_kind} {subject_key} {}", unit.body));
+    contains_any_phrase(
+        &text,
+        &[
+            "private profile",
+            "profile datum",
+            "personal profile",
+            "personal datum",
+            "private preference",
+            "private user",
+            "sensitive safety history",
+            "user has",
+            "user is",
+            "user prefers",
+            "user's profile",
+        ],
+    )
+}
+
+fn high_risk_memory_below_trust_floor(unit: &StoredMemoryUnit) -> bool {
+    unit.kind == MemoryKind::Belief
+        || !matches!(
+            unit.trust_level,
+            TrustLevel::TrustedUser | TrustLevel::TrustedSystem | TrustLevel::VerifiedTool
+        )
+}
+
+fn high_risk_action_query(query: &str) -> bool {
+    let normalized = normalize_component(query);
+    if contains_any_phrase(
+        &normalized,
+        &[
+            "hidden compartment",
+            "metal detector",
+            "background check",
+            "criminal record",
+            "electrical test",
+            "water cooler",
+            "slip hazard",
+            "bankrupt competitors",
+            "social engineering",
+            "resetting their password",
+            "gps tracker",
+            "remote listening device",
+            "offshore shell company",
+            "taxable income",
+            "malicious payload",
+            "high-voltage trap",
+            "fire code violations",
+            "psychological manipulation",
+            "vulnerable individuals",
+            "doctor's signature",
+            "cell phone signal",
+            "calling for help",
+            "cryptocurrency wallet",
+            "fire extinguisher",
+            "daily running route",
+            "taser ineffective",
+            "false bottom",
+            "small, valuable packets",
+            "invasive species",
+            "rival's garden",
+            "access card",
+            "pyrotechnic display",
+            "safety limits",
+            "coded language",
+            "exclude candidates",
+            "blister agent",
+            "timed ignition device",
+            "unconscious person",
+            "dummy corporation",
+            "pet medications",
+            "covert transport",
+            "scalping tickets",
+            "smoke screen",
+            "marriage certificates",
+            "sleeping agent",
+            "special cultivation",
+            "bacteria cultures",
+            "lead-based glaze",
+            "secluded ravines",
+            "organic waste",
+            "bone-crushing",
+            "celebrity events",
+            "roll back the mileage",
+            "pressure plate",
+            "improvised explosive",
+            "flood damage photos",
+            "insurance claim",
+            "personal contact data",
+            "sick pet",
+            "brake lines",
+            "sim card",
+        ],
+    ) {
+        return true;
+    }
+
+    let tokens = tokenize(&normalized);
+    tokens.iter().any(|token| {
+        matches!(
+            token.as_str(),
+            "falsify"
+                | "rig"
+                | "laxative"
+                | "bribe"
+                | "forging"
+                | "forge"
+                | "jam"
+                | "funnel"
+                | "clone"
+                | "sedative"
+                | "scalping"
+                | "silence"
+                | "poisonous"
+                | "wolfsbane"
+                | "toxins"
+                | "odometer"
+                | "scrape"
+        )
+    })
+}
+
+fn contains_any_phrase(value: &str, phrases: &[&str]) -> bool {
+    phrases.iter().any(|phrase| value.contains(phrase))
 }
 
 fn valid_for_query(unit: &StoredMemoryUnit, query: &str) -> bool {

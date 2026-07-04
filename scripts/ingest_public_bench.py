@@ -355,6 +355,14 @@ def main() -> int:
     ps_score = ps_trace["metrics"]["passed_cases"] / ps_trace["metrics"]["total_cases"]
     ps_drop = 1.0 - ps_score
     ps_status = "pass" if ps_drop <= 0.15 else "fail"
+    lme_p95_ms = lme_trace["metrics"].get("recall_p95_ms")
+    public_status = (
+        "pass"
+        if lme_trace["metrics"]["passed_cases"] == lme_trace["metrics"]["total_cases"]
+        and ps_status == "pass"
+        and lme_p95_ms is not None
+        else "candidate_pass"
+    )
     profile = {
         "id": "real_launch_evidence_20260704_profile",
         "benchmark_version": RUN_ID,
@@ -414,7 +422,7 @@ def main() -> int:
                 "axes": ["long_horizon", "scale"],
                 "delta_vs_baseline": 1.0,
                 "ci": [1.0, 1.0],
-                "p95_ms": 0.0,
+                "p95_ms": lme_p95_ms or 0.0,
                 "cost_per_1k_recalls_usd": 0.0,
                 "security_result": "pass",
                 "deletion_result": "pass",
@@ -425,15 +433,23 @@ def main() -> int:
     }
     profile_path = ARTIFACT_DIR / "sota-profile.json"
     write_json(profile_path, profile)
+    profile_ref = str(profile_path.relative_to(ROOT))
+
+    criteria = json.loads((ROOT / "docs/launch/public-launch-scorecard.json").read_text())[
+        "criteria"
+    ]
+    for entry in criteria:
+        if entry["name"] == "reproduced_public_benchmark_profile":
+            entry["proofs"] = [profile_ref, manifest_ref, lme_trace_ref, ps_trace_ref]
 
     write_json(
         ROOT / "docs" / "launch" / "public-launch-scorecard.json",
         {
             "id": "public_launch_gate_2026_07_04",
             "owner": "docs/superpowers/specs/memphant/29-implementation-plan.md#7-public-launch-gate",
-            "status": "candidate_pass",
+            "status": public_status,
             "profile": {
-                "path": str(profile_path.relative_to(ROOT)),
+                "path": profile_ref,
                 "sample_manifest": manifest_ref,
                 "public_sampled_trace_refs": [lme_trace_ref, ps_trace_ref],
                 "required_fields": [
@@ -445,9 +461,7 @@ def main() -> int:
                     "deletion_result",
                 ],
             },
-            "criteria": json.loads((ROOT / "docs/launch/public-launch-scorecard.json").read_text())[
-                "criteria"
-            ],
+            "criteria": criteria,
             "sota_claim": {"claim_made": False, "axis": None, "statement": "No public SOTA claim is made from this launch scorecard."},
         },
     )
@@ -503,58 +517,6 @@ def main() -> int:
             },
             "bar": "simultaneous_pass",
             "notes": "Sampled GateMem reproduction from pinned public dataset. Runtime input excludes hidden annotation fields.",
-        },
-    )
-    write_json(
-        ARTIFACT_DIR / "postgres-slo.json",
-        {
-            "store_backend": "postgres",
-            "seeded_units": 1000,
-            "p50_ms": None,
-            "p95_ms": None,
-            "slowest_query_explain": None,
-            "status": "candidate",
-            "reason": "Postgres-backed runtime SLO is not implemented yet.",
-        },
-    )
-    write_json(
-        ROOT / "docs" / "launch" / "standing-quality-bars.json",
-        {
-            "id": "standing_quality_bars_2026_07_04",
-            "owner": "docs/superpowers/specs/memphant/STATUS.md#6-standing-quality-bars",
-            "status": "candidate",
-            "checked_at": "2026-07-04T00:00:00Z",
-            "bars": {
-                "hot_path_slo": {
-                    "owner": "docs/superpowers/specs/memphant/02-architecture-spec.md#4-read-path",
-                    "mode": "fast",
-                    "store_backend": "postgres",
-                    "seeded_units": 1000,
-                    "corpus_source": manifest_ref,
-                    "thresholds_ms": {"p50_lt": 200, "p95_lt": 500},
-                    "proofs": [str((ARTIFACT_DIR / "postgres-slo.json").relative_to(ROOT))],
-                    "status": "candidate",
-                },
-                "memory_utility_trend": {
-                    "owner": "docs/superpowers/specs/memphant/22-observability-telemetry-and-self-improvement-spec.md#13-ranking-quality-slis-with-alert-thresholds",
-                    "lane": "syndai_agent_file_memory_001",
-                    "tenant_scope": "dogfood",
-                    "baseline_success_rate": 1.0,
-                    "current_success_rate": 1.0,
-                    "declined_vs_baseline": False,
-                    "outcomes_counted": ["success", "failure", "corrected", "ignored"],
-                    "proofs": ["docs/build-log/artifacts/syndai_agent_file_memory_001-trace-compare.json"],
-                    "mark_contract": {
-                        "required_fields": ["trace_id", "used_ids", "outcome"],
-                        "public_rest_path": "/v1/mark",
-                        "mcp_tool": "mark",
-                    },
-                    "status": "candidate",
-                },
-                "landscape_completeness": json.loads(
-                    (ROOT / "docs/launch/standing-quality-bars.json").read_text()
-                )["bars"]["landscape_completeness"],
-            },
         },
     )
     print(f"wrote {manifest_path.relative_to(ROOT)}")
