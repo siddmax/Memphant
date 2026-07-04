@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import importlib.util
+import os
+import re
 import subprocess
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 def test_memphant_lock_has_required_schema_keys() -> None:
@@ -26,12 +29,19 @@ def test_linked_repos_manifest_points_to_current_syndai_main() -> None:
     manifest = json.loads((ROOT / ".codex" / "linked-repos.json").read_text())
     private_path = Path(manifest["private_repo"]["path"])
 
-    assert private_path.exists()
     assert manifest["private_repo"]["branch"] == "main"
+    assert manifest["private_repo"]["upstream"] == "Syndai/main"
+    assert manifest["source_docs"]["remote_ref"] == "Syndai/main"
+    assert GIT_SHA_RE.fullmatch(manifest["source_docs"]["commit"])
+    assert manifest["source_docs"]["path"] == "docs/superpowers/specs/memphant"
+
+    if not private_path.exists():
+        assert os.environ.get("MEMPHANT_ALLOW_MISSING_PRIVATE_REPO") == "1"
+        return
+
     assert (
         private_path / "backend" / "src" / "features" / "memory" / "memphant_dogfood_adapter.py"
     ).exists()
-    assert manifest["source_docs"]["path"] == "docs/superpowers/specs/memphant"
 
     head = subprocess.check_output(
         ["git", "rev-parse", "HEAD"],
@@ -82,8 +92,12 @@ def test_spec_drift_check_passes_against_linked_syndai_docs() -> None:
         check=False,
     )
 
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "spec_drift=clean" in result.stdout
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "spec_drift=clean" in result.stdout or (
+        os.environ.get("MEMPHANT_ALLOW_MISSING_PRIVATE_REPO") == "1"
+        and "spec_drift=skipped reason=private_specs_missing" in result.stdout
+    )
 
 
 def test_governance_docs_pin_public_private_boundary() -> None:

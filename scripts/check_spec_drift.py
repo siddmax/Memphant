@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import filecmp
 import json
+import os
 import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / ".codex" / "linked-repos.json"
+ALLOW_MISSING_PRIVATE_ENV = "MEMPHANT_ALLOW_MISSING_PRIVATE_REPO"
 
 
 def collect_diffs(comparison: filecmp.dircmp[str], prefix: str = "") -> list[str]:
@@ -31,6 +33,12 @@ def main() -> int:
         print(f"public_specs_missing={public_dir}", file=sys.stderr)
         return 2
     if not private_dir.exists():
+        if os.environ.get(ALLOW_MISSING_PRIVATE_ENV) == "1":
+            print(
+                "spec_drift=skipped "
+                f"reason=private_specs_missing private={private_dir}"
+            )
+            return 0
         print(f"private_specs_missing={private_dir}", file=sys.stderr)
         return 2
 
