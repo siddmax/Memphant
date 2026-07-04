@@ -8,7 +8,7 @@
         "docs/build-log/artifacts/real-launch-evidence-20260704-v1/postgres-slo.json"
       ],
       "seeded_units": 1000,
-      "status": "candidate",
+      "status": "pass",
       "store_backend": "postgres",
       "thresholds_ms": {
         "p50_lt": 200,

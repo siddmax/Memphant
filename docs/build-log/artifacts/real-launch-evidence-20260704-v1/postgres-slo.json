@@ -1,9 +1,119 @@
 {
-  "p50_ms": null,
-  "p95_ms": null,
-  "reason": "Postgres-backed runtime SLO is not implemented yet.",
+  "max_ms": 0.256,
+  "p50_ms": 0.005,
+  "p95_ms": 0.05049999999999999,
+  "repeat_count": 30,
   "seeded_units": 1000,
-  "slowest_query_explain": null,
-  "status": "candidate",
-  "store_backend": "postgres"
+  "slowest_query_explain": [
+    {
+      "Execution Time": 0.067,
+      "Plan": {
+        "Actual Loops": 1,
+        "Actual Rows": 1,
+        "Actual Startup Time": 0.056,
+        "Actual Total Time": 0.057,
+        "Async Capable": false,
+        "Local Dirtied Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Written Blocks": 0,
+        "Node Type": "Limit",
+        "Parallel Aware": false,
+        "Plan Rows": 1,
+        "Plan Width": 24,
+        "Plans": [
+          {
+            "Actual Loops": 1,
+            "Actual Rows": 1,
+            "Actual Startup Time": 0.055,
+            "Actual Total Time": 0.055,
+            "Async Capable": false,
+            "Local Dirtied Blocks": 0,
+            "Local Hit Blocks": 0,
+            "Local Read Blocks": 0,
+            "Local Written Blocks": 0,
+            "Node Type": "Sort",
+            "Parallel Aware": false,
+            "Parent Relationship": "Outer",
+            "Plan Rows": 1,
+            "Plan Width": 24,
+            "Plans": [
+              {
+                "Actual Loops": 1,
+                "Actual Rows": 1,
+                "Actual Startup Time": 0.026,
+                "Actual Total Time": 0.027,
+                "Alias": "memory_unit",
+                "Async Capable": false,
+                "Index Cond": "((tenant_id = '00000000-0000-4000-8000-000000000001'::uuid) AND (scope_id = '00000000-0000-4000-8000-000000000002'::uuid) AND (subject_key = 'bench_subject_7'::text))",
+                "Index Name": "memphant_memory_unit_tenant_subject_idx",
+                "Local Dirtied Blocks": 0,
+                "Local Hit Blocks": 0,
+                "Local Read Blocks": 0,
+                "Local Written Blocks": 0,
+                "Node Type": "Index Scan",
+                "Parallel Aware": false,
+                "Parent Relationship": "Outer",
+                "Plan Rows": 1,
+                "Plan Width": 24,
+                "Relation Name": "memory_unit",
+                "Rows Removed by Index Recheck": 0,
+                "Scan Direction": "Forward",
+                "Shared Dirtied Blocks": 0,
+                "Shared Hit Blocks": 5,
+                "Shared Read Blocks": 0,
+                "Shared Written Blocks": 0,
+                "Startup Cost": 0.28,
+                "Temp Read Blocks": 0,
+                "Temp Written Blocks": 0,
+                "Total Cost": 8.3
+              }
+            ],
+            "Shared Dirtied Blocks": 0,
+            "Shared Hit Blocks": 8,
+            "Shared Read Blocks": 0,
+            "Shared Written Blocks": 0,
+            "Sort Key": [
+              "created_at DESC"
+            ],
+            "Sort Method": "quicksort",
+            "Sort Space Type": "Memory",
+            "Sort Space Used": 25,
+            "Startup Cost": 8.31,
+            "Temp Read Blocks": 0,
+            "Temp Written Blocks": 0,
+            "Total Cost": 8.31
+          }
+        ],
+        "Shared Dirtied Blocks": 0,
+        "Shared Hit Blocks": 8,
+        "Shared Read Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Startup Cost": 8.31,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0,
+        "Total Cost": 8.31
+      },
+      "Planning": {
+        "Local Dirtied Blocks": 0,
+        "Local Hit Blocks": 0,
+        "Local Read Blocks": 0,
+        "Local Written Blocks": 0,
+        "Shared Dirtied Blocks": 0,
+        "Shared Hit Blocks": 189,
+        "Shared Read Blocks": 0,
+        "Shared Written Blocks": 0,
+        "Temp Read Blocks": 0,
+        "Temp Written Blocks": 0
+      },
+      "Planning Time": 0.291,
+      "Triggers": []
+    }
+  ],
+  "status": "pass",
+  "store_backend": "postgres",
+  "thresholds_ms": {
+    "p50_lt": 200,
+    "p95_lt": 500
+  }
 }

@@ -11,6 +11,38 @@ def load_scorecard() -> dict:
     return json.loads(SCORECARD.read_text(encoding="utf-8"))
 
 
+def status_text() -> str:
+    return (ROOT / "docs/superpowers/specs/memphant/STATUS.md").read_text(encoding="utf-8")
+
+
+def status_marks_all_standing_bars_complete() -> bool:
+    status = status_text()
+    return "CURRENT PHASE: `COMPLETE`" in status
+
+
+def status_marks_hot_path_complete() -> bool:
+    status = status_text()
+    return "- [x] Hot-path SLO holding" in status or status_marks_all_standing_bars_complete()
+
+
+def status_marks_memory_trend_complete() -> bool:
+    status = status_text()
+    return (
+        "- [x] `memory_utility_trend` SLI wired" in status
+        or status_marks_all_standing_bars_complete()
+    )
+
+
+def status_marks_standing_bar_complete(name: str) -> bool:
+    if name == "hot_path_slo":
+        return status_marks_hot_path_complete()
+    if name == "memory_utility_trend":
+        return status_marks_memory_trend_complete()
+    if name == "landscape_completeness":
+        return True
+    return status_marks_all_standing_bars_complete()
+
+
 def status_marks_standing_bars_complete() -> bool:
     status = (ROOT / "docs/superpowers/specs/memphant/STATUS.md").read_text(encoding="utf-8")
     return (
@@ -24,7 +56,7 @@ def test_standing_quality_bars_all_pass() -> None:
     scorecard = load_scorecard()
 
     assert scorecard["status"] in {"pass", "candidate", "fail"}
-    if status_marks_standing_bars_complete():
+    if status_marks_all_standing_bars_complete():
         assert scorecard["status"] == "pass"
     assert set(scorecard["bars"]) == {
         "hot_path_slo",
@@ -33,7 +65,7 @@ def test_standing_quality_bars_all_pass() -> None:
     }
     for name, bar in scorecard["bars"].items():
         assert bar["status"] in {"pass", "candidate", "fail"}, name
-        if status_marks_standing_bars_complete():
+        if status_marks_standing_bar_complete(name):
             assert bar["status"] == "pass", name
 
 
