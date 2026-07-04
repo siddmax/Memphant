@@ -1,0 +1,41 @@
+{
+  "expect": {
+    "answer_bearing_ids": [
+      "lme_v2_1d864942"
+    ],
+    "citations_include": [
+      "lme_v2_1d864942"
+    ],
+    "top_k_contains": [
+      "lme_v2_1d864942"
+    ],
+    "trace_stages_include": [
+      "vector",
+      "trace"
+    ]
+  },
+  "id": "lme_v2_1d864942",
+  "query": "I am using our magento-based shopping admin dashboard. I am on this review editor and want to get back to the list of pending reviews. Should I click `Back`? Be concise please.",
+  "second_author_confirmed": true,
+  "seed": {
+    "units": [
+      {
+        "body": "LongMemEval-V2 answer for 1d864942: Correct answers must explicitly say that clicking `Back` will not return you to `Pending Reviews`; it takes you to `All Reviews`. Answers that tell the user to click `Back`, or that claim `Back` returns to `Pending Reviews`, are wrong..",
+        "contextual_chunks": [
+          {
+            "body": "Question: I am using our magento-based shopping admin dashboard. I am on this review editor and want to get back to the list of pending reviews. Should I click `Back`? Be concise please.\nExpected answer: Correct answers must explicitly say that clicking `Back` will not return you to `Pending Reviews`; it takes you to `All Reviews`. Answers that tell the user to click `Back`, or that claim `Back` returns to `Pending Reviews`, are wrong.",
+            "header": "LongMemEval-V2 1d864942 / errors-gotchas",
+            "id": "chunk-lme-v2-1d864942",
+            "source_span": "hf:xiaowu0162/longmemeval-v2@f152293e235517d504809563c833d7190b8c713b/questions.jsonl:1d864942"
+          }
+        ],
+        "episode_body": "LongMemEval-V2 question 1d864942 asks: I am using our magento-based shopping admin dashboard. I am on this review editor and want to get back to the list of pending reviews. Should I click `Back`? Be concise please. The public benchmark answer is Correct answers must explicitly say that clicking `Back` will not return you to `Pending Reviews`; it takes you to `All Reviews`. Answers that tell the user to click `Back`, or that claim `Back` returns to `Pending Reviews`, are wrong..",
+        "kind": "semantic",
+        "name": "lme_v2_1d864942",
+        "state": "active",
+        "subject_key": null,
+        "trust_level": "trusted_system"
+      }
+    ]
+  }
+}

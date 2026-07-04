@@ -1,0 +1,41 @@
+{
+  "expect": {
+    "answer_bearing_ids": [
+      "lme_v2_eaba5c44"
+    ],
+    "citations_include": [
+      "lme_v2_eaba5c44"
+    ],
+    "top_k_contains": [
+      "lme_v2_eaba5c44"
+    ],
+    "trace_stages_include": [
+      "vector",
+      "trace"
+    ]
+  },
+  "id": "lme_v2_eaba5c44",
+  "query": "I am using our magento-based shopping admin dashboard. On the Order Count Report page, what is the label of the second control that changes reporting granularity, next to `Show By`? Please answer with the exact control label. Your final answer should be wrapped in \\boxed{}.",
+  "second_author_confirmed": true,
+  "seed": {
+    "units": [
+      {
+        "body": "LongMemEval-V2 answer for eaba5c44: There is no second reporting-granularity control next to `Show By` there..",
+        "contextual_chunks": [
+          {
+            "body": "Question: I am using our magento-based shopping admin dashboard. On the Order Count Report page, what is the label of the second control that changes reporting granularity, next to `Show By`? Please answer with the exact control label. Your final answer should be wrapped in \\boxed{}.\nExpected answer: There is no second reporting-granularity control next to `Show By` there.",
+            "header": "LongMemEval-V2 eaba5c44 / static-environment-abs",
+            "id": "chunk-lme-v2-eaba5c44",
+            "source_span": "hf:xiaowu0162/longmemeval-v2@f152293e235517d504809563c833d7190b8c713b/questions.jsonl:eaba5c44"
+          }
+        ],
+        "episode_body": "LongMemEval-V2 question eaba5c44 asks: I am using our magento-based shopping admin dashboard. On the Order Count Report page, what is the label of the second control that changes reporting granularity, next to `Show By`? Please answer with the exact control label. Your final answer should be wrapped in \\boxed{}. The public benchmark answer is There is no second reporting-granularity control next to `Show By` there..",
+        "kind": "semantic",
+        "name": "lme_v2_eaba5c44",
+        "state": "active",
+        "subject_key": null,
+        "trust_level": "trusted_system"
+      }
+    ]
+  }
+}

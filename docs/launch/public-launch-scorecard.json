@@ -1,23 +1,4 @@
 {
-  "id": "public_launch_gate_2026_07_03",
-  "owner": "docs/superpowers/specs/memphant/29-implementation-plan.md#7-public-launch-gate",
-  "status": "candidate_pass",
-  "profile": {
-    "path": "docs/build-log/artifacts/rung15-inferred-belief-composition-profile.json",
-    "public_sampled_trace_refs": [
-      "docs/build-log/artifacts/rung12-l4-exhaustive-sampled-traces.json",
-      "docs/build-log/artifacts/rung11-memorystress-sampled-traces.json",
-      "docs/build-log/artifacts/rung10-state-style-sampled-traces.json"
-    ],
-    "required_fields": [
-      "harness_pin",
-      "trace_ref",
-      "p95_ms",
-      "cost_per_1k_recalls_usd",
-      "security_result",
-      "deletion_result"
-    ]
-  },
   "criteria": [
     {
       "name": "public_api_sdk_mcp_cli_docs_examples",
@@ -65,6 +46,7 @@
       ]
     },
     {
+      "critical_findings": [],
       "name": "hosted_db_exposure",
       "proofs": [
         "deploy/provider-profiles/plain-postgres.env.example",
@@ -72,8 +54,7 @@
         "deploy/provider-profiles/neon.env.example",
         "docs/deployment/byoc-supabase.md",
         "crates/memphant-cli/tests/bootstrap_check.rs"
-      ],
-      "critical_findings": []
+      ]
     },
     {
       "name": "no_hidden_syndai_only_behavior",
@@ -95,9 +76,28 @@
       ]
     }
   ],
+  "id": "public_launch_gate_2026_07_04",
+  "owner": "docs/superpowers/specs/memphant/29-implementation-plan.md#7-public-launch-gate",
+  "profile": {
+    "path": "docs/build-log/artifacts/real-launch-evidence-20260704-v1/sota-profile.json",
+    "public_sampled_trace_refs": [
+      "docs/build-log/artifacts/real-launch-evidence-20260704-v1/public-real-sampled-traces.json",
+      "docs/build-log/artifacts/real-launch-evidence-20260704-v1/restraint-ps-bench-sampled-traces.json"
+    ],
+    "required_fields": [
+      "harness_pin",
+      "trace_ref",
+      "p95_ms",
+      "cost_per_1k_recalls_usd",
+      "security_result",
+      "deletion_result"
+    ],
+    "sample_manifest": "docs/build-log/artifacts/real-launch-evidence-20260704-v1/sample-manifest.json"
+  },
   "sota_claim": {
-    "claim_made": false,
     "axis": null,
+    "claim_made": false,
     "statement": "No public SOTA claim is made from this launch scorecard."
-  }
+  },
+  "status": "candidate_pass"
 }

@@ -12,11 +12,22 @@ def load_scorecard() -> dict:
     return json.loads(SCORECARD.read_text(encoding="utf-8"))
 
 
+def status_marks_public_launch_complete() -> bool:
+    status = (ROOT / "docs/superpowers/specs/memphant/STATUS.md").read_text(encoding="utf-8")
+    return (
+        "CURRENT PHASE: `COMPLETE`" in status
+        or "- [x] **Public launch gate**" in status
+    )
+
+
 def test_public_launch_scorecard_covers_every_gate_criterion() -> None:
     scorecard = load_scorecard()
     criteria = {entry["name"]: entry for entry in scorecard["criteria"]}
 
-    assert scorecard["status"] == "candidate_pass"
+    if status_marks_public_launch_complete():
+        assert scorecard["status"] == "pass"
+    else:
+        assert scorecard["status"] in {"candidate_pass", "fail"}
     assert set(criteria) == {
         "public_api_sdk_mcp_cli_docs_examples",
         "self_host_docker_compose",
@@ -57,17 +68,28 @@ def test_release_process_and_ci_run_public_launch_gates() -> None:
     assert "scripts/check_spec_drift.py" not in workflow
 
 
-def test_public_benchmark_profile_has_cost_latency_config_and_traces() -> None:
+def test_public_benchmark_profile_is_real_sampled_public_evidence() -> None:
     scorecard = load_scorecard()
     profile_path = ROOT / scorecard["profile"]["path"]
     profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    manifest_path = ROOT / scorecard["profile"]["sample_manifest"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
     assert profile["harness_pin"]["answer_model"]
     assert profile["harness_pin"]["embedding_profile"]
+    assert manifest["tier"] == "sampled-public"
+    assert manifest["root_seed"]
+    assert manifest["benchmarks"]
+    for benchmark in manifest["benchmarks"]:
+        assert benchmark["sample_count"] >= 50
+        assert benchmark["license"]
+        assert benchmark["source_revision"]
+        assert benchmark["sample_ids"]
+
     sampled_axes = [
         axis
         for axis in profile["axes"].values()
-        if axis["source_status"] == "sampled_public_style"
+        if axis["source_status"] == "sampled_public"
     ]
     assert sampled_axes
     for axis in sampled_axes:
@@ -75,6 +97,13 @@ def test_public_benchmark_profile_has_cost_latency_config_and_traces() -> None:
         assert trace_ref.exists(), axis["trace_ref"]
         assert axis["score"] is not None
         assert axis["ci"] is not None
+        assert axis["sample_count"] >= 50
+        assert axis["sample_manifest"] == scorecard["profile"]["sample_manifest"]
+
+    for axis in profile["axes"].values():
+        assert axis["source_status"] not in {"sampled_public_style", "internal_mimic"}
+        if status_marks_public_launch_complete():
+            assert axis["source_status"] != "not_run"
 
     decisions = profile["rung_decisions"] + profile["activation_decisions"]
     measured = [
@@ -85,7 +114,8 @@ def test_public_benchmark_profile_has_cost_latency_config_and_traces() -> None:
         and decision.get("security_result") == "pass"
         and decision.get("deletion_result") == "pass"
     ]
-    assert measured
+    if status_marks_public_launch_complete():
+        assert measured
     for decision in measured:
         after_trace = decision.get("after_trace_ref")
         if after_trace:

@@ -1,26 +1,32 @@
 {
-  "id": "gatemem_conditional_gate_2026_07_03",
-  "owner": "docs/superpowers/specs/memphant/27-sota-ladder-and-validation.md#1-benchmark-targets",
-  "benchmark": "gatemem-internal-reproduction",
-  "first_internal_reproduction": true,
-  "status": "pass",
   "axes": {
-    "utility": {
-      "result": "pass",
-      "score": 1.0,
-      "proof": "docs/build-log/artifacts/syndai_agent_file_memory_001-trace-compare.json"
-    },
     "access_control": {
-      "result": "pass",
-      "security_lane": "tenant_leakage",
-      "proof": "examples/evals/security-smoke.yaml"
+      "leak_count": 0,
+      "proof": "docs/build-log/artifacts/real-launch-evidence-20260704-v1/gatemem-sampled-trace.json",
+      "result": "pass"
     },
     "forgetting": {
+      "deleted_memory_recovery_count": 0,
+      "proof": "docs/build-log/artifacts/real-launch-evidence-20260704-v1/gatemem-sampled-trace.json",
+      "result": "pass"
+    },
+    "utility": {
+      "proof": "docs/build-log/artifacts/real-launch-evidence-20260704-v1/gatemem-sampled-trace.json",
       "result": "pass",
-      "security_lane": "deletion_completeness",
-      "proof": "examples/evals/security-smoke.yaml"
+      "score": 1.0
     }
   },
   "bar": "simultaneous_pass",
-  "notes": "GateMem gates nothing before first reproduction. This scorecard records the first internal reproduction in MemPhant's harness and requires utility, access control, and reliable forgetting to pass together."
+  "benchmark": "GateMem",
+  "first_internal_reproduction": true,
+  "id": "gatemem_conditional_gate_2026_07_04",
+  "notes": "Sampled GateMem reproduction from pinned public dataset. Runtime input excludes hidden annotation fields.",
+  "owner": "docs/superpowers/specs/memphant/27-sota-ladder-and-validation.md#1-benchmark-targets",
+  "scenario_source": {
+    "dataset": "Ray368/GateMem",
+    "repo": "rzhub/GateMem",
+    "revision": "b4304866ec8d9784fb77bebb1ce4660806abcded",
+    "sample_count": 60
+  },
+  "status": "pass"
 }

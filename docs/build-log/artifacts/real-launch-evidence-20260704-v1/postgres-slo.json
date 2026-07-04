@@ -1,0 +1,9 @@
+{
+  "p50_ms": null,
+  "p95_ms": null,
+  "reason": "Postgres-backed runtime SLO is not implemented yet.",
+  "seeded_units": 1000,
+  "slowest_query_explain": null,
+  "status": "candidate",
+  "store_backend": "postgres"
+}

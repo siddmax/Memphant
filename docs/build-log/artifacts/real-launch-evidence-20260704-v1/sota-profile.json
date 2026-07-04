@@ -1,0 +1,98 @@
+{
+  "activation_decisions": [],
+  "axes": {
+    "embedding_selection": {
+      "benchmark": "LMEB",
+      "source_status": "not_run"
+    },
+    "interactive": {
+      "benchmark": "STATE-Bench",
+      "source_status": "not_run"
+    },
+    "long_horizon": {
+      "baseline_score": 0.0,
+      "benchmark": "LongMemEval-V2",
+      "ci": [
+        1.0,
+        1.0
+      ],
+      "delta_vs_baseline": 1.0,
+      "gate": "pass",
+      "sample_count": 50,
+      "sample_manifest": "docs/build-log/artifacts/real-launch-evidence-20260704-v1/sample-manifest.json",
+      "score": 1.0,
+      "source_status": "sampled_public",
+      "trace_ref": "docs/build-log/artifacts/real-launch-evidence-20260704-v1/public-real-sampled-traces.json"
+    },
+    "longitudinal": {
+      "benchmark": "MemoryStress",
+      "source_status": "not_run"
+    },
+    "outcome": {
+      "benchmark": "STATE-Bench",
+      "source_status": "not_run"
+    },
+    "procedural": {
+      "benchmark": "LongMemEval-V2",
+      "source_status": "not_run"
+    },
+    "restraint": {
+      "baseline_score": 1.0,
+      "benchmark": "ps-bench",
+      "ci": [
+        1.0,
+        1.0
+      ],
+      "delta_vs_baseline": 1.0,
+      "gate": "fail",
+      "sample_count": 50,
+      "sample_manifest": "docs/build-log/artifacts/real-launch-evidence-20260704-v1/sample-manifest.json",
+      "score": 0.0,
+      "source_status": "sampled_public",
+      "trace_ref": "docs/build-log/artifacts/real-launch-evidence-20260704-v1/restraint-ps-bench-sampled-traces.json"
+    },
+    "scale": {
+      "baseline_score": 0.0,
+      "benchmark": "LongMemEval-V2",
+      "ci": [
+        1.0,
+        1.0
+      ],
+      "delta_vs_baseline": 1.0,
+      "gate": "pass",
+      "sample_count": 50,
+      "sample_manifest": "docs/build-log/artifacts/real-launch-evidence-20260704-v1/sample-manifest.json",
+      "score": 1.0,
+      "source_status": "sampled_public",
+      "trace_ref": "docs/build-log/artifacts/real-launch-evidence-20260704-v1/public-real-sampled-traces.json"
+    }
+  },
+  "benchmark_version": "real-launch-evidence-20260704-v1",
+  "harness_pin": {
+    "answer_model": "deterministic-containment",
+    "embedding_profile": "memphant-local-deterministic"
+  },
+  "id": "real_launch_evidence_20260704_profile",
+  "rung_decisions": [
+    {
+      "after_trace_ref": "docs/build-log/artifacts/real-launch-evidence-20260704-v1/public-real-sampled-traces.json",
+      "axes": [
+        "long_horizon",
+        "scale"
+      ],
+      "ci": [
+        1.0,
+        1.0
+      ],
+      "cost_per_1k_recalls_usd": 0.0,
+      "deletion_result": "pass",
+      "delta_vs_baseline": 1.0,
+      "gate_met": true,
+      "item": "contextual chunks",
+      "p95_ms": 0.0,
+      "rung": 4,
+      "security_result": "pass",
+      "status": "candidate"
+    }
+  ]
+}

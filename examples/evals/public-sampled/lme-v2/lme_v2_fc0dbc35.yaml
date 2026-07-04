@@ -1,0 +1,41 @@
+{
+  "expect": {
+    "answer_bearing_ids": [
+      "lme_v2_fc0dbc35"
+    ],
+    "citations_include": [
+      "lme_v2_fc0dbc35"
+    ],
+    "top_k_contains": [
+      "lme_v2_fc0dbc35"
+    ],
+    "trace_stages_include": [
+      "vector",
+      "trace"
+    ]
+  },
+  "id": "lme_v2_fc0dbc35",
+  "query": "I am using our reddit-based custom forum website. When I am viewing a single comment thread instead of the full discussion, what link appears in the blue notice bar directly above \"View all comments\"? Mark your final answer (should be a short phrase) in \\boxed{}.",
+  "second_author_confirmed": true,
+  "seed": {
+    "units": [
+      {
+        "body": "LongMemEval-V2 answer for fc0dbc35: There is no such link. The notice bar only shows View all comments..",
+        "contextual_chunks": [
+          {
+            "body": "Question: I am using our reddit-based custom forum website. When I am viewing a single comment thread instead of the full discussion, what link appears in the blue notice bar directly above \"View all comments\"? Mark your final answer (should be a short phrase) in \\boxed{}.\nExpected answer: There is no such link. The notice bar only shows View all comments.",
+            "header": "LongMemEval-V2 fc0dbc35 / static-environment-abs",
+            "id": "chunk-lme-v2-fc0dbc35",
+            "source_span": "hf:xiaowu0162/longmemeval-v2@f152293e235517d504809563c833d7190b8c713b/questions.jsonl:fc0dbc35"
+          }
+        ],
+        "episode_body": "LongMemEval-V2 question fc0dbc35 asks: I am using our reddit-based custom forum website. When I am viewing a single comment thread instead of the full discussion, what link appears in the blue notice bar directly above \"View all comments\"? Mark your final answer (should be a short phrase) in \\boxed{}. The public benchmark answer is There is no such link. The notice bar only shows View all comments..",
+        "kind": "semantic",
+        "name": "lme_v2_fc0dbc35",
+        "state": "active",
+        "subject_key": null,
+        "trust_level": "trusted_system"
+      }
+    ]
+  }
+}

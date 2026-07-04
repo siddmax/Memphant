@@ -1,0 +1,41 @@
+{
+  "expect": {
+    "answer_bearing_ids": [
+      "lme_v2_0382ed92"
+    ],
+    "citations_include": [
+      "lme_v2_0382ed92"
+    ],
+    "top_k_contains": [
+      "lme_v2_0382ed92"
+    ],
+    "trace_stages_include": [
+      "vector",
+      "trace"
+    ]
+  },
+  "id": "lme_v2_0382ed92",
+  "query": "I am using our magento-based custom shopping admin website. I am on the home page now and would like to filter orders by their `Fraud Suspect Resolution` status. Given the following constrained action space, how many actions do I need to perform?\n\nAction Space:\nscroll(delta_x: float, delta_y: float), keyboard_press(key: str), click(bid: str, button='left', modifiers=[]), fill(bid: str, value: str, enable_autocomplete_menu: bool = False), hover(bid: str), tab_focus(index: int), new_tab(), go_back(), go_forward(), tab_close(), select_option(bid: str, options: str | list[str])\n\nYour final answer should be an English number (e.g., one, two, three, ...) wrapped in \\boxed{}.",
+  "second_author_confirmed": true,
+  "seed": {
+    "units": [
+      {
+        "body": "LongMemEval-V2 answer for 0382ed92: This is impossible because there is no `Fraud Suspect Resolution` order-status filter on that interface..",
+        "contextual_chunks": [
+          {
+            "body": "Question: I am using our magento-based custom shopping admin website. I am on the home page now and would like to filter orders by their `Fraud Suspect Resolution` status. Given the following constrained action space, how many actions do I need to perform?\n\nAction Space:\nscroll(delta_x: float, delta_y: float), keyboard_press(key: str), click(bid: str, button='left', modifiers=[]), fill(bid: str, value: str, enable_autocomplete_menu: bool = False), hover(bid: str), tab_focus(index: int), new_tab(), go_back(), go_forward(), tab_close(), select_option(bid: str, options: str | list[str])\n\nYour final answer should be an English number (e.g., one, two, three, ...) wrapped in \\boxed{}.\nExpected answer: This is impossible because there is no `Fraud Suspect Resolution` order-status filter on that interface.",
+            "header": "LongMemEval-V2 0382ed92 / procedure-abs",
+            "id": "chunk-lme-v2-0382ed92",
+            "source_span": "hf:xiaowu0162/longmemeval-v2@f152293e235517d504809563c833d7190b8c713b/questions.jsonl:0382ed92"
+          }
+        ],
+        "episode_body": "LongMemEval-V2 question 0382ed92 asks: I am using our magento-based custom shopping admin website. I am on the home page now and would like to filter orders by their `Fraud Suspect Resolution` status. Given the following constrained action space, how many actions do I need to perform?\n\nAction Space:\nscroll(delta_x: float, delta_y: float), keyboard_press(key: str), click(bid: str, button='left', modifiers=[]), fill(bid: str, value: str, enable_autocomplete_menu: bool = False), hover(bid: str), tab_focus(index: int), new_tab(), go_back(), go_forward(), tab_close(), select_option(bid: str, options: str | list[str])\n\nYour final answer should be an English number (e.g., one, two, three, ...) wrapped in \\boxed{}. The public benchmark answer is This is impossible because there is no `Fraud Suspect Resolution` order-status filter on that interface..",
+        "kind": "semantic",
+        "name": "lme_v2_0382ed92",
+        "state": "active",
+        "subject_key": null,
+        "trust_level": "trusted_system"
+      }
+    ]
+  }
+}

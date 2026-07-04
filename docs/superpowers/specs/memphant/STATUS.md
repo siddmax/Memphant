@@ -5,7 +5,7 @@
 > ## ✅ DONE definition (deterministic)
 > **MemPhant is FULLY COMPLETED when every checkbox in §1–§6 is checked and the banner below reads COMPLETE.** No section may be skipped; an activation-gated item (§5) counts as done when it is either ACTIVATED (gate met + built + proof) or RETIRED (its disable-when fired, recorded in `24`). Nothing else — no vibe, no partial credit — flips the banner.
 >
-> # CURRENT PHASE: `COMPLETE`
+> # CURRENT PHASE: `EVIDENCE_RECONCILIATION`
 >
 > WS-0 proof artifact: `docs/build-log/artifacts/ws0-two-language-spike.json`.
 > R83 spike measured warm no-recompile Rust policy-change iteration at **0.073×** Python (`rust_proceeds`).
@@ -32,10 +32,10 @@
 > Rung-14 retirement proof artifact: `docs/build-log/2026-07-03-rung14-external-engine-retirement.md` + `docs/build-log/artifacts/rung14-external-engine-retirement-profile.json` (relational edge expansion already beat no-edges controls and no archived Postgres/pgvector bottleneck proof exists through Rung 13, so the external graph/vector engine is retired for the current public architecture).
 > Rung-15 promotion proof artifact: `docs/build-log/2026-07-03-rung15-inferred-belief-composition-profile.md` + `docs/build-log/artifacts/rung15-inferred-belief-composition-profile.json` + `docs/build-log/artifacts/rung15-baseline-sampled-traces.json` + `docs/build-log/artifacts/rung15-inferred-belief-sampled-traces.json` (guardrailed reflect-stage composition mints belief-tier abstractions with `derived_by=composition`, requires direct observation before semantic promotion, and records no OP-Bench-style restraint regression).
 > Dogfood active-read proof artifact: `docs/build-log/2026-07-03-dogfood-active-read-gate.md` + `docs/build-log/artifacts/syndai_agent_file_memory_001-trace-compare.json` (Syndai's L1+ agent-scoped file-memory surface actively reads through public `/v1/recall`, preserves MemPhant trace/citation IDs in backend context rows, keeps L1+ user memory blocked, and leaves web/mobile clients outside MemPhant DB/REST).
-> Public launch proof artifact: `docs/build-log/2026-07-03-public-launch-gate.md` + `docs/launch/public-launch-scorecard.json` (public API/SDK/MCP/CLI/docs/examples, self-host packaging, release process, golden/security/sampled/deletion gates, provider exposure checks, and no-hidden-Syndai surface checks are green; no public SOTA claim is made).
-> Restraint launch proof artifact: `docs/build-log/2026-07-03-restraint-launch-gate.md` + `docs/launch/restraint-launch-scorecard.json` (OP-Bench-style restraint axis records 0.0 relative drop vs memory-free baseline under the 0.15 launch threshold, with pinned-block content in scope and no SOTA claim made).
-> GateMem conditional proof artifact: `docs/build-log/2026-07-03-gatemem-conditional-gate.md` + `docs/launch/gatemem-conditional-scorecard.json` (first internal reproduction recorded; utility, access-control, and forgetting axes pass simultaneously).
-> Standing bars proof artifact: `docs/build-log/2026-07-03-standing-quality-bars.md` + `docs/launch/standing-quality-bars.json` (fast hot-path SLO executable guard, dogfood `memory_utility_trend` mark contract, and latest landscape-completeness review pass).
+> Public launch proof artifact: `docs/launch/public-launch-scorecard.json` + `docs/build-log/artifacts/real-launch-evidence-20260704-v1/` (candidate only: real LongMemEval-V2 sampled profile is green, but restraint and Postgres standing bars are not launch-grade).
+> Restraint launch proof artifact: `docs/launch/restraint-launch-scorecard.json` + `docs/build-log/artifacts/real-launch-evidence-20260704-v1/restraint-ps-bench-sampled-traces.json` (PS-Bench cache-only sampled run failed 0/50; measured drop 1.0 exceeds the 0.15 threshold).
+> GateMem conditional proof artifact: `docs/launch/gatemem-conditional-scorecard.json` + `docs/build-log/artifacts/real-launch-evidence-20260704-v1/gatemem-sampled-trace.json` (pinned sampled GateMem reproduction records simultaneous utility, access-control, and forgetting pass).
+> Standing bars proof artifact: `docs/launch/standing-quality-bars.json` (candidate only: hot-path Postgres SLO and dogfood utility trend still need real measured proofs).
 > Syndai spec/preflight proof: `docs/build-log/2026-07-03-syndai-preflight.md` (`Syndai/main` `fe17bc488`, preflight green in 764s).
 
 ## 1. Spec corpus
@@ -69,9 +69,9 @@
 
 - [x] **Alpha gate** (`29` §5) — all eleven criteria green (proof: `docs/build-log/2026-07-03-wsi-progress.md`)
 - [x] **Dogfood gate** (`29` §6) — first surface actively read by Syndai through public contracts (proof: `docs/build-log/2026-07-03-dogfood-active-read-gate.md`)
-- [x] **Public launch gate** (`29` §7) — incl. one reproduced public benchmark profile + no hidden Syndai-only behavior (proof: `docs/build-log/2026-07-03-public-launch-gate.md`)
-- [x] **Restraint launch gate** (`27` §1) — OP-Bench drop ≤15% vs memory-free baseline (pinned-block content in scope; proof: `docs/build-log/2026-07-03-restraint-launch-gate.md`)
-- [x] **GateMem conditional gate** (`27` §1, R90) — first internal reproduction done; then simultaneous pass on utility+access-control+forgetting (proof: `docs/build-log/2026-07-03-gatemem-conditional-gate.md`)
+- [ ] **Public launch gate** (`29` §7) — candidate only until restraint and Postgres standing bars pass (proof: `docs/launch/public-launch-scorecard.json`)
+- [ ] **Restraint launch gate** (`27` §1) — PS-Bench sampled run failed 0/50; measured drop 1.0 > 0.15 (proof: `docs/launch/restraint-launch-scorecard.json`)
+- [x] **GateMem conditional gate** (`27` §1, R90) — sampled GateMem utility+access-control+forgetting pass (proof: `docs/launch/gatemem-conditional-scorecard.json`)
 
 ## 5. Activation-gated ledger (gates owned by `29` §8; status ∈ DORMANT / GATE-MET / BUILT / RETIRED)
 
@@ -95,8 +95,8 @@
 ## 6. Standing quality bars (never one-and-done; checked at every release while building)
 
 - [x] Security suites green at latest release (tenant isolation, deletion completeness, corroboration-farming, filter injection — `05` §10; proof: `docs/build-log/2026-07-03-rung15-inferred-belief-composition-profile.md`)
-- [x] Hot-path SLO holding (fast p50 <200ms / p95 <500ms — `02` §4; proof: `docs/build-log/2026-07-03-standing-quality-bars.md`)
-- [x] `memory_utility_trend` SLI wired on the dogfood lane (`22` §1.3; proof: `docs/build-log/2026-07-03-standing-quality-bars.md`)
+- [ ] Hot-path SLO holding (fast p50 <200ms / p95 <500ms — `02` §4; needs Postgres-backed proof; current candidate: `docs/launch/standing-quality-bars.json`)
+- [ ] `memory_utility_trend` SLI wired on the dogfood lane (`22` §1.3; needs real baseline/current windows; current candidate: `docs/launch/standing-quality-bars.json`)
 - [x] Landscape-completeness rule satisfied at latest review pass (`13` §1.4; proof: `docs/build-log/2026-07-03-standing-quality-bars.md`)
 
 ## Update protocol

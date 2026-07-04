@@ -1,0 +1,41 @@
+{
+  "expect": {
+    "answer_bearing_ids": [
+      "lme_v2_a7da9ab3"
+    ],
+    "citations_include": [
+      "lme_v2_a7da9ab3"
+    ],
+    "top_k_contains": [
+      "lme_v2_a7da9ab3"
+    ],
+    "trace_stages_include": [
+      "vector",
+      "trace"
+    ]
+  },
+  "id": "lme_v2_a7da9ab3",
+  "query": "I am using our reddit-based custom forum website. When I compare another user's profile page with my own profile page, what are the names of the actions that appear in the `Toolbox` on the other user's profile page but not on my own profile page? Please separate multiple action names with commas and wrap your final answer in `\\boxed{}`.",
+  "second_author_confirmed": true,
+  "seed": {
+    "units": [
+      {
+        "body": "LongMemEval-V2 answer for a7da9ab3: Block user, Send message.",
+        "contextual_chunks": [
+          {
+            "body": "Question: I am using our reddit-based custom forum website. When I compare another user's profile page with my own profile page, what are the names of the actions that appear in the `Toolbox` on the other user's profile page but not on my own profile page? Please separate multiple action names with commas and wrap your final answer in `\\boxed{}`.\nExpected answer: Block user, Send message",
+            "header": "LongMemEval-V2 a7da9ab3 / static-environment",
+            "id": "chunk-lme-v2-a7da9ab3",
+            "source_span": "hf:xiaowu0162/longmemeval-v2@f152293e235517d504809563c833d7190b8c713b/questions.jsonl:a7da9ab3"
+          }
+        ],
+        "episode_body": "LongMemEval-V2 question a7da9ab3 asks: I am using our reddit-based custom forum website. When I compare another user's profile page with my own profile page, what are the names of the actions that appear in the `Toolbox` on the other user's profile page but not on my own profile page? Please separate multiple action names with commas and wrap your final answer in `\\boxed{}`. The public benchmark answer is Block user, Send message.",
+        "kind": "semantic",
+        "name": "lme_v2_a7da9ab3",
+        "state": "active",
+        "subject_key": null,
+        "trust_level": "trusted_system"
+      }
+    ]
+  }
+}

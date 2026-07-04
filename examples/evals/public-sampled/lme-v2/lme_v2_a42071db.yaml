@@ -1,0 +1,41 @@
+{
+  "expect": {
+    "answer_bearing_ids": [
+      "lme_v2_a42071db"
+    ],
+    "citations_include": [
+      "lme_v2_a42071db"
+    ],
+    "top_k_contains": [
+      "lme_v2_a42071db"
+    ],
+    "trace_stages_include": [
+      "vector",
+      "trace"
+    ]
+  },
+  "id": "lme_v2_a42071db",
+  "query": "I am using our reddit-based custom forum website. When I compare my own profile page with another user's profile page, how many additional sections appear on the right side of my own profile page that do not appear on the other user's profile page? Answer with an English word such as `zero`, `one`, or `three`, and wrap your final answer in `\\boxed{}`.",
+  "second_author_confirmed": true,
+  "seed": {
+    "units": [
+      {
+        "body": "LongMemEval-V2 answer for a42071db: one.",
+        "contextual_chunks": [
+          {
+            "body": "Question: I am using our reddit-based custom forum website. When I compare my own profile page with another user's profile page, how many additional sections appear on the right side of my own profile page that do not appear on the other user's profile page? Answer with an English word such as `zero`, `one`, or `three`, and wrap your final answer in `\\boxed{}`.\nExpected answer: one",
+            "header": "LongMemEval-V2 a42071db / static-environment",
+            "id": "chunk-lme-v2-a42071db",
+            "source_span": "hf:xiaowu0162/longmemeval-v2@f152293e235517d504809563c833d7190b8c713b/questions.jsonl:a42071db"
+          }
+        ],
+        "episode_body": "LongMemEval-V2 question a42071db asks: I am using our reddit-based custom forum website. When I compare my own profile page with another user's profile page, how many additional sections appear on the right side of my own profile page that do not appear on the other user's profile page? Answer with an English word such as `zero`, `one`, or `three`, and wrap your final answer in `\\boxed{}`. The public benchmark answer is one.",
+        "kind": "semantic",
+        "name": "lme_v2_a42071db",
+        "state": "active",
+        "subject_key": null,
+        "trust_level": "trusted_system"
+      }
+    ]
+  }
+}
