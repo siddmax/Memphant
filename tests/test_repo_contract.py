@@ -22,13 +22,30 @@ def test_memphant_lock_has_required_schema_keys() -> None:
     ]
 
 
-def test_linked_repos_manifest_points_to_clean_syndai_worktree() -> None:
+def test_linked_repos_manifest_points_to_current_syndai_main() -> None:
     manifest = json.loads((ROOT / ".codex" / "linked-repos.json").read_text())
     private_path = Path(manifest["private_repo"]["path"])
 
     assert private_path.exists()
-    assert manifest["private_repo"]["branch"] == "codex/memphant-cross-repo"
+    assert manifest["private_repo"]["branch"] == "main"
+    assert (
+        private_path / "backend" / "src" / "features" / "memory" / "memphant_dogfood_adapter.py"
+    ).exists()
     assert manifest["source_docs"]["path"] == "docs/superpowers/specs/memphant"
+
+    head = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=private_path,
+        text=True,
+    ).strip()
+    branch = subprocess.check_output(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=private_path,
+        text=True,
+    ).strip()
+
+    assert branch == manifest["private_repo"]["branch"]
+    assert head == manifest["source_docs"]["commit"]
 
 
 def test_required_memphant_specs_are_present() -> None:

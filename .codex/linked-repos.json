@@ -5,13 +5,13 @@
   },
   "private_repo": {
     "name": "Syndai",
-    "path": "/Users/sidsharma/Syndai/.wt/codex-memphant-cross-repo",
-    "branch": "codex/memphant-cross-repo",
+    "path": "/Users/sidsharma/Syndai",
+    "branch": "main",
     "upstream": "Syndai/main"
   },
   "source_docs": {
     "remote_ref": "Syndai/main",
-    "commit": "27abc08bb548b4ffdbafdf23591f8ff0caa2f367",
+    "commit": "a94df3d7bd6bf8127004804206b69fff2e146b8a",
     "path": "docs/superpowers/specs/memphant"
   }
 }
