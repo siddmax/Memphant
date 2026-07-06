@@ -5,18 +5,19 @@
 > ## ✅ DONE definition (deterministic)
 > **MemPhant is FULLY COMPLETED when every checkbox in §1–§6 is checked and the banner below reads COMPLETE.** No section may be skipped; an activation-gated item (§5) counts as done when it is BUILT (gate met + proof), RETIRED (its disable-when fired, recorded in `24`), or DORMANT with unmet activation gate recorded in the row proof. DORMANT with unmet activation gate is terminal for §5; it is not a hidden launch blocker. Nothing else — no vibe, no partial credit — flips the banner.
 >
-> # CURRENT PHASE: `COMPLETE`
+> # CURRENT PHASE: `RUNTIME INCOMPLETE`
 >
 > WS-0 proof artifact: `docs/build-log/artifacts/ws0-two-language-spike.json`.
 > R83 spike measured warm no-recompile Rust policy-change iteration at **0.073×** Python (`rust_proceeds`).
 > WS-A proof artifact: `docs/build-log/2026-07-03-wsa-progress.md` (fresh `pgvector/pgvector:0.8.4-pg17` bootstrap + provider lint + store seam tests).
 > WS-B proof artifact: `docs/build-log/2026-07-03-wsb-progress.md` (retain/reflect/dedup/admission/freshness goldens + outbox shape + full local gates).
 > WS-C proof artifact: `docs/build-log/2026-07-03-wsc-progress.md` (recall trace spine + oracle/isolation/citation/filter goldens + full local gates).
-> WS-D proof artifact: `docs/build-log/2026-07-03-wsd-progress.md` (REST/MCP/Python SDK round-trips + schema snapshots + `memphant verify` + full local gates). Next build workstream: WS-E.
+> Runtime gap audit: `docs/build-log/2026-07-06-runtime-completion-gap-audit.md` (server/MCP still in-memory, worker stubbed, Postgres store lint-only, ghost OpenAPI paths removed, Python package made pure HTTP SDK).
+> WS-D proof artifact: `docs/build-log/2026-07-03-wsd-progress.md` (REST/MCP/Python SDK round-trips + schema snapshots + `memphant verify` + full local gates). Runtime exit remains unchecked until REST/MCP/CLI run against Postgres-backed storage.
 > WS-E proof artifact: `docs/build-log/2026-07-03-wse-progress.md` (YAML oracle + manifest guard + trace schema snapshot + security/ops suites + nightly sampled archive + Markdown compile/verify + full local gates). Next build workstream: WS-F.
 > WS-F proof artifact: `docs/build-log/2026-07-03-wsf-progress.md` (Syndai L1+ agent file-memory export + trace compare + config-gated public active-read adapter + focused Syndai gates). Next build workstream: WS-G.
 > WS-G proof artifact: `docs/build-log/2026-07-03-wsg-progress.md` (public docs/dashboard/trace/memory/API-key/eval/export surface + Playwright route/accessibility/no-DB gates). Next build workstream: WS-H.
-> WS-H proof artifact: `docs/build-log/2026-07-03-wsh-progress.md` (Docker/Compose packaging + plain Postgres/Supabase/Neon bootstrap profiles + BYOC preflight + hosted hooks + PITR runbooks + full local gates). Next build workstream: WS-I.
+> WS-H proof artifact: `docs/build-log/2026-07-03-wsh-progress.md` (Docker/Compose packaging + plain Postgres/Supabase/Neon bootstrap profiles + BYOC preflight + hosted hooks + PITR runbooks + full local gates). Runtime exit remains unchecked until the packaged server and worker actually use the Postgres stack they start.
 > WS-I proof artifact: `docs/build-log/2026-07-03-wsi-progress.md` + `docs/build-log/artifacts/wsi-local-sota-profile.json` (SOTA profile gate + activation audit: rungs 0-3 built, 15 advanced levers remain dormant because promotion gates are not met).
 > Rung-4 local proof artifact: `docs/build-log/2026-07-03-rung4-contextual-chunks-progress.md` + `docs/build-log/artifacts/pr-golden-traces.json` + `docs/build-log/artifacts/nightly-sampled-traces.json` (contextual chunk write/read path green locally; rung remains unchecked until LME-V2/BEAM sampled profile proves top-k gain).
 > Rung-4 promotion proof artifact: `docs/build-log/2026-07-03-rung4-contextual-chunks-profile.md` + `docs/build-log/artifacts/rung4-contextual-chunks-profile.json` + `docs/build-log/artifacts/rung4-baseline-sampled-traces.json` + `docs/build-log/artifacts/rung4-public-sampled-traces.json` (paired sampled-public LME-V2/BEAM top-k delta promoted contextual chunks).
@@ -32,7 +33,7 @@
 > Rung-14 retirement proof artifact: `docs/build-log/2026-07-03-rung14-external-engine-retirement.md` + `docs/build-log/artifacts/rung14-external-engine-retirement-profile.json` (relational edge expansion already beat no-edges controls and no archived Postgres/pgvector bottleneck proof exists through Rung 13, so the external graph/vector engine is retired for the current public architecture).
 > Rung-15 promotion proof artifact: `docs/build-log/2026-07-03-rung15-inferred-belief-composition-profile.md` + `docs/build-log/artifacts/rung15-inferred-belief-composition-profile.json` + `docs/build-log/artifacts/rung15-baseline-sampled-traces.json` + `docs/build-log/artifacts/rung15-inferred-belief-sampled-traces.json` (guardrailed reflect-stage composition mints belief-tier abstractions with `derived_by=composition`, requires direct observation before semantic promotion, and records no OP-Bench-style restraint regression).
 > Dogfood active-read proof artifact: `docs/build-log/2026-07-03-dogfood-active-read-gate.md` + `docs/build-log/artifacts/syndai_agent_file_memory_001-trace-compare.json` (Syndai's L1+ agent-scoped file-memory surface actively reads through public `/v1/recall`, preserves MemPhant trace/citation IDs in backend context rows, keeps L1+ user memory blocked, and leaves web/mobile clients outside MemPhant DB/REST).
-> Public launch proof artifact: `Memphant@91312d26b4ecc23b2ed33f8d6ddf72358486c372:docs/launch/public-launch-scorecard.json` + `Memphant@91312d26b4ecc23b2ed33f8d6ddf72358486c372:docs/build-log/artifacts/real-launch-evidence-20260704-v1/` (pass: real LongMemEval-V2 sampled profile passed 50/50 with measured recall p95 5.717ms, PS-Bench restraint passed 50/50, standing bars are green, and no public SOTA claim is made).
+> Public launch proof artifact: `Memphant@91312d26b4ecc23b2ed33f8d6ddf72358486c372:docs/launch/public-launch-scorecard.json` + `Memphant@91312d26b4ecc23b2ed33f8d6ddf72358486c372:docs/build-log/artifacts/real-launch-evidence-20260704-v1/` (benchmark/profile scorecard pass; runtime launch remains unchecked until Postgres-backed REST/MCP/worker/CLI proof exists).
 > Restraint launch proof artifact: `Memphant@91312d26b4ecc23b2ed33f8d6ddf72358486c372:docs/launch/restraint-launch-scorecard.json` + `Memphant@91312d26b4ecc23b2ed33f8d6ddf72358486c372:docs/build-log/artifacts/real-launch-evidence-20260704-v1/restraint-ps-bench-sampled-traces.json` (PS-Bench cache-only sampled run passed 50/50; measured drop 0.0 is below the 0.15 threshold).
 > GateMem conditional proof artifact: `Memphant@91312d26b4ecc23b2ed33f8d6ddf72358486c372:docs/launch/gatemem-conditional-scorecard.json` + `Memphant@91312d26b4ecc23b2ed33f8d6ddf72358486c372:docs/build-log/artifacts/real-launch-evidence-20260704-v1/gatemem-sampled-trace.json` (pinned sampled GateMem reproduction records simultaneous utility, access-control, and forgetting pass).
 > Standing bars proof artifact: `Memphant@91312d26b4ecc23b2ed33f8d6ddf72358486c372:docs/launch/standing-quality-bars.json` (Postgres hot-path SLO and dogfood utility trend wiring pass with measured proof artifacts).
@@ -51,11 +52,11 @@
 - [x] **WS-A** Schema, core types, store seam — all tables incl. `belief_observation`/`review_event`/`scope_block`; bootstrap + provider lint green (proof: `docs/build-log/2026-07-03-wsa-progress.md`)
 - [x] **WS-B** Write path + memory compiler — retain/reflect/dedup/contradiction/corroboration golden fixtures pass (proof: `docs/build-log/2026-07-03-wsb-progress.md`)
 - [x] **WS-C** Read path + trace spine — every recall traced; oracle + isolation + citation + small-tenant fixtures pass (proof: `docs/build-log/2026-07-03-wsc-progress.md`)
-- [x] **WS-D** Public surfaces — REST/MCP/Python SDK round-trip; schemas validate; `memphant verify` works (proof: `docs/build-log/2026-07-03-wsd-progress.md`)
+- [ ] **WS-D** Public surfaces — REST/MCP/Python SDK contract smoke exists, but packaged REST/MCP still use `InMemoryStore`; runtime exit requires Postgres-backed REST/MCP/CLI proof (current audit: `docs/build-log/2026-07-06-runtime-completion-gap-audit.md`)
 - [x] **WS-E** Eval, security, ops — golden oracle + manifest guard + security suites + nightly sampled runner + deletion-completeness lane (proof: `docs/build-log/2026-07-03-wse-progress.md`)
 - [x] **WS-F** Syndai dogfood cutover — first low-risk surface exported + trace-compared (proof: `docs/build-log/2026-07-03-wsf-progress.md`; stop-rule honored; launch not hostage to full cutover)
 - [x] **WS-G** Public UI/docs/launch surface (proof: `docs/build-log/2026-07-03-wsg-progress.md`)
-- [x] **WS-H** BYOC + hosted packaging (proof: `docs/build-log/2026-07-03-wsh-progress.md`)
+- [ ] **WS-H** BYOC + hosted packaging — Docker/Compose/provider profiles exist, but packaged server/worker do not yet use durable Postgres storage (current audit: `docs/build-log/2026-07-06-runtime-completion-gap-audit.md`)
 - [x] **WS-I** Advanced lever activation audit (proof: `docs/build-log/2026-07-03-wsi-progress.md`; `docs/build-log/artifacts/wsi-local-sota-profile.json` records 0 activated, 15 dormant)
 
 ## 3. SOTA ladder rungs (activation/disable contracts owned by `27` §2; check = advance-when met with archived profile proof)
@@ -69,7 +70,7 @@
 
 - [x] **Alpha gate** (`29` §5) — all eleven criteria green (proof: `docs/build-log/2026-07-03-wsi-progress.md`)
 - [x] **Dogfood gate** (`29` §6) — first surface actively read by Syndai through public contracts (proof: `docs/build-log/2026-07-03-dogfood-active-read-gate.md`)
-- [x] **Public launch gate** (`29` §7) — all §7 criteria pass with a real sampled-public profile and measured recall latency (proof: `Memphant@91312d26b4ecc23b2ed33f8d6ddf72358486c372:docs/launch/public-launch-scorecard.json`)
+- [ ] **Public launch gate** (`29` §7) — benchmark/profile scorecard passes, but runtime launch is blocked until REST/MCP/CLI/worker are Postgres-backed (current audit: `docs/build-log/2026-07-06-runtime-completion-gap-audit.md`)
 - [x] **Restraint launch gate** (`27` §1) — PS-Bench sampled run passed 50/50; measured drop 0.0 <= 0.15 (proof: `Memphant@91312d26b4ecc23b2ed33f8d6ddf72358486c372:docs/launch/restraint-launch-scorecard.json`)
 - [x] **GateMem conditional gate** (`27` §1, R90) — sampled GateMem utility+access-control+forgetting pass (proof: `Memphant@91312d26b4ecc23b2ed33f8d6ddf72358486c372:docs/launch/gatemem-conditional-scorecard.json`)
 
@@ -95,7 +96,7 @@
 ## 6. Standing quality bars (never one-and-done; checked at every release while building)
 
 - [x] Security suites green at latest release (tenant isolation, deletion completeness, corroboration-farming, filter injection — `05` §10; proof: `docs/build-log/2026-07-03-rung15-inferred-belief-composition-profile.md`)
-- [x] Hot-path SLO holding (fast p50 <200ms / p95 <500ms — `02` §4; Postgres p50 0.005ms / p95 0.0505ms; proof: `Memphant@91312d26b4ecc23b2ed33f8d6ddf72358486c372:docs/build-log/artifacts/real-launch-evidence-20260704-v1/postgres-slo.json`)
+- [ ] Hot-path SLO holding (fast p50 <200ms / p95 <500ms — `02` §4; existing Postgres SLO proof measured direct SQL, not packaged REST/MCP hot path; runtime exit requires Postgres-backed API proof)
 - [x] `memory_utility_trend` SLI wired on the dogfood lane (`22` §1.3; baseline/current trace windows recorded; proof: `Memphant@91312d26b4ecc23b2ed33f8d6ddf72358486c372:docs/build-log/artifacts/real-launch-evidence-20260704-v1/memory-utility-trend.json`)
 - [x] Landscape-completeness rule satisfied at latest review pass (`13` §1.4; proof: `docs/build-log/2026-07-03-standing-quality-bars.md`)
 

@@ -1,6 +1,6 @@
 [build-system]
-requires = ["maturin>=1.0,<2.0"]
-build-backend = "maturin"
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "memphant"
@@ -9,7 +9,6 @@ requires-python = ">=3.11"
 description = "Thin HTTP SDK for MemPhant"
 license = "Apache-2.0"
 
-[tool.maturin]
-module-name = "memphant._native"
-python-source = "."
-features = ["pyo3/extension-module"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["memphant*"]

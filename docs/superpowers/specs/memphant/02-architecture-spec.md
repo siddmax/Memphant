@@ -37,7 +37,7 @@ flowchart TB
 | `memphant-server` | Rust | Axum REST API and admin endpoints. |
 | `memphant-mcp` | Rust | MCP stdio and Streamable HTTP server (built on `rmcp`, the official MCP Rust SDK — `03` §3). |
 | `memphant-cli` | Rust | Local import/export/eval/debug client. |
-| `memphant-py` | Rust + Python | PyO3/maturin native binding and ergonomic Python client. |
+| `memphant-py` | Python | Pure HTTP client first; PyO3/maturin native binding deferred until a real embedded/local API exists. |
 | `memphant-ts` | TypeScript | HTTP client, types, examples. |
 
 Rust owns deterministic kernels. Python/TS own developer ergonomics.
@@ -61,7 +61,7 @@ No handler is allowed to reach around `memphant-core` policy checks.
 Mixing IO-bound (await Postgres) and CPU-bound (fuse/rerank) stages on the wrong runtime is how a Rust core silently loses its parallelism claim (`03` §0.1):
 
 - **IO-bound stages 1–4 stay on tokio**, run concurrently via `tokio::try_join!` over independent `sqlx` queries (parallel candidate generation — the dominant read-path concurrency).
-- **CPU-bound deterministic fusion (Stage 5) + rerank (Stage 6 default) run on `spawn_blocking`**, never inline, so a large fused set cannot stall the async reactor other tenants share. The PyO3 native-parallelism gate (`03` §6) asserts this same section releases the GIL.
+- **CPU-bound deterministic fusion (Stage 5) + rerank (Stage 6 default) run on `spawn_blocking`**, never inline, so a large fused set cannot stall the async reactor other tenants share. Any future PyO3 native binding must prove the same section releases the GIL before shipping.
 - **Provider rerankers + L4 are `async` provider awaits** (balanced/exhaustive only, IO-bound, trace-labeled). The deterministic default path is the only one touching `spawn_blocking`.
 - **Backpressure is a `tower::limit::ConcurrencyLimit`** at admission — request count can never exceed what the pools can serve; excess sheds as `429`+`Retry-After`, never unbounded queue growth. (Distinct from §3.1's `consolidation_lag`, which is *extraction* falling behind; both bounded, both traced.)
 

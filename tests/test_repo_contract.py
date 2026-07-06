@@ -176,3 +176,34 @@ def test_handoff_docs_mirror_status_phase() -> None:
         assert f"Current STATUS mirror: {status_phase.group(1)}" in text, handoff
         for phrase in stale_active_phrases:
             assert phrase not in active_text, f"{handoff}: {phrase}"
+
+
+def test_status_cannot_claim_complete_while_runtime_is_in_memory() -> None:
+    status = (ROOT / "docs/superpowers/specs/memphant/STATUS.md").read_text(encoding="utf-8")
+    phase = STATUS_PHASE_RE.search(status)
+
+    assert phase is not None
+
+    runtime_gaps = {
+        "server_in_memory": "AppState::new_in_memory()"
+        in (ROOT / "crates/memphant-server/src/main.rs").read_text(encoding="utf-8"),
+        "mcp_in_memory": "McpRuntime::new_in_memory()"
+        in (ROOT / "crates/memphant-mcp/src/main.rs").read_text(encoding="utf-8"),
+        "worker_stub": "memphant-worker ws0"
+        in (ROOT / "crates/memphant-worker/src/main.rs").read_text(encoding="utf-8"),
+        "postgres_store_lint_only": "impl MemoryStore for PostgresMemoryStore"
+        not in (ROOT / "crates/memphant-store-postgres/src/lib.rs").read_text(encoding="utf-8"),
+    }
+    postgres_manifest = (ROOT / "crates/memphant-store-postgres/Cargo.toml").read_text(
+        encoding="utf-8"
+    )
+
+    if any(runtime_gaps.values()):
+        assert phase.group(1) != "COMPLETE", runtime_gaps
+        assert "- [x] **Public launch gate**" not in status
+        assert "- [x] **WS-D** Public surfaces" not in status
+        assert "- [x] **WS-H** BYOC + hosted packaging" not in status
+        assert "- [x] Hot-path SLO holding" not in status
+
+    if phase.group(1) == "COMPLETE":
+        assert any(driver in postgres_manifest for driver in ("sqlx", "tokio-postgres"))

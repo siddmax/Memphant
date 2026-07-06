@@ -120,7 +120,7 @@ Build:
 - Axum REST API for `retain`, `recall`, `reflect`, `correct`, `forget`, `trace`, `mark`, scope memory listing, health.
 - OpenAPI and JSON Schema snapshots.
 - MCP stdio and Streamable HTTP server over the same verbs.
-- Python HTTP SDK plus optional native wheel shell.
+- Python pure HTTP SDK; native wheel shell waits for a real embedded/local API.
 - TypeScript SDK.
 - CLI: `retain`, `recall`, `reflect`, `correct`, `forget`, `trace`, `mark`, `db lint`, `verify`.
 

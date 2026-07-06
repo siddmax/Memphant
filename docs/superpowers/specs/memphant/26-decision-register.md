@@ -11,7 +11,7 @@ This file records final launch-critical decisions. If another doc conflicts with
 | Public repo | Apache-2.0 open core from day one | adoption and enterprise trust |
 | Primary language | Rust core/server/CLI/MCP/eval runner | deterministic hot paths, deployment, safety; WS-0 R83 spike measured warm no-recompile Rust policy-change iteration at 0.073× Python, below the <1.5× proceed threshold |
 | Primary production integration | HTTP API plus generated SDKs | stable public contract |
-| Python integration | HTTP SDK plus PyO3/maturin native wheel | Python adoption without hidden production coupling |
+| Python integration | Pure HTTP SDK now; PyO3/maturin native wheel deferred | Python adoption without placeholder native packaging; native waits for a real embedded/local API |
 | TypeScript integration | generated HTTP SDK | web/Node agent adoption |
 | MCP | stdio and Streamable HTTP | local and hosted agent integration |
 | Store | Postgres 17/18-compatible plus pgvector ≥ 0.8.4 | production-grade and portable (R74) |

@@ -45,7 +45,7 @@ All write endpoints require tenant/auth context. Read endpoints require tenant/a
 
 **`GET /v1/scopes/{id}/stats` (R91)** returns, for the resolved scope (Stage-0 gates apply): unit counts by `kind × state`, episode count + `retention_tier` distribution, `consolidation_lag`, storage bytes (hot/warm/cold), quarantined count, open deletion generations, and the pinned block's version/token usage. Read-only; counts only, never content; consumers: the `19` §5 inspector scope overview, hosted quota UX (`21`), and integrator dashboards. Metric names align with `20`/`22`.
 
-OpenAPI is canonical. SDKs and MCP schemas are generated or checked against the OpenAPI/JSON Schema definitions.
+OpenAPI is canonical. SDKs and MCP schemas are generated or checked against the OpenAPI/JSON Schema definitions. A self-hosted server may serve that document at `GET /v1/openapi.json` for discovery, but that introspection route is not itself a generated SDK/MCP operation.
 
 ## 2.1 Error Envelope
 
