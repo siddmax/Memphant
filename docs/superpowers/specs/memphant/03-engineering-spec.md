@@ -61,7 +61,6 @@ Rust:
 Python:
 
 - ergonomic SDK
-- PyO3 native binding via maturin
 - notebooks and benchmark scripts
 - integration examples with Python agent frameworks
 
@@ -77,13 +76,13 @@ TypeScript:
 | `memphant-core` | crates.io | Rust library types/policies/retrieval |
 | `memphant-server` | Docker/GitHub Releases | Axum HTTP service |
 | `memphant-cli` | crates.io/GitHub Releases | import/export/eval/debug |
-| `memphant` Python package | PyPI | ergonomic HTTP client plus native module wheels |
-| `memphant._native` | PyPI wheel via maturin | PyO3 binding for embedded/local use |
+| `memphant` Python package | PyPI | ergonomic pure HTTP client |
+| `memphant._native` | deferred | PyO3 binding only after a real embedded/local API exists |
 | `@memphant/sdk` | npm | generated TypeScript HTTP client |
 | `memphant-mcp` | Docker/GitHub Releases | MCP stdio/Streamable HTTP server |
 | harness provider adapters (`memphant-provider-hermes` first) | per-harness registry | activation-gated thin adapters mapping a harness memory-provider SPI onto the seven public verbs (`08` §5.1b, R87); never a parallel API |
 
-HTTP is the primary integration path. Native Python is a performance/local-embedding option, not the hidden production path. The per-scope stats/block surfaces (`08` §2) ride the existing `memphant-server` — no new crate.
+HTTP is the primary integration path. Native Python is deferred until there is a real embedded/local API to expose; do not ship placeholder native packaging. The per-scope stats/block surfaces (`08` §2) ride the existing `memphant-server` — no new crate.
 
 ### 2.2 Python Layout
 
@@ -91,30 +90,30 @@ Required `pyproject.toml` shape:
 
 ```toml
 [build-system]
-requires = ["maturin>=1.0,<2.0"]
-build-backend = "maturin"
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "memphant"
 
-[tool.maturin]
-module-name = "memphant._native"
-python-source = "python"
-features = ["pyo3/extension-module"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["memphant*"]
 ```
 
-The Python package exports a normal HTTP client even when `_native` is unavailable. Importing `memphant` must not require a compiled extension unless the caller explicitly uses native/local APIs.
+The Python package exports a normal HTTP client and must not reference `memphant._native` until native/local APIs exist.
 
-Maturin supports building Rust crates with PyO3 into Python packages and mixed Rust/Python layouts: <https://github.com/PyO3/maturin>.
+PyO3/maturin remains an allowed future path, but the first public package is pure Python metadata plus the HTTP client.
 
 Native Python entrypoints that run CPU-bound Rust retrieval, fusion, ranking, trace replay, or eval work must release the Python GIL around the Rust section. The Python binding is allowed to be ergonomic; it is not allowed to erase Rust's parallelism advantage.
 
 ### 2.2a Native Binding Contract (what is native, the GIL rule, the wheel)
 
+- **Status:** deferred. Do not add native packaging until at least one native/local API is implemented and tested.
 - **Exposed natively** (CPU-bound, local-embedding): `recall` fusion/rerank over fetched candidates, `eval`/trace-replay, decay recompute, local-text embedding. **HTTP-only:** anything needing hosted policy/auth, `reflect` (owns provider LLM calls), admin/forget. Importing `memphant` must succeed with no compiled extension and route those to HTTP.
 - **GIL rule, concrete:** each `#[pyfunction]` entering a Rust hot loop wraps it in `py.detach(|| …)` (PyO3's current spelling of `allow_threads`); inputs convert to owned Rust types *before* detach, results *after* — no `Py<…>` touched inside. Pure-marshalling calls don't detach.
 - **Test:** `tests/test_native_parallelism.py` spawns N threads each calling a detached native op and asserts **wall-clock ≈ max(call), not Σ(call)** — proving the GIL was released. A dropped `detach` fails this gate, not a subtle perf drift.
-- **Wheel:** maturin builds an **abi3** wheel (`pyo3/abi3-py311`) — one wheel per platform spans 3.11+; manylinux + macOS arm64/x86 + Windows in CI. Wheels-first; a source build is the local-embedding opt-in, never the documented production path.
+- **Wheel:** when native APIs exist, maturin builds an **abi3** wheel (`pyo3/abi3-py311`) — one wheel per platform spans 3.11+; manylinux + macOS arm64/x86 + Windows in CI. Until then, the package remains pure HTTP SDK metadata.
 
 ### 2.3 `memphant-core` Module Map
 
@@ -367,7 +366,7 @@ cargo test --doc
 Python binding gate:
 
 ```bash
-cd bindings/python && maturin develop && python -m pytest
+cd bindings/python && python -m pytest
 ```
 
 Native performance gate:

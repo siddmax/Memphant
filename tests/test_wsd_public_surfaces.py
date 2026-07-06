@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 import threading
+import tomllib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -127,6 +128,14 @@ def test_python_package_artifacts_exist() -> None:
         "trace",
         "mark",
     }
+
+
+def test_python_package_is_pure_http_sdk_until_native_api_exists() -> None:
+    pyproject = tomllib.loads((ROOT / "bindings/python/pyproject.toml").read_text())
+
+    assert pyproject["build-system"]["build-backend"] != "maturin"
+    assert "maturin" not in pyproject
+    assert "memphant._native" not in json.dumps(pyproject)
 
 
 class FakeMemphantServer:

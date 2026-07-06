@@ -1,6 +1,6 @@
 # MemPhant Completion Handoff - 2026-07-04
 
-Current STATUS mirror: COMPLETE
+Current STATUS mirror: RUNTIME INCOMPLETE
 
 `docs/superpowers/specs/memphant/STATUS.md` is the live ledger. This handoff is
 a reconciled summary for a follow-on agent; it does not override checkboxes,
@@ -8,9 +8,10 @@ gates, or owner contracts.
 
 ## Current State On Main
 
-`STATUS.md` currently records `CURRENT PHASE: COMPLETE`, with every checkbox in
-sections 1-6 checked. The current proof set is the reconciled launch evidence,
-not the pre-reconciliation gap list that previously lived in this file.
+`STATUS.md` currently records `CURRENT PHASE: RUNTIME INCOMPLETE`. The benchmark
+and launch scorecards remain useful evidence, but WS-D, WS-H, public launch,
+and hot-path SLO are unchecked until the packaged REST/MCP/CLI/worker runtime
+uses durable Postgres storage.
 
 | Area | Current proof |
 |---|---|
@@ -24,6 +25,7 @@ not the pre-reconciliation gap list that previously lived in this file.
 | Postgres SLO proof | `docs/build-log/artifacts/real-launch-evidence-20260704-v1/postgres-slo.json` |
 | Dogfood utility trend | `docs/build-log/artifacts/real-launch-evidence-20260704-v1/memory-utility-trend.json` |
 | Syndai preflight mirror | `docs/build-log/2026-07-03-syndai-preflight.md` |
+| Runtime gap audit | `docs/build-log/2026-07-06-runtime-completion-gap-audit.md` |
 
 Recorded numbers from those artifacts:
 
@@ -34,8 +36,8 @@ Recorded numbers from those artifacts:
   maximum.
 - GateMem sampled reproduction: `60` checkpoints, utility `1.0`,
   access-control leaks `0`, deleted-memory recoveries `0`.
-- Hot-path SLO: Postgres-backed `1000` seeded units, p50 `0.005ms`, p95
-  `0.0505ms`.
+- Direct-SQL Postgres SLO: `1000` seeded units, p50 `0.005ms`, p95
+  `0.0505ms`. This is not packaged API hot-path proof.
 
 ## Benchmark Ingestion Recipe
 
@@ -73,7 +75,7 @@ not the current MemPhant state.
 | Restraint and GateMem were backed by toy or generic fixtures. | Superseded by PS-Bench sampled restraint traces and GateMem sampled reproduction proof. |
 | Syndai dogfood proof path pointed at stale cross-repo state. | Superseded by `porting.md`, `docs/build-log/2026-07-03-syndai-preflight.md`, and the current dogfood utility-trend proof. |
 | Standing bars lacked Postgres-backed SLO and real baseline/current utility windows. | Superseded by `postgres-slo.json`, `memory-utility-trend.json`, and `standing-quality-bars.json`. |
-| `STATUS.md` COMPLETE was dishonest. | Superseded. `STATUS.md` is now the source of truth and records COMPLETE with proof paths on the checked lines. |
+| `STATUS.md` COMPLETE was dishonest. | Reopened by `docs/build-log/2026-07-06-runtime-completion-gap-audit.md`; `STATUS.md` now records `RUNTIME INCOMPLETE` until durable runtime proof exists. |
 
 ## Stale-Handoff Guard
 

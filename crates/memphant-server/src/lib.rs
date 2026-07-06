@@ -14,10 +14,38 @@ use memphant_types::{
     RetainRequest, RetrievalTrace, SCHEMA_COMPAT_REVISION, ScopeMemoryResponse,
     TRACE_SCHEMA_VERSION,
 };
-use schemars::{JsonSchema, schema_for};
+use schemars::JsonSchema;
+use schemars::generate::{SchemaGenerator, SchemaSettings};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
+
+const HEALTH_PATH: &str = "/v1/health";
+const OPENAPI_PATH: &str = "/v1/openapi.json";
+const EPISODES_PATH: &str = "/v1/episodes";
+const RECALL_PATH: &str = "/v1/recall";
+const REFLECT_PATH: &str = "/v1/reflect";
+const CORRECT_PATH: &str = "/v1/correct";
+const FORGET_PATH: &str = "/v1/forget";
+const MARK_PATH: &str = "/v1/mark";
+const TRACE_PATH: &str = "/v1/traces/{id}";
+const SCOPE_MEMORY_PATH: &str = "/v1/scopes/{id}/memory";
+
+const DOCUMENTED_OPENAPI_PATHS: &[&str] = &[
+    EPISODES_PATH,
+    RECALL_PATH,
+    REFLECT_PATH,
+    CORRECT_PATH,
+    FORGET_PATH,
+    MARK_PATH,
+    TRACE_PATH,
+    SCOPE_MEMORY_PATH,
+    HEALTH_PATH,
+];
+
+pub fn documented_openapi_paths() -> &'static [&'static str] {
+    DOCUMENTED_OPENAPI_PATHS
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -38,16 +66,16 @@ impl AppState {
 
 pub fn app(state: AppState) -> Router {
     Router::new()
-        .route("/v1/health", get(health))
-        .route("/v1/openapi.json", get(openapi))
-        .route("/v1/episodes", post(retain_episode_handler))
-        .route("/v1/recall", post(recall_handler))
-        .route("/v1/reflect", post(reflect_handler))
-        .route("/v1/correct", post(correct_handler))
-        .route("/v1/forget", post(forget_handler))
-        .route("/v1/mark", post(mark_handler))
-        .route("/v1/traces/{id}", get(trace_handler))
-        .route("/v1/scopes/{id}/memory", get(scope_memory_handler))
+        .route(HEALTH_PATH, get(health))
+        .route(OPENAPI_PATH, get(openapi))
+        .route(EPISODES_PATH, post(retain_episode_handler))
+        .route(RECALL_PATH, post(recall_handler))
+        .route(REFLECT_PATH, post(reflect_handler))
+        .route(CORRECT_PATH, post(correct_handler))
+        .route(FORGET_PATH, post(forget_handler))
+        .route(MARK_PATH, post(mark_handler))
+        .route(TRACE_PATH, get(trace_handler))
+        .route(SCOPE_MEMORY_PATH, get(scope_memory_handler))
         .with_state(state)
 }
 
@@ -256,44 +284,93 @@ pub fn openapi_document() -> Value {
             "title": "MemPhant API",
             "version": ENGINE_VERSION
         },
-        "paths": {
-            "/v1/episodes": path_item("post", "RetainEpisodeHttpRequest", "RetainEpisodeHttpResponse"),
-            "/v1/memory": path_item("post", "RetainEpisodeHttpRequest", "RetainEpisodeHttpResponse"),
-            "/v1/recall": path_item("post", "RecallHttpRequest", "RecallResponse"),
-            "/v1/reflect": path_item("post", "ReflectRequest", "ReflectResult"),
-            "/v1/correct": path_item("post", "CorrectRequest", "CorrectResult"),
-            "/v1/forget": path_item("post", "ForgetRequest", "ForgetResult"),
-            "/v1/mark": path_item("post", "MarkRequest", "MarkResult"),
-            "/v1/traces/{id}": path_item("get", "TraceId", "RetrievalTrace"),
-            "/v1/scopes/{id}/memory": path_item("get", "ScopeId", "ScopeMemoryResponse"),
-            "/v1/scopes/{id}/stats": path_item("get", "ScopeId", "HealthResponse"),
-            "/v1/scopes/{id}/block": path_item("get", "ScopeId", "HealthResponse"),
-            "/v1/health": path_item("get", "HealthResponse", "HealthResponse")
-        },
+        "paths": openapi_paths(),
         "components": {
-            "schemas": {
-                "RetainEpisodeHttpRequest": schema::<RetainEpisodeHttpRequest>(),
-                "RetainEpisodeHttpResponse": schema::<RetainEpisodeHttpResponse>(),
-                "RecallHttpRequest": schema::<RecallHttpRequest>(),
-                "RecallResponse": schema::<memphant_types::RecallResponse>(),
-                "ReflectRequest": schema::<ReflectRequest>(),
-                "ReflectResult": schema::<ReflectResult>(),
-                "CorrectRequest": schema::<CorrectRequest>(),
-                "CorrectResult": schema::<memphant_types::CorrectResult>(),
-                "ForgetRequest": schema::<memphant_types::ForgetRequest>(),
-                "ForgetResult": schema::<memphant_types::ForgetResult>(),
-                "MarkRequest": schema::<MarkRequest>(),
-                "MarkResult": schema::<memphant_types::MarkResult>(),
-                "RetrievalTrace": schema::<RetrievalTrace>(),
-                "ScopeMemoryResponse": schema::<ScopeMemoryResponse>(),
-                "ErrorEnvelope": schema::<ErrorEnvelope>()
-            }
+            "schemas": component_schemas()
         }
     })
 }
 
-fn schema<T: JsonSchema>() -> Value {
-    serde_json::to_value(schema_for!(T)).expect("schema serializes")
+fn openapi_paths() -> serde_json::Map<String, Value> {
+    let mut paths = serde_json::Map::new();
+    paths.insert(
+        EPISODES_PATH.to_string(),
+        path_item(
+            "post",
+            "RetainEpisodeHttpRequest",
+            "RetainEpisodeHttpResponse",
+        ),
+    );
+    paths.insert(
+        RECALL_PATH.to_string(),
+        path_item("post", "RecallHttpRequest", "RecallResponse"),
+    );
+    paths.insert(
+        REFLECT_PATH.to_string(),
+        path_item("post", "ReflectRequest", "ReflectResult"),
+    );
+    paths.insert(
+        CORRECT_PATH.to_string(),
+        path_item("post", "CorrectRequest", "CorrectResult"),
+    );
+    paths.insert(
+        FORGET_PATH.to_string(),
+        path_item("post", "ForgetRequest", "ForgetResult"),
+    );
+    paths.insert(
+        MARK_PATH.to_string(),
+        path_item("post", "MarkRequest", "MarkResult"),
+    );
+    paths.insert(
+        TRACE_PATH.to_string(),
+        get_path_item("RetrievalTrace", vec![path_param("id")]),
+    );
+    paths.insert(
+        SCOPE_MEMORY_PATH.to_string(),
+        get_path_item(
+            "ScopeMemoryResponse",
+            vec![path_param("id"), query_param("tenant_id")],
+        ),
+    );
+    paths.insert(
+        HEALTH_PATH.to_string(),
+        get_path_item("HealthResponse", Vec::new()),
+    );
+    paths
+}
+
+fn component_schemas() -> serde_json::Map<String, Value> {
+    let mut generator = openapi_schema_generator();
+    seed_component::<RetainEpisodeHttpRequest>(&mut generator);
+    seed_component::<RetainEpisodeHttpResponse>(&mut generator);
+    seed_component::<RecallHttpRequest>(&mut generator);
+    seed_component::<memphant_types::RecallResponse>(&mut generator);
+    seed_component::<ReflectRequest>(&mut generator);
+    seed_component::<ReflectResult>(&mut generator);
+    seed_component::<CorrectRequest>(&mut generator);
+    seed_component::<memphant_types::CorrectResult>(&mut generator);
+    seed_component::<memphant_types::ForgetRequest>(&mut generator);
+    seed_component::<memphant_types::ForgetResult>(&mut generator);
+    seed_component::<MarkRequest>(&mut generator);
+    seed_component::<memphant_types::MarkResult>(&mut generator);
+    seed_component::<RetrievalTrace>(&mut generator);
+    seed_component::<ScopeMemoryResponse>(&mut generator);
+    seed_component::<HealthResponse>(&mut generator);
+    seed_component::<ErrorEnvelope>(&mut generator);
+    generator.take_definitions(true)
+}
+
+fn openapi_schema_generator() -> SchemaGenerator {
+    SchemaSettings::draft2020_12()
+        .with(|settings| {
+            settings.definitions_path = "/components/schemas".into();
+            settings.meta_schema = None;
+        })
+        .into_generator()
+}
+
+fn seed_component<T: JsonSchema>(generator: &mut SchemaGenerator) {
+    let _ = generator.subschema_for::<T>();
 }
 
 fn path_item(method: &str, input_schema: &str, output_schema: &str) -> Value {
@@ -323,6 +400,48 @@ fn path_item(method: &str, input_schema: &str, output_schema: &str) -> Value {
                 }
             }
         }
+    })
+}
+
+fn get_path_item(output_schema: &str, parameters: Vec<Value>) -> Value {
+    json!({
+        "get": {
+            "parameters": parameters,
+            "responses": {
+                "200": {
+                    "content": {
+                        "application/json": {
+                            "schema": { "$ref": format!("#/components/schemas/{output_schema}") }
+                        }
+                    }
+                },
+                "default": {
+                    "content": {
+                        "application/json": {
+                            "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn path_param(name: &str) -> Value {
+    json!({
+        "name": name,
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string", "format": "uuid" }
+    })
+}
+
+fn query_param(name: &str) -> Value {
+    json!({
+        "name": name,
+        "in": "query",
+        "required": true,
+        "schema": { "type": "string", "format": "uuid" }
     })
 }
 
