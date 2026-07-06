@@ -7,7 +7,7 @@ This repository is the public product boundary. It owns the Rust crates, Postgre
 ## Repository Split
 
 - Public MemPhant: product code, public schemas, public tests, synthetic examples, provider bootstrap and lint code.
-- Syndai adapter: private dogfood integration work in `/Users/sidsharma/Syndai/.wt/codex-memphant-cross-repo` until a surface is generalized.
+- Syndai adapter: private dogfood integration work stays outside this repo until a surface is generalized; see `porting.md`.
 - No hidden hosted behavior: hosted MemPhant must run the same public binary self-hosters run.
 
 ## Current State

@@ -5,8 +5,8 @@ MemPhant is the public Apache-2.0 memory substrate repo. Treat `docs/superpowers
 ## Repo Boundaries
 
 - Public product work lives in this repo: Rust crates, migrations, SDKs, public docs, public fixtures, provider lint, and the self-hostable runtime.
-- Private Syndai integration work lives in `/Users/sidsharma/Syndai/.wt/codex-memphant-cross-repo`; keep it linked through `.codex/linked-repos.json`.
-- Keep mirrored MemPhant spec files drift-free between this repo and the linked Syndai worktree.
+- Private Syndai integration and porting boundaries are described in `porting.md`; do not track a local Syndai worktree path in this repo.
+- Keep mirrored MemPhant spec files drift-free when a private Syndai checkout is available.
 - Never commit secrets. Use `.env.example` for local variable names only.
 
 ## Database Rules
@@ -21,7 +21,7 @@ MemPhant is the public Apache-2.0 memory substrate repo. Treat `docs/superpowers
 - Use current docs when touching libraries, providers, CLIs, or cloud services; prefer Context7 plus official web docs.
 - Fix root causes and add tests or contract checks for regressions.
 - Do not add compatibility shims, feature-flag rot, or temporary bypass paths in this pre-production repo.
-- Preserve unrelated dirty work in this repo and in the linked Syndai worktree.
+- Preserve unrelated dirty work in this repo and in any private Syndai checkout.
 
 ## Verification
 

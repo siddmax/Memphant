@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import filecmp
-import json
 import os
 import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MANIFEST = ROOT / ".codex" / "linked-repos.json"
-ALLOW_MISSING_PRIVATE_ENV = "MEMPHANT_ALLOW_MISSING_PRIVATE_REPO"
+SPEC_PATH = Path("docs/superpowers/specs/memphant")
+PRIVATE_SPEC_DIR_ENV = "MEMPHANT_PRIVATE_SPEC_DIR"
 
 
 def collect_diffs(comparison: filecmp.dircmp[str], prefix: str = "") -> list[str]:
@@ -26,21 +25,19 @@ def collect_diffs(comparison: filecmp.dircmp[str], prefix: str = "") -> list[str
 
 
 def main() -> int:
-    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
-    public_dir = ROOT / manifest["source_docs"]["path"]
-    private_dir = Path(manifest["private_repo"]["path"]) / manifest["source_docs"]["path"]
+    public_dir = ROOT / SPEC_PATH
+    private_dir = Path(
+        os.environ.get(PRIVATE_SPEC_DIR_ENV, ROOT.parent / "Syndai" / SPEC_PATH)
+    )
     if not public_dir.exists():
         print(f"public_specs_missing={public_dir}", file=sys.stderr)
         return 2
     if not private_dir.exists():
-        if os.environ.get(ALLOW_MISSING_PRIVATE_ENV) == "1":
-            print(
-                "spec_drift=skipped "
-                f"reason=private_specs_missing private={private_dir}"
-            )
-            return 0
-        print(f"private_specs_missing={private_dir}", file=sys.stderr)
-        return 2
+        print(
+            "spec_drift=skipped "
+            f"reason=private_specs_missing private={private_dir}"
+        )
+        return 0
 
     differences = collect_diffs(filecmp.dircmp(public_dir, private_dir))
     if differences:

@@ -9,7 +9,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+STATUS_PHASE_RE = re.compile(r"^>?\s*# CURRENT PHASE: `([^`]+)`$", re.MULTILINE)
+REMOVED_PRIVATE_WORKTREE = "/Users/sidsharma/Syndai/.wt/codex-memphant-cross-repo"
+REMOVED_LINKED_MANIFEST = ".codex/linked-repos.json"
 
 
 def test_memphant_lock_has_required_schema_keys() -> None:
@@ -25,37 +27,35 @@ def test_memphant_lock_has_required_schema_keys() -> None:
     ]
 
 
-def test_linked_repos_manifest_points_to_current_syndai_main() -> None:
-    manifest = json.loads((ROOT / ".codex" / "linked-repos.json").read_text())
-    private_path = Path(manifest["private_repo"]["path"])
+def test_porting_doc_replaces_linked_worktree_manifest() -> None:
+    porting = (ROOT / "porting.md").read_text(encoding="utf-8")
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
-    assert manifest["private_repo"]["branch"] == "main"
-    assert manifest["private_repo"]["upstream"] == "Syndai/main"
-    assert manifest["source_docs"]["remote_ref"] == "Syndai/main"
-    assert GIT_SHA_RE.fullmatch(manifest["source_docs"]["commit"])
-    assert manifest["source_docs"]["path"] == "docs/superpowers/specs/memphant"
+    assert not (ROOT / REMOVED_LINKED_MANIFEST).exists()
+    assert "porting.md" in agents
+    assert "porting.md" in readme
+    assert "Do not track a local Syndai worktree path" in porting
 
-    if not private_path.exists():
-        assert os.environ.get("MEMPHANT_ALLOW_MISSING_PRIVATE_REPO") == "1"
-        return
 
-    assert (
-        private_path / "backend" / "src" / "features" / "memory" / "memphant_dogfood_adapter.py"
-    ).exists()
+def test_live_docs_use_porting_doc_instead_of_linked_worktree_manifest() -> None:
+    live_docs = [
+        ROOT / "AGENTS.md",
+        ROOT / "README.md",
+        ROOT / "docs" / "handoff" / "2026-07-04-completion-handoff.md",
+        ROOT / "docs" / "superpowers" / "specs" / "memphant" / "STATUS.md",
+    ]
 
-    head = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"],
-        cwd=private_path,
-        text=True,
-    ).strip()
-    branch = subprocess.check_output(
-        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-        cwd=private_path,
-        text=True,
-    ).strip()
+    offenders = [
+        str(path.relative_to(ROOT))
+        for path in live_docs
+        if any(
+            removed in path.read_text(encoding="utf-8")
+            for removed in [REMOVED_PRIVATE_WORKTREE, REMOVED_LINKED_MANIFEST]
+        )
+    ]
 
-    assert branch == manifest["private_repo"]["branch"]
-    assert head == manifest["source_docs"]["commit"]
+    assert offenders == []
 
 
 def test_required_memphant_specs_are_present() -> None:
@@ -95,8 +95,7 @@ def test_spec_drift_check_passes_against_linked_syndai_docs() -> None:
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
     assert "spec_drift=clean" in result.stdout or (
-        os.environ.get("MEMPHANT_ALLOW_MISSING_PRIVATE_REPO") == "1"
-        and "spec_drift=skipped reason=private_specs_missing" in result.stdout
+        "spec_drift=skipped reason=private_specs_missing" in result.stdout
     )
 
 
@@ -142,14 +141,8 @@ def test_repo_hygiene_files_keep_generated_and_private_state_out() -> None:
         cwd=ROOT,
         check=False,
     )
-    repo_link = subprocess.run(
-        ["git", "check-ignore", "-q", ".codex/linked-repos.json"],
-        cwd=ROOT,
-        check=False,
-    )
 
     assert ignored.returncode == 0
-    assert repo_link.returncode == 1
 
 
 def test_spike_decision_thresholds_match_r83() -> None:
@@ -163,3 +156,23 @@ def test_spike_decision_thresholds_match_r83() -> None:
     assert module.decision_for_ratio(1.5) == "manual_review"
     assert module.decision_for_ratio(2.99) == "manual_review"
     assert module.decision_for_ratio(3.0) == "reopen_decision_2"
+
+
+def test_handoff_docs_mirror_status_phase() -> None:
+    status = (ROOT / "docs/superpowers/specs/memphant/STATUS.md").read_text(encoding="utf-8")
+    status_phase = STATUS_PHASE_RE.search(status)
+
+    assert status_phase is not None
+
+    stale_active_phrases = [
+        "COMPLETE banner dishonest",
+        "Gaps that keep STATUS.md",
+        "candidate_pass behind a checked box",
+    ]
+    for handoff in (ROOT / "docs/handoff").glob("*.md"):
+        text = handoff.read_text(encoding="utf-8")
+        active_text = text.split("## Archived Pre-Reconciliation Snapshot", 1)[0]
+
+        assert f"Current STATUS mirror: {status_phase.group(1)}" in text, handoff
+        for phrase in stale_active_phrases:
+            assert phrase not in active_text, f"{handoff}: {phrase}"
