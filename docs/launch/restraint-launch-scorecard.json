@@ -20,7 +20,8 @@
   "profile_path": "docs/build-log/artifacts/real-launch-evidence-20260704-v1/sota-profile.json",
   "relevance_gate_mandatory_if_drop_exceeds_threshold": true,
   "sample_count": 50,
-  "status": "pass",
+  "source_status": "fabricated_fixture_20260703",
+  "status": "invalid_synthetic_fixture",
   "threshold_max_drop": 0.15,
   "trace_refs": [
     "docs/build-log/artifacts/real-launch-evidence-20260704-v1/restraint-ps-bench-sampled-traces.json"

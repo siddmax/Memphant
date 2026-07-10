@@ -19,24 +19,28 @@ def status_marks_gatemem_complete() -> bool:
 def test_gatemem_scorecard_records_first_internal_reproduction() -> None:
     scorecard = load_scorecard()
 
-    assert scorecard["status"] in {"pass", "candidate", "fail"}
-    assert scorecard["first_internal_reproduction"] is True
+    # Evidence reset (2026-07-09): the 2026-07-04 "reproduction" was a
+    # hardcoded synthetic fixture (no executed reader/scorer); the scorecard
+    # is retained only as an audit trail.
+    assert scorecard["status"] == "invalid_synthetic_fixture"
+    assert scorecard["source_status"] == "fabricated_fixture_20260703"
+    assert not status_marks_gatemem_complete()
     assert scorecard["bar"] == "simultaneous_pass"
-    if status_marks_gatemem_complete():
-        assert scorecard["status"] == "pass"
     if scorecard["status"] == "pass":
+        assert scorecard.get("runtime") == "postgres"
         assert scorecard["benchmark"] == "GateMem"
         assert scorecard["scenario_source"]["repo"] == "rzhub/GateMem"
         assert scorecard["scenario_source"]["sample_count"] > 0
         assert scorecard["scenario_source"]["revision"]
 
 
-def test_gatemem_axes_pass_simultaneously() -> None:
-    axes = load_scorecard()["axes"]
+def test_gatemem_axes_pass_simultaneously_when_gate_passes() -> None:
+    scorecard = load_scorecard()
+    axes = scorecard["axes"]
 
     assert set(axes) == {"utility", "access_control", "forgetting"}
-    assert all(axis["result"] == "pass" for axis in axes.values())
-    assert axes["utility"]["score"] == 1.0
+    if scorecard["status"] == "pass":
+        assert all(axis["result"] == "pass" for axis in axes.values())
 
 
 def test_gatemem_utility_uses_trace_compare_artifact() -> None:

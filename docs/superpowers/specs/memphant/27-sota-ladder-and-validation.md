@@ -29,6 +29,8 @@ The `baseline status` column states whether the comparison target is **independe
 | **GateMem (multi-principal governance)** | utility + access control + reliable forgetting in shared-memory agents — the wedge stated as an open problem ("no method simultaneously achieves" all three, arXiv:2606.18829) | reproduce-first (132★ repo; unproven harness) | **conditional launch gate (R90): gates NOTHING until first successful internal reproduction in MemPhant's harness** (the Zep-58.44% lesson); once reproduced, the bar is simultaneous pass on all three axes — the only public benchmark where the wedge IS the score |
 | Internal Syndai golden set | real L0/L1+, correction, forget, citation, project-scope contract cases | internal | meets or improves the internal golden baseline |
 
+**Promotion-provenance rule (2026-07-09):** Promotion evidence must be produced by the packaged Postgres-backed runtime against pinned real corpora with recorded hashes and an executed reader/scorer. Synthetic fixtures gate regressions, never promotions.
+
 The full multi-axis **benchmark portfolio** (no single source of truth — outcome / long-horizon / scale / longitudinal / restraint / interactive-episodic / embedding-selection / procedural / systems-cost) is owned by `12` §2.0; this table is the SOTA-claim subset.
 
 Primary-source anchors:

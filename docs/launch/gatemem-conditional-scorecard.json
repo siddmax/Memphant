@@ -28,5 +28,6 @@
     "revision": "b4304866ec8d9784fb77bebb1ce4660806abcded",
     "sample_count": 60
   },
-  "status": "pass"
+  "source_status": "fabricated_fixture_20260703",
+  "status": "invalid_synthetic_fixture"
 }

@@ -19,9 +19,13 @@ def status_marks_restraint_complete() -> bool:
 def test_restraint_scorecard_enforces_op_bench_launch_threshold() -> None:
     scorecard = load_scorecard()
 
-    assert scorecard["status"] in {"pass", "candidate", "fail"}
-    if status_marks_restraint_complete():
-        assert scorecard["status"] == "pass"
+    # Evidence reset (2026-07-09): the 2026-07-04 run was answer-seeded
+    # synthetic fixtures; the scorecard is retained only as an audit trail.
+    assert scorecard["status"] == "invalid_synthetic_fixture"
+    assert scorecard["source_status"] == "fabricated_fixture_20260703"
+    assert not status_marks_restraint_complete()
+    if scorecard["status"] == "pass":
+        assert scorecard.get("runtime") == "postgres"
     assert scorecard["metric"] == "relative_drop_vs_memory_free"
     assert scorecard["threshold_max_drop"] == 0.15
     assert scorecard["relevance_gate_mandatory_if_drop_exceeds_threshold"] is True
@@ -39,8 +43,10 @@ def test_restraint_profile_axis_matches_scorecard_measurement() -> None:
     restraint = profile["axes"]["restraint"]
 
     assert restraint["benchmark"] == scorecard["benchmark"]
-    assert restraint["gate"] == scorecard["status"]
+    # The archived profile's per-axis gate is part of the invalidated audit
+    # trail; it no longer has to mirror the (now invalid) scorecard status.
     if scorecard["status"] == "pass":
+        assert restraint["gate"] == scorecard["status"]
         assert restraint["source_status"] == "sampled_public"
         assert restraint["sample_count"] == scorecard["sample_count"]
     assert restraint["score"] == scorecard["memphant_score"]
@@ -60,7 +66,7 @@ def test_restraint_trace_has_no_mismatches() -> None:
             for case in trace["case_results"]:
                 assert case["passed"] is True
                 assert case["dropped_mismatches"] == []
-        else:
+        elif scorecard["status"] == "fail":
             assert trace["metrics"]["passed_cases"] < trace["metrics"]["total_cases"]
 
 

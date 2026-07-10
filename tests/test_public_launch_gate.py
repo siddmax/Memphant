@@ -21,10 +21,11 @@ def test_public_launch_scorecard_covers_every_gate_criterion() -> None:
     scorecard = load_scorecard()
     criteria = {entry["name"]: entry for entry in scorecard["criteria"]}
 
-    if status_marks_public_launch_complete():
-        assert scorecard["status"] == "pass"
-    else:
-        assert scorecard["status"] in {"pass", "candidate_pass", "fail"}
+    # Evidence reset (2026-07-09): the 2026-07-04 scorecard was produced from
+    # synthetic answer-seeded fixtures and is kept only as an audit trail.
+    assert scorecard["status"] == "invalid_synthetic_fixture"
+    assert scorecard["source_status"] == "fabricated_fixture_20260703"
+    assert not status_marks_public_launch_complete()
     assert set(criteria) == {
         "public_api_sdk_mcp_cli_docs_examples",
         "self_host_docker_compose",
@@ -65,58 +66,24 @@ def test_release_process_and_ci_run_public_launch_gates() -> None:
     assert "scripts/check_spec_drift.py" not in workflow
 
 
-def test_public_benchmark_profile_is_real_sampled_public_evidence() -> None:
+def test_public_benchmark_profile_kept_as_audit_trail_never_promotion_evidence() -> None:
     scorecard = load_scorecard()
     profile_path = ROOT / scorecard["profile"]["path"]
-    profile = json.loads(profile_path.read_text(encoding="utf-8"))
     manifest_path = ROOT / scorecard["profile"]["sample_manifest"]
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
-    assert profile["harness_pin"]["answer_model"]
-    assert profile["harness_pin"]["embedding_profile"]
-    assert manifest["tier"] == "sampled-public"
-    assert manifest["root_seed"]
-    assert manifest["benchmarks"]
-    for benchmark in manifest["benchmarks"]:
-        assert benchmark["sample_count"] >= 50
-        assert benchmark["license"]
-        assert benchmark["source_revision"]
-        assert benchmark["sample_ids"]
+    # The 2026-07-04 profile/manifest artifacts stay on disk as an audit trail
+    # of the invalidated run; the scorecard that references them is marked
+    # invalid_synthetic_fixture and cannot gate a launch.
+    assert profile_path.exists()
+    assert manifest_path.exists()
+    assert scorecard["status"] == "invalid_synthetic_fixture"
+    assert not status_marks_public_launch_complete()
 
-    sampled_axes = [
-        axis
-        for axis in profile["axes"].values()
-        if axis["source_status"] == "sampled_public"
-    ]
-    assert sampled_axes
-    for axis in sampled_axes:
-        trace_ref = ROOT / axis["trace_ref"]
-        assert trace_ref.exists(), axis["trace_ref"]
-        assert axis["score"] is not None
-        assert axis["ci"] is not None
-        assert axis["sample_count"] >= 50
-        assert axis["sample_manifest"] == scorecard["profile"]["sample_manifest"]
 
-    for axis in profile["axes"].values():
-        assert axis["source_status"] not in {"sampled_public_style", "internal_mimic"}
-        if axis["source_status"] == "not_run":
-            assert axis["benchmark"]
-
-    decisions = profile["rung_decisions"] + profile["activation_decisions"]
-    measured = [
-        decision
-        for decision in decisions
-        if decision.get("p95_ms", 0) > 0
-        and decision.get("cost_per_1k_recalls_usd") is not None
-        and decision.get("security_result") == "pass"
-        and decision.get("deletion_result") == "pass"
-    ]
-    if status_marks_public_launch_complete():
-        assert measured
-    for decision in measured:
-        after_trace = decision.get("after_trace_ref")
-        if after_trace:
-            assert (ROOT / after_trace).exists(), after_trace
+def test_public_scorecard_cannot_pass_without_postgres_runtime() -> None:
+    scorecard = load_scorecard()
+    if scorecard["status"] == "pass":
+        assert scorecard.get("runtime") == "postgres"
 
 
 def test_hosted_db_exposure_gate_is_fail_closed_for_supabase() -> None:

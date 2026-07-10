@@ -52,6 +52,18 @@ def status_marks_standing_bars_complete() -> bool:
     )
 
 
+def test_status_carries_promotion_provenance_rule_and_reopened_gates() -> None:
+    status = status_text()
+
+    assert "**Promotion-provenance rule (2026-07-09):**" in status
+    assert "Synthetic fixtures gate regressions, never promotions." in status
+    # The gates whose 2026-07-04 evidence was synthetic must stay reopened.
+    assert "- [x] **Dogfood gate**" not in status
+    assert "- [x] **Restraint launch gate**" not in status
+    assert "- [x] **GateMem conditional gate**" not in status
+    assert "- [x] **Public launch gate**" not in status
+
+
 def test_standing_quality_bars_all_pass() -> None:
     scorecard = load_scorecard()
 

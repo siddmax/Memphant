@@ -4,7 +4,7 @@ MemPhant is the public Apache-2.0 memory substrate repo. Treat `docs/superpowers
 
 ## Repo Boundaries
 
-- Public product work lives in this repo: Rust crates, migrations, SDKs, public docs, public fixtures, provider lint, and the self-hostable runtime.
+- Public product work lives in this repo: Rust crates, migrations, the Python SDK, public docs, public fixtures, provider lint, and the self-hostable runtime.
 - Private Syndai integration and porting boundaries are described in `porting.md`; do not track a local Syndai worktree path in this repo.
 - Keep mirrored MemPhant spec files drift-free when a private Syndai checkout is available.
 - Never commit secrets. Use `.env.example` for local variable names only.
@@ -13,7 +13,7 @@ MemPhant is the public Apache-2.0 memory substrate repo. Treat `docs/superpowers
 
 - MemPhant-owned database objects must live in the `memphant` schema.
 - Do not create or modify application objects in `public`.
-- Tenant and scope identifiers are part of every tenant-scoped API and storage boundary.
+- Tenant identity is derived server-side from API keys; every tenant-scoped read/write is tenant-bound (traces included).
 - Keep provider lint green for `plain-postgres`, `supabase`, and `neon`.
 
 ## Working Rules
@@ -22,6 +22,7 @@ MemPhant is the public Apache-2.0 memory substrate repo. Treat `docs/superpowers
 - Fix root causes and add tests or contract checks for regressions.
 - Do not add compatibility shims, feature-flag rot, or temporary bypass paths in this pre-production repo.
 - Preserve unrelated dirty work in this repo and in any private Syndai checkout.
+- `openapi/memphant.v1.json` and `mcp/memphant.tools.v1.json` are generated artifacts — regenerate via the server/mcp binaries, never hand-edit.
 
 ## Verification
 

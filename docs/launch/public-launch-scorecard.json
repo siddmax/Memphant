@@ -102,5 +102,6 @@
     "claim_made": false,
     "statement": "No public SOTA claim is made from this launch scorecard."
   },
-  "status": "pass"
+  "source_status": "fabricated_fixture_20260703",
+  "status": "invalid_synthetic_fixture"
 }
