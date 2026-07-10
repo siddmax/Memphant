@@ -6,107 +6,48 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Store memory or a raw episode.",
-    "input_schema": {
+    "description": "Supersede or invalidate selected memory through an auditable correction.",
+    "inputSchema": {
       "$defs": {
         "ActorId": {
           "format": "uuid",
           "type": "string"
         },
-        "MemoryKind": {
-          "enum": [
-            "episodic",
-            "semantic",
-            "procedural",
-            "belief",
-            "resource"
-          ],
-          "type": "string"
-        },
-        "ResourceKind": {
-          "enum": [
-            "document",
-            "code",
-            "conversation",
-            "other"
-          ],
-          "type": "string"
-        },
-        "RetainResourcePayload": {
-          "description": "Resource payload for the retain verb (spec 08 §209 `resource` shape).",
+        "CorrectSelector": {
           "properties": {
-            "body": {
-              "default": null,
-              "description": "Durable resource content the worker compiles from.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "content_hash": {
-              "type": "string"
-            },
-            "kind": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/ResourceKind"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null
-            },
-            "mime_type": {
-              "type": "string"
-            },
-            "revision": {
-              "default": null,
-              "description": "Revision identity (e.g. a code commit hash).",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "uri": {
-              "type": "string"
+            "memory_unit_id": {
+              "$ref": "#/$defs/UnitId"
             }
           },
           "required": [
-            "uri",
-            "mime_type",
-            "content_hash"
+            "memory_unit_id"
           ],
           "type": "object"
         },
-        "RetainUnitPayload": {
-          "description": "Direct pre-compiled unit payload for trusted callers (spec 08 §209 `unit`\nshape). Requires an explicit subject/predicate and kind; the admission\ntrust policy still applies.",
+        "CorrectionPayload": {
           "properties": {
-            "body": {
+            "reason": {
               "type": "string"
             },
-            "churn_class": {
-              "default": null,
+            "valid_from": {
               "type": [
                 "string",
                 "null"
               ]
             },
-            "kind": {
-              "$ref": "#/$defs/MemoryKind"
+            "valid_to": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
-            "predicate": {
-              "type": "string"
-            },
-            "subject": {
+            "value": {
               "type": "string"
             }
           },
           "required": [
-            "kind",
-            "subject",
-            "predicate",
-            "body"
+            "value",
+            "reason"
           ],
           "type": "object"
         },
@@ -118,146 +59,154 @@
           "format": "uuid",
           "type": "string"
         },
-        "TrustLevel": {
-          "enum": [
-            "trusted_user",
-            "trusted_system",
-            "verified_tool",
-            "unverified_tool",
-            "web_content",
-            "agent_output",
-            "imported_external",
-            "quarantined"
-          ],
+        "UnitId": {
+          "format": "uuid",
           "type": "string"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "The retain verb request: payload-dispatched between `episode` (default,\n`body` required), `resource`, and `unit` shapes.",
       "properties": {
         "actor_id": {
           "$ref": "#/$defs/ActorId"
         },
-        "body": {
-          "default": null,
-          "description": "Episode body; required for the episode payload shape.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "compiler_version": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "predicate": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "resource": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/RetainResourcePayload"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Present → resource payload shape."
+        "correction": {
+          "$ref": "#/$defs/CorrectionPayload"
         },
         "scope_id": {
           "$ref": "#/$defs/ScopeId"
         },
-        "source_kind": {
-          "type": "string"
-        },
-        "source_trust": {
-          "$ref": "#/$defs/TrustLevel"
-        },
-        "subject": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "subject_hint": {
-          "type": [
-            "string",
-            "null"
-          ]
+        "selector": {
+          "$ref": "#/$defs/CorrectSelector"
         },
         "tenant_id": {
           "$ref": "#/$defs/TenantId"
-        },
-        "unit": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/RetainUnitPayload"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Present → direct unit payload shape."
         }
       },
       "required": [
         "tenant_id",
         "scope_id",
         "actor_id",
-        "source_kind",
-        "source_trust"
+        "selector",
+        "correction"
       ],
-      "title": "RetainEpisodeHttpRequest",
       "type": "object"
     },
-    "name": "retain",
-    "output_schema": {
+    "name": "correct",
+    "outputSchema": {
       "$defs": {
-        "DedupOutcome": {
-          "properties": {
-            "matched": {
-              "type": "boolean"
-            },
-            "observation_count": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            }
+        "UnitId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "correction_id": {
+          "type": "string"
+        },
+        "correction_kind": {
+          "type": "string"
+        },
+        "created": {
+          "items": {
+            "$ref": "#/$defs/UnitId"
           },
-          "required": [
-            "matched",
-            "observation_count"
-          ],
-          "type": "object"
+          "type": "array"
+        },
+        "superseded": {
+          "items": {
+            "$ref": "#/$defs/UnitId"
+          },
+          "type": "array"
+        },
+        "trace_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "correction_id",
+        "superseded",
+        "created",
+        "correction_kind"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Forget by memory unit, episode or resource selector; tombstones block re-derivation.",
+    "inputSchema": {
+      "$defs": {
+        "ActorId": {
+          "format": "uuid",
+          "type": "string"
         },
         "EpisodeId": {
           "format": "uuid",
           "type": "string"
         },
+        "ForgetSelector": {
+          "properties": {
+            "episode_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EpisodeId"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "memory_unit_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/UnitId"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "resource_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResourceId"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "scope_id": {
+              "$ref": "#/$defs/ScopeId"
+            }
+          },
+          "required": [
+            "scope_id"
+          ],
+          "type": "object"
+        },
         "ResourceId": {
           "format": "uuid",
           "type": "string"
         },
-        "TrustLevel": {
-          "enum": [
-            "trusted_user",
-            "trusted_system",
-            "verified_tool",
-            "unverified_tool",
-            "web_content",
-            "agent_output",
-            "imported_external",
-            "quarantined"
-          ],
+        "ScopeId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "TenantId": {
+          "format": "uuid",
           "type": "string"
         },
         "UnitId": {
@@ -267,56 +216,54 @@
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
-        "assigned_trust": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/TrustLevel"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "The trust tier actually assigned after clamping to the API key's\n`max_trust` ceiling."
+        "actor_id": {
+          "$ref": "#/$defs/ActorId"
         },
-        "dedup": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/DedupOutcome"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+        "reason": {
+          "type": "string"
         },
-        "enqueued": {
+        "scope_id": {
+          "$ref": "#/$defs/ScopeId"
+        },
+        "selector": {
+          "$ref": "#/$defs/ForgetSelector"
+        },
+        "tenant_id": {
+          "$ref": "#/$defs/TenantId"
+        }
+      },
+      "required": [
+        "tenant_id",
+        "scope_id",
+        "actor_id",
+        "selector",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "name": "forget",
+    "outputSchema": {
+      "$defs": {
+        "UnitId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "deletion_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "invalidated_units": {
           "items": {
-            "type": "string"
+            "$ref": "#/$defs/UnitId"
           },
           "type": "array"
         },
-        "episode_id": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/EpisodeId"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "resource_id": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ResourceId"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+        "policy": {
+          "type": "string"
         },
         "trace_ref": {
           "type": [
@@ -324,8 +271,66 @@
             "null"
           ]
         },
-        "unit_ids": {
-          "default": [],
+        "verification": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "deletion_generation",
+        "policy",
+        "invalidated_units",
+        "verification"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Report what the caller did with a recall pack (feeds decay/reinforcement).",
+    "inputSchema": {
+      "$defs": {
+        "MarkOutcome": {
+          "enum": [
+            "success",
+            "failure",
+            "corrected",
+            "ignored"
+          ],
+          "type": "string"
+        },
+        "TenantId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "TraceId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "UnitId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "caller_id": {
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/$defs/MarkOutcome"
+        },
+        "tenant_id": {
+          "$ref": "#/$defs/TenantId"
+        },
+        "trace_id": {
+          "$ref": "#/$defs/TraceId"
+        },
+        "used_ids": {
           "items": {
             "$ref": "#/$defs/UnitId"
           },
@@ -333,9 +338,35 @@
         }
       },
       "required": [
-        "enqueued"
+        "tenant_id",
+        "trace_id",
+        "caller_id",
+        "used_ids",
+        "outcome"
       ],
-      "title": "RetainEpisodeHttpResponse",
+      "type": "object"
+    },
+    "name": "mark",
+    "outputSchema": {
+      "$defs": {
+        "TraceId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "trace_id": {
+          "$ref": "#/$defs/TraceId"
+        }
+      },
+      "required": [
+        "accepted",
+        "trace_id"
+      ],
       "type": "object"
     }
   },
@@ -346,8 +377,8 @@
       "openWorldHint": false,
       "readOnlyHint": true
     },
-    "description": "Retrieve cited memory evidence.",
-    "input_schema": {
+    "description": "Retrieve cited memory evidence for a query (budgeted, salience-ranked, with provenance).",
+    "inputSchema": {
       "$defs": {
         "ActorId": {
           "format": "uuid",
@@ -474,11 +505,10 @@
         "actor_id",
         "query"
       ],
-      "title": "RecallHttpRequest",
       "type": "object"
     },
     "name": "recall",
-    "output_schema": {
+    "outputSchema": {
       "$defs": {
         "EpisodeId": {
           "format": "uuid",
@@ -644,7 +674,6 @@
         "degraded",
         "suppression_labels"
       ],
-      "title": "RecallResponse",
       "type": "object"
     }
   },
@@ -655,8 +684,8 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Request consolidation for a scope.",
-    "input_schema": {
+    "description": "Consolidate a scope's pending episodes/resources into memory units.",
+    "inputSchema": {
       "$defs": {
         "ActorId": {
           "format": "uuid",
@@ -694,11 +723,10 @@
         "scope_id",
         "actor_id"
       ],
-      "title": "ReflectRequest",
       "type": "object"
     },
     "name": "reflect",
-    "output_schema": {
+    "outputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "candidates_created": {
@@ -726,7 +754,6 @@
         "episodes_consumed",
         "candidates_created"
       ],
-      "title": "ReflectResult",
       "type": "object"
     }
   },
@@ -737,48 +764,107 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Supersede or invalidate selected memory through an auditable correction.",
-    "input_schema": {
+    "description": "Store memory: an episode body (default), a resource {uri, mime_type, content_hash, revision?, body} or a direct pre-compiled unit {kind, subject, predicate, body}.",
+    "inputSchema": {
       "$defs": {
         "ActorId": {
           "format": "uuid",
           "type": "string"
         },
-        "CorrectSelector": {
+        "MemoryKind": {
+          "enum": [
+            "episodic",
+            "semantic",
+            "procedural",
+            "belief",
+            "resource"
+          ],
+          "type": "string"
+        },
+        "ResourceKind": {
+          "enum": [
+            "document",
+            "code",
+            "conversation",
+            "other"
+          ],
+          "type": "string"
+        },
+        "RetainResourcePayload": {
+          "description": "Resource payload for the retain verb (spec 08 §209 `resource` shape).",
           "properties": {
-            "memory_unit_id": {
-              "$ref": "#/$defs/UnitId"
+            "body": {
+              "default": null,
+              "description": "Durable resource content the worker compiles from.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content_hash": {
+              "type": "string"
+            },
+            "kind": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResourceKind"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "mime_type": {
+              "type": "string"
+            },
+            "revision": {
+              "default": null,
+              "description": "Revision identity (e.g. a code commit hash).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "uri": {
+              "type": "string"
             }
           },
           "required": [
-            "memory_unit_id"
+            "uri",
+            "mime_type",
+            "content_hash"
           ],
           "type": "object"
         },
-        "CorrectionPayload": {
+        "RetainUnitPayload": {
+          "description": "Direct pre-compiled unit payload for trusted callers (spec 08 §209 `unit`\nshape). Requires an explicit subject/predicate and kind; the admission\ntrust policy still applies.",
           "properties": {
-            "reason": {
+            "body": {
               "type": "string"
             },
-            "valid_from": {
+            "churn_class": {
+              "default": null,
               "type": [
                 "string",
                 "null"
               ]
             },
-            "valid_to": {
-              "type": [
-                "string",
-                "null"
-              ]
+            "kind": {
+              "$ref": "#/$defs/MemoryKind"
             },
-            "value": {
+            "predicate": {
+              "type": "string"
+            },
+            "subject": {
               "type": "string"
             }
           },
           "required": [
-            "value",
-            "reason"
+            "kind",
+            "subject",
+            "predicate",
+            "body"
           ],
           "type": "object"
         },
@@ -790,8 +876,17 @@
           "format": "uuid",
           "type": "string"
         },
-        "UnitId": {
-          "format": "uuid",
+        "TrustLevel": {
+          "enum": [
+            "trusted_user",
+            "trusted_system",
+            "verified_tool",
+            "unverified_tool",
+            "web_content",
+            "agent_output",
+            "imported_external",
+            "quarantined"
+          ],
           "type": "string"
         }
       },
@@ -800,146 +895,125 @@
         "actor_id": {
           "$ref": "#/$defs/ActorId"
         },
-        "correction": {
-          "$ref": "#/$defs/CorrectionPayload"
+        "body": {
+          "default": null,
+          "description": "Episode body; required for the episode payload shape.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "compiler_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "predicate": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resource": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetainResourcePayload"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Present → resource payload shape."
         },
         "scope_id": {
           "$ref": "#/$defs/ScopeId"
         },
-        "selector": {
-          "$ref": "#/$defs/CorrectSelector"
+        "source_kind": {
+          "type": "string"
+        },
+        "source_trust": {
+          "$ref": "#/$defs/TrustLevel"
+        },
+        "subject": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subject_hint": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "tenant_id": {
           "$ref": "#/$defs/TenantId"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetainUnitPayload"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Present → direct unit payload shape."
         }
       },
       "required": [
         "tenant_id",
         "scope_id",
         "actor_id",
-        "selector",
-        "correction"
+        "source_kind",
+        "source_trust"
       ],
-      "title": "CorrectRequest",
       "type": "object"
     },
-    "name": "correct",
-    "output_schema": {
+    "name": "retain",
+    "outputSchema": {
       "$defs": {
-        "UnitId": {
-          "format": "uuid",
-          "type": "string"
-        }
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "correction_id": {
-          "type": "string"
-        },
-        "correction_kind": {
-          "type": "string"
-        },
-        "created": {
-          "items": {
-            "$ref": "#/$defs/UnitId"
+        "DedupOutcome": {
+          "properties": {
+            "matched": {
+              "type": "boolean"
+            },
+            "observation_count": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
           },
-          "type": "array"
-        },
-        "superseded": {
-          "items": {
-            "$ref": "#/$defs/UnitId"
-          },
-          "type": "array"
-        },
-        "trace_ref": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "correction_id",
-        "superseded",
-        "created",
-        "correction_kind"
-      ],
-      "title": "CorrectResult",
-      "type": "object"
-    }
-  },
-  {
-    "annotations": {
-      "destructiveHint": true,
-      "idempotentHint": true,
-      "openWorldHint": false,
-      "readOnlyHint": false
-    },
-    "description": "Forget by ID, scope, kind, or policy selector.",
-    "input_schema": {
-      "$defs": {
-        "ActorId": {
-          "format": "uuid",
-          "type": "string"
+          "required": [
+            "matched",
+            "observation_count"
+          ],
+          "type": "object"
         },
         "EpisodeId": {
           "format": "uuid",
           "type": "string"
         },
-        "ForgetSelector": {
-          "properties": {
-            "episode_id": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/EpisodeId"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null
-            },
-            "memory_unit_id": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/UnitId"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null
-            },
-            "resource_id": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/ResourceId"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null
-            },
-            "scope_id": {
-              "$ref": "#/$defs/ScopeId"
-            }
-          },
-          "required": [
-            "scope_id"
-          ],
-          "type": "object"
-        },
         "ResourceId": {
           "format": "uuid",
           "type": "string"
         },
-        "ScopeId": {
-          "format": "uuid",
-          "type": "string"
-        },
-        "TenantId": {
-          "format": "uuid",
+        "TrustLevel": {
+          "enum": [
+            "trusted_user",
+            "trusted_system",
+            "verified_tool",
+            "unverified_tool",
+            "web_content",
+            "agent_output",
+            "imported_external",
+            "quarantined"
+          ],
           "type": "string"
         },
         "UnitId": {
@@ -949,55 +1023,56 @@
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
-        "actor_id": {
-          "$ref": "#/$defs/ActorId"
+        "assigned_trust": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrustLevel"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The trust tier actually assigned after clamping to the API key's\n`max_trust` ceiling."
         },
-        "reason": {
-          "type": "string"
+        "dedup": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DedupOutcome"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
-        "scope_id": {
-          "$ref": "#/$defs/ScopeId"
-        },
-        "selector": {
-          "$ref": "#/$defs/ForgetSelector"
-        },
-        "tenant_id": {
-          "$ref": "#/$defs/TenantId"
-        }
-      },
-      "required": [
-        "tenant_id",
-        "scope_id",
-        "actor_id",
-        "selector",
-        "reason"
-      ],
-      "title": "ForgetRequest",
-      "type": "object"
-    },
-    "name": "forget",
-    "output_schema": {
-      "$defs": {
-        "UnitId": {
-          "format": "uuid",
-          "type": "string"
-        }
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "deletion_generation": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "invalidated_units": {
+        "enqueued": {
           "items": {
-            "$ref": "#/$defs/UnitId"
+            "type": "string"
           },
           "type": "array"
         },
-        "policy": {
-          "type": "string"
+        "episode_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EpisodeId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "resource_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResourceId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "trace_ref": {
           "type": [
@@ -1005,17 +1080,17 @@
             "null"
           ]
         },
-        "verification": {
-          "type": "string"
+        "unit_ids": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/UnitId"
+          },
+          "type": "array"
         }
       },
       "required": [
-        "deletion_generation",
-        "policy",
-        "invalidated_units",
-        "verification"
+        "enqueued"
       ],
-      "title": "ForgetResult",
       "type": "object"
     }
   },
@@ -1026,8 +1101,8 @@
       "openWorldHint": false,
       "readOnlyHint": true
     },
-    "description": "Inspect a retrieval trace.",
-    "input_schema": {
+    "description": "Inspect a retrieval trace (tenant-bound).",
+    "inputSchema": {
       "$defs": {
         "TenantId": {
           "format": "uuid",
@@ -1051,11 +1126,10 @@
         "tenant_id",
         "trace_id"
       ],
-      "title": "TraceRequest",
       "type": "object"
     },
     "name": "trace",
-    "output_schema": {
+    "outputSchema": {
       "$defs": {
         "ActorId": {
           "format": "uuid",
@@ -1629,95 +1703,6 @@
         "token_estimate",
         "cost_micros"
       ],
-      "title": "RetrievalTrace",
-      "type": "object"
-    }
-  },
-  {
-    "annotations": {
-      "destructiveHint": false,
-      "idempotentHint": true,
-      "openWorldHint": false,
-      "readOnlyHint": false
-    },
-    "description": "Report what the caller did with a recall pack.",
-    "input_schema": {
-      "$defs": {
-        "MarkOutcome": {
-          "enum": [
-            "success",
-            "failure",
-            "corrected",
-            "ignored"
-          ],
-          "type": "string"
-        },
-        "TenantId": {
-          "format": "uuid",
-          "type": "string"
-        },
-        "TraceId": {
-          "format": "uuid",
-          "type": "string"
-        },
-        "UnitId": {
-          "format": "uuid",
-          "type": "string"
-        }
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "caller_id": {
-          "type": "string"
-        },
-        "outcome": {
-          "$ref": "#/$defs/MarkOutcome"
-        },
-        "tenant_id": {
-          "$ref": "#/$defs/TenantId"
-        },
-        "trace_id": {
-          "$ref": "#/$defs/TraceId"
-        },
-        "used_ids": {
-          "items": {
-            "$ref": "#/$defs/UnitId"
-          },
-          "type": "array"
-        }
-      },
-      "required": [
-        "tenant_id",
-        "trace_id",
-        "caller_id",
-        "used_ids",
-        "outcome"
-      ],
-      "title": "MarkRequest",
-      "type": "object"
-    },
-    "name": "mark",
-    "output_schema": {
-      "$defs": {
-        "TraceId": {
-          "format": "uuid",
-          "type": "string"
-        }
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "accepted": {
-          "type": "boolean"
-        },
-        "trace_id": {
-          "$ref": "#/$defs/TraceId"
-        }
-      },
-      "required": [
-        "accepted",
-        "trace_id"
-      ],
-      "title": "MarkResult",
       "type": "object"
     }
   }
