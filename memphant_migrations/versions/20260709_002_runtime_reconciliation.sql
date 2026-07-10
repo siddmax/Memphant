@@ -105,14 +105,27 @@ create index if not exists memphant_api_key_tenant_idx
   on memphant.api_key (tenant_id, created_at);
 
 -- Job queue: reuse the existing job_state table from 001. It already carries
--- attempts int; add claimed_at and the dead-letter state.
+-- attempts int; add claimed_at, the dead-letter state, and the reflect-job
+-- payload columns (scope binding, explicit subject/predicate pass-through,
+-- and the compiled ReflectTrace result used as the idempotency record).
 alter table memphant.job_state
-  add column if not exists claimed_at timestamptz;
+  add column if not exists claimed_at timestamptz,
+  add column if not exists scope_id uuid,
+  add column if not exists subject text,
+  add column if not exists predicate text,
+  add column if not exists result jsonb;
 alter table memphant.job_state
   drop constraint job_state_state_check;
 alter table memphant.job_state
   add constraint job_state_state_check
     check (state in ('queued','running','done','failed','dead'));
+create index if not exists memphant_job_state_tenant_scope_idx
+  on memphant.job_state (tenant_id, scope_id, state);
+
+-- The full retrieval trace document (the tenant-bound GET /v1/traces/{id}
+-- surface); the structured columns remain the queryable projection.
+alter table memphant.retrieval_trace
+  add column if not exists trace jsonb;
 
 -- Full-text search support for the lexical recall channel.
 alter table memphant.memory_unit

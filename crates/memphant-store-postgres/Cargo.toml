@@ -8,3 +8,18 @@ rust-version.workspace = true
 
 [dependencies]
 memphant-core.workspace = true
+memphant-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx = { version = "0.9", default-features = false, features = [
+  "postgres",
+  "runtime-tokio",
+  "tls-rustls",
+  "uuid",
+  "json",
+  "macros",
+] }
+uuid.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

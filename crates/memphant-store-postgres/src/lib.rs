@@ -1,6 +1,10 @@
 use std::fmt;
 use std::str::FromStr;
 
+mod store;
+
+pub use store::{PgStore, PgTxn};
+
 pub const STORE_NAME: &str = "postgres";
 
 const WSA_BOOTSTRAP_SQL: &str =

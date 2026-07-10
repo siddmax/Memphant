@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 axum.workspace = true
 memphant-core.workspace = true
+memphant-runtime = { path = "../memphant-runtime" }
 memphant-types.workspace = true
 schemars.workspace = true
 serde.workspace = true

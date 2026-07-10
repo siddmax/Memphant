@@ -14,10 +14,13 @@ async fn main() {
         return;
     }
 
-    let mut state = memphant_server::AppState::new_in_memory();
-    eprintln!(
-        "memphant-server: EPHEMERAL in-memory store — set DATABASE_URL for durability (postgres runtime lands via memphant-runtime)"
-    );
+    let store = memphant_runtime::build_store()
+        .await
+        .expect("memphant-server: store construction failed");
+    let store_name = store.name();
+    eprintln!("memphant-server: store={store_name}");
+    let service = memphant_runtime::build_service(store);
+    let mut state = memphant_server::AppState::from_service(service, store_name);
     if let Ok(dev_tenant) = std::env::var("MEMPHANT_DEV_TENANT") {
         let uuid = Uuid::parse_str(&dev_tenant).expect("MEMPHANT_DEV_TENANT must be a UUID");
         state = state.with_dev_tenant(TenantId::from_u128(uuid.as_u128()));

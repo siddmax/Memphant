@@ -8,3 +8,5 @@ rust-version.workspace = true
 
 [dependencies]
 memphant-core.workspace = true
+memphant-runtime = { path = "../memphant-runtime" }
+tokio = { workspace = true, features = ["signal", "time"] }

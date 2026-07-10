@@ -1,0 +1,580 @@
+//! Live-Postgres contract tests for `PgStore`, mirroring the in-memory
+//! `store_contract.rs` scenarios plus durability/cross-tenant/queue checks.
+//!
+//! Gated: every test is `#[ignore]` and reads `MEMPHANT_TEST_DATABASE_URL`.
+//! Run with:
+//!   MEMPHANT_TEST_DATABASE_URL=postgres://memphant:memphant@localhost:5432/memphant \
+//!     cargo test -p memphant-store-postgres -- --ignored --test-threads=1
+
+use std::sync::Arc;
+
+use memphant_core::service::MemoryService;
+use memphant_core::{
+    FixedClock, JobFilter, MemoryStore, NoopEmbedding, forget_memory, recall, retain_episode,
+    retain_resource,
+};
+use memphant_store_postgres::PgStore;
+use memphant_types::{
+    ActorId, ForgetRequest, ForgetSelector, MemoryKind, RecallHttpRequest, RecallMode,
+    RecallRequest, RetainRequest, RetainResourceRequest, ScopeId, TenantId, TrustLevel,
+};
+use uuid::Uuid;
+
+const CLOCK: FixedClock = FixedClock("2026-07-09T00:00:00Z");
+
+fn db_url() -> String {
+    std::env::var("MEMPHANT_TEST_DATABASE_URL")
+        .expect("MEMPHANT_TEST_DATABASE_URL must point at a migrated Postgres")
+}
+
+async fn connect() -> PgStore {
+    PgStore::connect(&db_url()).await.expect("connect PgStore")
+}
+
+async fn fresh_tenant(store: &PgStore) -> TenantId {
+    let id = store
+        .create_tenant(&format!("pg-contract-{}", Uuid::now_v7()))
+        .await
+        .expect("create tenant");
+    TenantId::from_u128(id.as_u128())
+}
+
+fn service(store: PgStore) -> MemoryService<PgStore> {
+    MemoryService::new(Arc::new(store), Arc::new(CLOCK), Arc::new(NoopEmbedding))
+}
+
+fn retain_request(
+    tenant_id: TenantId,
+    scope_id: ScopeId,
+    actor_id: ActorId,
+    body: &str,
+    subject: Option<&str>,
+) -> RetainRequest {
+    RetainRequest {
+        tenant_id,
+        scope_id,
+        actor_id,
+        source_kind: "user".to_string(),
+        source_trust: TrustLevel::TrustedUser,
+        subject_hint: subject.map(str::to_string),
+        subject: subject.map(str::to_string),
+        predicate: subject.map(|_| "value".to_string()),
+        body: body.to_string(),
+        compiler_version: "compiler-pg-contract".to_string(),
+    }
+}
+
+fn recall_request(
+    tenant_id: TenantId,
+    scope_id: ScopeId,
+    actor_id: ActorId,
+    query: &str,
+) -> RecallRequest {
+    RecallRequest {
+        tenant_id,
+        scope_id,
+        actor_id,
+        allowed_scope_ids: vec![scope_id],
+        query: query.to_string(),
+        k: 4,
+        budget_tokens: 256,
+        mode: RecallMode::Fast,
+        include_beliefs: true,
+        edge_expansion_enabled: true,
+        context_packing_abstention_enabled: true,
+        rerank_enabled: true,
+        learned_rerank_profile: None,
+        query_decomposition_enabled: true,
+        procedure_recall_enabled: true,
+        decay_enabled: true,
+        engine_version: "pg-contract-test".to_string(),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn retain_stores_episode_and_reflect_job_and_dedups() {
+    let store = connect().await;
+    let tenant = fresh_tenant(&store).await;
+    let scope = ScopeId::new();
+    let actor = ActorId::new();
+
+    let request = retain_request(tenant, scope, actor, "Staging pins Node 24.15.0.", None);
+    let first = retain_episode(&store, request.clone())
+        .await
+        .expect("retain");
+    let second = retain_episode(&store, request).await.expect("retain again");
+
+    assert!(!first.dedup.matched);
+    assert!(second.dedup.matched);
+    assert_eq!(second.episode_id, first.episode_id);
+    assert_eq!(second.dedup.observation_count, 2);
+
+    let episodes = store
+        .fetch_episodes_for_scope(tenant, scope, 10)
+        .await
+        .expect("episodes");
+    assert_eq!(episodes.len(), 1);
+    assert_eq!(episodes[0].observation_count, 2);
+    assert!(store.pending_job_count(tenant, scope).await.expect("count") >= 1);
+}
+
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn durability_write_with_pool_a_read_with_fresh_pool_b() {
+    let store_a = connect().await;
+    let tenant = fresh_tenant(&store_a).await;
+    let scope = ScopeId::new();
+    let actor = ActorId::new();
+
+    let svc_a = service(store_a);
+    retain_episode(
+        svc_a.store(),
+        retain_request(
+            tenant,
+            scope,
+            actor,
+            "Durable release region is Taipei.",
+            Some("release region"),
+        ),
+    )
+    .await
+    .expect("retain");
+    svc_a.reflect(tenant, scope, None).await.expect("reflect");
+
+    // A COMPLETELY fresh pool must see the compiled unit.
+    let store_b = connect().await;
+    let recalled = recall(
+        &store_b,
+        recall_request(tenant, scope, actor, "Where is the durable release region?"),
+        &CLOCK,
+    )
+    .await
+    .expect("recall via fresh pool");
+    assert_eq!(recalled.items[0].body, "Durable release region is Taipei.");
+
+    // The recall's trace is durable and tenant-bound through yet another pool.
+    let store_c = connect().await;
+    let trace = store_c
+        .trace_by_id(tenant, recalled.trace_id)
+        .await
+        .expect("trace lookup");
+    assert!(trace.is_some(), "trace persists across pools");
+}
+
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn cross_tenant_candidates_and_traces_are_isolated() {
+    let store = connect().await;
+    let tenant_a = fresh_tenant(&store).await;
+    let tenant_b = fresh_tenant(&store).await;
+    let scope = ScopeId::new();
+    let actor = ActorId::new();
+
+    let svc = service(store.clone());
+    retain_episode(
+        svc.store(),
+        retain_request(tenant_a, scope, actor, "Tenant A secret deploy fact.", None),
+    )
+    .await
+    .expect("retain");
+    svc.reflect(tenant_a, scope, None).await.expect("reflect");
+
+    let own = store
+        .fetch_recall_candidates(tenant_a, &[scope], &[], &["deploy".to_string()], None, 100)
+        .await
+        .expect("candidates");
+    assert!(!own.is_empty());
+
+    let cross = store
+        .fetch_recall_candidates(tenant_b, &[scope], &[], &["deploy".to_string()], None, 100)
+        .await
+        .expect("candidates");
+    assert!(cross.is_empty(), "tenant B must never see tenant A units");
+
+    let recalled = recall(
+        &store,
+        recall_request(tenant_a, scope, actor, "secret deploy fact"),
+        &CLOCK,
+    )
+    .await
+    .expect("recall");
+    let own_trace = store
+        .trace_by_id(tenant_a, recalled.trace_id)
+        .await
+        .expect("lookup");
+    assert!(own_trace.is_some());
+    let cross_trace = store
+        .trace_by_id(tenant_b, recalled.trace_id)
+        .await
+        .expect("lookup");
+    assert!(
+        cross_trace.is_none(),
+        "wrong tenant gets None, never a trace"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn claim_reflect_jobs_is_disjoint_and_does_not_reclaim_fresh_claims() {
+    let store = connect().await;
+    let tenant = fresh_tenant(&store).await;
+    let scope = ScopeId::new();
+    let actor = ActorId::new();
+
+    retain_episode(
+        &store,
+        retain_request(tenant, scope, actor, "Claim scenario fact one.", None),
+    )
+    .await
+    .expect("retain one");
+    retain_episode(
+        &store,
+        retain_request(tenant, scope, actor, "Claim scenario fact two.", None),
+    )
+    .await
+    .expect("retain two");
+
+    let filter = JobFilter {
+        tenant: Some(tenant),
+        scope: Some(scope),
+    };
+    let first = store.claim_reflect_jobs(filter, 1).await.expect("claim 1");
+    let second = store.claim_reflect_jobs(filter, 1).await.expect("claim 2");
+    assert_eq!(first.len(), 1);
+    assert_eq!(second.len(), 1);
+    assert_ne!(
+        first[0].job.id.as_uuid(),
+        second[0].job.id.as_uuid(),
+        "a freshly claimed job must not be handed out twice"
+    );
+
+    // Both jobs are claimed; nothing is left to claim inside the window.
+    let third = store.claim_reflect_jobs(filter, 10).await.expect("claim 3");
+    assert!(third.is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn exhausted_jobs_dead_letter_and_surface_in_count() {
+    let store = connect().await;
+    let tenant = fresh_tenant(&store).await;
+    let scope = ScopeId::new();
+    let actor = ActorId::new();
+
+    retain_episode(
+        &store,
+        retain_request(tenant, scope, actor, "Dead letter scenario fact.", None),
+    )
+    .await
+    .expect("retain");
+
+    sqlx::query("update memphant.job_state set attempts = 5 where tenant_id = $1")
+        .bind(tenant.as_uuid())
+        .execute(store.pool())
+        .await
+        .expect("exhaust attempts");
+
+    let claimed = store
+        .claim_reflect_jobs(
+            JobFilter {
+                tenant: Some(tenant),
+                scope: Some(scope),
+            },
+            10,
+        )
+        .await
+        .expect("claim");
+    assert!(claimed.is_empty(), "exhausted jobs are never re-claimed");
+
+    let dead: i64 = sqlx::query_scalar(
+        "select count(*) from memphant.job_state where tenant_id = $1 and state = 'dead'",
+    )
+    .bind(tenant.as_uuid())
+    .fetch_one(store.pool())
+    .await
+    .expect("dead count");
+    assert!(dead >= 1);
+    assert!(store.dead_letter_count().await.expect("dead letters") >= 1);
+}
+
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn forget_by_episode_tombstone_blocks_recompilation_durably() {
+    let store = connect().await;
+    let tenant = fresh_tenant(&store).await;
+    let scope = ScopeId::new();
+    let actor = ActorId::new();
+    let svc = service(store.clone());
+
+    let retained = retain_episode(
+        svc.store(),
+        retain_request(
+            tenant,
+            scope,
+            actor,
+            "Payment processor is AcmePay.",
+            Some("payment processor"),
+        ),
+    )
+    .await
+    .expect("retain");
+    svc.reflect(tenant, scope, None).await.expect("reflect");
+
+    let recalled = recall(
+        &store,
+        recall_request(tenant, scope, actor, "Which payment processor do we use?"),
+        &CLOCK,
+    )
+    .await
+    .expect("recall");
+    assert_eq!(recalled.items[0].body, "Payment processor is AcmePay.");
+
+    let forgotten = forget_memory(
+        &store,
+        ForgetRequest {
+            tenant_id: tenant,
+            scope_id: scope,
+            actor_id: actor,
+            selector: ForgetSelector {
+                memory_unit_id: None,
+                episode_id: Some(retained.episode_id),
+                resource_id: None,
+                scope_id: scope,
+            },
+            reason: "user_request".to_string(),
+        },
+        &CLOCK,
+    )
+    .await
+    .expect("forget");
+    assert_eq!(forgotten.invalidated_units.len(), 1);
+    assert_eq!(forgotten.verification, "post_forget_recall_probe_hits=0");
+
+    // Re-enqueue + recompile with a bumped compiler: the durable tombstone
+    // must refuse re-derivation from the forgotten episode.
+    retain_episode(
+        &store,
+        RetainRequest {
+            compiler_version: "compiler-pg-contract-v2".to_string(),
+            ..retain_request(
+                tenant,
+                scope,
+                actor,
+                "Payment processor is AcmePay.",
+                Some("payment processor"),
+            )
+        },
+    )
+    .await
+    .expect("re-enqueue");
+    svc.reflect(tenant, scope, None).await.expect("recompile");
+
+    let recalled_again = recall(
+        &store,
+        recall_request(tenant, scope, actor, "Which payment processor do we use?"),
+        &CLOCK,
+    )
+    .await
+    .expect("recall after recompile");
+    assert!(
+        recalled_again.items.is_empty(),
+        "tombstoned episode must not re-derive units"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn resource_retain_reflect_recall_round_trips_via_service() {
+    let store = connect().await;
+    let tenant = fresh_tenant(&store).await;
+    let scope = ScopeId::new();
+    let actor = ActorId::new();
+    let svc = service(store.clone());
+
+    let retained = retain_resource(
+        svc.store(),
+        RetainResourceRequest {
+            tenant_id: tenant,
+            scope_id: scope,
+            actor_id: actor,
+            uri: "https://example.test/runbooks/deploy.md".to_string(),
+            kind: Some(memphant_types::ResourceKind::Document),
+            content_hash: "sha256:deploy-runbook".to_string(),
+            mime_type: "text/markdown".to_string(),
+            revision: Some("rev-42".to_string()),
+            body: Some("Deploy runbook: canary first, then roll forward regions.".to_string()),
+            source_trust: TrustLevel::TrustedUser,
+            compiler_version: "compiler-pg-contract".to_string(),
+        },
+    )
+    .await
+    .expect("retain resource");
+    svc.reflect(tenant, scope, None).await.expect("reflect");
+
+    let recalled = recall(
+        &store,
+        recall_request(
+            tenant,
+            scope,
+            actor,
+            "How does the deploy runbook roll forward?",
+        ),
+        &CLOCK,
+    )
+    .await
+    .expect("recall");
+    let item = recalled
+        .items
+        .iter()
+        .find(|item| item.kind == MemoryKind::Resource)
+        .expect("resource-derived item");
+    assert_eq!(item.citation_resource_id, Some(retained.resource_id));
+}
+
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn scope_memory_page_cursors_without_overlap() {
+    let store = connect().await;
+    let tenant = fresh_tenant(&store).await;
+    let scope = ScopeId::new();
+    let actor = ActorId::new();
+    let svc = service(store.clone());
+
+    for index in 0..5 {
+        retain_episode(
+            svc.store(),
+            retain_request(
+                tenant,
+                scope,
+                actor,
+                &format!("Paginated durable fact number {index}."),
+                Some(&format!("paginated fact {index}")),
+            ),
+        )
+        .await
+        .expect("retain");
+    }
+    svc.reflect(tenant, scope, None).await.expect("reflect");
+
+    let page_one = store
+        .scope_memory_page(tenant, scope, None, 3)
+        .await
+        .expect("page one");
+    assert_eq!(page_one.items.len(), 3);
+    assert!(page_one.has_more);
+    let cursor = page_one.next_cursor.expect("cursor");
+
+    let page_two = store
+        .scope_memory_page(tenant, scope, Some(cursor), 3)
+        .await
+        .expect("page two");
+    assert!(!page_two.items.is_empty());
+    assert!(!page_two.has_more);
+
+    let ids_one: std::collections::HashSet<_> = page_one
+        .items
+        .iter()
+        .map(|unit| unit.id.as_uuid())
+        .collect();
+    let ids_two: std::collections::HashSet<_> = page_two
+        .items
+        .iter()
+        .map(|unit| unit.id.as_uuid())
+        .collect();
+    assert!(ids_one.is_disjoint(&ids_two));
+    assert_eq!(ids_one.len() + ids_two.len(), 5);
+}
+
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn api_key_lookup_and_revocation_round_trip() {
+    let store = connect().await;
+    let tenant = fresh_tenant(&store).await;
+    let key_hash = format!("hash-{}", Uuid::now_v7());
+
+    let key_id = store
+        .create_api_key(
+            tenant.as_uuid(),
+            &key_hash,
+            "contract",
+            TrustLevel::TrustedUser,
+        )
+        .await
+        .expect("create key");
+
+    let row = store
+        .lookup_api_key(&key_hash)
+        .await
+        .expect("lookup")
+        .expect("key exists");
+    assert_eq!(row.tenant_id, tenant);
+    assert_eq!(row.max_trust, TrustLevel::TrustedUser);
+    assert!(!row.revoked);
+
+    assert!(store.revoke_api_key(key_id).await.expect("revoke"));
+    let row = store
+        .lookup_api_key(&key_hash)
+        .await
+        .expect("lookup")
+        .expect("key still resolvable");
+    assert!(row.revoked, "revoked keys resolve as revoked, never valid");
+    assert!(
+        !store.revoke_api_key(key_id).await.expect("second revoke"),
+        "double revoke is a no-op"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn degraded_read_your_own_writes_serves_unreflected_episodes() {
+    let store = connect().await;
+    let tenant = fresh_tenant(&store).await;
+    let scope = ScopeId::new();
+    let actor = ActorId::new();
+    let svc = service(store.clone());
+
+    retain_episode(
+        svc.store(),
+        retain_request(
+            tenant,
+            scope,
+            actor,
+            "Fallback rollout window is Thursday night.",
+            None,
+        ),
+    )
+    .await
+    .expect("retain");
+
+    // No reflect: the service-level recall must fall back to raw episodes.
+    let response = svc
+        .recall(
+            tenant,
+            RecallHttpRequest {
+                tenant_id: tenant,
+                scope_id: scope,
+                actor_id: actor,
+                allowed_scope_ids: Some(vec![scope]),
+                query: "When is the fallback rollout window?".to_string(),
+                limit: Some(4),
+                budget_tokens: Some(256),
+                mode: None,
+                include_beliefs: None,
+                edge_expansion_enabled: None,
+                context_packing_abstention_enabled: None,
+                rerank_enabled: None,
+                query_decomposition_enabled: None,
+                procedure_recall_enabled: None,
+                decay_enabled: None,
+                include_trace: None,
+            },
+        )
+        .await
+        .expect("service recall");
+    assert!(response.degraded);
+    assert_eq!(
+        response.items[0].body,
+        "Fallback rollout window is Thursday night."
+    );
+}

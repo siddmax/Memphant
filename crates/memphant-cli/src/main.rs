@@ -90,13 +90,169 @@ fn main() -> ExitCode {
         {
             bootstrap_check(provider, Some(Path::new(profile)))
         }
+        [admin, command, name_flag, name, url_flag, url]
+            if admin == "admin"
+                && command == "create-tenant"
+                && name_flag == "--name"
+                && url_flag == "--database-url" =>
+        {
+            admin_create_tenant(name, url)
+        }
+        [admin, command, tenant_flag, tenant, url_flag, url]
+            if admin == "admin"
+                && command == "create-key"
+                && tenant_flag == "--tenant"
+                && url_flag == "--database-url" =>
+        {
+            admin_create_key(tenant, "trusted_user", url)
+        }
+        [
+            admin,
+            command,
+            tenant_flag,
+            tenant,
+            trust_flag,
+            trust,
+            url_flag,
+            url,
+        ] if admin == "admin"
+            && command == "create-key"
+            && tenant_flag == "--tenant"
+            && trust_flag == "--max-trust"
+            && url_flag == "--database-url" =>
+        {
+            admin_create_key(tenant, trust, url)
+        }
+        [admin, command, id_flag, id, url_flag, url]
+            if admin == "admin"
+                && command == "revoke-key"
+                && id_flag == "--id"
+                && url_flag == "--database-url" =>
+        {
+            admin_revoke_key(id, url)
+        }
         _ => {
             eprintln!(
-                "usage: memphant lock --out <path|-> | memphant verify --lock <path> [--export <dir>] | memphant compile --scope <scope> --out <dir> --source <json> | memphant db lint --provider <plain-postgres|supabase|neon> | memphant db bootstrap-check --provider <plain-postgres|supabase|neon> [--profile <env-file>]"
+                "usage: memphant lock --out <path|-> | memphant verify --lock <path> [--export <dir>] | memphant compile --scope <scope> --out <dir> --source <json> | memphant db lint --provider <plain-postgres|supabase|neon> | memphant db bootstrap-check --provider <plain-postgres|supabase|neon> [--profile <env-file>] | memphant admin create-tenant --name <name> --database-url <url> | memphant admin create-key --tenant <uuid> [--max-trust <tier>] --database-url <url> | memphant admin revoke-key --id <uuid> --database-url <url>"
             );
             ExitCode::from(2)
         }
     }
+}
+
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime")
+        .block_on(future)
+}
+
+fn connect_pg(url: &str) -> Result<memphant_store_postgres::PgStore, String> {
+    block_on(memphant_store_postgres::PgStore::connect(url)).map_err(|error| error.to_string())
+}
+
+fn admin_create_tenant(name: &str, url: &str) -> ExitCode {
+    match connect_pg(url)
+        .and_then(|store| block_on(store.create_tenant(name)).map_err(|error| error.to_string()))
+    {
+        Ok(id) => {
+            println!("tenant_created id={id} name={name}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("admin=error command=create-tenant");
+            eprintln!("{error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn admin_create_key(tenant: &str, max_trust: &str, url: &str) -> ExitCode {
+    let tenant_id = match uuid::Uuid::parse_str(tenant) {
+        Ok(tenant_id) => tenant_id,
+        Err(error) => {
+            eprintln!("admin=error command=create-key");
+            eprintln!("--tenant must be a UUID: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let trust: memphant_types::TrustLevel = match serde_json::from_value(serde_json::Value::String(
+        max_trust.to_string(),
+    )) {
+        Ok(trust) => trust,
+        Err(_) => {
+            eprintln!("admin=error command=create-key");
+            eprintln!(
+                "--max-trust must be one of: trusted_user, trusted_system, verified_tool, unverified_tool, web_content, agent_output, imported_external, quarantined"
+            );
+            return ExitCode::from(1);
+        }
+    };
+
+    // The plaintext key is printed exactly ONCE; only its sha256 is stored.
+    let plaintext = format!(
+        "mk_{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    let key_hash = sha256_hex(&plaintext);
+
+    match connect_pg(url).and_then(|store| {
+        block_on(store.create_api_key(tenant_id, &key_hash, "cli", trust))
+            .map_err(|error| error.to_string())
+    }) {
+        Ok(id) => {
+            println!("key_created id={id} tenant={tenant_id} max_trust={max_trust}");
+            println!("{plaintext}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("admin=error command=create-key");
+            eprintln!("{error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn admin_revoke_key(id: &str, url: &str) -> ExitCode {
+    let key_id = match uuid::Uuid::parse_str(id) {
+        Ok(key_id) => key_id,
+        Err(error) => {
+            eprintln!("admin=error command=revoke-key");
+            eprintln!("--id must be a UUID: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    match connect_pg(url)
+        .and_then(|store| block_on(store.revoke_api_key(key_id)).map_err(|error| error.to_string()))
+    {
+        Ok(true) => {
+            println!("key_revoked id={key_id}");
+            ExitCode::SUCCESS
+        }
+        Ok(false) => {
+            eprintln!("admin=error command=revoke-key");
+            eprintln!("key {key_id} not found or already revoked");
+            ExitCode::from(1)
+        }
+        Err(error) => {
+            eprintln!("admin=error command=revoke-key");
+            eprintln!("{error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn sha256_hex(value: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn emit_lock(out: &str) -> ExitCode {
