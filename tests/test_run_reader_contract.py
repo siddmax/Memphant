@@ -103,13 +103,40 @@ def test_reader_cli_cache_is_keyed_by_engine_and_model(tmp_path) -> None:
 def test_unknown_engine_is_rejected(tmp_path) -> None:
     reader = _load_run_reader()
     try:
-        reader.ReaderCli("openrouter", "m", "m", tmp_path, 0)
+        reader.ReaderCli("not-a-real-engine", "m", "m", tmp_path, 0)
         raise AssertionError("expected ValueError")
     except ValueError:
         pass
 
 
-def test_reasoning_effort_is_part_of_cache_identity_and_codex_only(tmp_path) -> None:
+def test_openrouter_requires_api_key(tmp_path, monkeypatch) -> None:
+    reader = _load_run_reader()
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    try:
+        reader.ReaderCli("openrouter", "m", "m", tmp_path, 0)
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as error:
+        assert "OPENROUTER_API_KEY" in str(error)
+
+
+def test_openrouter_cache_key_includes_engine_model_and_effort(tmp_path, monkeypatch) -> None:
+    reader = _load_run_reader()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-not-real")
+    a = reader.ReaderCli("openrouter", "openai/gpt-5.6-terra", "anthropic/claude-sonnet-5", tmp_path, 0)
+    b = reader.ReaderCli(
+        "openrouter", "openai/gpt-5.6-terra", "anthropic/claude-sonnet-5", tmp_path, 0,
+        reasoning_effort="low",
+    )
+    # Same engine/models, reasoning effort differs -> different cache entries.
+    assert a._cache_path("reader", "sys", "prompt") != b._cache_path("reader", "sys", "prompt")
+    # Reader and judge use different models on this engine -> different cache entries.
+    assert a._cache_path("reader", "sys", "prompt") != a._cache_path("judge", "sys", "prompt")
+    # A codex ReaderCli with the same reader model still keys separately (engine is part of the key).
+    codex = reader.ReaderCli("codex", "openai/gpt-5.6-terra", "anthropic/claude-sonnet-5", tmp_path, 0)
+    assert codex._cache_path("reader", "sys", "prompt") != a._cache_path("reader", "sys", "prompt")
+
+
+def test_reasoning_effort_is_part_of_cache_identity_and_codex_or_openrouter_only(tmp_path) -> None:
     reader = _load_run_reader()
     default = reader.ReaderCli("codex", "gpt-5.6-terra", "gpt-5.6-terra", tmp_path, 0)
     medium = reader.ReaderCli(

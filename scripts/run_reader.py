@@ -14,6 +14,15 @@ Engines (``--engine``):
   stdin; only the agent's final message is read (``-o``), so any tool use is
   stripped by construction, and the read-only sandbox plus an explicit
   "answer directly, no commands" instruction suppress it at the source.
+- ``openrouter``: direct HTTPS POST to
+  ``https://openrouter.ai/api/v1/chat/completions`` (no CLI, no quota tied to
+  a coding-agent subscription). ``--model``/``--judge-model`` must be full
+  OpenRouter model ids (e.g. ``openai/gpt-5.6-terra``,
+  ``anthropic/claude-sonnet-5``). Requires ``OPENROUTER_API_KEY`` in the
+  environment (never read from a flag, never printed, never persisted); run
+  via Doppler so the key stays out of shell history and process args:
+  ``doppler run --project syndai --config dev -- python3 scripts/run_reader.py
+  --engine openrouter ...``.
 
 ``--judge-model`` lets the judge use a different (stronger) model than the
 reader; both model ids and the engine are recorded in the report header.
@@ -38,16 +47,22 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import random
 import re
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 DEFAULT_MODEL = "claude-haiku-4-5-20251001"
-ENGINES = ("claude", "codex")
+ENGINES = ("claude", "codex", "openrouter")
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_TIMEOUT = 180
+OPENROUTER_RETRY_DELAYS = (2, 8, 30)  # 4 tries total: 3 backoff sleeps between them
 # The codex engine has no separate system-prompt channel; the system prompt is
 # prepended to the user prompt with this no-tool-use guard.
 CODEX_NO_TOOLS_GUARD = (
@@ -105,8 +120,8 @@ class ReaderCli:
     ) -> None:
         if engine not in ENGINES:
             raise ValueError(f"unknown engine: {engine} (known: {ENGINES})")
-        if reasoning_effort is not None and engine != "codex":
-            raise ValueError("--reasoning-effort is codex-only")
+        if reasoning_effort is not None and engine not in ("codex", "openrouter"):
+            raise ValueError("--reasoning-effort is codex/openrouter-only")
         self.engine = engine
         self.model = model
         self.judge_model = judge_model
@@ -115,6 +130,17 @@ class ReaderCli:
         self.max_calls = max_calls
         self.fresh_calls = 0
         self.cached_calls = 0
+        self._openrouter_api_key = None
+        if engine == "openrouter":
+            api_key = os.environ.get("OPENROUTER_API_KEY")
+            if not api_key:
+                raise RuntimeError(
+                    "--engine openrouter requires OPENROUTER_API_KEY in the "
+                    "environment; run via: doppler run --project syndai "
+                    "--config dev -- python3 scripts/run_reader.py --engine "
+                    "openrouter ..."
+                )
+            self._openrouter_api_key = api_key
         cache_dir.mkdir(parents=True, exist_ok=True)
 
     def model_for(self, kind: str) -> str:
@@ -168,8 +194,10 @@ class ReaderCli:
         self.fresh_calls += 1
         if self.engine == "claude":
             reply = self._call_claude(kind, system_prompt, prompt)
-        else:
+        elif self.engine == "codex":
             reply = self._call_codex(kind, system_prompt, prompt)
+        else:
+            reply = self._call_openrouter(kind, system_prompt, prompt)
         cache_path.write_text(
             json.dumps({"kind": kind, "prompt": prompt, "reply": reply}) + "\n"
         )
@@ -244,6 +272,63 @@ class ReaderCli:
         if not reply:
             raise RuntimeError("codex exec returned an empty final message")
         return reply
+
+    def _call_openrouter(self, kind: str, system_prompt: str, prompt: str) -> str:
+        payload = {
+            "model": self.model_for(kind),
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0,
+            "max_tokens": 1024,
+        }
+        if self.reasoning_effort is not None:
+            payload["reasoning"] = {"effort": self.reasoning_effort}
+        body = json.dumps(payload).encode()
+        request = urllib.request.Request(
+            OPENROUTER_URL,
+            data=body,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {self._openrouter_api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://github.com/memphant",
+                "X-Title": "memphant-bench-reader",
+            },
+        )
+        last_error: Exception | None = None
+        for attempt, delay in enumerate((0, *OPENROUTER_RETRY_DELAYS)):
+            if delay:
+                time.sleep(delay)
+            try:
+                with urllib.request.urlopen(
+                    request, timeout=OPENROUTER_TIMEOUT
+                ) as response:
+                    data = json.loads(response.read())
+                content = (
+                    data.get("choices", [{}])[0].get("message", {}).get("content")
+                )
+                if not content:
+                    raise RuntimeError(
+                        f"openrouter returned empty content (attempt "
+                        f"{attempt + 1}/4): {json.dumps(data)[:500]}"
+                    )
+                return content.strip()
+            except urllib.error.HTTPError as error:
+                body_text = error.read().decode(errors="replace")[:500]
+                last_error = RuntimeError(
+                    f"openrouter request failed (HTTP {error.code}, attempt "
+                    f"{attempt + 1}/4): {body_text}"
+                )
+                if error.code != 429 and error.code < 500:
+                    raise last_error from error
+            except (urllib.error.URLError, TimeoutError) as error:
+                last_error = RuntimeError(
+                    f"openrouter request failed (attempt {attempt + 1}/4): {error}"
+                )
+        assert last_error is not None
+        raise last_error
 
 
 def build_reader_prompt(row: dict) -> str:
@@ -345,7 +430,11 @@ def main() -> int:
     parser.add_argument(
         "--reasoning-effort",
         default=None,
-        help="codex-only: model_reasoning_effort override (low|medium|high|...); part of the cache key",
+        help=(
+            "codex/openrouter-only: reasoning effort override (low|medium|"
+            "high|...) — codex model_reasoning_effort or OpenRouter "
+            "reasoning.effort; part of the cache key"
+        ),
     )
     parser.add_argument("--cache-dir", default="docs/build-log/artifacts/real-retrieval-20260710/reader-cache")
     parser.add_argument("--max-calls", type=int, default=150, help="hard fresh-call budget for this invocation")
@@ -409,6 +498,7 @@ def main() -> int:
     engine_desc = {
         "claude": "claude -p headless",
         "codex": "codex exec headless (read-only sandbox, final message only)",
+        "openrouter": "openrouter chat/completions API",
     }[args.engine]
     report = {
         "benchmark": "longmemeval_reader_qa",
