@@ -15,6 +15,7 @@ fn main() -> ExitCode {
 
     match args.remove(0).as_str() {
         "run" => run_command(args),
+        "bench-lme" => bench_lme_command(args),
         "verify-golden" => verify_golden_command(args),
         "security" => security_command(args),
         "ops" => ops_command(args),
@@ -419,8 +420,135 @@ fn profile_command(args: Vec<String>) -> ExitCode {
     }
 }
 
+fn bench_lme_command(args: Vec<String>) -> ExitCode {
+    let mut database_url = None;
+    let mut data = None;
+    let mut sample = None;
+    let mut seed = None;
+    let mut k = 10usize;
+    let mut disable = None;
+    let mut mode = memphant_types::RecallMode::Fast;
+    let mut baseline = None;
+    let mut out = None;
+    let mut index = 0;
+    while index < args.len() {
+        let take = |index: usize| -> Option<String> { args.get(index + 1).cloned() };
+        match args[index].as_str() {
+            "--database-url" => {
+                database_url = take(index);
+                index += 2;
+            }
+            "--data" => {
+                data = take(index);
+                index += 2;
+            }
+            "--sample" => {
+                sample = take(index).and_then(|value| value.parse::<usize>().ok());
+                index += 2;
+            }
+            "--seed" => {
+                seed = take(index).and_then(|value| value.parse::<u64>().ok());
+                index += 2;
+            }
+            "--k" => {
+                match take(index).and_then(|value| value.parse::<usize>().ok()) {
+                    Some(value) => k = value,
+                    None => {
+                        usage();
+                        return ExitCode::from(2);
+                    }
+                }
+                index += 2;
+            }
+            "--disable" => {
+                disable = take(index);
+                index += 2;
+            }
+            "--mode" => {
+                mode = match take(index).as_deref() {
+                    Some("fast") => memphant_types::RecallMode::Fast,
+                    Some("balanced") => memphant_types::RecallMode::Balanced,
+                    Some("exhaustive") => memphant_types::RecallMode::Exhaustive,
+                    _ => {
+                        usage();
+                        return ExitCode::from(2);
+                    }
+                };
+                index += 2;
+            }
+            "--baseline" => {
+                baseline = take(index);
+                index += 2;
+            }
+            "--out" => {
+                out = take(index).map(PathBuf::from);
+                index += 2;
+            }
+            _ => {
+                usage();
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let (Some(database_url), Some(data), Some(sample), Some(seed)) =
+        (database_url, data, sample, seed)
+    else {
+        usage();
+        return ExitCode::from(2);
+    };
+
+    let command = std::env::args().collect::<Vec<_>>().join(" ");
+    let options = memphant_eval::bench_lme::BenchLmeOptions {
+        database_url,
+        data_path: data,
+        sample,
+        seed,
+        k,
+        disable,
+        mode,
+        baseline,
+        command,
+    };
+    match memphant_eval::bench_lme::run_bench_lme(&options) {
+        Ok(report) => {
+            let json = match serde_json::to_string_pretty(&report) {
+                Ok(json) => json,
+                Err(error) => {
+                    eprintln!("bench_lme=error\n{error}");
+                    return ExitCode::from(1);
+                }
+            };
+            match &out {
+                Some(path) => {
+                    if let Err(error) = std::fs::write(path, format!("{json}\n")) {
+                        eprintln!("bench_lme=error\n{error}");
+                        return ExitCode::from(1);
+                    }
+                }
+                None => println!("{json}"),
+            }
+            println!(
+                "bench_lme=done sample={} seed={} recall_at_5={:?} recall_at_10={:?} disabled={} out={}",
+                report.sample_n,
+                report.sample_seed,
+                report.overall.recall_at_5,
+                report.overall.recall_at_10,
+                report.disabled.as_deref().unwrap_or("none"),
+                out.as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "stdout".to_string())
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("bench_lme=error\n{error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn usage() {
     eprintln!(
-        "usage: memphant-eval run <suite.yaml> [--archive-traces] [--archive-dir <dir>] [--disable-contextual-chunks] [--disable-temporal-validity] [--disable-edge-expansion] [--disable-context-packing-abstention] [--disable-rerank] [--disable-learned-rerank] [--disable-query-decomposition] [--disable-procedure-recall] [--disable-decay] [--disable-l4-exhaustive] [--filesystem-control] | memphant-eval verify-golden <suite.yaml> | memphant-eval security <suite.yaml> | memphant-eval ops <suite.yaml> | memphant-eval syndai-trace-compare <fixture.yaml> [--archive-traces] [--archive-dir <dir>] | memphant-eval profile <profile.yaml> --compare-to <baseline> [--archive <path>] | memphant-eval schema trace"
+        "usage: memphant-eval bench-lme --database-url <url> --data <longmemeval.json> --sample <n> --seed <s> [--k 10] [--disable vector|edge_expansion|rerank|query_decomposition|procedure_recall|decay|packing] [--mode fast|balanced|exhaustive] [--baseline <report.json>] [--out <report.json>] | memphant-eval run <suite.yaml> [--archive-traces] [--archive-dir <dir>] [--disable-contextual-chunks] [--disable-temporal-validity] [--disable-edge-expansion] [--disable-context-packing-abstention] [--disable-rerank] [--disable-learned-rerank] [--disable-query-decomposition] [--disable-procedure-recall] [--disable-decay] [--disable-l4-exhaustive] [--filesystem-control] | memphant-eval verify-golden <suite.yaml> | memphant-eval security <suite.yaml> | memphant-eval ops <suite.yaml> | memphant-eval syndai-trace-compare <fixture.yaml> [--archive-traces] [--archive-dir <dir>] | memphant-eval profile <profile.yaml> --compare-to <baseline> [--archive <path>] | memphant-eval schema trace"
     );
 }

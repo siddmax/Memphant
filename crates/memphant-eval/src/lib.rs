@@ -16,6 +16,8 @@ use memphant_types::{
 use schemars::schema_for;
 use serde::{Deserialize, Serialize};
 
+pub mod bench_lme;
+
 pub const EVAL_RUNNER_NAME: &str = "memphant-eval";
 const REQUIRED_PROFILE_AXES: &[&str] = &[
     "outcome",

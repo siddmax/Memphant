@@ -1,0 +1,852 @@
+//! LongMemEval retrieval-only benchmark lane against the packaged Postgres
+//! runtime (`MemoryService<PgStore>`).
+//!
+//! Per sampled question (stratified by `question_type`, seeded, identical
+//! sample for every run at the same seed): create a fresh tenant, ingest each
+//! haystack session chronologically as ONE episode (turns concatenated as
+//! `role: content`, body prefixed with the session id and date), reflect via
+//! the worker claim/complete path, then recall the question and score
+//! Recall@5/@10 by provenance: a top-k item hits when its
+//! `citation_episode_id` maps back to a session in `answer_session_ids`.
+//! Abstention questions (`_abs` in the question id) are scored separately.
+//!
+//! Honesty header: every report records the dataset sha256, sample seed,
+//! `runtime: "postgres"`, `retrieval_only: true` and the exact command line.
+//! This lane makes NO reader/QA-accuracy claim.
+
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
+
+use memphant_core::service::MemoryService;
+use memphant_core::{EmbeddingProvider, NoopEmbedding, SystemClock};
+use memphant_store_postgres::PgStore;
+use memphant_types::{
+    ActorId, RecallHttpRequest, RecallMode, RetainEpisodeHttpRequest, ScopeId, TenantId, TrustLevel,
+};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+const BOOTSTRAP_RESAMPLES: usize = 1000;
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LmeQuestion {
+    pub question_id: String,
+    pub question_type: String,
+    pub question: String,
+    #[serde(default)]
+    pub question_date: Option<String>,
+    pub haystack_session_ids: Vec<String>,
+    pub haystack_dates: Vec<String>,
+    pub haystack_sessions: Vec<Vec<LmeTurn>>,
+    pub answer_session_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LmeTurn {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchLmeOptions {
+    pub database_url: String,
+    pub data_path: String,
+    pub sample: usize,
+    pub seed: u64,
+    pub k: usize,
+    /// One of: vector, edge_expansion, rerank, query_decomposition,
+    /// procedure_recall, decay, packing.
+    pub disable: Option<String>,
+    pub mode: RecallMode,
+    /// Baseline report path for paired per-question deltas.
+    pub baseline: Option<String>,
+    pub command: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuestionResult {
+    pub question_id: String,
+    pub question_type: String,
+    pub is_abstention: bool,
+    /// None for abstention questions (scored separately).
+    pub hit_at_5: Option<bool>,
+    pub hit_at_10: Option<bool>,
+    /// Some(...) only for abstention questions: correct when recall abstained
+    /// or returned no answer-session item.
+    pub abstention_correct: Option<bool>,
+    /// 1-based rank of the first answer-bearing item, if any.
+    pub first_answer_rank: Option<usize>,
+    pub returned_items: usize,
+    pub degraded: bool,
+    pub ingested_sessions: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StratumMetrics {
+    pub question_type: String,
+    pub n: usize,
+    pub n_scored: usize,
+    pub recall_at_5: Option<f64>,
+    pub recall_at_10: Option<f64>,
+    pub abstention_n: usize,
+    pub abstention_correct: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeltaCi {
+    pub mean: f64,
+    pub ci95_low: f64,
+    pub ci95_high: f64,
+    /// True when the bootstrap 95% CI excludes zero.
+    pub ci_excludes_zero: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairedComparison {
+    pub baseline_path: String,
+    pub n_paired: usize,
+    pub delta_recall_at_5: DeltaCi,
+    pub delta_recall_at_10: DeltaCi,
+    pub bootstrap_resamples: usize,
+    pub bootstrap_seed: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchLmeReport {
+    pub benchmark: String,
+    pub dataset_path: String,
+    pub dataset_sha256: String,
+    pub dataset_questions: usize,
+    pub sample_seed: u64,
+    pub sample_n: usize,
+    pub k: usize,
+    pub runtime: String,
+    pub retrieval_only: bool,
+    pub embeddings: String,
+    pub ingestion: String,
+    pub reflect: String,
+    pub mode: String,
+    pub disabled: Option<String>,
+    pub command: String,
+    pub generated_at_unix: u64,
+    pub overall: StratumMetrics,
+    pub strata: Vec<StratumMetrics>,
+    pub per_question: Vec<QuestionResult>,
+    pub paired_vs_baseline: Option<PairedComparison>,
+}
+
+/// Deterministic splitmix64 PRNG — no external randomness anywhere in the
+/// lane, so a (seed, sample) pair always names the same question set.
+pub struct SplitMix64 {
+    state: u64,
+}
+
+impl SplitMix64 {
+    pub fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    pub fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9E3779B97F4A7C15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+        z ^ (z >> 31)
+    }
+
+    pub fn next_below(&mut self, bound: usize) -> usize {
+        (self.next_u64() % bound.max(1) as u64) as usize
+    }
+}
+
+fn stratum_seed(seed: u64, stratum: &str) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in stratum.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    seed ^ hash
+}
+
+/// Stratified, seeded sample: proportional allocation (largest remainder,
+/// minimum one per stratum when the budget allows), then a seeded
+/// Fisher-Yates shuffle inside each stratum sorted by question id.
+pub fn stratified_sample_ids(
+    questions: &[(String, String)],
+    sample: usize,
+    seed: u64,
+) -> Vec<String> {
+    let mut strata: Vec<(String, Vec<String>)> = Vec::new();
+    for (id, stratum) in questions {
+        match strata.iter_mut().find(|(name, _)| name == stratum) {
+            Some((_, ids)) => ids.push(id.clone()),
+            None => strata.push((stratum.clone(), vec![id.clone()])),
+        }
+    }
+    strata.sort_by(|left, right| left.0.cmp(&right.0));
+    for (_, ids) in &mut strata {
+        ids.sort();
+    }
+    let total = questions.len();
+    let sample = sample.min(total);
+
+    // Largest-remainder proportional allocation.
+    let mut allocations: Vec<(usize, f64)> = strata
+        .iter()
+        .map(|(_, ids)| {
+            let exact = sample as f64 * ids.len() as f64 / total as f64;
+            (exact.floor() as usize, exact - exact.floor())
+        })
+        .collect();
+    if sample >= strata.len() {
+        for (index, (floor, _)) in allocations.iter_mut().enumerate() {
+            if *floor == 0 && !strata[index].1.is_empty() {
+                *floor = 1;
+            }
+        }
+    }
+    let mut assigned: usize = allocations.iter().map(|(floor, _)| *floor).sum();
+    let mut order: Vec<usize> = (0..allocations.len()).collect();
+    order.sort_by(|a, b| {
+        allocations[*b]
+            .1
+            .partial_cmp(&allocations[*a].1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| strata[*a].0.cmp(&strata[*b].0))
+    });
+    let mut cursor = 0;
+    while assigned < sample {
+        let index = order[cursor % order.len()];
+        if allocations[index].0 < strata[index].1.len() {
+            allocations[index].0 += 1;
+            assigned += 1;
+        }
+        cursor += 1;
+        if cursor > order.len() * (sample + 1) {
+            break; // every stratum exhausted
+        }
+    }
+    while assigned > sample {
+        let index = order[cursor % order.len()];
+        if allocations[index].0 > 1 {
+            allocations[index].0 -= 1;
+            assigned -= 1;
+        }
+        cursor += 1;
+    }
+
+    let mut picked = Vec::new();
+    for ((stratum, ids), (count, _)) in strata.iter().zip(allocations.iter()) {
+        let mut pool = ids.clone();
+        let mut rng = SplitMix64::new(stratum_seed(seed, stratum));
+        for index in (1..pool.len()).rev() {
+            let swap = rng.next_below(index + 1);
+            pool.swap(index, swap);
+        }
+        picked.extend(pool.into_iter().take((*count).min(ids.len())));
+    }
+    picked.sort();
+    picked
+}
+
+/// Pure scorer: `item_sessions` is the recalled items' provenance
+/// (rank-ordered session ids, None when an item has no episode citation).
+pub fn score_question(
+    item_sessions: &[Option<String>],
+    answer_session_ids: &[String],
+    is_abstention: bool,
+    abstained: bool,
+) -> (Option<bool>, Option<bool>, Option<bool>, Option<usize>) {
+    let first_answer_rank = item_sessions.iter().enumerate().find_map(|(index, item)| {
+        item.as_ref()
+            .filter(|session| answer_session_ids.iter().any(|answer| answer == *session))
+            .map(|_| index + 1)
+    });
+    if is_abstention {
+        let correct = abstained || first_answer_rank.is_none();
+        (None, None, Some(correct), first_answer_rank)
+    } else {
+        let hit5 = first_answer_rank.is_some_and(|rank| rank <= 5);
+        let hit10 = first_answer_rank.is_some_and(|rank| rank <= 10);
+        (Some(hit5), Some(hit10), None, first_answer_rank)
+    }
+}
+
+/// Bootstrap 95% CI over per-question paired deltas (seeded, deterministic).
+pub fn bootstrap_ci(deltas: &[f64], resamples: usize, seed: u64) -> DeltaCi {
+    let n = deltas.len();
+    let mean = if n == 0 {
+        0.0
+    } else {
+        deltas.iter().sum::<f64>() / n as f64
+    };
+    if n == 0 {
+        return DeltaCi {
+            mean,
+            ci95_low: 0.0,
+            ci95_high: 0.0,
+            ci_excludes_zero: false,
+        };
+    }
+    let mut rng = SplitMix64::new(seed);
+    let mut means = Vec::with_capacity(resamples);
+    for _ in 0..resamples {
+        let mut sum = 0.0;
+        for _ in 0..n {
+            sum += deltas[rng.next_below(n)];
+        }
+        means.push(sum / n as f64);
+    }
+    means.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let low = means[((resamples as f64 * 0.025).floor() as usize).min(resamples - 1)];
+    let high = means[((resamples as f64 * 0.975).ceil() as usize - 1).min(resamples - 1)];
+    DeltaCi {
+        mean,
+        ci95_low: low,
+        ci95_high: high,
+        ci_excludes_zero: low > 0.0 || high < 0.0,
+    }
+}
+
+fn aggregate(name: &str, rows: &[&QuestionResult]) -> StratumMetrics {
+    let scored: Vec<_> = rows.iter().filter(|row| !row.is_abstention).collect();
+    let abstentions: Vec<_> = rows.iter().filter(|row| row.is_abstention).collect();
+    let ratio = |hits: usize, n: usize| (n > 0).then(|| hits as f64 / n as f64);
+    StratumMetrics {
+        question_type: name.to_string(),
+        n: rows.len(),
+        n_scored: scored.len(),
+        recall_at_5: ratio(
+            scored
+                .iter()
+                .filter(|row| row.hit_at_5 == Some(true))
+                .count(),
+            scored.len(),
+        ),
+        recall_at_10: ratio(
+            scored
+                .iter()
+                .filter(|row| row.hit_at_10 == Some(true))
+                .count(),
+            scored.len(),
+        ),
+        abstention_n: abstentions.len(),
+        abstention_correct: abstentions
+            .iter()
+            .filter(|row| row.abstention_correct == Some(true))
+            .count(),
+    }
+}
+
+fn paired_comparison(
+    current: &[QuestionResult],
+    baseline: &BenchLmeReport,
+    baseline_path: &str,
+    seed: u64,
+) -> PairedComparison {
+    let baseline_rows: HashMap<&str, &QuestionResult> = baseline
+        .per_question
+        .iter()
+        .map(|row| (row.question_id.as_str(), row))
+        .collect();
+    let mut deltas5 = Vec::new();
+    let mut deltas10 = Vec::new();
+    for row in current.iter().filter(|row| !row.is_abstention) {
+        let Some(base) = baseline_rows.get(row.question_id.as_str()) else {
+            continue;
+        };
+        let (Some(hit5), Some(hit10), Some(base5), Some(base10)) =
+            (row.hit_at_5, row.hit_at_10, base.hit_at_5, base.hit_at_10)
+        else {
+            continue;
+        };
+        deltas5.push(f64::from(u8::from(hit5)) - f64::from(u8::from(base5)));
+        deltas10.push(f64::from(u8::from(hit10)) - f64::from(u8::from(base10)));
+    }
+    PairedComparison {
+        baseline_path: baseline_path.to_string(),
+        n_paired: deltas5.len(),
+        delta_recall_at_5: bootstrap_ci(&deltas5, BOOTSTRAP_RESAMPLES, seed),
+        delta_recall_at_10: bootstrap_ci(&deltas10, BOOTSTRAP_RESAMPLES, seed),
+        bootstrap_resamples: BOOTSTRAP_RESAMPLES,
+        bootstrap_seed: seed,
+    }
+}
+
+fn session_body(session_id: &str, date: &str, turns: &[LmeTurn]) -> String {
+    let mut body = format!("[session {session_id}] [date {date}]\n");
+    for turn in turns {
+        body.push_str(&turn.role);
+        body.push_str(": ");
+        body.push_str(&turn.content);
+        body.push('\n');
+    }
+    body
+}
+
+#[cfg(feature = "fastembed")]
+fn build_fastembed() -> Result<Arc<dyn EmbeddingProvider>, String> {
+    memphant_runtime::embeddings::FastEmbedProvider::new()
+        .map(|provider| Arc::new(provider) as Arc<dyn EmbeddingProvider>)
+        .map_err(|error| format!("fastembed initialization failed: {error}"))
+}
+
+#[cfg(not(feature = "fastembed"))]
+fn build_fastembed() -> Result<Arc<dyn EmbeddingProvider>, String> {
+    Err("bench-lme requires a binary built with --features fastembed (real embeddings are part of the benchmark contract)".to_string())
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+pub fn run_bench_lme(options: &BenchLmeOptions) -> Result<BenchLmeReport, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("tokio runtime: {error}"))?;
+    runtime.block_on(run_bench_lme_async(options))
+}
+
+async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport, String> {
+    let data_path = Path::new(&options.data_path);
+    let dataset_sha256 = sha256_file(data_path)?;
+    let raw = std::fs::read_to_string(data_path)
+        .map_err(|error| format!("read {}: {error}", data_path.display()))?;
+    let questions: Vec<LmeQuestion> =
+        serde_json::from_str(&raw).map_err(|error| format!("parse dataset: {error}"))?;
+    let dataset_questions = questions.len();
+
+    let id_pairs: Vec<(String, String)> = questions
+        .iter()
+        .map(|question| (question.question_id.clone(), question.question_type.clone()))
+        .collect();
+    let sampled_ids = stratified_sample_ids(&id_pairs, options.sample, options.seed);
+    let by_id: HashMap<&str, &LmeQuestion> = questions
+        .iter()
+        .map(|question| (question.question_id.as_str(), question))
+        .collect();
+
+    let store = Arc::new(
+        PgStore::connect(&options.database_url)
+            .await
+            .map_err(|error| format!("postgres connect: {error}"))?,
+    );
+    let embedder = build_fastembed()?;
+    let ingest_service = MemoryService::new(
+        Arc::clone(&store),
+        Arc::new(SystemClock),
+        Arc::clone(&embedder),
+    );
+    let vector_disabled = options.disable.as_deref() == Some("vector");
+    // Vector ablation: same store/units, but the recall-side service embeds
+    // with Noop so `query_vec` is None and the vector channel is honestly off.
+    let recall_service = if vector_disabled {
+        MemoryService::new(
+            Arc::clone(&store),
+            Arc::new(SystemClock),
+            Arc::new(NoopEmbedding),
+        )
+    } else {
+        ingest_service.clone()
+    };
+
+    let disable = options.disable.as_deref();
+    if let Some(stage) = disable {
+        let known = [
+            "vector",
+            "edge_expansion",
+            "rerank",
+            "query_decomposition",
+            "procedure_recall",
+            "decay",
+            "packing",
+        ];
+        if !known.contains(&stage) {
+            return Err(format!(
+                "unknown --disable stage: {stage} (known: {known:?})"
+            ));
+        }
+    }
+
+    // Unique per-run slug nonce: every run ingests into FRESH tenants (fresh
+    // tenant per question), so repeated runs never collide or share state.
+    let run_nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+
+    let mut per_question = Vec::new();
+    for (index, question_id) in sampled_ids.iter().enumerate() {
+        let question = by_id
+            .get(question_id.as_str())
+            .ok_or_else(|| format!("sampled id missing from dataset: {question_id}"))?;
+        eprintln!(
+            "bench-lme [{}/{}] {} ({}) sessions={}",
+            index + 1,
+            sampled_ids.len(),
+            question.question_id,
+            question.question_type,
+            question.haystack_sessions.len()
+        );
+
+        let tenant_uuid = store
+            .create_tenant(&format!(
+                "lme-{run_nonce}-{}-{}",
+                options.seed, question.question_id
+            ))
+            .await
+            .map_err(|error| format!("create_tenant: {error}"))?;
+        let tenant = TenantId::from_u128(tenant_uuid.as_u128());
+        let scope = ScopeId::new();
+        let actor = ActorId::new();
+
+        // Chronological ingestion: one episode per haystack session.
+        let mut order: Vec<usize> = (0..question.haystack_sessions.len()).collect();
+        order.sort_by(|left, right| {
+            question.haystack_dates[*left]
+                .cmp(&question.haystack_dates[*right])
+                .then(left.cmp(right))
+        });
+        let mut episode_sessions = HashMap::new();
+        for session_index in order {
+            let session_id = &question.haystack_session_ids[session_index];
+            let body = session_body(
+                session_id,
+                &question.haystack_dates[session_index],
+                &question.haystack_sessions[session_index],
+            );
+            let response = ingest_service
+                .retain(
+                    tenant,
+                    RetainEpisodeHttpRequest {
+                        tenant_id: tenant,
+                        scope_id: scope,
+                        actor_id: actor,
+                        source_kind: "user".to_string(),
+                        source_trust: TrustLevel::TrustedUser,
+                        subject_hint: Some(format!("session {session_id}")),
+                        subject: None,
+                        predicate: None,
+                        body: Some(body),
+                        resource: None,
+                        unit: None,
+                        compiler_version: None,
+                    },
+                )
+                .await
+                .map_err(|error| format!("retain {session_id}: {error}"))?;
+            if let Some(episode_id) = response.episode_id {
+                episode_sessions
+                    .entry(episode_id)
+                    .or_insert_with(|| session_id.clone());
+            }
+        }
+
+        // Reflect through the same claim/complete path the worker uses.
+        ingest_service
+            .reflect(tenant, scope, None)
+            .await
+            .map_err(|error| format!("reflect: {error}"))?;
+
+        let response = recall_service
+            .recall(
+                tenant,
+                RecallHttpRequest {
+                    tenant_id: tenant,
+                    scope_id: scope,
+                    actor_id: actor,
+                    allowed_scope_ids: None,
+                    query: question.question.clone(),
+                    limit: Some(options.k),
+                    budget_tokens: Some(8192),
+                    mode: Some(options.mode),
+                    include_beliefs: Some(false),
+                    edge_expansion_enabled: Some(disable != Some("edge_expansion")),
+                    context_packing_abstention_enabled: Some(disable != Some("packing")),
+                    rerank_enabled: Some(disable != Some("rerank")),
+                    query_decomposition_enabled: Some(disable != Some("query_decomposition")),
+                    procedure_recall_enabled: Some(disable != Some("procedure_recall")),
+                    decay_enabled: Some(disable != Some("decay")),
+                    include_trace: Some(false),
+                },
+            )
+            .await
+            .map_err(|error| format!("recall: {error}"))?;
+
+        let item_sessions: Vec<Option<String>> = response
+            .items
+            .iter()
+            .map(|item| {
+                item.citation_episode_id
+                    .and_then(|episode| episode_sessions.get(&episode).cloned())
+            })
+            .collect();
+        let is_abstention = question.question_id.contains("_abs");
+        let (hit_at_5, hit_at_10, abstention_correct, first_answer_rank) = score_question(
+            &item_sessions,
+            &question.answer_session_ids,
+            is_abstention,
+            response.abstention,
+        );
+        per_question.push(QuestionResult {
+            question_id: question.question_id.clone(),
+            question_type: question.question_type.clone(),
+            is_abstention,
+            hit_at_5,
+            hit_at_10,
+            abstention_correct,
+            first_answer_rank,
+            returned_items: response.items.len(),
+            degraded: response.degraded,
+            ingested_sessions: question.haystack_sessions.len(),
+        });
+    }
+
+    let mut stratum_names: Vec<String> = per_question
+        .iter()
+        .map(|row| row.question_type.clone())
+        .collect();
+    stratum_names.sort();
+    stratum_names.dedup();
+    let strata = stratum_names
+        .iter()
+        .map(|name| {
+            let rows: Vec<&QuestionResult> = per_question
+                .iter()
+                .filter(|row| &row.question_type == name)
+                .collect();
+            aggregate(name, &rows)
+        })
+        .collect();
+    let overall = aggregate("overall", &per_question.iter().collect::<Vec<_>>());
+
+    let paired_vs_baseline = match &options.baseline {
+        Some(path) => {
+            let raw = std::fs::read_to_string(path)
+                .map_err(|error| format!("read baseline {path}: {error}"))?;
+            let baseline: BenchLmeReport =
+                serde_json::from_str(&raw).map_err(|error| format!("parse baseline: {error}"))?;
+            if baseline.dataset_sha256 != dataset_sha256 {
+                return Err("baseline dataset sha256 differs from current dataset".to_string());
+            }
+            if baseline.sample_seed != options.seed || baseline.sample_n != options.sample {
+                return Err(
+                    "baseline sample seed/size differs — deltas would be unpaired".to_string(),
+                );
+            }
+            Some(paired_comparison(
+                &per_question,
+                &baseline,
+                path,
+                options.seed,
+            ))
+        }
+        None => None,
+    };
+
+    Ok(BenchLmeReport {
+        benchmark: "longmemeval_retrieval_only".to_string(),
+        dataset_path: options.data_path.clone(),
+        dataset_sha256,
+        dataset_questions,
+        sample_seed: options.seed,
+        sample_n: sampled_ids.len(),
+        k: options.k,
+        runtime: "postgres".to_string(),
+        retrieval_only: true,
+        embeddings: if vector_disabled {
+            format!(
+                "{} for ingestion; query vector disabled (query_vec=None)",
+                embedder.id()
+            )
+        } else {
+            embedder.id().to_string()
+        },
+        ingestion: "one episode per haystack session, chronological by haystack_dates; turns concatenated as `role: content`; body prefixed with [session <id>] [date <date>]".to_string(),
+        reflect: "MemoryService::reflect (worker claim/complete path), synchronous after ingestion".to_string(),
+        mode: match options.mode {
+            RecallMode::Fast => "fast",
+            RecallMode::Balanced => "balanced",
+            RecallMode::Exhaustive => "exhaustive",
+        }
+        .to_string(),
+        disabled: options.disable.clone(),
+        command: options.command.clone(),
+        generated_at_unix: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0),
+        overall,
+        strata,
+        per_question,
+        paired_vs_baseline,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture_rows() -> Vec<QuestionResult> {
+        // Synthetic 3-question fixture: one hit@5, one hit@10-only, one abstention.
+        let (h5a, h10a, absa, ranka) = score_question(
+            &[
+                Some("s_other".to_string()),
+                Some("s_answer".to_string()),
+                None,
+            ],
+            &["s_answer".to_string()],
+            false,
+            false,
+        );
+        let (h5b, h10b, absb, rankb) = score_question(
+            &[
+                None,
+                Some("s1".to_string()),
+                Some("s2".to_string()),
+                Some("s3".to_string()),
+                Some("s4".to_string()),
+                Some("s5".to_string()),
+                Some("s_answer".to_string()),
+            ],
+            &["s_answer".to_string()],
+            false,
+            false,
+        );
+        let (h5c, h10c, absc, rankc) = score_question(
+            &[Some("s_noise".to_string())],
+            &["answer_missing_abs".to_string()],
+            true,
+            false,
+        );
+        vec![
+            QuestionResult {
+                question_id: "q1".to_string(),
+                question_type: "multi-session".to_string(),
+                is_abstention: false,
+                hit_at_5: h5a,
+                hit_at_10: h10a,
+                abstention_correct: absa,
+                first_answer_rank: ranka,
+                returned_items: 3,
+                degraded: false,
+                ingested_sessions: 3,
+            },
+            QuestionResult {
+                question_id: "q2".to_string(),
+                question_type: "multi-session".to_string(),
+                is_abstention: false,
+                hit_at_5: h5b,
+                hit_at_10: h10b,
+                abstention_correct: absb,
+                first_answer_rank: rankb,
+                returned_items: 7,
+                degraded: false,
+                ingested_sessions: 3,
+            },
+            QuestionResult {
+                question_id: "q3_abs".to_string(),
+                question_type: "knowledge-update".to_string(),
+                is_abstention: true,
+                hit_at_5: h5c,
+                hit_at_10: h10c,
+                abstention_correct: absc,
+                first_answer_rank: rankc,
+                returned_items: 1,
+                degraded: false,
+                ingested_sessions: 2,
+            },
+        ]
+    }
+
+    #[test]
+    fn scorer_ranks_hits_and_abstentions() {
+        let rows = fixture_rows();
+        assert_eq!(rows[0].hit_at_5, Some(true));
+        assert_eq!(rows[0].hit_at_10, Some(true));
+        assert_eq!(rows[0].first_answer_rank, Some(2));
+        assert_eq!(rows[1].hit_at_5, Some(false));
+        assert_eq!(rows[1].hit_at_10, Some(true));
+        assert_eq!(rows[1].first_answer_rank, Some(7));
+        assert_eq!(rows[2].hit_at_5, None);
+        assert_eq!(rows[2].abstention_correct, Some(true));
+    }
+
+    #[test]
+    fn abstention_fails_when_answer_session_returned_without_abstaining() {
+        let (_, _, correct, rank) = score_question(
+            &[Some("s_answer".to_string())],
+            &["s_answer".to_string()],
+            true,
+            false,
+        );
+        assert_eq!(correct, Some(false));
+        assert_eq!(rank, Some(1));
+        // But abstaining is always correct for an abstention question.
+        let (_, _, correct, _) = score_question(
+            &[Some("s_answer".to_string())],
+            &["s_answer".to_string()],
+            true,
+            true,
+        );
+        assert_eq!(correct, Some(true));
+    }
+
+    #[test]
+    fn aggregate_splits_abstentions_from_scored() {
+        let rows = fixture_rows();
+        let refs: Vec<&QuestionResult> = rows.iter().collect();
+        let overall = aggregate("overall", &refs);
+        assert_eq!(overall.n, 3);
+        assert_eq!(overall.n_scored, 2);
+        assert_eq!(overall.recall_at_5, Some(0.5));
+        assert_eq!(overall.recall_at_10, Some(1.0));
+        assert_eq!(overall.abstention_n, 1);
+        assert_eq!(overall.abstention_correct, 1);
+    }
+
+    #[test]
+    fn bootstrap_ci_is_deterministic_and_brackets_mean() {
+        let deltas = vec![1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0];
+        let first = bootstrap_ci(&deltas, 1000, 20260710);
+        let second = bootstrap_ci(&deltas, 1000, 20260710);
+        assert_eq!(first.ci95_low, second.ci95_low);
+        assert_eq!(first.ci95_high, second.ci95_high);
+        assert!(first.ci95_low <= first.mean && first.mean <= first.ci95_high);
+        assert!(first.ci_excludes_zero);
+        let null = bootstrap_ci(&[0.0, 0.0, 1.0, -1.0], 1000, 7);
+        assert!(!null.ci_excludes_zero);
+    }
+
+    #[test]
+    fn stratified_sample_is_deterministic_and_proportional() {
+        let mut questions = Vec::new();
+        for index in 0..60 {
+            questions.push((format!("a{index:03}"), "multi-session".to_string()));
+        }
+        for index in 0..30 {
+            questions.push((format!("b{index:03}"), "knowledge-update".to_string()));
+        }
+        for index in 0..10 {
+            questions.push((
+                format!("c{index:03}"),
+                "single-session-preference".to_string(),
+            ));
+        }
+        let first = stratified_sample_ids(&questions, 10, 20260710);
+        let second = stratified_sample_ids(&questions, 10, 20260710);
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 10);
+        let count = |prefix: &str| first.iter().filter(|id| id.starts_with(prefix)).count();
+        assert_eq!(count("a"), 6);
+        assert_eq!(count("b"), 3);
+        assert_eq!(count("c"), 1);
+        let other_seed = stratified_sample_ids(&questions, 10, 1);
+        assert_ne!(first, other_seed);
+    }
+}

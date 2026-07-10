@@ -3028,12 +3028,19 @@ fn derive_dedup_key(
         .map(normalize_component)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "unspecified".to_string());
+    // The body component is content-hashed (sha256 of the normalized body):
+    // dedup equality is unchanged, but the key stays small enough for the
+    // `(tenant_id, scope_id, dedup_key)` btree unique index regardless of
+    // episode body size (btree tuples cap at ~8KB).
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(normalize_component(body).as_bytes());
     format!(
-        "{}:{}:{}:{}",
+        "{}:{}:{}:{:x}",
         scope_id,
         normalize_component(source_kind),
         subject,
-        normalize_component(body)
+        hasher.finalize()
     )
 }
 
