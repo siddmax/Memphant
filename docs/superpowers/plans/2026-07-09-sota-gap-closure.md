@@ -351,3 +351,102 @@ impl<S: MemoryStore> MemoryService<S> {
 - **VERDICT:** ENG + OUTSIDE VOICES CLEARED (auto-decide mode under explicit user delegation: "Make the decisions for what is best") — ready to implement.
 
 NO UNRESOLVED DECISIONS
+
+---
+
+# 2026-07-10 Addendum — Accuracy Wave (evidence-synthesized one-shot plan)
+
+Phase 1-2 above (runtime completion + evidence reset) are DONE. This addendum is the
+next canonical wave, synthesized from an 11-lens research fleet (7 research lenses + 4
+Syndai surface analyses; full reports in the session scratchpad, conclusions and
+citations absorbed here). Authoritative; supersedes the handoff's step-2 lever list.
+
+## Ground truth after the fleet
+
+- Our LME-S 0.60 (n=100, k=10, terra reader) equals the paper's full-context GPT-4o
+  baseline; the paper's optimized-retrieval condition reaches ~0.70-0.73; oracle 0.87.
+  Vendor "90%+" claims are recall-metric or self-run harnesses; the independently
+  reproducible band is 0.58-0.72. Target: ≥0.70 on our harness, then ONE
+  published-protocol run (full 500q, canonical LongMemEval judge prompt) before the
+  word "SOTA" is ever used. Until then the word is banned (devil's-advocate REAL-3).
+- Failure modes under the promoted config (re-classified per question): preference =
+  retrieval-miss of specific facts inside long sessions; temporal = composition with
+  operands already packed; counting = split reader-undercount / dropped siblings;
+  multi-session = cross-session assembly.
+- Intent-vs-implementation debt found in core (all with file:line in the fleet
+  reports): shipped server hardcodes NoopEmbedding (vector channel dead in prod);
+  vector SQL missing embedding_profile_id predicate + app-side cosine recompute;
+  fusion is dedup-truncate with hardcoded query-substring weight hacks; valid_from
+  never read at recall; subject_key mostly an opaque hash; the falsified "rerank" was
+  a hand heuristic, never a real cross-encoder.
+- Syndai reality: knowledge tables are EMPTY (0 rows; schema complete: HNSW,
+  BM25+RRF, Jina reranker option, text-embedding-3-small@1536); episodic memories
+  have 100% NULL embeddings; the only substantial real corpus is 63.6k
+  coding_execution_attempt_events. Mobile ships a rich Memory Hub consuming
+  /api/v1/memory/* + /api/v1/facts*; web has NO functional memory UI at all.
+  MemPhant /v1/recall dogfood path exists with pre-built, uncalled write adapters.
+
+## Answers to the open questions (binding)
+
+1. **Evaluate existing memory mechanisms?** Yes — as an engine-vs-engine gate, not a
+   production-data mining exercise (no data exists to mine). Seed one real document
+   corpus through BOTH Syndai's knowledge stack and MemPhant; mine a golden set from
+   the corpus (cross-model generation, span-level grading, version-pinned, test-tenant
+   exclusions per the backend report's recipe); MemPhant must beat Syndai's stack on
+   it before any replacement. Episodic/behavioral/persona consolidation follows the
+   docs gate; the coding-continuity lane (63.6k events) is first-mover — build after
+   the gate harness exists.
+2. **Rerank?** Re-test with a REAL cross-encoder (fastembed TextRerank) over a widened
+   pool (64-128 → k) as a measured arm. The prior falsification indicted the heuristic.
+3. **Embedding model?** bge-base-en-v1.5 arm now (one enum change + re-embed; profiles
+   coexist). Qwen3-class embedders later only if the bge-base arm shows the channel is
+   binding.
+4. **Knowledge graphs?** No. Mem0's own ablation: +1.6pp at 2x tokens/3x latency and
+   worse multi-hop. Our edges stay for supersedence/contradiction only. The
+   chat-domain replacement for edge expansion is an entity-anchor boost — deferred
+   until the levers below are measured.
+5. **LLM at ingest?** Not in v1. Zero-cost deterministic writes are a differentiator
+   (mem0/zep pay LLM per write). Extraction v1 is deterministic (preference/attribute
+   pattern mining); an LLM extractor is a later measured experiment behind the same
+   trait.
+6. **w4 / 8192 / rerank-off / runtime-chunks defaults?** Confirmed; runtime-chunks
+   default additionally subject to the held-out seed-20260711 confirmation + codex
+   replication now running. If held-out fails to confirm B2, fall back to
+   rendering-only (B1 shape) and re-measure.
+7. **Chunks on non-chat kinds?** Unmeasured risk (REAL-2): the ≤32-window cap
+   truncates >~128-line bodies. Fix: adaptive window growth (window size scales so 32
+   blocks always cover the whole body); tri-domain ablation before any tri-domain
+   accuracy claim.
+
+## The wave (single SDD execution, sequential implementers, main branch)
+
+- W1 Gate hardening: AGENTS.md pytest → directory discovery (`pytest tests/`), add
+  pg `--ignored` line + e2e_probe to the gate; add the 4 smallest-closing tests
+  (pg chunk round-trip, multi-tenant job-claim starvation, urlopen-mocked retry
+  loop, worker-binary smoke).
+- W2 Vector-channel honesty: shipped server gets real fastembed embeddings (kill
+  NoopEmbedding default), embedding_profile_id predicate in vector SQL, fusion
+  consumes SQL `<=>` scores (drop the second app-side fetch+recompute).
+- W3 Fusion cleanup: remove query-substring weight hacks; clean weighted RRF over
+  the four families; widened candidate pool (configurable, default preserved until
+  measured).
+- W4 Packing: sibling-gather (session-complete once any window of an episode packs)
+  + per-session diversity quota keyed on source_episode_id.
+- W5 Temporal grounding: populate validity from episode observation dates at
+  reflect; extract_query_date + real valid_from<=q<=valid_to windowing at recall;
+  date-stamp packed items with absolute episode dates (properly threaded
+  first_observed_at — not the compile clock).
+- W6 Extraction v1 (deterministic): compile_job emits extra ReflectCandidates for
+  preference/attribute facts via pattern mining; honest subject_keys for them.
+- W7 Reader routing: per-question-type prompt routing in run_reader (CoT to
+  temporal/counting only) — harness-level, prompt_version=3.
+- W8 Measured arms: bge-base embedding profile; real cross-encoder rerank flag.
+- W9 Chunk safety: adaptive window growth replacing the truncating cap.
+- W10 Syndai gate harness: corpus seeder + golden-set miner + Syndai-knowledge
+  search adapter as a bench engine (engine-vs-engine runner).
+
+Then ONE measurement campaign: all arms paired on dev seed 20260710 vs current
+champion; winners confirmed on held-out 20260711 before promotion (two-seed rule is
+now binding for promotions — forking-paths defense); promotions + STATUS + build-log
++ mirror in the same wave. Priorities: Accuracy/UX > cost > perf/latency > security
+(RLS/roles stay queued, not in this wave).
