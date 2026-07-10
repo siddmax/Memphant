@@ -1,0 +1,216 @@
+//! Rung 4 runtime contextual-chunk write path: the reflect-stage compile
+//! (`MemoryService::compile_job`, shared by the public reflect verb and the
+//! worker tick) mints contextual chunks tied to their parent episode when the
+//! `contextual_chunks_write_enabled` service option is on — and stays chunk-free
+//! (today's behavior) when it is off. Recall still cites chunk-matched items
+//! back to the PARENT episode (chunk id ↔ parent linkage).
+
+use std::sync::Arc;
+
+use memphant_core::service::MemoryService;
+use memphant_core::{FixedClock, InMemoryStore, MemoryStore, StubEmbedding};
+use memphant_types::{
+    ActorId, RecallHttpRequest, RetainEpisodeHttpRequest, ScopeId, TenantId, TrustLevel,
+};
+
+const CLOCK: FixedClock = FixedClock("2026-07-09T00:00:00Z");
+
+/// Six turns behind a `[session]` provenance line: turn windows of 4 yield
+/// two chunks (turns 1-4, 5-6).
+const EPISODE_BODY: &str = "[session s1] [date 2023/05/30]\n\
+user: I moved to Berlin in March.\n\
+assistant: Got it, you moved to Berlin in March.\n\
+user: My favorite tea is oolong.\n\
+assistant: Noted, oolong tea it is.\n\
+user: I drive a blue Tesla.\n\
+assistant: A blue Tesla, understood.\n";
+
+fn service(store: InMemoryStore, chunks_write: bool) -> MemoryService<InMemoryStore> {
+    MemoryService::new(
+        Arc::new(store),
+        Arc::new(CLOCK),
+        Arc::new(StubEmbedding::default()),
+    )
+    .with_contextual_chunks_write_enabled(chunks_write)
+}
+
+fn retain_request(
+    tenant_id: TenantId,
+    scope_id: ScopeId,
+    actor_id: ActorId,
+) -> RetainEpisodeHttpRequest {
+    RetainEpisodeHttpRequest {
+        tenant_id,
+        scope_id,
+        actor_id,
+        source_kind: "user".to_string(),
+        source_trust: TrustLevel::TrustedUser,
+        subject_hint: None,
+        subject: None,
+        predicate: None,
+        body: Some(EPISODE_BODY.to_string()),
+        resource: None,
+        unit: None,
+        compiler_version: None,
+    }
+}
+
+fn recall_request(
+    tenant_id: TenantId,
+    scope_id: ScopeId,
+    actor_id: ActorId,
+    query: &str,
+) -> RecallHttpRequest {
+    RecallHttpRequest {
+        tenant_id,
+        scope_id,
+        actor_id,
+        allowed_scope_ids: None,
+        query: query.to_string(),
+        limit: None,
+        budget_tokens: None,
+        mode: None,
+        include_beliefs: None,
+        edge_expansion_enabled: None,
+        context_packing_abstention_enabled: None,
+        rerank_enabled: None,
+        query_decomposition_enabled: None,
+        procedure_recall_enabled: None,
+        decay_enabled: None,
+        include_trace: None,
+    }
+}
+
+#[tokio::test]
+async fn reflect_mints_contextual_chunks_when_write_enabled() {
+    let store = InMemoryStore::default();
+    let service = service(store.clone(), true);
+    let tenant = TenantId::new();
+    let scope = ScopeId::new();
+    let actor = ActorId::new();
+
+    let retained = service
+        .retain(tenant, retain_request(tenant, scope, actor))
+        .await
+        .expect("retain");
+    let episode_id = retained.episode_id.expect("episode retained");
+    service.reflect(tenant, scope, None).await.expect("reflect");
+
+    let page = store
+        .scope_memory_page(tenant, scope, None, 100)
+        .await
+        .expect("page");
+    let unit = page
+        .items
+        .iter()
+        .find(|unit| unit.source_episode_id == Some(episode_id))
+        .expect("episode-derived unit");
+
+    // Six turns / window 4 → two chunks (turns 1-4, 5-6).
+    assert_eq!(unit.contextual_chunks.len(), 2, "one chunk per turn window");
+    let episode_uuid = episode_id.as_uuid();
+    for chunk in &unit.contextual_chunks {
+        assert!(
+            chunk.id.starts_with(&format!("chunk-{episode_uuid}-")),
+            "chunk id derives from parent episode: {}",
+            chunk.id
+        );
+        assert!(
+            chunk.header.contains(&format!("[episode {episode_uuid}]")),
+            "header carries parent episode provenance: {}",
+            chunk.header
+        );
+        assert!(
+            chunk.header.contains("[kind user]"),
+            "header carries source_kind"
+        );
+        assert!(!chunk.body.trim().is_empty(), "no empty-body chunks");
+        assert!(
+            chunk
+                .source_span
+                .as_deref()
+                .is_some_and(|span| span.contains('-')),
+            "chunk carries a source span"
+        );
+    }
+    assert!(
+        unit.contextual_chunks[0].header.contains("[turns 1-4]"),
+        "first window covers turns 1-4: {}",
+        unit.contextual_chunks[0].header
+    );
+    assert!(
+        unit.contextual_chunks[1].header.contains("[turns 5-6]"),
+        "second window covers turns 5-6: {}",
+        unit.contextual_chunks[1].header
+    );
+    assert_ne!(
+        unit.contextual_chunks[0].id, unit.contextual_chunks[1].id,
+        "window ids are distinct"
+    );
+}
+
+#[tokio::test]
+async fn reflect_stays_chunk_free_by_default() {
+    let store = InMemoryStore::default();
+    // Default construction (no builder call) must retain today's behavior.
+    let service = MemoryService::new(
+        Arc::new(store.clone()),
+        Arc::new(CLOCK),
+        Arc::new(StubEmbedding::default()),
+    );
+    let tenant = TenantId::new();
+    let scope = ScopeId::new();
+    let actor = ActorId::new();
+
+    let retained = service
+        .retain(tenant, retain_request(tenant, scope, actor))
+        .await
+        .expect("retain");
+    let episode_id = retained.episode_id.expect("episode retained");
+    service.reflect(tenant, scope, None).await.expect("reflect");
+
+    let page = store
+        .scope_memory_page(tenant, scope, None, 100)
+        .await
+        .expect("page");
+    let unit = page
+        .items
+        .iter()
+        .find(|unit| unit.source_episode_id == Some(episode_id))
+        .expect("episode-derived unit");
+    assert!(
+        unit.contextual_chunks.is_empty(),
+        "chunks are default-off until the paired ablation clears"
+    );
+}
+
+#[tokio::test]
+async fn recall_cites_chunk_matched_item_to_parent_episode() {
+    let store = InMemoryStore::default();
+    let service = service(store.clone(), true);
+    let tenant = TenantId::new();
+    let scope = ScopeId::new();
+    let actor = ActorId::new();
+
+    let retained = service
+        .retain(tenant, retain_request(tenant, scope, actor))
+        .await
+        .expect("retain");
+    let episode_id = retained.episode_id.expect("episode retained");
+    service.reflect(tenant, scope, None).await.expect("reflect");
+
+    let response = service
+        .recall(tenant, recall_request(tenant, scope, actor, "oolong tea"))
+        .await
+        .expect("recall");
+    let item = response
+        .items
+        .iter()
+        .find(|item| item.inclusion_reason == "contextual_chunk")
+        .expect("an item was included via its contextual chunk");
+    assert_eq!(
+        item.citation_episode_id,
+        Some(episode_id),
+        "chunk-matched recall cites the PARENT episode, not the chunk"
+    );
+}

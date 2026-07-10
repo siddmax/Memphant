@@ -9,12 +9,12 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use memphant_types::{
-    COMPILER_VERSION, CorrectRequest, CorrectResult, ENGINE_VERSION, EpisodeId, ForgetRequest,
-    ForgetResult, MarkRequest, MarkResult, MemoryKind, RecallContextItem, RecallHttpRequest,
-    RecallMode, RecallRequest, RecallResponse, ReflectCandidate, ReflectInput, ReflectJobKind,
-    ReflectResult, ResourceId, RetainEpisodeHttpRequest, RetainEpisodeHttpResponse, RetainRequest,
-    RetainResourceRequest, RetrievalTrace, ScopeId, StoredEpisode, TenantId, TraceId, TrustLevel,
-    UnitId,
+    COMPILER_VERSION, ContextualChunk, CorrectRequest, CorrectResult, ENGINE_VERSION, EpisodeId,
+    ForgetRequest, ForgetResult, MarkRequest, MarkResult, MemoryKind, RecallContextItem,
+    RecallHttpRequest, RecallMode, RecallRequest, RecallResponse, ReflectCandidate, ReflectInput,
+    ReflectJobKind, ReflectResult, ResourceId, RetainEpisodeHttpRequest, RetainEpisodeHttpResponse,
+    RetainRequest, RetainResourceRequest, RetrievalTrace, ScopeId, StoredEpisode, TenantId,
+    TraceId, TrustLevel, UnitId,
 };
 
 use crate::{
@@ -68,6 +68,11 @@ pub struct MemoryService<S: MemoryStore> {
     store: Arc<S>,
     clock: Arc<dyn Clock>,
     embedder: Arc<dyn EmbeddingProvider>,
+    /// Rung 4 write-time toggle: when set, the reflect-stage compile mints
+    /// per-episode contextual chunks (§`compile_job`). DEFAULT FALSE — the
+    /// promotion-provenance rule forbids default-on until the paired ablation
+    /// through this path clears.
+    contextual_chunks_write_enabled: bool,
 }
 
 impl<S: MemoryStore> Clone for MemoryService<S> {
@@ -76,6 +81,7 @@ impl<S: MemoryStore> Clone for MemoryService<S> {
             store: Arc::clone(&self.store),
             clock: Arc::clone(&self.clock),
             embedder: Arc::clone(&self.embedder),
+            contextual_chunks_write_enabled: self.contextual_chunks_write_enabled,
         }
     }
 }
@@ -86,7 +92,17 @@ impl<S: MemoryStore> MemoryService<S> {
             store,
             clock,
             embedder,
+            contextual_chunks_write_enabled: false,
         }
+    }
+
+    /// Enables (or disables) the rung 4 contextual-chunk write path. A builder
+    /// override so every existing `new` caller keeps today's chunk-free
+    /// default; only callers that opt in (the bench lane's `--runtime-chunks`)
+    /// flip it on.
+    pub fn with_contextual_chunks_write_enabled(mut self, enabled: bool) -> Self {
+        self.contextual_chunks_write_enabled = enabled;
+        self
     }
 
     pub fn store(&self) -> &S {
@@ -483,6 +499,20 @@ impl<S: MemoryStore> MemoryService<S> {
                     // Episode gone (e.g. forgotten before compile): nothing to do.
                     return Ok(CompileOutcome::default());
                 };
+                // Rung 4: mint contextual chunks tied to this raw episode when
+                // the write path is enabled (default off). Every other
+                // candidate construction (resource jobs, direct-unit retains)
+                // stays chunk-free — episodes only.
+                let contextual_chunks = if self.contextual_chunks_write_enabled {
+                    episode_contextual_chunks(
+                        episode.id,
+                        &episode.source_kind,
+                        chunk_header_date(self.clock.as_ref()).as_str(),
+                        &episode.body,
+                    )
+                } else {
+                    Vec::new()
+                };
                 (
                     Some(episode.id),
                     None,
@@ -496,7 +526,7 @@ impl<S: MemoryStore> MemoryService<S> {
                         body: episode.body.clone(),
                         churn_class: None,
                         admission_hint: None,
-                        contextual_chunks: Vec::new(),
+                        contextual_chunks,
                         valid_from: None,
                         valid_to: None,
                     },
@@ -581,6 +611,117 @@ struct CompileOutcome {
     created: usize,
 }
 
+/// Turns (or fallback segments) per contextual-chunk window. This is the
+/// turn-window granularity promoted on real evidence (LME-S n=100, 2026-07-10
+/// scaled-reader campaign: ≤4-turn episodes lifted ΔR@5/ΔR@10/ΔQA with CIs
+/// excluding zero). The runtime write path is the same granularity as an
+/// extraction-side embodiment rather than client-side windowing.
+const CONTEXTUAL_CHUNK_WINDOW: usize = 4;
+
+/// Per-episode chunk cap — the rung 4 bloat guard (disable-when: chunk fan-out
+/// hurts recall latency/cost once it stops adding coverage). An episode long
+/// enough to mint more windows keeps only its first `MAX_CONTEXTUAL_CHUNKS`
+/// (covering up to `MAX_CONTEXTUAL_CHUNKS * CONTEXTUAL_CHUNK_WINDOW` turns).
+const MAX_CONTEXTUAL_CHUNKS: usize = 32;
+
+/// The date stamped into a contextual chunk's provenance header. The episode's
+/// `first_observed_at` is not carried on `StoredEpisode`, so the service clock
+/// stands in — in the standard synchronous-reflect path (public reflect verb
+/// and prompt worker tick) compile time coincides with first observation.
+fn chunk_header_date(clock: &dyn Clock) -> String {
+    let now = clock.now_rfc3339();
+    // RFC 3339 always leads with `YYYY-MM-DD`; keep just the date.
+    now.get(..10).unwrap_or(now.as_str()).to_string()
+}
+
+/// A body line reads as a conversational turn when it has the `role: content`
+/// shape: a short leading role token, then `": "`, then non-empty content. The
+/// bench lane's per-session episodes ingest in exactly this form; a bracketed
+/// provenance line like `[session s1] [date ...]` has no `": "` and is skipped.
+fn line_is_turn(line: &str) -> bool {
+    let Some((role, content)) = line.trim().split_once(": ") else {
+        return false;
+    };
+    !role.is_empty()
+        && role.len() <= 32
+        && !content.trim().is_empty()
+        && role
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, ' ' | '_' | '-'))
+}
+
+/// Byte spans of the segments to window over, plus whether the body parsed as
+/// turns. Turn-structured bodies window over their `role: content` lines;
+/// everything else falls back to non-empty line segments.
+fn segment_episode_body(body: &str) -> (Vec<(usize, usize)>, bool) {
+    let mut lines: Vec<(usize, usize, bool)> = Vec::new();
+    let mut offset = 0usize;
+    for raw in body.split_inclusive('\n') {
+        let start = offset;
+        offset += raw.len();
+        let content = raw.trim_end_matches(['\n', '\r']);
+        if content.trim().is_empty() {
+            continue;
+        }
+        lines.push((start, start + content.len(), line_is_turn(content)));
+    }
+    let turn_count = lines.iter().filter(|(_, _, is_turn)| *is_turn).count();
+    // Turn-structured when turns are present and dominate (a stray `": "` in a
+    // prose body never flips it).
+    let turn_structured = turn_count >= 2 && turn_count * 2 >= lines.len();
+    let spans = lines
+        .into_iter()
+        .filter(|(_, _, is_turn)| !turn_structured || *is_turn)
+        .map(|(start, end, _)| (start, end))
+        .collect();
+    (spans, turn_structured)
+}
+
+/// Splits `body` into windows of up to `CONTEXTUAL_CHUNK_WINDOW` turns/segments
+/// and mints one `ContextualChunk` per window, each tied back to its parent
+/// episode. Emits nothing when the body fits a single window (a lone chunk
+/// would just duplicate the unit body) and never emits empty-body chunks — the
+/// rung 4 bloat guards.
+fn episode_contextual_chunks(
+    episode_id: EpisodeId,
+    source_kind: &str,
+    date: &str,
+    body: &str,
+) -> Vec<ContextualChunk> {
+    let (spans, turn_structured) = segment_episode_body(body);
+    if spans.len() <= CONTEXTUAL_CHUNK_WINDOW {
+        return Vec::new();
+    }
+    let span_label = if turn_structured { "turns" } else { "segments" };
+    spans
+        .chunks(CONTEXTUAL_CHUNK_WINDOW)
+        .take(MAX_CONTEXTUAL_CHUNKS)
+        .enumerate()
+        .filter_map(|(window_index, window)| {
+            let start = window.first()?.0;
+            let end = window.last()?.1;
+            let text = body.get(start..end)?.trim();
+            if text.is_empty() {
+                return None;
+            }
+            let first = window_index * CONTEXTUAL_CHUNK_WINDOW + 1;
+            let last = window_index * CONTEXTUAL_CHUNK_WINDOW + window.len();
+            // Character (not byte) offsets, per the source-span contract.
+            let char_start = body[..start].chars().count();
+            let char_end = body[..end].chars().count();
+            Some(ContextualChunk {
+                id: format!("chunk-{}-{window_index}", episode_id.as_uuid()),
+                header: format!(
+                    "[episode {}] [kind {source_kind}] [date {date}] [{span_label} {first}-{last}]",
+                    episode_id.as_uuid()
+                ),
+                body: text.to_string(),
+                source_span: Some(format!("{char_start}-{char_end}")),
+            })
+        })
+        .collect()
+}
+
 /// Degraded read-your-own-writes items: raw episode bodies lexically matched
 /// against the query, cited back to their episode.
 fn degraded_episode_items(
@@ -655,5 +796,128 @@ impl<F: Future> Future for CatchUnwind<F> {
             Ok(Poll::Pending) => Poll::Pending,
             Err(_) => Poll::Ready(Err(())),
         }
+    }
+}
+
+#[cfg(test)]
+mod chunk_tests {
+    use super::*;
+
+    const DATE: &str = "2026-07-09";
+
+    /// `role: content` bodies window over turns with a `[turns a-b]` header
+    /// and exact character-offset spans over the parent body.
+    #[test]
+    fn turn_structured_body_windows_over_turns() {
+        let episode_id = EpisodeId::new();
+        let body = "[session s1] [date 2023/05/30]\n\
+user: a b c.\n\
+assistant: d e f.\n\
+user: g h i.\n\
+assistant: j k l.\n\
+user: m n o.\n";
+        let chunks = episode_contextual_chunks(episode_id, "user", DATE, body);
+        assert_eq!(chunks.len(), 2, "five turns / window 4 → two windows");
+
+        let uuid = episode_id.as_uuid();
+        assert_eq!(
+            chunks[0].header,
+            format!("[episode {uuid}] [kind user] [date {DATE}] [turns 1-4]")
+        );
+        assert_eq!(
+            chunks[1].header,
+            format!("[episode {uuid}] [kind user] [date {DATE}] [turns 5-5]")
+        );
+
+        // Spans are character offsets of the window within the body; the body
+        // slice at that span equals the chunk body (ASCII → byte == char).
+        let first_start = body.find("user: a b c.").unwrap();
+        let fourth = "assistant: j k l.";
+        let first_end = body.find(fourth).unwrap() + fourth.len();
+        assert_eq!(
+            chunks[0].source_span,
+            Some(format!("{first_start}-{first_end}"))
+        );
+        assert_eq!(chunks[0].body, &body[first_start..first_end]);
+        assert!(chunks[0].body.starts_with("user: a b c."));
+        assert!(chunks[0].body.ends_with("assistant: j k l."));
+    }
+
+    /// Non-turn prose falls back to line segments with a `[segments a-b]` label.
+    #[test]
+    fn non_turn_body_falls_back_to_line_segments() {
+        let episode_id = EpisodeId::new();
+        let body = "Line one about apples.\n\
+Line two about oranges.\n\
+Line three about pears.\n\
+Line four about grapes.\n\
+Line five about kiwis.\n";
+        let chunks = episode_contextual_chunks(episode_id, "doc", DATE, body);
+        assert_eq!(chunks.len(), 2, "five lines / window 4 → two windows");
+        assert!(
+            chunks[0].header.contains("[segments 1-4]"),
+            "fallback labels windows as segments: {}",
+            chunks[0].header
+        );
+        assert!(chunks[1].header.contains("[segments 5-5]"));
+        assert!(chunks[0].body.starts_with("Line one about apples."));
+    }
+
+    /// A body that fits a single window would only duplicate the unit body:
+    /// emit nothing (bloat guard).
+    #[test]
+    fn single_window_body_emits_no_chunks() {
+        let episode_id = EpisodeId::new();
+        let four_turns = "[session s1] [date 2023/05/30]\n\
+user: a b c.\n\
+assistant: d e f.\n\
+user: g h i.\n\
+assistant: j k l.\n";
+        assert!(episode_contextual_chunks(episode_id, "user", DATE, four_turns).is_empty());
+        // A lone prose line is also a single window.
+        assert!(episode_contextual_chunks(episode_id, "doc", DATE, "one solitary line").is_empty());
+        // And an empty body yields nothing.
+        assert!(episode_contextual_chunks(episode_id, "doc", DATE, "").is_empty());
+    }
+
+    /// Never mint more than `MAX_CONTEXTUAL_CHUNKS` per episode.
+    #[test]
+    fn per_episode_chunk_cap_is_enforced() {
+        let episode_id = EpisodeId::new();
+        let turns = (MAX_CONTEXTUAL_CHUNKS + 2) * CONTEXTUAL_CHUNK_WINDOW;
+        let mut body = String::from("[session s1] [date 2023/05/30]\n");
+        for turn in 0..turns {
+            body.push_str(&format!("user: turn number {turn} here.\n"));
+        }
+        let chunks = episode_contextual_chunks(episode_id, "user", DATE, &body);
+        assert_eq!(chunks.len(), MAX_CONTEXTUAL_CHUNKS, "cap holds");
+        assert!(chunks.iter().all(|chunk| !chunk.body.trim().is_empty()));
+    }
+
+    /// Ids are deterministic in episode id + window index across calls.
+    #[test]
+    fn chunk_ids_are_deterministic() {
+        let episode_id = EpisodeId::new();
+        let body = "[session s1] [date 2023/05/30]\n\
+user: a b c.\n\
+assistant: d e f.\n\
+user: g h i.\n\
+assistant: j k l.\n\
+user: m n o.\n";
+        let uuid = episode_id.as_uuid();
+        let first = episode_contextual_chunks(episode_id, "user", DATE, body);
+        let second = episode_contextual_chunks(episode_id, "user", DATE, body);
+        let ids: Vec<_> = first.iter().map(|chunk| chunk.id.clone()).collect();
+        assert_eq!(
+            ids,
+            vec![format!("chunk-{uuid}-0"), format!("chunk-{uuid}-1")]
+        );
+        assert_eq!(
+            ids,
+            second
+                .iter()
+                .map(|chunk| chunk.id.clone())
+                .collect::<Vec<_>>()
+        );
     }
 }
