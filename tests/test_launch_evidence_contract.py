@@ -55,7 +55,26 @@ def test_status_ledger_reopened_synthetic_promotions() -> None:
         assert not checked(label), label
     assert "- [x] **WS-F**" not in status
     assert "- [x] **WS-G**" not in status
+    # A reopened rung may re-check ONLY with real-runtime evidence: its row
+    # must cite the real-retrieval campaign (Postgres runtime, pinned dataset),
+    # never the invalidated 2026-07-03 synthetic profile artifacts as proof.
     for rung in range(4, 16):
+        marker = f"[x] {rung} "
+        if marker not in status:
+            continue
+        row = next(line for line in status.splitlines() if marker in line)
+        assert "real-retrieval-20260710" in row or (
+            "2026-07-10-real-retrieval-campaign.md" in row
+        ), f"rung {rung} re-checked without real-runtime evidence"
+        assert "2026-07-03-rung" not in row.split("proof:")[-1] or (
+            "2026-07-10-real-retrieval-campaign.md" in row.split("proof:")[-1]
+        ), f"rung {rung} cites synthetic artifacts as promotion proof"
+    # Rung 14 is a retirement, not a promotion: if checked, it must say so.
+    if "[x] 14 " in status:
+        row = next(line for line in status.splitlines() if "[x] 14 " in line)
+        assert "retirement stands" in row
+    # Rungs whose advance-when was NOT met by the real campaign stay open.
+    for rung in (4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15):
         assert f"[x] {rung} " not in status, f"rung {rung} must stay reopened"
     # Rungs 0-3 remain built (built locally, not promoted from synthetic evidence).
     for rung in range(0, 4):
