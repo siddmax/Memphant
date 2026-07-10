@@ -98,6 +98,10 @@ pub struct BenchLmeOptions {
     pub turns_window: usize,
     /// Packing token budget threaded to the recall call.
     pub budget_tokens: usize,
+    /// Rung 4 runtime contextual-chunk write path: when true the ingest
+    /// service mints per-episode contextual chunks at reflect time (default
+    /// off = today's chunk-free behavior).
+    pub runtime_chunks: bool,
     /// When set, write one QA-evidence JSONL row per question to this path
     /// (question + gold answer + top-k evidence bodies) for the external
     /// reader/judge in `scripts/run_reader.py`.
@@ -202,6 +206,11 @@ pub struct BenchLmeReport {
     /// for pre-flag reports — see `default_budget_tokens`).
     #[serde(default = "default_budget_tokens")]
     pub budget_tokens: usize,
+    /// Whether the rung 4 runtime contextual-chunk write path was enabled for
+    /// ingestion (defaults to false for pre-flag reports, matching today's
+    /// chunk-free behavior).
+    #[serde(default)]
+    pub runtime_chunks: bool,
     pub mode: String,
     pub disabled: Option<String>,
     pub command: String,
@@ -572,7 +581,8 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
         Arc::clone(&store),
         Arc::new(SystemClock),
         Arc::clone(&embedder),
-    );
+    )
+    .with_contextual_chunks_write_enabled(options.runtime_chunks);
     let vector_disabled = options.disable.as_deref() == Some("vector");
     // Vector ablation: same store/units, but the recall-side service embeds
     // with Noop so `query_vec` is None and the vector channel is honestly off.
@@ -860,6 +870,7 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
         granularity: options.granularity.clone(),
         turns_window: options.turns_window,
         budget_tokens: options.budget_tokens,
+        runtime_chunks: options.runtime_chunks,
         mode: match options.mode {
             RecallMode::Fast => "fast",
             RecallMode::Balanced => "balanced",
