@@ -286,7 +286,10 @@ impl<S: MemoryStore> MemoryService<S> {
                 context_packing_abstention_enabled: request
                     .context_packing_abstention_enabled
                     .unwrap_or(true),
-                rerank_enabled: request.rerank_enabled.unwrap_or(true),
+                // Real-evidence default (rung 8 disable-when, real-retrieval-20260710):
+                // the deterministic reranker cost -0.143 Recall@5 on LongMemEval-S
+                // (CI excludes zero), so it is opt-in until a variant earns its keep.
+                rerank_enabled: request.rerank_enabled.unwrap_or(false),
                 learned_rerank_profile: None,
                 query_decomposition_enabled: request.query_decomposition_enabled.unwrap_or(true),
                 procedure_recall_enabled: request.procedure_recall_enabled.unwrap_or(true),
