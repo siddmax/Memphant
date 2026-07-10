@@ -1,0 +1,370 @@
+{
+  "benchmark": "longmemeval_reader_qa",
+  "engine": "codex",
+  "reader": "gpt-5.6-luna (codex exec headless (read-only sandbox, final message only))",
+  "judge": "containment+gpt-5.6-terra (normalized containment first; one LLM judge call on non-match; abstention = exact 'I don't know' containment)",
+  "reader_model_id": "gpt-5.6-luna",
+  "judge_model_id": "gpt-5.6-terra",
+  "reasoning_effort": null,
+  "runtime": "postgres",
+  "label": "30q-session-rerank-on-luna-low",
+  "evidence_path": "docs/build-log/artifacts/real-retrieval-20260710/reader-evidence-session.jsonl",
+  "retrieval_report": "docs/build-log/artifacts/real-retrieval-20260710/lme-s-reader-session.json",
+  "command": "scripts/run_reader.py --evidence docs/build-log/artifacts/real-retrieval-20260710/reader-evidence-session.jsonl --out docs/build-log/artifacts/real-retrieval-20260710/scaled-reader-30q-session-luna-low.json --label 30q-session-rerank-on-luna-low --engine codex --model gpt-5.6-luna --judge-model gpt-5.6-terra --retrieval-report docs/build-log/artifacts/real-retrieval-20260710/lme-s-reader-session.json --baseline docs/build-log/artifacts/real-retrieval-20260710/reader-session.json --max-calls 0",
+  "generated_at_unix": 1783706662,
+  "aborted": null,
+  "fresh_calls": 0,
+  "cached_calls": 36,
+  "overall": {
+    "n": 30,
+    "n_scored": 30,
+    "qa_accuracy": 0.3333333333333333
+  },
+  "strata": {
+    "knowledge-update": {
+      "n": 5,
+      "n_scored": 5,
+      "qa_accuracy": 0.6
+    },
+    "multi-session": {
+      "n": 8,
+      "n_scored": 8,
+      "qa_accuracy": 0.125
+    },
+    "single-session-assistant": {
+      "n": 3,
+      "n_scored": 3,
+      "qa_accuracy": 0.6666666666666666
+    },
+    "single-session-preference": {
+      "n": 2,
+      "n_scored": 2,
+      "qa_accuracy": 0.0
+    },
+    "single-session-user": {
+      "n": 4,
+      "n_scored": 4,
+      "qa_accuracy": 0.5
+    },
+    "temporal-reasoning": {
+      "n": 8,
+      "n_scored": 8,
+      "qa_accuracy": 0.25
+    }
+  },
+  "per_question": [
+    {
+      "question_id": "0db4c65d",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "18 days. 19 days (including the last day) is also acceptable.",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "0ea62687",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "2",
+      "reply": "2 miles per gallon.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "10e09553",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "7",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "184da446",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "220",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "38146c39",
+      "question_type": "single-session-preference",
+      "is_abstention": false,
+      "gold_answer": "The user would prefer responses that build upon their previous experimentation with turbinado sugar, suggesting ingredients or techniques that complement its richer flavor. They might not prefer generic cookie-making advice or suggestions that don't take into account their existing use of turbinado sugar.",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "3f1e9474",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "Sarah",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "57f827a0",
+      "question_type": "single-session-preference",
+      "is_abstention": false,
+      "gold_answer": "The user would prefer responses that take into account their existing plans to replace the bedroom dresser and their interest in mid-century modern style, suggesting furniture layouts that accommodate the new dresser and incorporate elements of this design aesthetic. They might not prefer general furniture arrangement tips or suggestions that do not consider their specific design preferences.",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "5a4f22c0",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "TechCorp",
+      "reply": "TechCorp",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "6456829e_abs",
+      "question_type": "multi-session",
+      "is_abstention": true,
+      "gold_answer": "The information provided is not enough. You mentioned planting 5 plants for tomatoes but you did not mention chili peppers.",
+      "reply": "5 tomato plants; the number of chili pepper plants is unknown.",
+      "judge_method": "abstention_exact",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "6613b389",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "2",
+      "reply": "About two months.",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "7161e7e2",
+      "question_type": "single-session-assistant",
+      "is_abstention": false,
+      "gold_answer": "Admon was assigned to the 8 am - 4 pm (Day Shift) on Sundays.",
+      "reply": "8 am\u20134 pm.",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "7527f7e2",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "$800",
+      "reply": "$800",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "8e91e7d9",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "4",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "8fb83627",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "Five",
+      "reply": "Five issues.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "982b5123_abs",
+      "question_type": "temporal-reasoning",
+      "is_abstention": true,
+      "gold_answer": "The information provided is not enough. You only mentioned booking Airbnb in San Francisco.",
+      "reply": "I don't know.",
+      "judge_method": "abstention_exact",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "a1eacc2a",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "seven",
+      "reply": "7 short stories",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "af082822",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": 2,
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "b29f3365",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "Four weeks",
+      "reply": "Six weeks.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "bb7c3b45",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "$300",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "c4f10528",
+      "question_type": "single-session-assistant",
+      "is_abstention": false,
+      "gold_answer": "Miss Bee Providore",
+      "reply": "Miss Bee Providore",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "c960da58",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "20",
+      "reply": "20",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "d905b33f",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "20%",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "e3038f8c",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": 99,
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "e47becba",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "Business Administration",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "e9327a54",
+      "question_type": "single-session-assistant",
+      "is_abstention": false,
+      "gold_answer": "The Sugar Factory at Icon Park.",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "efc3f7c2",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "30 minutes",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_2f8be40d",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "I attended three weddings. The couples were Rachel and Mike, Emily and Sarah, and Jen and Tom.",
+      "reply": "2 weddings",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_468eb063",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "9 days ago. 10 days (including the last day) is also acceptable.",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_59149c78",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "The Metropolitan Museum of Art.",
+      "reply": "City Art Museum.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_88806d6e",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "Tom",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    }
+  ],
+  "paired_vs_baseline": {
+    "baseline_path": "docs/build-log/artifacts/real-retrieval-20260710/reader-session.json",
+    "baseline_label": "session-rerank-on",
+    "n_paired": 30,
+    "delta_qa_accuracy": {
+      "mean": -0.1,
+      "ci95_low": -0.23333333333333334,
+      "ci95_high": 0.0,
+      "ci_excludes_zero": false
+    },
+    "bootstrap_resamples": 1000,
+    "bootstrap_seed": 20260710
+  }
+}

@@ -1,5 +1,11 @@
 # Next-Session Prompt (paste this to resume the MemPhant SOTA campaign)
 
+Current STATUS mirror: RUNTIME COMPLETE — BENCHMARK EVIDENCE PENDING
+
+> Update 2026-07-10 (later same day): the scaled n=100 campaign COMPLETED —
+> see `docs/build-log/2026-07-10-scaled-reader-campaign.md`. Step 1 below is
+> done (turns granularity promoted, rerank-off re-confirmed); resume at step 2.
+
 You are resuming the MemPhant SOTA campaign in /Users/sidsharma/Memphant (sibling
 repo /Users/sidsharma/Syndai; spec mirror must stay drift-free via
 `python3 scripts/check_spec_drift.py` after any spec edit + rsync). Read, in
