@@ -6,6 +6,22 @@ Current STATUS mirror: RUNTIME COMPLETE — BENCHMARK EVIDENCE PENDING
 > see `docs/build-log/2026-07-10-scaled-reader-campaign.md`. Step 1 below is
 > done (turns granularity promoted, rerank-off re-confirmed); resume at step 2.
 
+> Update 2026-07-10 (evening, runtime-chunks campaign —
+> `docs/build-log/2026-07-10-runtime-chunks-campaign.md`): **RUNG 4 CLOSED**
+> (first real-evidence rung closure): reflect-stage contextual chunks +
+> chunk-aware packing shipped default-on (`e669a3f`), ΔQA +0.110 excl 0 through
+> the runtime; turns lane default superseded back to `session` (runtime ties
+> client-side windowing). Falsified: w=8 windows, budget 16384, global reader
+> prompt v2 (all ns). New harness: `scripts/run_reader.py --engine openrouter`
+> (key via Doppler `syndai/dev`; reader `openai/gpt-5.6-terra`, judge
+> `anthropic/claude-sonnet-5`, different-family) — built after the codex CLI
+> quota outage; both baselines re-scored so all deltas are same-lattice paired.
+> Step 2(a) is DONE; of step 2's remaining levers, next ranked work is:
+> (1) multi-session composition (weakest stratum, 0.33 under promoted config —
+> per-session diversity quota in packing), (2) query-date temporal filtering
+> (+ stratum-targeted prompting; chunks+v2 hit temporal 0.78), then steps 3–5
+> below unchanged.
+
 You are resuming the MemPhant SOTA campaign in /Users/sidsharma/Memphant (sibling
 repo /Users/sidsharma/Syndai; spec mirror must stay drift-free via
 `python3 scripts/check_spec_drift.py` after any spec edit + rsync). Read, in
