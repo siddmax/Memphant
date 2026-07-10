@@ -184,6 +184,92 @@ async fn reflect_stays_chunk_free_by_default() {
     );
 }
 
+/// Twelve turns behind a `[session]` line: turn windows of 4 yield three chunks
+/// (1-4 Berlin/balcony, 5-8 quantum harmonica, 9-12 pomegranate). A query for
+/// the middle window's content chunk-renders that window plus one neighbour
+/// within the item's whole-body budget, dropping the far window.
+const SESSION_BODY: &str = "[session s7] [date 2023/06/01]\n\
+user: I moved to Berlin in March for a new job.\n\
+assistant: Congrats on the move to Berlin and the new job.\n\
+user: The apartment there has a lovely balcony garden.\n\
+assistant: A balcony garden sounds wonderful in Berlin.\n\
+user: My prized possession is a vintage quantum harmonica.\n\
+assistant: A vintage quantum harmonica is a rare collector item.\n\
+user: I keep the quantum harmonica in a velvet case.\n\
+assistant: Storing the quantum harmonica in velvet protects it well.\n\
+user: On weekends I bake sourdough with pomegranate molasses.\n\
+assistant: Sourdough with pomegranate molasses sounds delicious.\n\
+user: The pomegranate molasses comes from a shop downtown.\n\
+assistant: A downtown shop for pomegranate molasses is handy.\n";
+
+/// End-to-end: retain → reflect (chunks on) → recall. The packed context text of
+/// the chunk-matched item is rendered from its chunks — the matched window's
+/// header + body and a neighbour window — NOT the full session body (the far,
+/// unmatched window is dropped).
+#[tokio::test]
+async fn recall_chunk_renders_matched_window_plus_neighbour() {
+    let store = InMemoryStore::default();
+    let service = service(store.clone(), true);
+    let tenant = TenantId::new();
+    let scope = ScopeId::new();
+    let actor = ActorId::new();
+
+    let retained = service
+        .retain(
+            tenant,
+            RetainEpisodeHttpRequest {
+                body: Some(SESSION_BODY.to_string()),
+                ..retain_request(tenant, scope, actor)
+            },
+        )
+        .await
+        .expect("retain");
+    let episode_id = retained.episode_id.expect("episode retained");
+    service.reflect(tenant, scope, None).await.expect("reflect");
+
+    let response = service
+        .recall(
+            tenant,
+            recall_request(tenant, scope, actor, "quantum harmonica"),
+        )
+        .await
+        .expect("recall");
+    let item = response
+        .items
+        .iter()
+        .find(|item| item.citation_episode_id == Some(episode_id))
+        .expect("episode-derived item recalled");
+
+    // Matched middle window (turns 5-8) is present with its provenance header.
+    assert!(
+        item.body.contains("[turns 5-8]"),
+        "matched window header present: {}",
+        item.body
+    );
+    assert!(
+        item.body.contains("quantum harmonica"),
+        "matched window body present: {}",
+        item.body
+    );
+    // A neighbour window (turns 1-4) is gathered in.
+    assert!(
+        item.body.contains("[turns 1-4]") && item.body.contains("Berlin"),
+        "neighbour window gathered: {}",
+        item.body
+    );
+    // The far, unmatched window (turns 9-12) is dropped — this is NOT the full
+    // session body.
+    assert!(
+        !item.body.contains("pomegranate") && !item.body.contains("[turns 9-12]"),
+        "far unmatched window dropped: {}",
+        item.body
+    );
+    assert_ne!(
+        item.body, SESSION_BODY,
+        "packed text is chunk-rendered, not the raw session body"
+    );
+}
+
 #[tokio::test]
 async fn recall_cites_chunk_matched_item_to_parent_episode() {
     let store = InMemoryStore::default();

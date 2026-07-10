@@ -8,9 +8,9 @@ use std::sync::{Arc, Mutex};
 
 use fsrs::{FSRS, FSRS6_DEFAULT_DECAY, MemoryState, current_retrievability};
 use memphant_types::{
-    ActorId, AdmissionAction, CorrectRequest, CorrectResult, CorrectSelector, CorrectionPayload,
-    DedupOutcome, EdgeId, EpisodeId, ForgetRequest, ForgetResult, ForgetTarget, JobId,
-    LearnedRerankProfile, MarkOutcome, MarkRequest, MarkResult, MemoryEdgeKind, MemoryKind,
+    ActorId, AdmissionAction, ContextualChunk, CorrectRequest, CorrectResult, CorrectSelector,
+    CorrectionPayload, DedupOutcome, EdgeId, EpisodeId, ForgetRequest, ForgetResult, ForgetTarget,
+    JobId, LearnedRerankProfile, MarkOutcome, MarkRequest, MarkResult, MemoryEdgeKind, MemoryKind,
     NewEpisode, NewMemoryEdge, NewMemoryUnit, ProcedureTraceFact, QueuedReflectJob,
     RecallCandidateTrace, RecallChannel, RecallCitation, RecallContextItem, RecallDropReason,
     RecallDroppedItem, RecallMode, RecallPolicyFilter, RecallRequest, RecallResponse, ReflectInput,
@@ -2979,6 +2979,19 @@ fn context_item_for(
     let suppression_labels = suppression_labels_for(&candidate.unit, tenant_edges);
     let derived_by = derived_by_for_unit(&candidate.unit).to_string();
     let matched_contextual_chunk = contextual_chunk_score(&candidate.unit, query_tokens) > 0.0;
+    // Chunk-aware pack rendering: when the unit carries contextual chunks and the
+    // query matched at least one, render this item's packed text from its chunks
+    // (matched-first + neighbour expansion, header-prefixed, document order)
+    // instead of the whole body. Bounded by the SAME budget share the whole body
+    // would have consumed (`unit.body` whitespace-token count) so the item never
+    // uses more budget than before; scoring/ranking/citation are untouched.
+    // `None` (no chunks, or no chunk matched) keeps today's byte-identical
+    // whole-body rendering.
+    let rendered_body = render_chunked_item_body(
+        &candidate.unit.contextual_chunks,
+        query_tokens,
+        candidate.unit.body.split_whitespace().count(),
+    );
     let inclusion_reason = if candidate.unit.kind == MemoryKind::Procedural
         && procedure_signal_kind(&candidate.unit) == "failure"
     {
@@ -2994,7 +3007,7 @@ fn context_item_for(
     };
     RecallContextItem {
         unit_id: candidate.unit.id,
-        body: candidate.unit.body,
+        body: rendered_body.unwrap_or(candidate.unit.body),
         kind: candidate.unit.kind,
         derived_by,
         inclusion_reason: inclusion_reason.to_string(),
@@ -3002,6 +3015,107 @@ fn context_item_for(
         citation_resource_id: candidate.unit.source_resource_id,
         suppression_labels,
     }
+}
+
+/// Renders a packed item's text from its contextual chunks instead of the whole
+/// unit body. Returns `None` — signalling the caller to keep today's whole-body
+/// rendering — when there are no chunks, when no chunk matched the query, or (a
+/// defensive guard that never fires in practice, since the top matched chunk is
+/// always a strict subset of the body) when nothing fit the budget.
+///
+/// Selection: matched chunks first (per-chunk lexical score vs the query, desc),
+/// then expansion to adjacent siblings (window index ±1, then ±2, …) around the
+/// matched anchors, each step gated by `budget_tokens` — the whitespace-token
+/// count the whole body would have consumed, so a chunk-rendered item never uses
+/// more budget than before. Emission is document order (chunk vector index ==
+/// window index), each chunk prefixed by its provenance header so the reader
+/// sees positional gaps. No chunk is emitted twice.
+fn render_chunked_item_body(
+    chunks: &[ContextualChunk],
+    query_tokens: &[String],
+    budget_tokens: usize,
+) -> Option<String> {
+    if chunks.is_empty() {
+        return None;
+    }
+    let scores: Vec<f32> = chunks
+        .iter()
+        .map(|chunk| chunk_query_score(chunk, query_tokens))
+        .collect();
+
+    // Matched chunks, highest score first, document order breaking ties.
+    let mut matched: Vec<usize> = (0..chunks.len())
+        .filter(|&index| scores[index] > 0.0)
+        .collect();
+    if matched.is_empty() {
+        // No chunk matched (unit surfaced via body-lexical/vector channel): keep
+        // whole-body rendering. Chunk headers make full coverage cost MORE than
+        // the whole body, so first-N-chunks would arbitrarily drop the session
+        // tail with no matched signal to justify it; whole body loses nothing.
+        return None;
+    }
+    matched.sort_by(|&left, &right| {
+        scores[right]
+            .partial_cmp(&scores[left])
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(left.cmp(&right))
+    });
+
+    let mut selected = vec![false; chunks.len()];
+    let mut used_tokens = 0usize;
+
+    // Phase A — matched chunks, highest score first, within budget.
+    let mut anchors: Vec<usize> = Vec::new();
+    for &index in &matched {
+        let cost = chunk_block_token_cost(&chunks[index]);
+        if used_tokens + cost <= budget_tokens {
+            selected[index] = true;
+            used_tokens += cost;
+            anchors.push(index);
+        }
+    }
+    anchors.sort_unstable();
+
+    // Phase B — expand to adjacent siblings (±1, then ±2, …) around each matched
+    // anchor while the item's budget share allows.
+    for radius in 1..chunks.len() {
+        for &anchor in &anchors {
+            for candidate in [anchor.checked_sub(radius), anchor.checked_add(radius)] {
+                let Some(index) = candidate else { continue };
+                if index >= chunks.len() || selected[index] {
+                    continue;
+                }
+                let cost = chunk_block_token_cost(&chunks[index]);
+                if used_tokens + cost <= budget_tokens {
+                    selected[index] = true;
+                    used_tokens += cost;
+                }
+            }
+        }
+    }
+
+    // Emission — selected chunks in document order, each header-prefixed.
+    let rendered: Vec<String> = (0..chunks.len())
+        .filter(|&index| selected[index])
+        .map(|index| chunk_block(&chunks[index]))
+        .collect();
+    if rendered.is_empty() {
+        return None;
+    }
+    Some(rendered.join("\n\n"))
+}
+
+/// The rendered block for one chunk: its provenance header line, then its body.
+fn chunk_block(chunk: &ContextualChunk) -> String {
+    format!("{}\n{}", chunk.header, chunk.body)
+}
+
+/// Whitespace-token cost of a rendered chunk block. The header/body newline and
+/// the inter-block separator are whitespace, so summing this over the selected
+/// chunks equals `rendered.join(...).split_whitespace().count()` — the same
+/// counter the packing budget uses on whole bodies.
+fn chunk_block_token_cost(chunk: &ContextualChunk) -> usize {
+    chunk.header.split_whitespace().count() + chunk.body.split_whitespace().count()
 }
 
 fn has_contradiction_with_any(
@@ -3510,10 +3624,15 @@ fn token_set_overlap_score(unit: &StoredMemoryUnit, query_tokens: &[String]) -> 
 fn contextual_chunk_score(unit: &StoredMemoryUnit, query_tokens: &[String]) -> f32 {
     unit.contextual_chunks
         .iter()
-        .map(|chunk| {
-            token_set_overlap_text_score(&format!("{} {}", chunk.header, chunk.body), query_tokens)
-        })
+        .map(|chunk| chunk_query_score(chunk, query_tokens))
         .fold(0.0, f32::max)
+}
+
+/// Per-chunk lexical score of a single chunk (header + body) against the query.
+/// Shared by `contextual_chunk_score` (the inclusion-reason gate) and chunk-aware
+/// pack rendering so a chunk "matched" means exactly the same thing in both.
+fn chunk_query_score(chunk: &ContextualChunk, query_tokens: &[String]) -> f32 {
+    token_set_overlap_text_score(&format!("{} {}", chunk.header, chunk.body), query_tokens)
 }
 
 pub(crate) fn token_set_overlap_text_score(text: &str, query_tokens: &[String]) -> f32 {
@@ -4447,4 +4566,167 @@ fn composed_dependent_ids(
             }
             ids
         })
+}
+
+#[cfg(test)]
+mod chunk_render_tests {
+    use super::*;
+
+    /// Header is a constant 6 whitespace tokens (`[episode ep] [kind user]
+    /// [turns X-Y]`), so a block's budget cost is `6 + body_word_count`.
+    fn chunk(turns: &str, body: &str) -> ContextualChunk {
+        ContextualChunk {
+            id: format!("chunk-ep-{turns}"),
+            header: format!("[episode ep] [kind user] [turns {turns}]"),
+            body: body.to_string(),
+            source_span: Some("0-0".to_string()),
+        }
+    }
+
+    fn count(haystack: &str, needle: &str) -> usize {
+        haystack.matches(needle).count()
+    }
+
+    /// A unit with no chunks signals whole-body rendering (`None`) — the caller
+    /// then emits `unit.body` byte-for-byte, exactly as before this feature.
+    #[test]
+    fn unchunked_unit_renders_whole_body() {
+        assert_eq!(
+            render_chunked_item_body(&[], &tokenize("anything at all"), 100),
+            None,
+            "no chunks → whole-body fallback"
+        );
+    }
+
+    /// A chunked unit whose chunks none match the query keeps whole-body
+    /// rendering (the unit surfaced via a body-lexical/vector channel).
+    #[test]
+    fn no_matched_chunk_falls_back_to_whole_body() {
+        let chunks = [
+            chunk("1-4", "red apple pie crust"),
+            chunk("5-8", "green lime soda fizz"),
+            chunk("9-12", "blue plum jam toast"),
+        ];
+        assert_eq!(
+            render_chunked_item_body(&chunks, &tokenize("zebra"), 1000),
+            None,
+            "no chunk matched → whole-body fallback"
+        );
+    }
+
+    /// Matched chunk first, then neighbours expand outward; with ample budget
+    /// every chunk is emitted once, in document order, each header-prefixed.
+    #[test]
+    fn matched_first_then_neighbours_in_document_order() {
+        let chunks = [
+            chunk("1-2", "red apple pie"),
+            chunk("3-4", "green lime soda"),
+            chunk("5-6", "blue mango tart"),
+            chunk("7-8", "gold plum cake"),
+        ];
+        let rendered = render_chunked_item_body(&chunks, &tokenize("mango"), 1000)
+            .expect("matched chunk renders");
+
+        // Every header present, each body emitted exactly once (dedup).
+        for turns in ["1-2", "3-4", "5-6", "7-8"] {
+            assert!(
+                rendered.contains(&format!("[turns {turns}]")),
+                "header for {turns} present: {rendered}"
+            );
+        }
+        for body in [
+            "red apple pie",
+            "green lime soda",
+            "blue mango tart",
+            "gold plum cake",
+        ] {
+            assert_eq!(count(&rendered, body), 1, "{body} emitted once");
+        }
+        // Document order: header positions ascend with window index.
+        let positions: Vec<usize> = ["1-2", "3-4", "5-6", "7-8"]
+            .iter()
+            .map(|turns| rendered.find(&format!("[turns {turns}]")).unwrap())
+            .collect();
+        assert!(
+            positions.windows(2).all(|pair| pair[0] < pair[1]),
+            "chunks emitted in document order: {positions:?}"
+        );
+        // Header prefixes its body (provenance immediately precedes content).
+        let matched = rendered.find("[turns 5-6]").unwrap();
+        let body = rendered.find("blue mango tart").unwrap();
+        assert!(matched < body, "header precedes its body");
+    }
+
+    /// Budget bounds expansion: the matched chunk plus its nearest sibling fit,
+    /// the far sibling is dropped. Nearest = window index −1 tried before +1.
+    #[test]
+    fn budget_cutoff_keeps_matched_and_nearest_neighbour() {
+        let chunks = [
+            chunk("1-4", "red apple pie crust"),
+            chunk("5-8", "green mango tart glaze"),
+            chunk("9-12", "blue plum jam toast"),
+        ];
+        // Each block costs 6 + 4 = 10 tokens; budget admits exactly two.
+        let rendered = render_chunked_item_body(&chunks, &tokenize("mango"), 20)
+            .expect("matched chunk renders");
+
+        assert!(
+            rendered.contains("green mango tart glaze"),
+            "matched chunk kept"
+        );
+        assert!(
+            rendered.contains("red apple pie crust"),
+            "nearest neighbour kept"
+        );
+        assert!(rendered.contains("[turns 1-4]") && rendered.contains("[turns 5-8]"));
+        assert!(
+            !rendered.contains("blue plum jam toast") && !rendered.contains("[turns 9-12]"),
+            "over-budget far sibling dropped: {rendered}"
+        );
+    }
+
+    /// When only one slot fits, the higher-scoring matched chunk wins over a
+    /// lower-scoring matched chunk (matched-first is score-ranked, desc).
+    #[test]
+    fn higher_scoring_matched_chunk_wins_single_slot() {
+        let chunks = [
+            chunk("1-4", "green mango plum here"), // matches "mango" only
+            chunk("5-8", "green mango tart here"), // matches "mango" AND "tart"
+        ];
+        // Each block costs 10; budget admits exactly one.
+        let rendered = render_chunked_item_body(&chunks, &tokenize("mango tart"), 10)
+            .expect("matched chunk renders");
+
+        assert!(
+            rendered.contains("tart"),
+            "higher-scoring chunk chosen: {rendered}"
+        );
+        assert!(rendered.contains("[turns 5-8]"));
+        assert!(
+            !rendered.contains("plum") && !rendered.contains("[turns 1-4]"),
+            "lower-scoring chunk dropped for the single slot: {rendered}"
+        );
+    }
+
+    /// A sibling adjacent to two matched anchors is considered from both but
+    /// emitted only once.
+    #[test]
+    fn overlapping_expansion_never_duplicates() {
+        let chunks = [
+            chunk("1-4", "red mango pie"),    // matched
+            chunk("5-8", "green lime soda"),  // neighbour of both anchors
+            chunk("9-12", "blue mango tart"), // matched
+        ];
+        let rendered = render_chunked_item_body(&chunks, &tokenize("mango"), 1000)
+            .expect("matched chunk renders");
+
+        assert_eq!(
+            count(&rendered, "green lime soda"),
+            1,
+            "shared neighbour emitted once: {rendered}"
+        );
+        for body in ["red mango pie", "green lime soda", "blue mango tart"] {
+            assert_eq!(count(&rendered, body), 1, "{body} emitted once");
+        }
+    }
 }
