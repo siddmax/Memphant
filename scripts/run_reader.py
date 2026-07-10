@@ -310,10 +310,11 @@ class ReaderCli:
                     data.get("choices", [{}])[0].get("message", {}).get("content")
                 )
                 if not content:
-                    raise RuntimeError(
+                    last_error = RuntimeError(
                         f"openrouter returned empty content (attempt "
                         f"{attempt + 1}/4): {json.dumps(data)[:500]}"
                     )
+                    continue
                 return content.strip()
             except urllib.error.HTTPError as error:
                 body_text = error.read().decode(errors="replace")[:500]
@@ -323,7 +324,11 @@ class ReaderCli:
                 )
                 if error.code != 429 and error.code < 500:
                     raise last_error from error
-            except (urllib.error.URLError, TimeoutError) as error:
+            except (urllib.error.URLError, TimeoutError, OSError, ValueError) as error:
+                # OSError covers ssl.SSLError/socket resets that urlopen can
+                # surface raw; ValueError covers malformed JSON bodies. Both
+                # must retry, then land as RuntimeError so the per-question
+                # handler records the row instead of killing the run.
                 last_error = RuntimeError(
                     f"openrouter request failed (attempt {attempt + 1}/4): {error}"
                 )
