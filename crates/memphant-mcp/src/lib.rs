@@ -2,8 +2,8 @@ use axum::extract::State;
 use axum::routing::post;
 use axum::{Json, Router};
 use memphant_core::{
-    CoreError, InMemoryStore, correct_memory, forget_memory, recall, record_mark, reflect_recorded,
-    retain_episode,
+    CoreError, InMemoryStore, MemoryStore, SystemClock, correct_memory, forget_memory, recall,
+    record_mark, reflect_recorded, retain_episode,
 };
 use memphant_types::{
     AdmissionAction, COMPILER_VERSION, CorrectRequest, CorrectResult, ENGINE_VERSION,
@@ -124,6 +124,8 @@ impl McpRuntime {
                         source_kind: request.source_kind,
                         source_trust: request.source_trust,
                         subject_hint: request.subject_hint,
+                        subject: request.subject,
+                        predicate: request.predicate,
                         body: request.body,
                         compiler_version: request
                             .compiler_version
@@ -175,6 +177,7 @@ impl McpRuntime {
                         decay_enabled: request.decay_enabled.unwrap_or(true),
                         engine_version: ENGINE_VERSION.to_string(),
                     },
+                    &SystemClock,
                 )
                 .await?;
                 ok("Returned cited memory evidence.", recalled)
@@ -183,21 +186,23 @@ impl McpRuntime {
                 let request: CorrectRequest = serde_json::from_value(arguments)?;
                 ok(
                     "Corrected selected memory.",
-                    correct_memory(&self.store, request).await?,
+                    correct_memory(&self.store, request, &SystemClock).await?,
                 )
             }
             "forget" => {
                 let request: ForgetRequest = serde_json::from_value(arguments)?;
                 ok(
                     "Forgot selected memory.",
-                    forget_memory(&self.store, request).await?,
+                    forget_memory(&self.store, request, &SystemClock).await?,
                 )
             }
             "trace" => {
                 let request: TraceRequest = serde_json::from_value(arguments)?;
                 let trace = self
                     .store
-                    .trace_by_id(request.trace_id)
+                    .trace_by_id(request.tenant_id, request.trace_id)
+                    .await
+                    .map_err(|error| McpRuntimeError::Tool(error.to_string()))?
                     .ok_or_else(|| McpRuntimeError::Tool("trace not found".to_string()))?;
                 ok("Returned retrieval trace.", trace)
             }
@@ -248,8 +253,8 @@ impl McpRuntime {
                         source_kind: episode.source_kind.clone(),
                         trust_level: episode.source_trust,
                         actor_id: episode.actor_id,
-                        subject: Some("retained episode".to_string()),
-                        predicate: Some("body".to_string()),
+                        subject: job.subject.clone(),
+                        predicate: job.predicate.clone(),
                         body: episode.body.clone(),
                         churn_class: None,
                         admission_hint: None,
@@ -258,6 +263,7 @@ impl McpRuntime {
                         valid_to: None,
                     }],
                 },
+                &SystemClock,
             )
             .await?;
             created += trace

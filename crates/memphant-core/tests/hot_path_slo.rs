@@ -1,10 +1,12 @@
 use std::time::{Duration, Instant};
 
-use memphant_core::{InMemoryStore, MemoryStore, recall};
+use memphant_core::{FixedClock, InMemoryStore, MemoryStore, recall};
 use memphant_types::{
     ActorId, ENGINE_VERSION, MemoryKind, NewEpisode, NewMemoryUnit, RecallMode, RecallRequest,
     ScopeId, TenantId, TrustLevel, UnitState,
 };
+
+const CLOCK: FixedClock = FixedClock("2026-07-03T00:00:00Z");
 
 const FAST_P50_LIMIT: Duration = Duration::from_millis(200);
 const FAST_P95_LIMIT: Duration = Duration::from_millis(500);
@@ -51,13 +53,17 @@ async fn fast_mode_recall_holds_release_hot_path_slo() {
     };
 
     for _ in 0..5 {
-        recall(&store, request.clone()).await.expect("warm recall");
+        recall(&store, request.clone(), &CLOCK)
+            .await
+            .expect("warm recall");
     }
 
     let mut samples = Vec::with_capacity(80);
     for _ in 0..80 {
         let started = Instant::now();
-        let response = recall(&store, request.clone()).await.expect("fast recall");
+        let response = recall(&store, request.clone(), &CLOCK)
+            .await
+            .expect("fast recall");
         assert!(!response.items.is_empty());
         samples.push(started.elapsed());
     }
@@ -130,7 +136,7 @@ async fn seed_reference_corpus(
                     body: body.to_string(),
                     trust_level: TrustLevel::TrustedSystem,
                     churn_class: None,
-                    freshness_due: false,
+                    freshness_due_at: None,
                     actor_id: Some(actor_id),
                     source_kind: Some("reference-corpus".to_string()),
                     source_episode_id: Some(episode.episode_id),

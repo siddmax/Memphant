@@ -4,8 +4,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use memphant_core::{
-    CoreError, InMemoryStore, correct_memory, forget_memory, recall, record_mark, reflect_recorded,
-    retain_episode,
+    CoreError, InMemoryStore, SystemClock, correct_memory, forget_memory, recall, record_mark,
+    reflect_recorded, retain_episode,
 };
 use memphant_types::{
     COMPILER_VERSION, CorrectRequest, ENGINE_VERSION, ErrorBody, ErrorEnvelope, HealthResponse,
@@ -105,6 +105,8 @@ async fn retain_episode_handler(
             source_kind: request.source_kind,
             source_trust: request.source_trust,
             subject_hint: request.subject_hint,
+            subject: request.subject,
+            predicate: request.predicate,
             body: request.body,
             compiler_version: request
                 .compiler_version
@@ -160,8 +162,8 @@ async fn reflect_handler(
                     source_kind: episode.source_kind.clone(),
                     trust_level: episode.source_trust,
                     actor_id: episode.actor_id,
-                    subject: Some("retained episode".to_string()),
-                    predicate: Some("body".to_string()),
+                    subject: job.subject.clone(),
+                    predicate: job.predicate.clone(),
                     body: episode.body.clone(),
                     churn_class: None,
                     admission_hint: None,
@@ -170,6 +172,7 @@ async fn reflect_handler(
                     valid_to: None,
                 }],
             },
+            &SystemClock,
         )
         .await?;
         created += trace
@@ -217,6 +220,7 @@ async fn recall_handler(
             decay_enabled: request.decay_enabled.unwrap_or(true),
             engine_version: ENGINE_VERSION.to_string(),
         },
+        &SystemClock,
     )
     .await?;
     Ok(Json(response))
@@ -226,14 +230,18 @@ async fn correct_handler(
     State(state): State<AppState>,
     Json(request): Json<CorrectRequest>,
 ) -> Result<Json<memphant_types::CorrectResult>, ApiError> {
-    Ok(Json(correct_memory(&state.store, request).await?))
+    Ok(Json(
+        correct_memory(&state.store, request, &SystemClock).await?,
+    ))
 }
 
 async fn forget_handler(
     State(state): State<AppState>,
     Json(request): Json<memphant_types::ForgetRequest>,
 ) -> Result<Json<memphant_types::ForgetResult>, ApiError> {
-    Ok(Json(forget_memory(&state.store, request).await?))
+    Ok(Json(
+        forget_memory(&state.store, request, &SystemClock).await?,
+    ))
 }
 
 async fn mark_handler(
@@ -251,7 +259,7 @@ async fn trace_handler(
     let trace_id = memphant_types::TraceId::from_u128(uuid.as_u128());
     state
         .store
-        .trace_by_id(trace_id)
+        .trace_by_id_any_tenant(trace_id)
         .map(Json)
         .ok_or_else(|| ApiError::not_found("trace"))
 }

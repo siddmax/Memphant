@@ -1,12 +1,14 @@
 use std::collections::HashMap;
 
-use memphant_core::{CoreError, InMemoryStore, MemoryStore, recall, record_mark};
+use memphant_core::{CoreError, FixedClock, InMemoryStore, MemoryStore, recall, record_mark};
 use memphant_types::{
     ActorId, ContextualChunk, LearnedRerankProfile, MarkOutcome, MarkRequest, MemoryEdgeKind,
     MemoryKind, NewEpisode, NewMemoryEdge, NewMemoryUnit, RecallChannel, RecallDropReason,
     RecallMode, RecallRequest, ScopeId, TenantId, TraceId, TrustLevel, UnitId, UnitState,
 };
 use serde::Deserialize;
+
+const CLOCK: FixedClock = FixedClock("2026-07-03T00:00:00Z");
 
 fn tenant(value: u128) -> TenantId {
     TenantId::from_u128(value)
@@ -49,6 +51,7 @@ async fn recall_writes_trace_for_scope_denial() {
             decay_enabled: true,
             engine_version: "engine-wsc-test".to_string(),
         },
+        &CLOCK,
     )
     .await
     .expect_err("denied recall returns a policy error");
@@ -82,7 +85,7 @@ async fn dsr_decay_fold_promotes_reinforced_memory_over_ignored_stale_candidate(
                 body: "Aardvark deploy runbook says to restart the legacy queue.".to_string(),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: Some("slow".to_string()),
-                freshness_due: false,
+                freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
                 source_episode_id: None,
@@ -109,7 +112,7 @@ async fn dsr_decay_fold_promotes_reinforced_memory_over_ignored_stale_candidate(
                 body: "Zulu deploy runbook says to run the atlas cutover checklist.".to_string(),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: Some("stable".to_string()),
-                freshness_due: false,
+                freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
                 source_episode_id: None,
@@ -174,13 +177,14 @@ async fn dsr_decay_fold_promotes_reinforced_memory_over_ignored_stale_candidate(
             decay_enabled: true,
             engine_version: "engine-rung11-test".to_string(),
         },
+        &CLOCK,
     )
     .await
     .expect("recall succeeds");
 
     assert_eq!(response.candidate_whitelist, vec![durable_id]);
     let trace = store
-        .trace_by_id(response.trace_id)
+        .trace_by_id_any_tenant(response.trace_id)
         .expect("trace recorded for decay fold");
     assert!(
         trace
@@ -248,7 +252,7 @@ async fn exhaustive_mode_gathers_buried_raw_episode_evidence_without_changing_fa
                 body: "Stargate deploy requires a routine restart.".to_string(),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
-                freshness_due: false,
+                freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
                 source_episode_id: Some(decoy_episode.episode_id),
@@ -290,7 +294,7 @@ async fn exhaustive_mode_gathers_buried_raw_episode_evidence_without_changing_fa
                 body: "Heliotrope.".to_string(),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
-                freshness_due: false,
+                freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
                 source_episode_id: Some(answer_episode.episode_id),
@@ -329,6 +333,7 @@ async fn exhaustive_mode_gathers_buried_raw_episode_evidence_without_changing_fa
             decay_enabled: true,
             engine_version: "engine-rung12-test".to_string(),
         },
+        &CLOCK,
     )
     .await
     .expect("fast recall succeeds");
@@ -357,6 +362,7 @@ async fn exhaustive_mode_gathers_buried_raw_episode_evidence_without_changing_fa
             decay_enabled: true,
             engine_version: "engine-rung12-test".to_string(),
         },
+        &CLOCK,
     )
     .await
     .expect("exhaustive recall succeeds");
@@ -365,7 +371,7 @@ async fn exhaustive_mode_gathers_buried_raw_episode_evidence_without_changing_fa
     assert_eq!(exhaustive.items[0].inclusion_reason, "l4_exhaustive");
 
     let trace = store
-        .trace_by_id(exhaustive.trace_id)
+        .trace_by_id_any_tenant(exhaustive.trace_id)
         .expect("trace recorded for exhaustive recall");
     assert_eq!(trace.mode_requested, RecallMode::Exhaustive);
     assert_eq!(trace.mode_executed, RecallMode::Exhaustive);
@@ -429,7 +435,7 @@ async fn contextual_chunk_recall_finds_source_unit_and_traces_flag() {
                 body: "Runbook contains a gated switch.".to_string(),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
-                freshness_due: false,
+                freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("system".to_string()),
                 source_episode_id: Some(episode.episode_id),
@@ -472,6 +478,7 @@ async fn contextual_chunk_recall_finds_source_unit_and_traces_flag() {
             decay_enabled: true,
             engine_version: "engine-ws4-test".to_string(),
         },
+        &CLOCK,
     )
     .await
     .expect("recall succeeds");
@@ -488,11 +495,25 @@ async fn contextual_chunk_recall_finds_source_unit_and_traces_flag() {
             .iter()
             .any(|flag| flag == "contextual_chunks_enabled")
     );
+    // The token-overlap scorer is honestly labeled `lexical`; no candidate is
+    // ever attributed to the (disabled) vector channel by the default runtime.
     assert!(traces[0].candidates.iter().any(|candidate| {
         candidate.unit_id == unit_id
-            && candidate.channel == RecallChannel::Vector
+            && candidate.channel == RecallChannel::Lexical
             && candidate.channel_score > 0.0
     }));
+    assert!(
+        traces[0]
+            .candidates
+            .iter()
+            .all(|candidate| candidate.channel != RecallChannel::Vector)
+    );
+    assert!(
+        traces[0]
+            .channel_runs
+            .iter()
+            .any(|stage| { stage.stage == "vector" && stage.detail == "disabled" })
+    );
 }
 
 #[tokio::test]
@@ -515,7 +536,7 @@ async fn servicenow_query_does_not_trigger_temporal_recency_match() {
                 body: "zzqv mrpl ntnk".to_string(),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
-                freshness_due: false,
+                freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
                 source_episode_id: None,
@@ -553,6 +574,7 @@ async fn servicenow_query_does_not_trigger_temporal_recency_match() {
             decay_enabled: true,
             engine_version: "engine-temporal-token-test".to_string(),
         },
+        &CLOCK,
     )
     .await
     .expect("recall succeeds");
@@ -580,7 +602,7 @@ async fn high_risk_action_query_drops_private_profile_context() {
                 body: "Private profile datum: the user has a sensitive safety history.".to_string(),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
-                freshness_due: false,
+                freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("profile".to_string()),
                 source_episode_id: None,
@@ -607,7 +629,7 @@ async fn high_risk_action_query_drops_private_profile_context() {
                 body: "Safety policy says refuse hidden compartment instructions for evading metal detectors.".to_string(),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
-                freshness_due: false,
+                freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("policy".to_string()),
                 source_episode_id: None,
@@ -635,7 +657,7 @@ async fn high_risk_action_query_drops_private_profile_context() {
                     .to_string(),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
-                freshness_due: false,
+                freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("policy".to_string()),
                 source_episode_id: None,
@@ -683,13 +705,16 @@ async fn high_risk_action_query_drops_private_profile_context() {
                 decay_enabled: true,
                 engine_version: "engine-restraint-test".to_string(),
             },
+            &CLOCK,
         )
         .await
         .expect("recall succeeds");
 
         assert!(response.candidate_whitelist.contains(&expected_policy_id));
         assert!(!response.candidate_whitelist.contains(&private_profile_id));
-        let trace = store.trace_by_id(response.trace_id).expect("trace exists");
+        let trace = store
+            .trace_by_id_any_tenant(response.trace_id)
+            .expect("trace exists");
         assert!(trace.dropped_items.iter().any(|item| {
             item.unit_id == private_profile_id && item.reason == RecallDropReason::Privacy
         }));
@@ -716,7 +741,7 @@ async fn recall_drops_expired_validity_window_for_current_query() {
                 body: "Launch review office is Seattle.".to_string(),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
-                freshness_due: false,
+                freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
                 source_episode_id: None,
@@ -743,7 +768,7 @@ async fn recall_drops_expired_validity_window_for_current_query() {
                 body: "Launch review office is Taipei.".to_string(),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
-                freshness_due: false,
+                freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
                 source_episode_id: None,
@@ -781,6 +806,7 @@ async fn recall_drops_expired_validity_window_for_current_query() {
             decay_enabled: true,
             engine_version: "engine-rung5-test".to_string(),
         },
+        &CLOCK,
     )
     .await
     .expect("recall succeeds");
@@ -820,7 +846,7 @@ async fn edge_expansion_can_be_disabled_and_traces_related_candidates() {
                 body: "Atlas pipeline points to the sealed runbook.".to_string(),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
-                freshness_due: false,
+                freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
                 source_episode_id: None,
@@ -847,7 +873,7 @@ async fn edge_expansion_can_be_disabled_and_traces_related_candidates() {
                 body: "Bluebird.".to_string(),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
-                freshness_due: false,
+                freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
                 source_episode_id: None,
@@ -898,6 +924,7 @@ async fn edge_expansion_can_be_disabled_and_traces_related_candidates() {
             decay_enabled: true,
             engine_version: "engine-rung6-test".to_string(),
         },
+        &CLOCK,
     )
     .await
     .expect("recall succeeds with edges disabled");
@@ -924,12 +951,15 @@ async fn edge_expansion_can_be_disabled_and_traces_related_candidates() {
             decay_enabled: true,
             engine_version: "engine-rung6-test".to_string(),
         },
+        &CLOCK,
     )
     .await
     .expect("recall succeeds with edges enabled");
 
     assert!(enabled.candidate_whitelist.contains(&related_id));
-    let trace = store.trace_by_id(enabled.trace_id).expect("trace exists");
+    let trace = store
+        .trace_by_id_any_tenant(enabled.trace_id)
+        .expect("trace exists");
     assert!(
         trace
             .feature_flags
@@ -965,7 +995,7 @@ async fn packing_collapses_duplicate_decoys_and_preserves_answer_under_budget() 
                     body: format!("A prod deploy step ran before release {index}."),
                     trust_level: TrustLevel::TrustedSystem,
                     churn_class: None,
-                    freshness_due: false,
+                    freshness_due_at: None,
                     actor_id: Some(actor_id),
                     source_kind: Some("fixture".to_string()),
                     source_episode_id: None,
@@ -994,7 +1024,7 @@ async fn packing_collapses_duplicate_decoys_and_preserves_answer_under_budget() 
                 body: "Prod deploy requires manual approval in release.".to_string(),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
-                freshness_due: false,
+                freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
                 source_episode_id: None,
@@ -1032,6 +1062,7 @@ async fn packing_collapses_duplicate_decoys_and_preserves_answer_under_budget() 
             decay_enabled: true,
             engine_version: "engine-rung7-test".to_string(),
         },
+        &CLOCK,
     )
     .await
     .expect("recall succeeds");
@@ -1045,7 +1076,9 @@ async fn packing_collapses_duplicate_decoys_and_preserves_answer_under_budget() 
             .is_some_and(|position| position <= 1)
     );
 
-    let trace = store.trace_by_id(response.trace_id).expect("trace exists");
+    let trace = store
+        .trace_by_id_any_tenant(response.trace_id)
+        .expect("trace exists");
     assert!(
         trace
             .feature_flags
@@ -1081,7 +1114,7 @@ async fn packing_abstains_when_top_evidence_is_unresolved_contradiction() {
                 body: "Refund window is 30 days.".to_string(),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
-                freshness_due: false,
+                freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
                 source_episode_id: None,
@@ -1108,7 +1141,7 @@ async fn packing_abstains_when_top_evidence_is_unresolved_contradiction() {
                 body: "Refund window is 14 days.".to_string(),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
-                freshness_due: false,
+                freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
                 source_episode_id: None,
@@ -1159,6 +1192,7 @@ async fn packing_abstains_when_top_evidence_is_unresolved_contradiction() {
             decay_enabled: true,
             engine_version: "engine-rung7-test".to_string(),
         },
+        &CLOCK,
     )
     .await
     .expect("recall succeeds");
@@ -1194,7 +1228,7 @@ async fn bounded_rerank_reorders_rank_sensitive_candidate_and_traces_decision() 
                 body: "Owner currently resolves pager alerts noise.".to_string(),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
-                freshness_due: false,
+                freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
                 source_episode_id: None,
@@ -1221,7 +1255,7 @@ async fn bounded_rerank_reorders_rank_sensitive_candidate_and_traces_decision() 
                 body: "Incident owner resolves pager alerts.".to_string(),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
-                freshness_due: false,
+                freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
                 source_episode_id: None,
@@ -1259,10 +1293,13 @@ async fn bounded_rerank_reorders_rank_sensitive_candidate_and_traces_decision() 
             decay_enabled: true,
             engine_version: "engine-rung8-test".to_string(),
         },
+        &CLOCK,
     )
     .await
     .expect("recall succeeds with rerank disabled");
-    let disabled_trace = store.trace_by_id(disabled.trace_id).expect("trace exists");
+    let disabled_trace = store
+        .trace_by_id_any_tenant(disabled.trace_id)
+        .expect("trace exists");
     assert!(
         disabled.candidate_whitelist.contains(&decoy_id),
         "disabled whitelist={:?}, decoy_id={:?}, answer_id={:?}, candidates={:?}",
@@ -1294,13 +1331,16 @@ async fn bounded_rerank_reorders_rank_sensitive_candidate_and_traces_decision() 
             decay_enabled: true,
             engine_version: "engine-rung8-test".to_string(),
         },
+        &CLOCK,
     )
     .await
     .expect("recall succeeds with rerank enabled");
     assert!(enabled.candidate_whitelist.contains(&answer_id));
     assert!(!enabled.candidate_whitelist.contains(&decoy_id));
 
-    let trace = store.trace_by_id(enabled.trace_id).expect("trace exists");
+    let trace = store
+        .trace_by_id_any_tenant(enabled.trace_id)
+        .expect("trace exists");
     assert!(
         trace
             .feature_flags
@@ -1346,7 +1386,7 @@ async fn learned_rerank_profile_reorders_protected_topk_and_traces_training_set(
                 body: "Atlas rollback should use the noisy rollback runbook notes that repeat atlas rollback runbook terms but do not name the canonical runbook.".to_string(),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
-                freshness_due: false,
+                freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
                 source_episode_id: None,
@@ -1373,7 +1413,7 @@ async fn learned_rerank_profile_reorders_protected_topk_and_traces_training_set(
                 body: "Use the mira-ledger recovery runbook.".to_string(),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
-                freshness_due: false,
+                freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
                 source_episode_id: None,
@@ -1412,6 +1452,7 @@ async fn learned_rerank_profile_reorders_protected_topk_and_traces_training_set(
             decay_enabled: true,
             engine_version: "engine-rung13-test".to_string(),
         },
+        &CLOCK,
     )
     .await
     .expect("deterministic recall succeeds");
@@ -1448,13 +1489,16 @@ async fn learned_rerank_profile_reorders_protected_topk_and_traces_training_set(
             decay_enabled: true,
             engine_version: "engine-rung13-test".to_string(),
         },
+        &CLOCK,
     )
     .await
     .expect("learned-profile recall succeeds");
     assert!(learned.candidate_whitelist.contains(&answer_id));
     assert!(!learned.candidate_whitelist.contains(&decoy_id));
 
-    let trace = store.trace_by_id(learned.trace_id).expect("trace exists");
+    let trace = store
+        .trace_by_id_any_tenant(learned.trace_id)
+        .expect("trace exists");
     assert!(
         trace
             .feature_flags
@@ -1503,7 +1547,7 @@ async fn query_decomposition_recovers_composite_answer_and_traces_subqueries() {
                 body: "Deploy task file changed rollout.toml.".to_string(),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
-                freshness_due: false,
+                freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
                 source_episode_id: None,
@@ -1530,7 +1574,7 @@ async fn query_decomposition_recovers_composite_answer_and_traces_subqueries() {
                 body: "Manual gate is required.".to_string(),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
-                freshness_due: false,
+                freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
                 source_episode_id: None,
@@ -1561,7 +1605,7 @@ async fn query_decomposition_recovers_composite_answer_and_traces_subqueries() {
                     ),
                     trust_level: TrustLevel::TrustedSystem,
                     churn_class: None,
-                    freshness_due: false,
+                    freshness_due_at: None,
                     actor_id: Some(actor_id),
                     source_kind: Some("fixture".to_string()),
                     source_episode_id: None,
@@ -1602,10 +1646,13 @@ async fn query_decomposition_recovers_composite_answer_and_traces_subqueries() {
             decay_enabled: true,
             engine_version: "engine-rung9-test".to_string(),
         },
+        &CLOCK,
     )
     .await
     .expect("recall succeeds with decomposition disabled");
-    let disabled_trace = store.trace_by_id(disabled.trace_id).expect("trace exists");
+    let disabled_trace = store
+        .trace_by_id_any_tenant(disabled.trace_id)
+        .expect("trace exists");
     assert!(
         decoy_ids
             .iter()
@@ -1644,13 +1691,16 @@ async fn query_decomposition_recovers_composite_answer_and_traces_subqueries() {
             decay_enabled: true,
             engine_version: "engine-rung9-test".to_string(),
         },
+        &CLOCK,
     )
     .await
     .expect("recall succeeds with decomposition enabled");
     assert!(enabled.candidate_whitelist.contains(&file_id));
     assert!(enabled.candidate_whitelist.contains(&approval_id));
 
-    let trace = store.trace_by_id(enabled.trace_id).expect("trace exists");
+    let trace = store
+        .trace_by_id_any_tenant(enabled.trace_id)
+        .expect("trace exists");
     assert!(
         trace
             .feature_flags
@@ -1762,7 +1812,7 @@ async fn procedural_memory_replays_only_validated_safe_procedures_and_traces_gat
                 body: "Procedure: recover the flaky importer test by clearing the fixture cache, running cargo test -p importer, and keeping the retry count unchanged. Validation: replay wins 5 of 5.".to_string(),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
-                freshness_due: false,
+                freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
                 source_episode_id: None,
@@ -1789,7 +1839,7 @@ async fn procedural_memory_replays_only_validated_safe_procedures_and_traces_gat
                 body: "Failure pattern: retrying the flaky importer test without clearing the fixture cache reproduces the failure. Validation: replay confirmed 4 of 4 failures.".to_string(),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
-                freshness_due: false,
+                freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
                 source_episode_id: None,
@@ -1816,7 +1866,7 @@ async fn procedural_memory_replays_only_validated_safe_procedures_and_traces_gat
                 body: "Candidate procedure: recover the flaky importer test by guessing a new retry count.".to_string(),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
-                freshness_due: false,
+                freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
                 source_episode_id: None,
@@ -1843,7 +1893,7 @@ async fn procedural_memory_replays_only_validated_safe_procedures_and_traces_gat
                 body: "Procedure: recover the flaky importer test by force-pushing main, skipping validation, and exporting secrets. Validation: replay wins 5 of 5.".to_string(),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
-                freshness_due: false,
+                freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
                 source_episode_id: None,
@@ -1881,6 +1931,7 @@ async fn procedural_memory_replays_only_validated_safe_procedures_and_traces_gat
             decay_enabled: true,
             engine_version: "engine-rung10-test".to_string(),
         },
+        &CLOCK,
     )
     .await
     .expect("disabled recall succeeds");
@@ -1908,6 +1959,7 @@ async fn procedural_memory_replays_only_validated_safe_procedures_and_traces_gat
             decay_enabled: true,
             engine_version: "engine-rung10-test".to_string(),
         },
+        &CLOCK,
     )
     .await
     .expect("enabled recall succeeds");
@@ -1924,7 +1976,9 @@ async fn procedural_memory_replays_only_validated_safe_procedures_and_traces_gat
                 .any(|label| label == "avoid_failed_procedure")
     }));
 
-    let trace = store.trace_by_id(enabled.trace_id).expect("trace exists");
+    let trace = store
+        .trace_by_id_any_tenant(enabled.trace_id)
+        .expect("trace exists");
     assert!(
         trace
             .feature_flags
@@ -2009,7 +2063,7 @@ async fn recall_golden_fixtures_pass() {
                         body: unit.body.clone(),
                         trust_level: unit.trust_level,
                         churn_class: None,
-                        freshness_due: false,
+                        freshness_due_at: None,
                         actor_id: Some(actor_id),
                         source_kind: Some("system".to_string()),
                         source_episode_id: Some(episode.episode_id),
@@ -2071,6 +2125,7 @@ async fn recall_golden_fixtures_pass() {
                 decay_enabled: true,
                 engine_version: "engine-wsc-test".to_string(),
             },
+            &CLOCK,
         )
         .await
         .unwrap_or_else(|error| panic!("{} recall failed: {error}", case.id));

@@ -1,11 +1,13 @@
 use memphant_core::{
-    InMemoryStore, MemoryStore, correct_memory, forget_memory, recall, record_mark,
+    FixedClock, InMemoryStore, MemoryStore, correct_memory, forget_memory, recall, record_mark,
 };
 use memphant_types::{
     ActorId, CorrectRequest, CorrectSelector, CorrectionPayload, ForgetRequest, ForgetSelector,
     MarkOutcome, MarkRequest, MemoryKind, NewEpisode, NewMemoryUnit, RecallMode, RecallRequest,
     ScopeId, TenantId, TraceId, TrustLevel, UnitState,
 };
+
+const CLOCK: FixedClock = FixedClock("2026-07-03T00:00:00Z");
 
 fn tenant(value: u128) -> TenantId {
     TenantId::from_u128(value)
@@ -51,6 +53,7 @@ async fn correct_supersedes_old_generation_and_recall_returns_new_value() {
                 valid_to: None,
             },
         },
+        &CLOCK,
     )
     .await
     .expect("correction succeeds");
@@ -103,6 +106,7 @@ async fn correct_supersedes_old_generation_and_recall_returns_new_value() {
             decay_enabled: true,
             engine_version: "engine-wsd-test".to_string(),
         },
+        &CLOCK,
     )
     .await
     .expect("recall succeeds");
@@ -135,10 +139,13 @@ async fn forget_marks_memory_deleted_and_recall_hides_it() {
             actor_id,
             selector: ForgetSelector {
                 memory_unit_id: Some(unit_id),
-                scope_id: None,
+                episode_id: None,
+                resource_id: None,
+                scope_id,
             },
             reason: "user_request".to_string(),
         },
+        &CLOCK,
     )
     .await
     .expect("forget succeeds");
@@ -177,6 +184,7 @@ async fn forget_marks_memory_deleted_and_recall_hides_it() {
             decay_enabled: true,
             engine_version: "engine-wsd-test".to_string(),
         },
+        &CLOCK,
     )
     .await
     .expect("recall succeeds");
@@ -294,7 +302,7 @@ async fn seed_active_unit(
                 body: body.to_string(),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
-                freshness_due: false,
+                freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("system".to_string()),
                 source_episode_id: Some(episode.episode_id),

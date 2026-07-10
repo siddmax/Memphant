@@ -246,6 +246,17 @@
       },
       "ForgetSelector": {
         "properties": {
+          "episode_id": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EpisodeId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "memory_unit_id": {
             "anyOf": [
               {
@@ -254,19 +265,27 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "default": null
           },
-          "scope_id": {
+          "resource_id": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/ScopeId"
+                "$ref": "#/components/schemas/ResourceId"
               },
               {
                 "type": "null"
               }
-            ]
+            ],
+            "default": null
+          },
+          "scope_id": {
+            "$ref": "#/components/schemas/ScopeId"
           }
         },
+        "required": [
+          "scope_id"
+        ],
         "type": "object"
       },
       "HealthResponse": {
@@ -883,6 +902,13 @@
               "null"
             ]
           },
+          "predicate": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "scope_id": {
             "$ref": "#/components/schemas/ScopeId"
           },
@@ -891,6 +917,13 @@
           },
           "source_trust": {
             "$ref": "#/components/schemas/TrustLevel"
+          },
+          "subject": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "subject_hint": {
             "type": [
@@ -1223,8 +1256,12 @@
               "null"
             ]
           },
-          "freshness_due": {
-            "type": "boolean"
+          "freshness_due_at": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "id": {
             "$ref": "#/components/schemas/UnitId"
@@ -1330,7 +1367,6 @@
           "state",
           "body",
           "trust_level",
-          "freshness_due",
           "contextual_chunks"
         ],
         "type": "object"

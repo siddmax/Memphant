@@ -8,6 +8,40 @@ fn bundled_wsa_migration_passes_all_provider_lints() {
 }
 
 #[test]
+fn bundled_migration_list_includes_runtime_reconciliation() {
+    let versions: Vec<_> = memphant_store_postgres::MIGRATIONS
+        .iter()
+        .map(|(version, _)| *version)
+        .collect();
+    assert_eq!(
+        versions,
+        [
+            "20260703_001_wsa_bootstrap",
+            "20260709_002_runtime_reconciliation"
+        ]
+    );
+}
+
+#[test]
+fn provider_lint_rejects_drops_without_rewrite_header() {
+    let bad_sql = "drop table memphant.review_event;";
+    let error = lint_migration_sql(bad_sql, Provider::PlainPostgres).expect_err("drop must fail");
+    assert!(error.to_string().contains("boundary:drop_table"));
+
+    let bad_index_sql = "drop index memphant.some_idx;";
+    let error =
+        lint_migration_sql(bad_index_sql, Provider::PlainPostgres).expect_err("drop must fail");
+    assert!(error.to_string().contains("boundary:drop_index"));
+}
+
+#[test]
+fn provider_lint_allows_drops_under_rewrite_header() {
+    let rewrite_sql = "-- migration_kind: rewrite\ndrop table memphant.review_event;\ndrop index memphant.some_idx;";
+    lint_migration_sql(rewrite_sql, Provider::PlainPostgres)
+        .expect("rewrite-declared drops should pass");
+}
+
+#[test]
 fn provider_lint_rejects_browser_role_grants() {
     let bad_sql = r#"
         create table if not exists memphant.memory_unit (

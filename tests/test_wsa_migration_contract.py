@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATIONS = ROOT / "memphant_migrations" / "versions"
 BOOTSTRAP = MIGRATIONS / "20260703_001_wsa_bootstrap.sql"
+RECONCILIATION = MIGRATIONS / "20260709_002_runtime_reconciliation.sql"
 
 REQUIRED_TABLES = {
     "tenant",
@@ -108,8 +109,9 @@ def test_apply_runner_dry_run_reports_ordered_bootstrap() -> None:
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "migration_plan=1" in result.stdout
+    assert "migration_plan=2" in result.stdout
     assert "20260703_001_wsa_bootstrap.sql" in result.stdout
+    assert "20260709_002_runtime_reconciliation.sql" in result.stdout
 
 
 def test_live_catalog_check_requires_database_url() -> None:
@@ -176,6 +178,119 @@ def test_wsa_bootstrap_locks_down_browser_roles() -> None:
 
     for role in browser_roles:
         assert f"revoke all on schema memphant from {role}" in sql
+
+
+def _reconciliation_sql() -> str:
+    return RECONCILIATION.read_text(encoding="utf-8")
+
+
+def test_runtime_reconciliation_declares_rewrite_header() -> None:
+    first_lines = _reconciliation_sql().splitlines()[:5]
+    assert any(
+        line.strip() == "-- migration_kind: rewrite" for line in first_lines
+    )
+
+
+def test_runtime_reconciliation_replaces_open_subject_index_with_scope_bound() -> None:
+    sql = _reconciliation_sql().lower()
+
+    # The old tenant-open-subject index must be dropped by its REAL name and
+    # NOT behind `if exists` — a silent no-op must fail loudly at apply time.
+    assert "drop index memphant.memphant_memory_unit_tenant_open_subject_idx" in sql
+    assert "drop index if exists memphant.memphant_memory_unit_tenant_open_subject_idx" not in sql
+
+    start = sql.index("create unique index memphant_memory_unit_scope_subject_idx")
+    stanza = sql[start : sql.index(";", start)]
+    assert "scope_id" in stanza
+    assert "kind = 'semantic'" in stanza
+    assert "transaction_to is null" in stanza
+
+
+def test_runtime_reconciliation_adds_api_key_and_forgotten_source_with_rls() -> None:
+    sql = _reconciliation_sql().lower()
+
+    for table in ("api_key", "forgotten_source"):
+        assert f"create table if not exists memphant.{table}" in sql
+        assert f"alter table memphant.{table} enable row level security" in sql
+        assert f"create policy memphant_{table}_tenant_isolation" in sql
+
+    api_key_block = _table_block(sql, "api_key")
+    assert "key_hash text not null unique" in api_key_block
+    assert "max_trust" in api_key_block
+    assert "revoked_at" in api_key_block
+
+    forgotten_block = _table_block(sql, "forgotten_source")
+    assert "source_kind text not null check (source_kind in ('episode','resource','memory_unit'))" in forgotten_block
+    assert "primary key (tenant_id, source_kind, source_id)" in forgotten_block
+
+
+def test_runtime_reconciliation_rewrites_review_event_with_join_table() -> None:
+    sql = _reconciliation_sql().lower()
+
+    assert "drop table memphant.review_event" in sql
+    review_block = _table_block(sql, "review_event")
+    assert "trace_id uuid not null" in review_block
+    assert "caller_id text not null" in review_block
+    assert "unique (trace_id, caller_id)" in review_block
+
+    join_block = _table_block(sql, "review_event_unit")
+    assert "review_event_id uuid not null references memphant.review_event(id) on delete cascade" in join_block
+    assert "primary key (review_event_id, memory_unit_id)" in join_block
+    assert "foreign key (tenant_id, memory_unit_id) references memphant.memory_unit(tenant_id, id)" in join_block
+    assert "alter table memphant.review_event_unit enable row level security" in sql
+
+
+def test_runtime_reconciliation_extends_job_state_instead_of_new_table() -> None:
+    sql = _reconciliation_sql().lower()
+
+    assert "create table if not exists memphant.reflect_job" not in sql
+    assert "alter table memphant.job_state" in sql
+    assert "add column if not exists claimed_at timestamptz" in sql
+    assert "'dead'" in sql
+
+
+def test_boundary_checker_allows_drops_only_under_rewrite_header(tmp_path: Path) -> None:
+    def run_boundary(sql: str) -> subprocess.CompletedProcess[str]:
+        migrations = tmp_path / "versions"
+        migrations.mkdir(exist_ok=True)
+        for stale in migrations.glob("*.sql"):
+            stale.unlink()
+        (migrations / "20990101_900_case.sql").write_text(sql, encoding="utf-8")
+        return subprocess.run(
+            [
+                "python3",
+                "scripts/check_memphant_migration_boundary.py",
+                "--migrations-dir",
+                str(migrations),
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    denied = run_boundary("drop table memphant.review_event;\n")
+    assert denied.returncode == 1
+    assert "drop_table_without_rewrite_header" in denied.stdout
+
+    denied_index = run_boundary("drop index memphant.some_idx;\n")
+    assert denied_index.returncode == 1
+    assert "drop_index_without_rewrite_header" in denied_index.stdout
+
+    allowed = run_boundary(
+        "-- migration_kind: rewrite\n"
+        "drop table memphant.review_event;\n"
+        "drop index memphant.some_idx;\n"
+    )
+    assert allowed.returncode == 0, allowed.stdout + allowed.stderr
+    assert "migration_boundary=clean" in allowed.stdout
+
+    still_denied = run_boundary(
+        "-- migration_kind: rewrite\n"
+        "create table public.leak (id int);\n"
+    )
+    assert still_denied.returncode == 1
+    assert "public_schema_reference" in still_denied.stdout
 
 
 def _table_block(sql: str, table: str) -> str:

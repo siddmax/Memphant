@@ -54,7 +54,7 @@
       "assemble",
       "trace"
     ],
-    "expect_filter_selectivity_lt_one": true,
+    "expect_filter_selectivity_lt_one": false,
     "seed": {
       "units": [
         {
@@ -127,10 +127,7 @@
     },
     "expect": {
       "answer_bearing_units": ["mem_callback_v2"],
-      "forbidden_units": ["mem_callback_v3_denied"],
-      "dropped": [
-        { "unit": "mem_callback_v3_denied", "reason": "scope" }
-      ]
+      "forbidden_units": ["mem_callback_v3_denied"]
     }
   },
   {

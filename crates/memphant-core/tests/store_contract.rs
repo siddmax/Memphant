@@ -32,6 +32,8 @@ async fn retain_pipeline_stores_episode_and_reflect_job_atomically() {
             source_kind: "user".to_string(),
             source_trust: TrustLevel::TrustedUser,
             subject_hint: Some("deploy channel".to_string()),
+            subject: None,
+            predicate: None,
             body: "Remember the deploy channel is #launch.".to_string(),
             compiler_version: "compiler-wsb-test".to_string(),
         },
@@ -62,6 +64,8 @@ async fn retain_pipeline_collapses_duplicate_episode_by_dedup_key() {
         source_kind: "tool".to_string(),
         source_trust: TrustLevel::VerifiedTool,
         subject_hint: Some("node version".to_string()),
+        subject: None,
+        predicate: None,
         body: "Staging pins Node 24.15.0.".to_string(),
         compiler_version: "compiler-wsb-test".to_string(),
     };
@@ -104,8 +108,11 @@ async fn retain_resource_stores_pointer_before_extraction_and_enqueues_reflect()
             scope_id,
             actor_id,
             uri: "https://example.test/runbooks/deploy.md".to_string(),
+            kind: None,
             content_hash: "sha256:deploy-runbook".to_string(),
             mime_type: "text/markdown".to_string(),
+            revision: None,
+            body: Some("Deploy runbook body: roll forward, never force-push.".to_string()),
             source_trust: TrustLevel::WebContent,
             compiler_version: "compiler-wsb-test".to_string(),
         },
@@ -160,7 +167,7 @@ async fn committed_transaction_publishes_staged_episode_and_unit() {
                 body: "Deploy channel is #launch.".to_string(),
                 trust_level: TrustLevel::TrustedUser,
                 churn_class: None,
-                freshness_due: false,
+                freshness_due_at: None,
                 actor_id: None,
                 source_kind: None,
                 source_episode_id: Some(episode.episode_id),
@@ -232,7 +239,7 @@ fn new_episode_and_unit_shapes_require_tenant_and_scope_ids() {
         body: episode.body.clone(),
         trust_level: episode.source_trust,
         churn_class: None,
-        freshness_due: false,
+        freshness_due_at: None,
         actor_id: Some(episode.actor_id),
         source_kind: Some(episode.source_kind.clone()),
         source_episode_id: None,
@@ -247,4 +254,224 @@ fn new_episode_and_unit_shapes_require_tenant_and_scope_ids() {
 
     assert_eq!(episode.tenant_id, unit.tenant_id);
     assert_eq!(episode.scope_id, unit.scope_id);
+}
+
+#[tokio::test]
+async fn candidates_fetch_respects_tenant_and_scope() {
+    let store = InMemoryStore::default();
+    let tenant_a = tenant(70_000);
+    let tenant_b = tenant(70_001);
+    let scope_a = scope(70_002);
+    let scope_b = scope(70_003);
+
+    for (tenant_id, scope_id, body) in [
+        (tenant_a, scope_a, "Tenant A scope A fact."),
+        (tenant_a, scope_b, "Tenant A scope B fact."),
+        (tenant_b, scope_a, "Tenant B scope A fact."),
+    ] {
+        let mut tx = store.begin().await;
+        store
+            .stage_memory_unit(
+                &mut tx,
+                NewMemoryUnit {
+                    tenant_id,
+                    scope_id,
+                    kind: MemoryKind::Semantic,
+                    state: UnitState::Active,
+                    subject_key: None,
+                    body: body.to_string(),
+                    trust_level: TrustLevel::TrustedSystem,
+                    churn_class: None,
+                    freshness_due_at: None,
+                    actor_id: None,
+                    source_kind: None,
+                    source_episode_id: None,
+                    source_resource_id: None,
+                    deletion_generation: None,
+                    contextual_chunks: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                    transaction_from: None,
+                    transaction_to: None,
+                },
+            )
+            .await
+            .expect("unit stages");
+        store.commit(tx).await.expect("commit");
+    }
+
+    let candidates = store
+        .fetch_recall_candidates(tenant_a, &[scope_a], &[], &[], None, usize::MAX)
+        .await
+        .expect("fetch succeeds");
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].body, "Tenant A scope A fact.");
+}
+
+#[tokio::test]
+async fn trace_by_id_with_wrong_tenant_returns_none() {
+    let store = InMemoryStore::default();
+    let tenant_a = tenant(71_000);
+    let tenant_b = tenant(71_001);
+    let scope_id = scope(71_002);
+    let actor_id = actor(71_003);
+
+    let response = memphant_core::recall(
+        &store,
+        memphant_types::RecallRequest {
+            tenant_id: tenant_a,
+            scope_id,
+            actor_id,
+            allowed_scope_ids: vec![scope_id],
+            query: "anything".to_string(),
+            k: 4,
+            budget_tokens: 128,
+            mode: memphant_types::RecallMode::Fast,
+            include_beliefs: false,
+            edge_expansion_enabled: true,
+            context_packing_abstention_enabled: true,
+            rerank_enabled: true,
+            learned_rerank_profile: None,
+            query_decomposition_enabled: true,
+            procedure_recall_enabled: true,
+            decay_enabled: true,
+            engine_version: "store-contract-test".to_string(),
+        },
+        &memphant_core::FixedClock("2026-07-03T00:00:00Z"),
+    )
+    .await
+    .expect("recall succeeds");
+
+    let own = store
+        .trace_by_id(tenant_a, response.trace_id)
+        .await
+        .expect("lookup succeeds");
+    assert!(own.is_some(), "owner tenant sees its trace");
+
+    let cross = store
+        .trace_by_id(tenant_b, response.trace_id)
+        .await
+        .expect("lookup succeeds");
+    assert!(cross.is_none(), "wrong tenant must get None, never a trace");
+}
+
+#[tokio::test]
+async fn forget_by_episode_hides_units_and_tombstone_blocks_recompilation() {
+    use memphant_core::{FixedClock, forget_memory, recall, reflect_recorded};
+    use memphant_types::{
+        ForgetRequest, ForgetSelector, RecallMode, RecallRequest, ReflectCandidate, ReflectInput,
+    };
+
+    const CLOCK: FixedClock = FixedClock("2026-07-03T00:00:00Z");
+    let store = InMemoryStore::default();
+    let tenant_id = tenant(72_000);
+    let scope_id = scope(72_001);
+    let actor_id = actor(72_002);
+
+    let retained = retain_episode(
+        &store,
+        RetainRequest {
+            tenant_id,
+            scope_id,
+            actor_id,
+            source_kind: "user".to_string(),
+            source_trust: TrustLevel::TrustedUser,
+            subject_hint: None,
+            subject: Some("payment processor".to_string()),
+            predicate: Some("value".to_string()),
+            body: "Payment processor is AcmePay.".to_string(),
+            compiler_version: "compiler-forget-test".to_string(),
+        },
+    )
+    .await
+    .expect("retain succeeds");
+    let job = store.reflect_jobs(tenant_id)[0].clone();
+    let reflect_input = |compiler_version: &str| ReflectInput {
+        tenant_id,
+        scope_id,
+        actor_id,
+        episode_id: retained.episode_id,
+        job_id: job.id,
+        compiler_version: compiler_version.to_string(),
+        candidates: vec![ReflectCandidate {
+            source_kind: "user".to_string(),
+            trust_level: TrustLevel::TrustedUser,
+            actor_id,
+            subject: Some("payment processor".to_string()),
+            predicate: Some("value".to_string()),
+            body: "Payment processor is AcmePay.".to_string(),
+            churn_class: None,
+            admission_hint: None,
+            contextual_chunks: Vec::new(),
+            valid_from: None,
+            valid_to: None,
+        }],
+    };
+    reflect_recorded(&store, reflect_input("compiler-forget-test"), &CLOCK)
+        .await
+        .expect("reflect succeeds");
+    assert_eq!(store.active_semantic_units(tenant_id).len(), 1);
+
+    let forgotten = forget_memory(
+        &store,
+        ForgetRequest {
+            tenant_id,
+            scope_id,
+            actor_id,
+            selector: ForgetSelector {
+                memory_unit_id: None,
+                episode_id: Some(retained.episode_id),
+                resource_id: None,
+                scope_id,
+            },
+            reason: "user_request".to_string(),
+        },
+        &CLOCK,
+    )
+    .await
+    .expect("forget succeeds");
+    assert_eq!(forgotten.invalidated_units.len(), 1);
+    assert_eq!(
+        forgotten.verification, "post_forget_recall_probe_hits=0",
+        "forget verification is a real recall probe, not a hardcoded string"
+    );
+    assert!(store.active_semantic_units(tenant_id).is_empty());
+
+    // A second reflect with a BUMPED compiler version must NOT resurrect the
+    // forgotten fact: the forgotten-source tombstone blocks re-derivation.
+    reflect_recorded(&store, reflect_input("compiler-forget-test-v2"), &CLOCK)
+        .await
+        .expect("recompilation runs");
+    assert!(
+        store.active_semantic_units(tenant_id).is_empty(),
+        "tombstoned episode must not re-derive units"
+    );
+
+    let recalled = recall(
+        &store,
+        RecallRequest {
+            tenant_id,
+            scope_id,
+            actor_id,
+            allowed_scope_ids: vec![scope_id],
+            query: "Which payment processor do we use?".to_string(),
+            k: 4,
+            budget_tokens: 128,
+            mode: RecallMode::Fast,
+            include_beliefs: true,
+            edge_expansion_enabled: true,
+            context_packing_abstention_enabled: true,
+            rerank_enabled: true,
+            learned_rerank_profile: None,
+            query_decomposition_enabled: true,
+            procedure_recall_enabled: true,
+            decay_enabled: true,
+            engine_version: "store-contract-test".to_string(),
+        },
+        &CLOCK,
+    )
+    .await
+    .expect("recall succeeds");
+    assert!(recalled.items.is_empty(), "forgotten memory must stay gone");
 }

@@ -65,6 +65,10 @@ pub struct RetainRequest {
     pub source_kind: String,
     pub source_trust: TrustLevel,
     pub subject_hint: Option<String>,
+    #[serde(default)]
+    pub subject: Option<String>,
+    #[serde(default)]
+    pub predicate: Option<String>,
     pub body: String,
     pub compiler_version: String,
 }
@@ -75,8 +79,14 @@ pub struct RetainResourceRequest {
     pub scope_id: ScopeId,
     pub actor_id: ActorId,
     pub uri: String,
+    #[serde(default)]
+    pub kind: Option<ResourceKind>,
     pub content_hash: String,
     pub mime_type: String,
+    #[serde(default)]
+    pub revision: Option<String>,
+    #[serde(default)]
+    pub body: Option<String>,
     pub source_trust: TrustLevel,
     pub compiler_version: String,
 }
@@ -357,14 +367,30 @@ pub enum ResourceExtractorState {
     Stale,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ResourceKind {
+    Document,
+    Code,
+    Conversation,
+    #[default]
+    Other,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NewResource {
     pub tenant_id: TenantId,
     pub scope_id: ScopeId,
     pub actor_id: ActorId,
     pub uri: String,
+    #[serde(default)]
+    pub kind: ResourceKind,
     pub content_hash: String,
     pub mime_type: String,
+    #[serde(default)]
+    pub revision: Option<String>,
+    #[serde(default)]
+    pub body: Option<String>,
     pub source_trust: TrustLevel,
 }
 
@@ -375,8 +401,14 @@ pub struct StoredResource {
     pub scope_id: ScopeId,
     pub actor_id: ActorId,
     pub uri: String,
+    #[serde(default)]
+    pub kind: ResourceKind,
     pub content_hash: String,
     pub mime_type: String,
+    #[serde(default)]
+    pub revision: Option<String>,
+    #[serde(default)]
+    pub body: Option<String>,
     pub source_trust: TrustLevel,
     pub extractor_state: ResourceExtractorState,
 }
@@ -399,7 +431,8 @@ pub struct NewMemoryUnit {
     pub body: String,
     pub trust_level: TrustLevel,
     pub churn_class: Option<String>,
-    pub freshness_due: bool,
+    #[serde(default)]
+    pub freshness_due_at: Option<String>,
     pub actor_id: Option<ActorId>,
     pub source_kind: Option<String>,
     pub source_episode_id: Option<EpisodeId>,
@@ -428,7 +461,8 @@ pub struct StoredMemoryUnit {
     pub body: String,
     pub trust_level: TrustLevel,
     pub churn_class: Option<String>,
-    pub freshness_due: bool,
+    #[serde(default)]
+    pub freshness_due_at: Option<String>,
     pub actor_id: Option<ActorId>,
     pub source_kind: Option<String>,
     pub source_episode_id: Option<EpisodeId>,
@@ -505,6 +539,10 @@ pub struct ReflectJob {
     pub resource_id: Option<ResourceId>,
     pub kind: ReflectJobKind,
     pub compiler_version: String,
+    #[serde(default)]
+    pub subject: Option<String>,
+    #[serde(default)]
+    pub predicate: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -516,6 +554,10 @@ pub struct QueuedReflectJob {
     pub resource_id: Option<ResourceId>,
     pub kind: ReflectJobKind,
     pub compiler_version: String,
+    #[serde(default)]
+    pub subject: Option<String>,
+    #[serde(default)]
+    pub predicate: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -709,6 +751,10 @@ pub struct RetainEpisodeHttpRequest {
     pub source_kind: String,
     pub source_trust: TrustLevel,
     pub subject_hint: Option<String>,
+    #[serde(default)]
+    pub subject: Option<String>,
+    #[serde(default)]
+    pub predicate: Option<String>,
     pub body: String,
     pub compiler_version: Option<String>,
 }
@@ -794,8 +840,49 @@ pub struct CorrectResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ForgetSelector {
+    #[serde(default)]
     pub memory_unit_id: Option<UnitId>,
-    pub scope_id: Option<ScopeId>,
+    #[serde(default)]
+    pub episode_id: Option<EpisodeId>,
+    #[serde(default)]
+    pub resource_id: Option<ResourceId>,
+    pub scope_id: ScopeId,
+}
+
+/// The single forget target named by a selector; exactly one of the three ids
+/// must be present.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForgetTarget {
+    MemoryUnit(UnitId),
+    Episode(EpisodeId),
+    Resource(ResourceId),
+}
+
+impl ForgetSelector {
+    /// Validates the exactly-one-of contract and returns the named target.
+    pub fn exactly_one_target(&self) -> Result<ForgetTarget, String> {
+        let mut targets = Vec::new();
+        if let Some(id) = self.memory_unit_id {
+            targets.push(ForgetTarget::MemoryUnit(id));
+        }
+        if let Some(id) = self.episode_id {
+            targets.push(ForgetTarget::Episode(id));
+        }
+        if let Some(id) = self.resource_id {
+            targets.push(ForgetTarget::Resource(id));
+        }
+        match targets.as_slice() {
+            [single] => Ok(*single),
+            [] => Err(
+                "forget selector must include exactly one of memory_unit_id, episode_id, resource_id"
+                    .to_string(),
+            ),
+            _ => Err(
+                "forget selector must include exactly one of memory_unit_id, episode_id, resource_id (got multiple)"
+                    .to_string(),
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

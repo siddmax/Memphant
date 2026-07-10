@@ -5,6 +5,17 @@ pub const STORE_NAME: &str = "postgres";
 
 const WSA_BOOTSTRAP_SQL: &str =
     include_str!("../../../memphant_migrations/versions/20260703_001_wsa_bootstrap.sql");
+const RUNTIME_RECONCILIATION_SQL: &str =
+    include_str!("../../../memphant_migrations/versions/20260709_002_runtime_reconciliation.sql");
+
+/// Bundled migrations in apply order.
+pub const MIGRATIONS: &[(&str, &str)] = &[
+    ("20260703_001_wsa_bootstrap", WSA_BOOTSTRAP_SQL),
+    (
+        "20260709_002_runtime_reconciliation",
+        RUNTIME_RECONCILIATION_SQL,
+    ),
+];
 
 const REQUIRED_TABLES: &[&str] = &[
     "tenant",
@@ -84,6 +95,13 @@ impl fmt::Display for LintError {
 
 impl std::error::Error for LintError {}
 
+const RECONCILIATION_TABLES: &[&str] = &[
+    "api_key",
+    "forgotten_source",
+    "review_event",
+    "review_event_unit",
+];
+
 pub fn lint_migrations(provider: Provider) -> Result<(), LintError> {
     let sql = normalize(WSA_BOOTSTRAP_SQL);
     let mut findings = lint_sql(&sql, provider);
@@ -95,6 +113,14 @@ pub fn lint_migrations(provider: Provider) -> Result<(), LintError> {
     if !table_block(&sql, "schema_migrations").contains("schema_compat_revision") {
         findings.push("schema_migrations:missing_schema_compat_revision".to_string());
     }
+
+    let reconciliation = normalize(RUNTIME_RECONCILIATION_SQL);
+    findings.extend(lint_sql(&reconciliation, provider));
+    for table in RECONCILIATION_TABLES {
+        if !reconciliation.contains(&format!("create table if not exists memphant.{table}")) {
+            findings.push(format!("{table}:missing_table"));
+        }
+    }
     finish(findings)
 }
 
@@ -102,10 +128,22 @@ pub fn lint_migration_sql(sql: &str, provider: Provider) -> Result<(), LintError
     finish(lint_sql(&normalize(sql), provider))
 }
 
+/// Drops are allowed only when the migration declares
+/// `-- migration_kind: rewrite` within its first few header lines.
+fn declares_rewrite(sql: &str) -> bool {
+    sql.lines()
+        .take(5)
+        .any(|line| line.trim() == "-- migration_kind: rewrite")
+}
+
 fn lint_sql(sql: &str, provider: Provider) -> Vec<String> {
     let mut findings = Vec::new();
-    if sql.contains("drop table") {
+    let rewrite = declares_rewrite(sql);
+    if sql.contains("drop table") && !rewrite {
         findings.push("boundary:drop_table".to_string());
+    }
+    if sql.contains("drop index") && !rewrite {
+        findings.push("boundary:drop_index".to_string());
     }
     if sql.contains("public.") {
         findings.push("boundary:public_schema_reference".to_string());

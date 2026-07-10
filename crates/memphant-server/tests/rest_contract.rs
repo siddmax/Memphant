@@ -45,6 +45,8 @@ async fn rest_examples_round_trip_through_retain_reflect_recall_trace_and_mutati
             source_kind: "system".to_string(),
             source_trust: TrustLevel::TrustedSystem,
             subject_hint: Some("release region".to_string()),
+            subject: Some("release region".to_string()),
+            predicate: Some("value".to_string()),
             body: "Release region is Taipei.".to_string(),
             compiler_version: None,
         }),
@@ -135,17 +137,16 @@ async fn rest_examples_round_trip_through_retain_reflect_recall_trace_and_mutati
             actor_id,
             selector: ForgetSelector {
                 memory_unit_id: Some(recalled.items[0].unit_id),
-                scope_id: None,
+                episode_id: None,
+                resource_id: None,
+                scope_id,
             },
             reason: "user_request".to_string(),
         }),
     )
     .await
     .1;
-    assert_eq!(
-        forgotten["verification"],
-        "no_recall_path_returns_forgotten"
-    );
+    assert_eq!(forgotten["verification"], "post_forget_recall_probe_hits=0");
 
     let marked: Value = json_request(
         &app,

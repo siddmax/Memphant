@@ -3,7 +3,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use memphant_core::{InMemoryStore, MemoryStore, forget_memory, recall, record_mark};
+use memphant_core::{FixedClock, InMemoryStore, MemoryStore, forget_memory, recall, record_mark};
+
+/// Deterministic clock for eval fixtures (pinned to the WS-A methodology date).
+const EVAL_CLOCK: FixedClock = FixedClock("2026-07-03T00:00:00Z");
 use memphant_types::{
     ActorId, ContextualChunk, ENGINE_VERSION, ForgetRequest, ForgetSelector, LearnedRerankProfile,
     MarkOutcome, MarkRequest, MemoryEdgeKind, MemoryKind, NewEpisode, NewMemoryEdge, NewMemoryUnit,
@@ -1759,6 +1762,7 @@ async fn run_syndai_trace_compare(
             decay_enabled: true,
             engine_version: ENGINE_VERSION.to_string(),
         },
+        &EVAL_CLOCK,
     )
     .await
     .map_err(|error| EvalError::Core(error.to_string()))?;
@@ -1873,6 +1877,7 @@ async fn run_golden_case_inner(
             decay_enabled: controls.decay_enabled,
             engine_version: ENGINE_VERSION.to_string(),
         },
+        &EVAL_CLOCK,
     )
     .await
     .map_err(|error| EvalError::Core(error.to_string()))?;
@@ -1880,7 +1885,7 @@ async fn run_golden_case_inner(
 
     let trace = context
         .store
-        .trace_by_id(response.trace_id)
+        .trace_by_id_any_tenant(response.trace_id)
         .ok_or_else(|| EvalError::Failed(format!("{} missing trace", case.id)))?;
     let mut required_units = case.expect.top_k_contains.clone();
     for answer in &case.expect.answer_bearing_ids {
@@ -2186,6 +2191,7 @@ async fn run_high_risk_lane(lane: &SecurityLane) -> EvalResult<String> {
             decay_enabled: true,
             engine_version: ENGINE_VERSION.to_string(),
         },
+        &EVAL_CLOCK,
     )
     .await
     .map_err(|error| EvalError::Core(error.to_string()))?;
@@ -2242,10 +2248,13 @@ async fn run_deletion_lane(lane: &SecurityLane) -> EvalResult<String> {
             actor_id: context.actor_id,
             selector: ForgetSelector {
                 memory_unit_id: Some(unit_id),
-                scope_id: None,
+                episode_id: None,
+                resource_id: None,
+                scope_id: context.scope_id,
             },
             reason: forget.reason.clone(),
         },
+        &EVAL_CLOCK,
     )
     .await
     .map_err(|error| EvalError::Core(error.to_string()))?;
@@ -2295,6 +2304,7 @@ async fn run_deletion_lane(lane: &SecurityLane) -> EvalResult<String> {
             decay_enabled: true,
             engine_version: ENGINE_VERSION.to_string(),
         },
+        &EVAL_CLOCK,
     )
     .await
     .map_err(|error| EvalError::Core(error.to_string()))?;
@@ -2461,7 +2471,8 @@ async fn seed_store(
                     body: unit.body.clone(),
                     trust_level: unit.trust_level,
                     churn_class: unit.churn_class.clone(),
-                    freshness_due: unit.churn_class.as_deref() == Some("volatile"),
+                    freshness_due_at: (unit.churn_class.as_deref() == Some("volatile"))
+                        .then(|| "2026-07-03T00:00:00Z".to_string()),
                     actor_id: Some(actor_id),
                     source_kind: Some(unit.source_kind.clone()),
                     source_episode_id: Some(episode.episode_id),

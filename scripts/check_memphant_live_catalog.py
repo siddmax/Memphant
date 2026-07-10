@@ -30,8 +30,11 @@ REQUIRED_TABLES = {
     "blob_ledger",
     "belief_observation",
     "review_event",
+    "review_event_unit",
     "scope_block",
     "schema_migrations",
+    "api_key",
+    "forgotten_source",
 }
 
 TENANT_RLS_TABLES = REQUIRED_TABLES - {"schema_migrations"}
@@ -201,6 +204,24 @@ def main() -> int:
     )
     for row in missing_fk_indexes:
         findings.append(f"{row['table_name']}:{row['conname']}:missing_fk_index")
+
+    index_names = {
+        row["indexname"]
+        for row in psql_json(
+            args.database_url,
+            "select indexname from pg_indexes where schemaname = 'memphant'",
+        )
+    }
+    # Migration 002 replaces tenant-wide open-subject uniqueness with
+    # scope-bound uniqueness; a silent `if exists` no-op must be caught here.
+    if "memphant_memory_unit_tenant_open_subject_idx" in index_names:
+        findings.append(
+            "memory_unit:stale_index:memphant_memory_unit_tenant_open_subject_idx"
+        )
+    if "memphant_memory_unit_scope_subject_idx" not in index_names:
+        findings.append(
+            "memory_unit:missing_index:memphant_memory_unit_scope_subject_idx"
+        )
 
     migrations = psql_json(
         args.database_url,

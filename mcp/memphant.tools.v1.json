@@ -49,6 +49,13 @@
             "null"
           ]
         },
+        "predicate": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "scope_id": {
           "$ref": "#/$defs/ScopeId"
         },
@@ -57,6 +64,13 @@
         },
         "source_trust": {
           "$ref": "#/$defs/TrustLevel"
+        },
+        "subject": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "subject_hint": {
           "type": [
@@ -187,6 +201,24 @@
             "null"
           ]
         },
+        "context_packing_abstention_enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "decay_enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "edge_expansion_enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "include_beliefs": {
           "type": [
             "boolean",
@@ -217,8 +249,26 @@
             }
           ]
         },
+        "procedure_recall_enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "query": {
           "type": "string"
+        },
+        "query_decomposition_enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "rerank_enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "scope_id": {
           "$ref": "#/$defs/ScopeId"
@@ -309,6 +359,9 @@
                 }
               ]
             },
+            "derived_by": {
+              "type": "string"
+            },
             "inclusion_reason": {
               "type": "string"
             },
@@ -329,6 +382,7 @@
             "unit_id",
             "body",
             "kind",
+            "derived_by",
             "inclusion_reason",
             "suppression_labels"
           ],
@@ -630,8 +684,23 @@
           "format": "uuid",
           "type": "string"
         },
+        "EpisodeId": {
+          "format": "uuid",
+          "type": "string"
+        },
         "ForgetSelector": {
           "properties": {
+            "episode_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EpisodeId"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
             "memory_unit_id": {
               "anyOf": [
                 {
@@ -640,20 +709,32 @@
                 {
                   "type": "null"
                 }
-              ]
+              ],
+              "default": null
             },
-            "scope_id": {
+            "resource_id": {
               "anyOf": [
                 {
-                  "$ref": "#/$defs/ScopeId"
+                  "$ref": "#/$defs/ResourceId"
                 },
                 {
                   "type": "null"
                 }
-              ]
+              ],
+              "default": null
+            },
+            "scope_id": {
+              "$ref": "#/$defs/ScopeId"
             }
           },
+          "required": [
+            "scope_id"
+          ],
           "type": "object"
+        },
+        "ResourceId": {
+          "format": "uuid",
+          "type": "string"
         },
         "ScopeId": {
           "format": "uuid",
@@ -796,6 +877,29 @@
           ],
           "type": "string"
         },
+        "ProcedureTraceFact": {
+          "properties": {
+            "safety_status": {
+              "type": "string"
+            },
+            "signal_kind": {
+              "type": "string"
+            },
+            "unit_id": {
+              "$ref": "#/$defs/UnitId"
+            },
+            "validation_state": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "unit_id",
+            "validation_state",
+            "signal_kind",
+            "safety_status"
+          ],
+          "type": "object"
+        },
         "RecallCandidateTrace": {
           "properties": {
             "channel": {
@@ -810,6 +914,14 @@
               "format": "float",
               "type": "number"
             },
+            "decay_retrievability": {
+              "default": 0.0,
+              "format": "float",
+              "type": "number"
+            },
+            "derived_by": {
+              "type": "string"
+            },
             "discard_reason": {
               "anyOf": [
                 {
@@ -818,6 +930,28 @@
                 {
                   "type": "null"
                 }
+              ]
+            },
+            "dsr_difficulty": {
+              "default": null,
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "dsr_reinforcement_count": {
+              "default": 0,
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "dsr_stability_days": {
+              "default": null,
+              "format": "float",
+              "type": [
+                "number",
+                "null"
               ]
             },
             "fused_rank": {
@@ -835,8 +969,27 @@
                 "null"
               ]
             },
+            "rerank_rank": {
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "rerank_score": {
+              "format": "float",
+              "type": "number"
+            },
             "state": {
               "$ref": "#/$defs/UnitState"
+            },
+            "subquery_ids": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
             },
             "trust_level": {
               "$ref": "#/$defs/TrustLevel"
@@ -850,6 +1003,8 @@
             "channel",
             "channel_rank",
             "channel_score",
+            "derived_by",
+            "rerank_score",
             "trust_level",
             "state"
           ],
@@ -861,7 +1016,8 @@
             "lexical",
             "vector",
             "temporal",
-            "edge"
+            "edge",
+            "exhaustive"
           ],
           "type": "string"
         },
@@ -921,6 +1077,9 @@
                 }
               ]
             },
+            "derived_by": {
+              "type": "string"
+            },
             "inclusion_reason": {
               "type": "string"
             },
@@ -941,6 +1100,7 @@
             "unit_id",
             "body",
             "kind",
+            "derived_by",
             "inclusion_reason",
             "suppression_labels"
           ],
@@ -1111,6 +1271,13 @@
           "minimum": 0,
           "type": "integer"
         },
+        "decay_model_id": {
+          "default": "",
+          "type": "string"
+        },
+        "decomposition_reason": {
+          "type": "string"
+        },
         "dropped_items": {
           "items": {
             "$ref": "#/$defs/RecallDroppedItem"
@@ -1147,10 +1314,31 @@
             "null"
           ]
         },
+        "l4_gathered_evidence_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "l4_sandbox_id": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "latency_ms": {
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "learned_rerank_training_set_id": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "mode_executed": {
           "$ref": "#/$defs/RecallMode"
@@ -1164,11 +1352,44 @@
           },
           "type": "array"
         },
+        "procedure_ids": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/UnitId"
+          },
+          "type": "array"
+        },
+        "procedure_validation_states": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ProcedureTraceFact"
+          },
+          "type": "array"
+        },
         "query_hash": {
+          "type": "string"
+        },
+        "rerank_input_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rerank_overfetch_ratio": {
+          "format": "float",
+          "type": "number"
+        },
+        "reranker_id": {
           "type": "string"
         },
         "scope_id": {
           "$ref": "#/$defs/ScopeId"
+        },
+        "subquery_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "tenant_id": {
           "$ref": "#/$defs/TenantId"
@@ -1201,6 +1422,10 @@
         "mode_requested",
         "mode_executed",
         "escalation_reason",
+        "reranker_id",
+        "rerank_input_count",
+        "rerank_overfetch_ratio",
+        "decomposition_reason",
         "abstention_signal",
         "latency_ms",
         "token_estimate",
