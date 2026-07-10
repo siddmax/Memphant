@@ -69,6 +69,65 @@ def test_reader_prompt_contains_evidence_and_question_date() -> None:
     assert "Question date: unknown" in empty
 
 
+def test_reader_cli_cache_is_keyed_by_engine_and_model(tmp_path) -> None:
+    reader = _load_run_reader()
+    codex = reader.ReaderCli("codex", "gpt-5.6-luna", "gpt-5.6-terra", tmp_path, 0)
+    claude = reader.ReaderCli(
+        "claude", "gpt-5.6-luna", "gpt-5.6-terra", tmp_path, 0
+    )
+    # Same prompts, different engine -> different cache entries.
+    codex_key = codex._cache_path("reader", "sys", "prompt")
+    claude_key = claude._cache_path("reader", "sys", "prompt")
+    assert codex_key != claude_key
+    # Judge calls key on the judge model, reader calls on the reader model.
+    assert codex._cache_path("judge", "sys", "prompt") != codex_key
+    # A pre-seeded cache entry is served without spending budget (max_calls=0).
+    codex_key.write_text('{"reply": "cached-answer"}')
+    assert codex.call("reader", "sys", "prompt") == "cached-answer"
+    assert codex.fresh_calls == 0 and codex.cached_calls == 1
+    # Legacy (pre-engine) cache entries stay readable for the claude engine.
+    claude._legacy_cache_path("reader", "sys", "prompt").write_text(
+        '{"reply": "legacy-answer"}'
+    )
+    assert claude.call("reader", "sys", "prompt") == "legacy-answer"
+    # ...but never for codex: exhausted budget must raise, not fall through.
+    codex_judge = codex._cache_path("judge", "sys", "prompt")
+    assert not codex_judge.exists()
+    try:
+        codex.call("judge", "sys", "prompt")
+        raise AssertionError("expected CallBudgetExceeded")
+    except reader.CallBudgetExceeded:
+        pass
+
+
+def test_unknown_engine_is_rejected(tmp_path) -> None:
+    reader = _load_run_reader()
+    try:
+        reader.ReaderCli("openrouter", "m", "m", tmp_path, 0)
+        raise AssertionError("expected ValueError")
+    except ValueError:
+        pass
+
+
+def test_reasoning_effort_is_part_of_cache_identity_and_codex_only(tmp_path) -> None:
+    reader = _load_run_reader()
+    default = reader.ReaderCli("codex", "gpt-5.6-terra", "gpt-5.6-terra", tmp_path, 0)
+    medium = reader.ReaderCli(
+        "codex", "gpt-5.6-terra", "gpt-5.6-terra", tmp_path, 0,
+        reasoning_effort="medium",
+    )
+    assert default._cache_path("reader", "sys", "p") != medium._cache_path(
+        "reader", "sys", "p"
+    )
+    assert medium.cache_model_for("reader") == "gpt-5.6-terra@medium"
+    assert medium.model_for("reader") == "gpt-5.6-terra"
+    try:
+        reader.ReaderCli("claude", "m", "m", tmp_path, 0, reasoning_effort="high")
+        raise AssertionError("expected ValueError")
+    except ValueError:
+        pass
+
+
 def test_accuracy_excludes_unscored_rows() -> None:
     reader = _load_run_reader()
     rows = [

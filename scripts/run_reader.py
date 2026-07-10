@@ -3,18 +3,31 @@
 
 Input: the ``--emit-qa`` JSONL written by ``memphant-eval bench-lme`` (one row
 per question: question, question_date, gold answer, top-k evidence bodies with
-provenance). This script drives an external reader and judge through the
-Claude CLI in headless mode (``claude -p``) and writes a labeled QA report.
+provenance). This script drives an external reader and judge through a
+headless CLI engine and writes a labeled QA report.
+
+Engines (``--engine``):
+- ``claude`` (default): ``claude -p`` headless, no tools, no session
+  persistence (the original lane).
+- ``codex``: ``codex exec - -m <model> -s read-only --ephemeral
+  --skip-git-repo-check --ignore-user-config -o <file>`` with the prompt on
+  stdin; only the agent's final message is read (``-o``), so any tool use is
+  stripped by construction, and the read-only sandbox plus an explicit
+  "answer directly, no commands" instruction suppress it at the source.
+
+``--judge-model`` lets the judge use a different (stronger) model than the
+reader; both model ids and the engine are recorded in the report header.
 
 Honesty contract:
-- reader model and judge method are recorded in the output header;
+- engine, reader model and judge method are recorded in the output header;
 - containment judging runs first (gold answer normalized-contained in the
   reply); only non-matches spend one LLM judge call;
 - abstention questions (``_abs`` in the question id) score correct only when
   the reader replies "I don't know" (normalized containment);
 - a hard call budget aborts with partial results recorded (n is explicit);
-- every reply is cached by sha256(model + kind + prompt) so reruns and
-  identical evidence packs across runs never re-spend budget.
+- every reply is cached by sha256(engine + model + kind + prompt) so reruns
+  and identical evidence packs across runs never re-spend budget (legacy
+  pre-engine cache entries stay readable for the claude engine).
 
 This script never fabricates: any CLI failure is recorded per question as
 ``reader_error`` and that question is excluded from accuracy (n_scored drops).
@@ -29,10 +42,18 @@ import random
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+ENGINES = ("claude", "codex")
+# The codex engine has no separate system-prompt channel; the system prompt is
+# prepended to the user prompt with this no-tool-use guard.
+CODEX_NO_TOOLS_GUARD = (
+    "Do not run any commands or use any tools; answer directly from this "
+    "prompt in your final message."
+)
 READER_SYSTEM_PROMPT = (
     "You answer questions using ONLY the evidence provided in the prompt. "
     "Be terse: reply with the answer itself, a short phrase, no preamble. "
@@ -69,37 +90,99 @@ class CallBudgetExceeded(Exception):
     pass
 
 
-class ClaudeCli:
-    """Serialized, cached ``claude -p`` calls with a hard budget."""
+class ReaderCli:
+    """Serialized, cached headless CLI calls with a hard budget shared across
+    reader and judge (which may use different models on the same engine)."""
 
-    def __init__(self, model: str, cache_dir: Path, max_calls: int) -> None:
+    def __init__(
+        self,
+        engine: str,
+        model: str,
+        judge_model: str,
+        cache_dir: Path,
+        max_calls: int,
+        reasoning_effort: str | None = None,
+    ) -> None:
+        if engine not in ENGINES:
+            raise ValueError(f"unknown engine: {engine} (known: {ENGINES})")
+        if reasoning_effort is not None and engine != "codex":
+            raise ValueError("--reasoning-effort is codex-only")
+        self.engine = engine
         self.model = model
+        self.judge_model = judge_model
+        self.reasoning_effort = reasoning_effort
         self.cache_dir = cache_dir
         self.max_calls = max_calls
         self.fresh_calls = 0
         self.cached_calls = 0
         cache_dir.mkdir(parents=True, exist_ok=True)
 
-    def call(self, kind: str, system_prompt: str, prompt: str) -> str:
+    def model_for(self, kind: str) -> str:
+        return self.judge_model if kind == "judge" else self.model
+
+    def cache_model_for(self, kind: str) -> str:
+        """Cache identity of the model: reasoning effort changes replies, so
+        it is part of the key (None = the engine's configured default)."""
+        model = self.model_for(kind)
+        if self.reasoning_effort is not None:
+            return f"{model}@{self.reasoning_effort}"
+        return model
+
+    def _cache_path(self, kind: str, system_prompt: str, prompt: str) -> Path:
         key = hashlib.sha256(
-            "\x1e".join([self.model, kind, system_prompt, prompt]).encode()
+            "\x1e".join(
+                [
+                    self.engine,
+                    self.cache_model_for(kind),
+                    kind,
+                    system_prompt,
+                    prompt,
+                ]
+            ).encode()
         ).hexdigest()
-        cache_path = self.cache_dir / f"{key}.json"
+        return self.cache_dir / f"{key}.json"
+
+    def _legacy_cache_path(self, kind: str, system_prompt: str, prompt: str) -> Path:
+        """Pre-engine cache key (claude engine only): sha256(model+kind+prompts)."""
+        key = hashlib.sha256(
+            "\x1e".join(
+                [self.model_for(kind), kind, system_prompt, prompt]
+            ).encode()
+        ).hexdigest()
+        return self.cache_dir / f"{key}.json"
+
+    def call(self, kind: str, system_prompt: str, prompt: str) -> str:
+        cache_path = self._cache_path(kind, system_prompt, prompt)
         if cache_path.exists():
             self.cached_calls += 1
             return json.loads(cache_path.read_text())["reply"]
+        if self.engine == "claude":
+            legacy = self._legacy_cache_path(kind, system_prompt, prompt)
+            if legacy.exists():
+                self.cached_calls += 1
+                return json.loads(legacy.read_text())["reply"]
         if self.fresh_calls >= self.max_calls:
             raise CallBudgetExceeded(
-                f"claude CLI call budget exhausted ({self.max_calls})"
+                f"{self.engine} CLI call budget exhausted ({self.max_calls})"
             )
         self.fresh_calls += 1
+        if self.engine == "claude":
+            reply = self._call_claude(kind, system_prompt, prompt)
+        else:
+            reply = self._call_codex(kind, system_prompt, prompt)
+        cache_path.write_text(
+            json.dumps({"kind": kind, "prompt": prompt, "reply": reply}) + "\n"
+        )
+        return reply
+
+    def _call_claude(self, kind: str, system_prompt: str, prompt: str) -> str:
         result = subprocess.run(
             [
                 "claude",
                 "-p",
                 prompt,
                 "--model",
-                self.model,
+                self.model_for(kind),
                 "--system-prompt",
                 system_prompt,
                 "--tools",
@@ -117,10 +200,49 @@ class ClaudeCli:
                 f"claude -p failed (exit {result.returncode}): "
                 f"{result.stderr.strip()[:500]}"
             )
-        reply = result.stdout.strip()
-        cache_path.write_text(
-            json.dumps({"kind": kind, "prompt": prompt, "reply": reply}) + "\n"
+        return result.stdout.strip()
+
+    def _call_codex(self, kind: str, system_prompt: str, prompt: str) -> str:
+        full_prompt = f"Instructions: {system_prompt} {CODEX_NO_TOOLS_GUARD}\n\n{prompt}"
+        effort_args = (
+            ["-c", f'model_reasoning_effort="{self.reasoning_effort}"']
+            if self.reasoning_effort is not None
+            else []
         )
+        with tempfile.NamedTemporaryFile(
+            mode="r", suffix=".txt", prefix="codex-last-msg-"
+        ) as last_message:
+            result = subprocess.run(
+                [
+                    "codex",
+                    "exec",
+                    "-",
+                    "-m",
+                    self.model_for(kind),
+                    *effort_args,
+                    "-s",
+                    "read-only",
+                    "--ephemeral",
+                    "--skip-git-repo-check",
+                    "--ignore-user-config",
+                    "--color",
+                    "never",
+                    "-o",
+                    last_message.name,
+                ],
+                input=full_prompt,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"codex exec failed (exit {result.returncode}): "
+                    f"{result.stderr.strip()[:500]}"
+                )
+            reply = Path(last_message.name).read_text().strip()
+        if not reply:
+            raise RuntimeError("codex exec returned an empty final message")
         return reply
 
 
@@ -149,7 +271,7 @@ def build_judge_prompt(question: str, gold: str, reply: str) -> str:
     )
 
 
-def judge_row(cli: ClaudeCli, row: dict, reply: str) -> tuple[bool, str]:
+def judge_row(cli: ReaderCli, row: dict, reply: str) -> tuple[bool, str]:
     """Returns (correct, judge_method)."""
     gold = str(row["gold_answer"])
     if row["is_abstention"]:
@@ -208,7 +330,23 @@ def main() -> int:
     parser.add_argument("--label", required=True, help="run label, e.g. session-rerank-off")
     parser.add_argument("--retrieval-report", help="path of the paired bench-lme retrieval report (recorded in header)")
     parser.add_argument("--baseline", help="baseline reader report JSON for paired QA deltas")
+    parser.add_argument(
+        "--engine",
+        choices=ENGINES,
+        default="claude",
+        help="headless CLI engine driving reader and judge calls",
+    )
     parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument(
+        "--judge-model",
+        default=None,
+        help="judge model id (defaults to --model; lets a stronger model judge)",
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        default=None,
+        help="codex-only: model_reasoning_effort override (low|medium|high|...); part of the cache key",
+    )
     parser.add_argument("--cache-dir", default="docs/build-log/artifacts/real-retrieval-20260710/reader-cache")
     parser.add_argument("--max-calls", type=int, default=150, help="hard fresh-call budget for this invocation")
     parser.add_argument("--limit", type=int, help="only process the first N evidence rows (smoke)")
@@ -225,7 +363,15 @@ def main() -> int:
     if args.limit:
         rows = rows[: args.limit]
 
-    cli = ClaudeCli(args.model, Path(args.cache_dir), args.max_calls)
+    judge_model = args.judge_model or args.model
+    cli = ReaderCli(
+        args.engine,
+        args.model,
+        judge_model,
+        Path(args.cache_dir),
+        args.max_calls,
+        reasoning_effort=args.reasoning_effort,
+    )
     per_question: list[dict] = []
     aborted_reason = None
     for index, row in enumerate(rows):
@@ -260,12 +406,22 @@ def main() -> int:
         )
 
     strata = sorted({r["question_type"] for r in per_question})
+    engine_desc = {
+        "claude": "claude -p headless",
+        "codex": "codex exec headless (read-only sandbox, final message only)",
+    }[args.engine]
     report = {
         "benchmark": "longmemeval_reader_qa",
-        "reader": f"claude-haiku-4-5 (claude -p headless, model {args.model})",
-        "judge": "containment+claude-haiku-4-5 (normalized containment first; one LLM judge call on non-match; abstention = exact 'I don't know' containment)",
+        "engine": args.engine,
+        "reader": f"{args.model} ({engine_desc})",
+        "judge": (
+            f"containment+{judge_model} (normalized containment first; one LLM "
+            "judge call on non-match; abstention = exact 'I don't know' "
+            "containment)"
+        ),
         "reader_model_id": args.model,
-        "judge_model_id": args.model,
+        "judge_model_id": judge_model,
+        "reasoning_effort": args.reasoning_effort,
         "runtime": "postgres",
         "label": args.label,
         "evidence_path": args.evidence,
