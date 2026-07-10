@@ -27,11 +27,16 @@ function citationLink(id, label = id) {
   return `<a data-evidence-link href="/citations/${encodeURIComponent(id)}">${escapeHtml(label)}</a>`;
 }
 
-function page(title, eyebrow, lede, body) {
+function demoDataBadge() {
+  return `<span class="demo-badge" data-demo-badge>Demo data</span>`;
+}
+
+function page(title, eyebrow, lede, body, options = {}) {
+  const demo = options.demo ? demoDataBadge() : "";
   content.innerHTML = `
     <section class="page-head">
       <p class="eyebrow">${escapeHtml(eyebrow)}</p>
-      <h1>${escapeHtml(title)}</h1>
+      <div class="title-row"><h1>${escapeHtml(title)}</h1>${demo}</div>
       <p class="lede">${escapeHtml(lede)}</p>
     </section>
     ${body}
@@ -60,8 +65,13 @@ function renderHome(data) {
       <section class="grid two">
         <div class="panel">
           <h2>Install</h2>
-          <pre><code>cargo install memphant-cli
-memphant recall --scope project:checkout "Which token is current?"</code></pre>
+          <pre><code>docker compose up -d
+python3 scripts/apply_memphant_migrations.py --database-url $DATABASE_URL
+curl -X POST "$MEMPHANT_API_BASE/v1/recall" \\
+  -H "Authorization: Bearer $MEMPHANT_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"scope": "project:checkout", "query": "Which token is current?"}'</code></pre>
+          <p class="muted">CLI: <code>memphant retain|recall --scope &lt;scope&gt; ...</code> (CLI verbs land with the runtime kernel — track STATUS.md)</p>
         </div>
         <div class="panel">
           <h2>Proof block</h2>
@@ -86,7 +96,8 @@ memphant recall --scope project:checkout "Which token is current?"</code></pre>
           </a>
         `).join("")}
       </section>
-    `
+    `,
+    { demo: true }
   );
 }
 
@@ -99,9 +110,14 @@ function renderDocs() {
       <section class="grid two">
         <div class="panel">
           <h2>Quickstart</h2>
-          <pre><code>memphant db lint --provider plain-postgres
-memphant retain --scope project:checkout ./incident.md
-memphant recall --scope project:checkout "What changed?"</code></pre>
+          <pre><code>docker compose up -d
+python3 scripts/apply_memphant_migrations.py --database-url $DATABASE_URL
+memphant db lint --provider plain-postgres
+curl -X POST "$MEMPHANT_API_BASE/v1/recall" \\
+  -H "Authorization: Bearer $MEMPHANT_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"scope": "project:checkout", "query": "What changed?"}'</code></pre>
+          <p class="muted">CLI: <code>memphant retain|recall --scope &lt;scope&gt; ...</code> (CLI verbs land with the runtime kernel — track STATUS.md)</p>
         </div>
         <div class="panel">
           <h2>Core operations</h2>
@@ -155,7 +171,8 @@ function renderDashboard(data) {
           </table>
         </div>
       </section>
-    `
+    `,
+    { demo: true }
   );
 }
 
@@ -219,7 +236,8 @@ function renderTrace(data, selectedId = data.traces[0].id) {
         <h2>Raw JSON</h2>
         <pre><code>${escapeHtml(JSON.stringify(trace, null, 2))}</code></pre>
       </section>
-    `
+    `,
+    { demo: true }
   );
 }
 
@@ -238,14 +256,19 @@ function renderMemory(data) {
               <th scope="row">${escapeHtml(unit.title)}<br><span class="muted">${escapeHtml(unit.body)}</span></th>
               <td>${escapeHtml(unit.kind)}</td>
               <td>${escapeHtml(unit.scope)}</td>
-              <td>${badge(unit.state, unit.trust)}</td>
+              <td data-unit-state>${badge(unit.state, unit.trust)}</td>
               <td>${traceLink(unit.traceId)} ${citationLink(unit.citationId)}</td>
-              <td><button type="button" aria-label="Correct ${escapeHtml(unit.id)}">Correct</button> <button type="button" aria-label="Forget ${escapeHtml(unit.id)}">Forget</button></td>
+              <td>
+                <button type="button" data-memory-action="correct" data-unit-id="${escapeHtml(unit.id)}" aria-label="Correct ${escapeHtml(unit.id)}"${apiBase() ? "" : ' disabled title="Connect an API base to enable"'}>Correct</button>
+                <button type="button" data-memory-action="forget" data-unit-id="${escapeHtml(unit.id)}" aria-label="Forget ${escapeHtml(unit.id)}"${apiBase() ? "" : ' disabled title="Connect an API base to enable"'}>Forget</button>
+                <span class="action-feedback" data-action-feedback role="status"></span>
+              </td>
             </tr>
           `).join("")}</tbody>
         </table>
       </section>
-    `
+    `,
+    { demo: true }
   );
 }
 
@@ -272,7 +295,8 @@ function renderApiKeys(data) {
           </ul>
         </div>
       </section>
-    `
+    `,
+    { demo: true }
   );
 }
 
@@ -289,7 +313,8 @@ function renderEvals(data) {
           <tbody>${data.evalRuns.map((run) => `<tr><th scope="row">${escapeHtml(run.id)}</th><td>${escapeHtml(run.benchmark)} ${escapeHtml(run.version)}</td><td>${escapeHtml(run.accuracy)} (${escapeHtml(run.ci)})</td><td>${run.latencyP95Ms}ms p95</td><td>${run.costMicros} micros</td><td>${badge(run.sourceStatus, "trusted")}</td><td><span class="mono">${escapeHtml(run.traceArchive)}</span></td><td>${escapeHtml(run.security)}</td></tr>`).join("")}</tbody>
         </table>
       </section>
-    `
+    `,
+    { demo: true }
   );
 }
 
@@ -306,7 +331,8 @@ function renderExports(data) {
           <tbody>${data.exports.flatMap((entry) => entry.entries.map((item) => `<tr data-memory-unit="${escapeHtml(item.memoryId)}"><th scope="row">${escapeHtml(entry.id)}</th><td>${escapeHtml(entry.scope)}</td><td>${badge(entry.status, "trusted")}</td><td>${escapeHtml(item.title)}</td><td>${traceLink(item.traceId)} ${citationLink(data.memory.find((unit) => unit.id === item.memoryId)?.citationId || "")}</td></tr>`)).join("")}</tbody>
         </table>
       </section>
-    `
+    `,
+    { demo: true }
   );
 }
 
@@ -333,16 +359,95 @@ function renderCitation(data, citationId) {
           </tbody>
         </table>
       </section>
-    `
+    `,
+    { demo: true }
   );
+}
+
+function apiBase() {
+  return typeof window.MEMPHANT_API_BASE === "string" && window.MEMPHANT_API_BASE.trim()
+    ? window.MEMPHANT_API_BASE.trim().replace(/\/+$/, "")
+    : "";
+}
+
+function getApiKey() {
+  let key = sessionStorage.getItem("memphant-api-key");
+  if (!key) {
+    key = window.prompt("Enter your MemPhant API key");
+    if (key) {
+      sessionStorage.setItem("memphant-api-key", key);
+    }
+  }
+  return key || "";
 }
 
 function wireCopyButtons() {
   document.querySelectorAll("[data-copy]").forEach((button) => {
     button.addEventListener("click", async () => {
       const value = button.getAttribute("data-copy") || "";
-      await navigator.clipboard?.writeText(value);
-      button.textContent = "Copied";
+      try {
+        await Promise.resolve(navigator.clipboard?.writeText(value)).catch(() => {
+          throw new Error("copy failed");
+        });
+        button.textContent = "Copied";
+      } catch {
+        button.textContent = "Copy failed";
+        button.insertAdjacentHTML(
+          "afterend",
+          `<span class="action-feedback error" data-copy-error role="status">copy failed — select the trace ID manually</span>`
+        );
+      }
+    });
+  });
+}
+
+function wireMemoryActions(data) {
+  document.querySelectorAll("[data-memory-action]").forEach((button) => {
+    if (button.disabled) return;
+    button.addEventListener("click", async () => {
+      const action = button.getAttribute("data-memory-action");
+      const unitId = button.getAttribute("data-unit-id") || "";
+      const row = button.closest("tr");
+      const feedback = row?.querySelector("[data-action-feedback]");
+      const key = getApiKey();
+      if (!key) {
+        if (feedback) {
+          feedback.textContent = "An API key is required.";
+          feedback.classList.add("error");
+        }
+        return;
+      }
+      button.disabled = true;
+      try {
+        const response = await fetch(`${apiBase()}/v1/${action}`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${key}`
+          },
+          body: JSON.stringify({ unit_id: unitId })
+        });
+        if (!response.ok) {
+          throw new Error(`${action} failed with status ${response.status}`);
+        }
+        const nextState = action === "forget" ? "deleted" : "superseded";
+        const unit = data.memory.find((item) => item.id === unitId);
+        if (unit) unit.state = nextState;
+        const statusCell = row?.querySelector("[data-unit-state]");
+        if (statusCell) {
+          statusCell.innerHTML = badge(nextState, nextState === "deleted" ? "quarantined" : "stale");
+        }
+        if (feedback) {
+          feedback.textContent = `${action} accepted`;
+          feedback.classList.remove("error");
+        }
+      } catch (error) {
+        button.disabled = false;
+        if (feedback) {
+          feedback.textContent = error.message;
+          feedback.classList.add("error");
+        }
+      }
     });
   });
 }
@@ -360,6 +465,18 @@ function route(data) {
   else if (top === "citations") renderCitation(data, parts[1]);
   else renderHome(data);
   wireCopyButtons();
+  wireMemoryActions(data);
+  wrapTables();
+}
+
+function wrapTables() {
+  content.querySelectorAll("table").forEach((table) => {
+    if (table.parentElement?.classList.contains("table-scroll")) return;
+    const wrapper = document.createElement("div");
+    wrapper.className = "table-scroll";
+    table.replaceWith(wrapper);
+    wrapper.appendChild(table);
+  });
 }
 
 async function main() {

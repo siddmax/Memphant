@@ -75,6 +75,94 @@ test("public surface fetches API-shaped data and never DB or SQL paths", async (
   expect(requests.some((pathname) => /(?:db|sql|postgres|supabase)/i.test(pathname))).toBe(false);
 });
 
+test("quickstart surfaces only real commands", async ({ page }) => {
+  for (const route of ["/", "/docs"]) {
+    await page.goto(route);
+    const shell = page.locator("#content");
+    await expect(shell.locator("pre").first()).toContainText("docker compose up -d");
+    await expect(shell.locator("pre").first()).toContainText("apply_memphant_migrations.py --database-url $DATABASE_URL");
+    await expect(shell.locator("pre").first()).toContainText("/v1/recall");
+    await expect(shell.locator("pre").first()).toContainText("Authorization: Bearer $MEMPHANT_API_KEY");
+    await expect(shell.getByText("CLI verbs land with the runtime kernel")).toBeVisible();
+    await expect(shell.getByText("cargo install memphant-cli")).toHaveCount(0);
+    await expect(shell.getByText("./incident.md")).toHaveCount(0);
+  }
+  await page.goto("/docs");
+  await expect(page.locator("#content pre").first()).toContainText("memphant db lint --provider plain-postgres");
+});
+
+test("fixture-rendered pages carry a visible demo-data badge", async ({ page }) => {
+  for (const route of ["/dashboard", "/memory"]) {
+    await page.goto(route);
+    await expect(page.locator("[data-demo-badge]")).toBeVisible();
+    await expect(page.locator("[data-demo-badge]")).toHaveText("Demo data");
+  }
+});
+
+test("correct and forget render disabled, not missing, without an API base", async ({ page }) => {
+  await page.goto("/memory");
+  const correct = page.getByRole("button", { name: /^Correct / }).first();
+  const forget = page.getByRole("button", { name: /^Forget / }).first();
+  await expect(correct).toBeVisible();
+  await expect(forget).toBeVisible();
+  await expect(correct).toBeDisabled();
+  await expect(forget).toBeDisabled();
+  await expect(correct).toHaveAttribute("title", "Connect an API base to enable");
+  await expect(forget).toHaveAttribute("title", "Connect an API base to enable");
+});
+
+test("correct and forget fire real API calls when an API base is configured", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.MEMPHANT_API_BASE = "https://api.memphant.test";
+    sessionStorage.setItem("memphant-api-key", "test-key");
+  });
+  const apiCalls = [];
+  await page.route("https://api.memphant.test/**", async (route) => {
+    const request = route.request();
+    apiCalls.push({
+      path: new URL(request.url()).pathname,
+      auth: request.headers()["authorization"]
+    });
+    await route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+  });
+
+  await page.goto("/memory");
+  const forget = page.getByRole("button", { name: /^Forget / }).first();
+  await expect(forget).toBeEnabled();
+  await forget.click();
+
+  await expect(page.locator("[data-action-feedback]").first()).toHaveText("forget accepted");
+  await expect(page.locator("[data-unit-state]").first()).toContainText("deleted");
+  expect(apiCalls).toEqual([{ path: "/v1/forget", auth: "Bearer test-key" }]);
+});
+
+test("copy trace ID failure shows inline error instead of throwing", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: () => Promise.reject(new Error("NotAllowedError")) }
+    });
+  });
+  const pageErrors = [];
+  page.on("pageerror", (error) => pageErrors.push(error));
+
+  await page.goto("/traces/ret_checkout_001");
+  await page.getByRole("button", { name: /Copy trace ID/ }).click();
+
+  await expect(page.locator("[data-copy-error]")).toBeVisible();
+  await expect(page.locator("[data-copy-error]")).toContainText("copy failed");
+  expect(pageErrors).toEqual([]);
+});
+
+test("no route overflows a 390px viewport", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "mobile", "mobile project only");
+  for (const [route] of routes) {
+    await page.goto(route);
+    await expect(page.locator("h1")).toBeVisible();
+    const scrollWidth = await page.evaluate(() => document.documentElement.scrollWidth);
+    expect(scrollWidth, `route ${route} overflows horizontally`).toBeLessThanOrEqual(390);
+  }
+});
+
 test("benchmark surface avoids unsupported bare SOTA claim", async ({ page }) => {
   await page.goto("/evals");
   await expect(page.getByText("internal_reproduced")).toBeVisible();
