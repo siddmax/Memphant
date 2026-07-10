@@ -127,6 +127,17 @@ def is_abstention_reply(reply: str) -> bool:
     return "i don t know" in normalize(reply)
 
 
+def is_final_line_abstention(reply: str) -> bool:
+    """Like is_abstention_reply, but scoped to the reply's final non-empty
+    line. Used for non-abstention rows so a v2 chain-of-thought reply that
+    hedges mid-reasoning (e.g. "I don't know the exact format... 50") isn't
+    short-circuited to WRONG when its final line states the answer."""
+    lines = [line.strip() for line in reply.splitlines()]
+    non_empty = [line for line in lines if line]
+    final_line = non_empty[-1] if non_empty else ""
+    return is_abstention_reply(final_line)
+
+
 class CallBudgetExceeded(Exception):
     pass
 
@@ -392,7 +403,7 @@ def judge_row(cli: ReaderCli, row: dict, reply: str) -> tuple[bool, str]:
     gold = str(row["gold_answer"])
     if row["is_abstention"]:
         return is_abstention_reply(reply), "abstention_exact"
-    if is_abstention_reply(reply):
+    if is_final_line_abstention(reply):
         return False, "containment"
     if contains_gold(reply, gold):
         return True, "containment"

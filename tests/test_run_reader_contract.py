@@ -35,6 +35,24 @@ def test_abstention_reply_detection() -> None:
     assert not reader.is_abstention_reply("The user's dog is called Waffles")
 
 
+def test_cot_reply_with_mid_reasoning_hedge_is_not_final_line_abstention() -> None:
+    reader = _load_run_reader()
+    reply = (
+        "I don't know the exact currency format they used, but the math is "
+        "straightforward.\n60 - 10 = 50.\n50"
+    )
+    assert not reader.is_final_line_abstention(reply)
+    # Whole-reply containment would have wrongly scored this as abstention.
+    assert reader.is_abstention_reply(reply)
+    assert reader.contains_gold(reply, "50")
+
+
+def test_reply_whose_final_line_is_i_dont_know_is_final_line_abstention() -> None:
+    reader = _load_run_reader()
+    reply = "Let me think through this...\nI don't know"
+    assert reader.is_final_line_abstention(reply)
+
+
 def test_bootstrap_ci_is_deterministic_and_brackets_mean() -> None:
     reader = _load_run_reader()
     deltas = [1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0]
