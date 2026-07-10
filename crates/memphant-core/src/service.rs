@@ -504,12 +504,7 @@ impl<S: MemoryStore> MemoryService<S> {
                 // candidate construction (resource jobs, direct-unit retains)
                 // stays chunk-free — episodes only.
                 let contextual_chunks = if self.contextual_chunks_write_enabled {
-                    episode_contextual_chunks(
-                        episode.id,
-                        &episode.source_kind,
-                        chunk_header_date(self.clock.as_ref()).as_str(),
-                        &episode.body,
-                    )
+                    episode_contextual_chunks(episode.id, &episode.source_kind, &episode.body)
                 } else {
                     Vec::new()
                 };
@@ -624,16 +619,6 @@ const CONTEXTUAL_CHUNK_WINDOW: usize = 4;
 /// (covering up to `MAX_CONTEXTUAL_CHUNKS * CONTEXTUAL_CHUNK_WINDOW` turns).
 const MAX_CONTEXTUAL_CHUNKS: usize = 32;
 
-/// The date stamped into a contextual chunk's provenance header. The episode's
-/// `first_observed_at` is not carried on `StoredEpisode`, so the service clock
-/// stands in — in the standard synchronous-reflect path (public reflect verb
-/// and prompt worker tick) compile time coincides with first observation.
-fn chunk_header_date(clock: &dyn Clock) -> String {
-    let now = clock.now_rfc3339();
-    // RFC 3339 always leads with `YYYY-MM-DD`; keep just the date.
-    now.get(..10).unwrap_or(now.as_str()).to_string()
-}
-
 /// A body line reads as a conversational turn when it has the `role: content`
 /// shape: a short leading role token, then `": "`, then non-empty content. The
 /// bench lane's per-session episodes ingest in exactly this form; a bracketed
@@ -685,7 +670,6 @@ fn segment_episode_body(body: &str) -> (Vec<(usize, usize)>, bool) {
 fn episode_contextual_chunks(
     episode_id: EpisodeId,
     source_kind: &str,
-    date: &str,
     body: &str,
 ) -> Vec<ContextualChunk> {
     let (spans, turn_structured) = segment_episode_body(body);
@@ -706,17 +690,17 @@ fn episode_contextual_chunks(
             }
             let first = window_index * CONTEXTUAL_CHUNK_WINDOW + 1;
             let last = window_index * CONTEXTUAL_CHUNK_WINDOW + window.len();
-            // Character (not byte) offsets, per the source-span contract.
-            let char_start = body[..start].chars().count();
-            let char_end = body[..end].chars().count();
             Some(ContextualChunk {
                 id: format!("chunk-{}-{window_index}", episode_id.as_uuid()),
                 header: format!(
-                    "[episode {}] [kind {source_kind}] [date {date}] [{span_label} {first}-{last}]",
+                    "[episode {}] [kind {source_kind}] [{span_label} {first}-{last}]",
                     episode_id.as_uuid()
                 ),
                 body: text.to_string(),
-                source_span: Some(format!("{char_start}-{char_end}")),
+                // Byte offsets (matching the `body.get(start..end)` slice
+                // above) — NOT char counts, so `body[start..end]` reproduces
+                // the chunk body directly even over multi-byte text.
+                source_span: Some(format!("{start}-{end}")),
             })
         })
         .collect()
@@ -803,10 +787,8 @@ impl<F: Future> Future for CatchUnwind<F> {
 mod chunk_tests {
     use super::*;
 
-    const DATE: &str = "2026-07-09";
-
     /// `role: content` bodies window over turns with a `[turns a-b]` header
-    /// and exact character-offset spans over the parent body.
+    /// and exact byte-offset spans over the parent body.
     #[test]
     fn turn_structured_body_windows_over_turns() {
         let episode_id = EpisodeId::new();
@@ -816,20 +798,20 @@ assistant: d e f.\n\
 user: g h i.\n\
 assistant: j k l.\n\
 user: m n o.\n";
-        let chunks = episode_contextual_chunks(episode_id, "user", DATE, body);
+        let chunks = episode_contextual_chunks(episode_id, "user", body);
         assert_eq!(chunks.len(), 2, "five turns / window 4 → two windows");
 
         let uuid = episode_id.as_uuid();
         assert_eq!(
             chunks[0].header,
-            format!("[episode {uuid}] [kind user] [date {DATE}] [turns 1-4]")
+            format!("[episode {uuid}] [kind user] [turns 1-4]")
         );
         assert_eq!(
             chunks[1].header,
-            format!("[episode {uuid}] [kind user] [date {DATE}] [turns 5-5]")
+            format!("[episode {uuid}] [kind user] [turns 5-5]")
         );
 
-        // Spans are character offsets of the window within the body; the body
+        // Spans are byte offsets of the window within the body; the body
         // slice at that span equals the chunk body (ASCII → byte == char).
         let first_start = body.find("user: a b c.").unwrap();
         let fourth = "assistant: j k l.";
@@ -852,7 +834,7 @@ Line two about oranges.\n\
 Line three about pears.\n\
 Line four about grapes.\n\
 Line five about kiwis.\n";
-        let chunks = episode_contextual_chunks(episode_id, "doc", DATE, body);
+        let chunks = episode_contextual_chunks(episode_id, "doc", body);
         assert_eq!(chunks.len(), 2, "five lines / window 4 → two windows");
         assert!(
             chunks[0].header.contains("[segments 1-4]"),
@@ -873,11 +855,11 @@ user: a b c.\n\
 assistant: d e f.\n\
 user: g h i.\n\
 assistant: j k l.\n";
-        assert!(episode_contextual_chunks(episode_id, "user", DATE, four_turns).is_empty());
+        assert!(episode_contextual_chunks(episode_id, "user", four_turns).is_empty());
         // A lone prose line is also a single window.
-        assert!(episode_contextual_chunks(episode_id, "doc", DATE, "one solitary line").is_empty());
+        assert!(episode_contextual_chunks(episode_id, "doc", "one solitary line").is_empty());
         // And an empty body yields nothing.
-        assert!(episode_contextual_chunks(episode_id, "doc", DATE, "").is_empty());
+        assert!(episode_contextual_chunks(episode_id, "doc", "").is_empty());
     }
 
     /// Never mint more than `MAX_CONTEXTUAL_CHUNKS` per episode.
@@ -889,7 +871,7 @@ assistant: j k l.\n";
         for turn in 0..turns {
             body.push_str(&format!("user: turn number {turn} here.\n"));
         }
-        let chunks = episode_contextual_chunks(episode_id, "user", DATE, &body);
+        let chunks = episode_contextual_chunks(episode_id, "user", &body);
         assert_eq!(chunks.len(), MAX_CONTEXTUAL_CHUNKS, "cap holds");
         assert!(chunks.iter().all(|chunk| !chunk.body.trim().is_empty()));
     }
@@ -905,8 +887,8 @@ user: g h i.\n\
 assistant: j k l.\n\
 user: m n o.\n";
         let uuid = episode_id.as_uuid();
-        let first = episode_contextual_chunks(episode_id, "user", DATE, body);
-        let second = episode_contextual_chunks(episode_id, "user", DATE, body);
+        let first = episode_contextual_chunks(episode_id, "user", body);
+        let second = episode_contextual_chunks(episode_id, "user", body);
         let ids: Vec<_> = first.iter().map(|chunk| chunk.id.clone()).collect();
         assert_eq!(
             ids,
@@ -918,6 +900,46 @@ user: m n o.\n";
                 .iter()
                 .map(|chunk| chunk.id.clone())
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// Non-ASCII bodies expose the byte-vs-char bug directly: the reported
+    /// `source_span` must be byte offsets so slicing the original body at
+    /// that span reproduces the chunk body exactly, even when multi-byte
+    /// characters precede the window.
+    #[test]
+    fn source_span_is_byte_offsets_for_multibyte_body() {
+        let episode_id = EpisodeId::new();
+        // Turns 1-4 are packed with multi-byte characters (é, ö, 世界, 🎉),
+        // so byte offsets and char offsets diverge well before the second
+        // window (turn 5) starts; five turns / window 4 → two chunks.
+        let body = "user: héllo wörld.\n\
+assistant: 世界 reply here.\n\
+user: third turn 🎉 emoji.\n\
+assistant: fourth turn plain.\n\
+user: fifth turn plain.\n";
+        let chunks = episode_contextual_chunks(episode_id, "conversation", body);
+        assert_eq!(chunks.len(), 2, "five turns / window 4 → two windows");
+
+        let chunk = &chunks[1];
+        let span = chunk.source_span.as_deref().expect("span present");
+        let (start_str, end_str) = span.split_once('-').expect("span is start-end");
+        let start: usize = start_str.parse().expect("start is a byte offset");
+        let end: usize = end_str.parse().expect("end is a byte offset");
+
+        // Byte offsets differ from char offsets here because turns 1-4 (which
+        // precede this window) contain multi-byte characters — this would
+        // mis-slice (or, at a non-boundary byte, panic) if the span were
+        // still reported in chars.
+        assert_ne!(
+            start,
+            body[..start].chars().count(),
+            "test body must actually contain multi-byte offsets before the span"
+        );
+        assert_eq!(
+            &body[start..end],
+            chunk.body,
+            "slicing the episode body at the reported byte span reproduces the chunk body exactly"
         );
     }
 }
