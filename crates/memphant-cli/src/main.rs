@@ -37,6 +37,14 @@ struct ExportMetadata {
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
+    if let Some(verb) = args.first().map(String::as_str)
+        && matches!(
+            verb,
+            "retain" | "recall" | "reflect" | "correct" | "forget" | "mark" | "trace"
+        )
+    {
+        return http_verbs::run(verb, &args[1..]);
+    }
     match args.as_slice() {
         [lock, out_flag, out] if lock == "lock" && out_flag == "--out" => emit_lock(out),
         [verify, lock_flag, path] if verify == "verify" && lock_flag == "--lock" => {
@@ -133,9 +141,264 @@ fn main() -> ExitCode {
         }
         _ => {
             eprintln!(
-                "usage: memphant lock --out <path|-> | memphant verify --lock <path> [--export <dir>] | memphant compile --scope <scope> --out <dir> --source <json> | memphant db lint --provider <plain-postgres|supabase|neon> | memphant db bootstrap-check --provider <plain-postgres|supabase|neon> [--profile <env-file>] | memphant admin create-tenant --name <name> --database-url <url> | memphant admin create-key --tenant <uuid> [--max-trust <tier>] --database-url <url> | memphant admin revoke-key --id <uuid> --database-url <url>"
+                "usage: memphant lock --out <path|-> | memphant verify --lock <path> [--export <dir>] | memphant compile --scope <scope> --out <dir> --source <json> | memphant db lint --provider <plain-postgres|supabase|neon> | memphant db bootstrap-check --provider <plain-postgres|supabase|neon> [--profile <env-file>] | memphant admin create-tenant --name <name> --database-url <url> | memphant admin create-key --tenant <uuid> [--max-trust <tier>] --database-url <url> | memphant admin revoke-key --id <uuid> --database-url <url> | memphant retain --tenant <uuid> --scope <uuid> --body <text> [--subject S --predicate P] | memphant retain --tenant <uuid> --scope <uuid> --resource --uri <uri> [--revision R] [--body-file F] | memphant recall --tenant <uuid> --scope <uuid> --query <text> | memphant reflect --tenant <uuid> --scope <uuid> | memphant correct --tenant <uuid> --scope <uuid> --unit <uuid> --value V --reason R | memphant forget --tenant <uuid> --scope <uuid> (--unit|--episode|--resource <uuid>) --reason R | memphant mark --tenant <uuid> --trace <uuid> --outcome <success|failure|corrected|ignored> [--used a,b] | memphant trace <uuid>   (env: MEMPHANT_URL, MEMPHANT_API_KEY)"
             );
             ExitCode::from(2)
+        }
+    }
+}
+
+/// Thin HTTP clients for the six public memory verbs + trace inspection
+/// (Task 8): each command posts the frozen REST contract to `MEMPHANT_URL`
+/// (default http://127.0.0.1:8080) with `Authorization: Bearer
+/// $MEMPHANT_API_KEY` and prints the JSON response to stdout.
+mod http_verbs {
+    use std::collections::HashMap;
+    use std::process::ExitCode;
+
+    use serde_json::{Value, json};
+
+    const DEFAULT_URL: &str = "http://127.0.0.1:8080";
+
+    pub fn run(verb: &str, args: &[String]) -> ExitCode {
+        match execute(verb, args) {
+            Ok(exit) => exit,
+            Err(message) => {
+                eprintln!("{verb}=error");
+                eprintln!("{message}");
+                ExitCode::from(2)
+            }
+        }
+    }
+
+    fn execute(verb: &str, args: &[String]) -> Result<ExitCode, String> {
+        let (flags, positional) = parse_flags(args)?;
+        if verb == "trace" {
+            let id = positional
+                .first()
+                .cloned()
+                .or_else(|| flags.get("id").cloned())
+                .ok_or("usage: memphant trace <trace-id>")?;
+            return request("GET", &format!("/v1/traces/{id}"), None);
+        }
+        if !positional.is_empty() {
+            return Err(format!("unexpected positional arguments: {positional:?}"));
+        }
+        let body = build_body(verb, &flags)?;
+        let path = match verb {
+            "retain" => "/v1/episodes",
+            "recall" => "/v1/recall",
+            "reflect" => "/v1/reflect",
+            "correct" => "/v1/correct",
+            "forget" => "/v1/forget",
+            "mark" => "/v1/mark",
+            other => return Err(format!("unknown verb: {other}")),
+        };
+        request("POST", path, Some(body))
+    }
+
+    /// `--flag value` pairs plus bare `--resource` style booleans.
+    fn parse_flags(args: &[String]) -> Result<(HashMap<String, String>, Vec<String>), String> {
+        let mut flags = HashMap::new();
+        let mut positional = Vec::new();
+        let mut index = 0;
+        while index < args.len() {
+            let arg = &args[index];
+            if let Some(name) = arg.strip_prefix("--") {
+                let next = args.get(index + 1);
+                match next {
+                    Some(value) if !value.starts_with("--") => {
+                        flags.insert(name.to_string(), value.clone());
+                        index += 2;
+                    }
+                    _ => {
+                        flags.insert(name.to_string(), "true".to_string());
+                        index += 1;
+                    }
+                }
+            } else {
+                positional.push(arg.clone());
+                index += 1;
+            }
+        }
+        Ok((flags, positional))
+    }
+
+    fn required<'a>(flags: &'a HashMap<String, String>, name: &str) -> Result<&'a str, String> {
+        flags
+            .get(name)
+            .map(String::as_str)
+            .ok_or_else(|| format!("missing required flag --{name}"))
+    }
+
+    fn ids(flags: &HashMap<String, String>) -> Result<(String, String, String), String> {
+        let tenant = required(flags, "tenant")?.to_string();
+        let scope = required(flags, "scope")?.to_string();
+        let actor = flags
+            .get("actor")
+            .cloned()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        Ok((tenant, scope, actor))
+    }
+
+    fn build_body(verb: &str, flags: &HashMap<String, String>) -> Result<Value, String> {
+        match verb {
+            "retain" => {
+                let (tenant, scope, actor) = ids(flags)?;
+                let mut body = json!({
+                    "tenant_id": tenant,
+                    "scope_id": scope,
+                    "actor_id": actor,
+                    "source_kind": flags.get("source-kind").cloned().unwrap_or_else(|| "user".to_string()),
+                    "source_trust": flags.get("trust").cloned().unwrap_or_else(|| "trusted_user".to_string()),
+                    "subject_hint": flags.get("subject-hint"),
+                    "compiler_version": null,
+                });
+                if flags.contains_key("resource") {
+                    let resource_body = match flags.get("body-file") {
+                        Some(path) => Some(
+                            std::fs::read_to_string(path)
+                                .map_err(|error| format!("--body-file {path}: {error}"))?,
+                        ),
+                        None => flags.get("body").cloned(),
+                    };
+                    body["resource"] = json!({
+                        "uri": required(flags, "uri")?,
+                        "mime_type": flags.get("mime-type").cloned().unwrap_or_else(|| "text/plain".to_string()),
+                        "content_hash": flags.get("content-hash").cloned().unwrap_or_default(),
+                        "kind": flags.get("kind"),
+                        "revision": flags.get("revision"),
+                        "body": resource_body,
+                    });
+                } else if flags.contains_key("unit") {
+                    body["unit"] = json!({
+                        "kind": flags.get("kind").cloned().unwrap_or_else(|| "semantic".to_string()),
+                        "subject": required(flags, "subject")?,
+                        "predicate": required(flags, "predicate")?,
+                        "body": required(flags, "body")?,
+                        "churn_class": flags.get("churn-class"),
+                    });
+                } else {
+                    body["body"] = json!(required(flags, "body")?);
+                    if let Some(subject) = flags.get("subject") {
+                        body["subject"] = json!(subject);
+                        body["predicate"] = json!(required(flags, "predicate")?);
+                    }
+                }
+                Ok(body)
+            }
+            "recall" => {
+                let (tenant, scope, actor) = ids(flags)?;
+                Ok(json!({
+                    "tenant_id": tenant,
+                    "scope_id": scope,
+                    "actor_id": actor,
+                    "query": required(flags, "query")?,
+                    "limit": flags.get("limit").map(|value| value.parse::<usize>()
+                        .map_err(|error| format!("--limit: {error}"))).transpose()?,
+                    "budget_tokens": flags.get("budget-tokens").map(|value| value.parse::<usize>()
+                        .map_err(|error| format!("--budget-tokens: {error}"))).transpose()?,
+                    "mode": flags.get("mode"),
+                }))
+            }
+            "reflect" => {
+                let (tenant, scope, actor) = ids(flags)?;
+                Ok(json!({
+                    "tenant_id": tenant,
+                    "scope_id": scope,
+                    "actor_id": actor,
+                    "compiler_version": flags.get("compiler-version"),
+                }))
+            }
+            "correct" => {
+                let (tenant, scope, actor) = ids(flags)?;
+                Ok(json!({
+                    "tenant_id": tenant,
+                    "scope_id": scope,
+                    "actor_id": actor,
+                    "selector": { "memory_unit_id": required(flags, "unit")? },
+                    "correction": {
+                        "value": required(flags, "value")?,
+                        "reason": required(flags, "reason")?,
+                        "valid_from": flags.get("valid-from"),
+                        "valid_to": flags.get("valid-to"),
+                    },
+                }))
+            }
+            "forget" => {
+                let (tenant, scope, actor) = ids(flags)?;
+                Ok(json!({
+                    "tenant_id": tenant,
+                    "scope_id": scope,
+                    "actor_id": actor,
+                    "selector": {
+                        "memory_unit_id": flags.get("unit"),
+                        "episode_id": flags.get("episode"),
+                        "resource_id": flags.get("resource"),
+                        "scope_id": scope,
+                    },
+                    "reason": required(flags, "reason")?,
+                }))
+            }
+            "mark" => Ok(json!({
+                "tenant_id": required(flags, "tenant")?,
+                "trace_id": required(flags, "trace")?,
+                "caller_id": flags.get("caller").cloned().unwrap_or_else(|| "memphant-cli".to_string()),
+                "used_ids": flags
+                    .get("used")
+                    .map(|used| used.split(',').map(str::trim).filter(|id| !id.is_empty()).collect::<Vec<_>>())
+                    .unwrap_or_default(),
+                "outcome": required(flags, "outcome")?,
+            })),
+            other => Err(format!("unknown verb: {other}")),
+        }
+    }
+
+    fn request(method: &str, path: &str, body: Option<Value>) -> Result<ExitCode, String> {
+        let base = std::env::var("MEMPHANT_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_URL.to_string());
+        let url = format!("{}{}", base.trim_end_matches('/'), path);
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build()
+            .into();
+        let api_key = std::env::var("MEMPHANT_API_KEY").ok();
+        let mut response = match body {
+            Some(body) => {
+                let mut request = agent.post(&url);
+                if let Some(key) = &api_key {
+                    request = request.header("authorization", format!("Bearer {key}"));
+                }
+                request
+                    .send_json(&body)
+                    .map_err(|error| format!("{method} {url}: {error}"))?
+            }
+            None => {
+                let mut request = agent.get(&url);
+                if let Some(key) = &api_key {
+                    request = request.header("authorization", format!("Bearer {key}"));
+                }
+                request
+                    .call()
+                    .map_err(|error| format!("{method} {url}: {error}"))?
+            }
+        };
+        let status = response.status().as_u16();
+        let value: Value = response
+            .body_mut()
+            .read_json()
+            .map_err(|error| format!("{method} {url}: non-JSON response: {error}"))?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).map_err(|error| error.to_string())?
+        );
+        if (200..300).contains(&status) {
+            Ok(ExitCode::SUCCESS)
+        } else {
+            eprintln!("http_status={status}");
+            Ok(ExitCode::from(1))
         }
     }
 }

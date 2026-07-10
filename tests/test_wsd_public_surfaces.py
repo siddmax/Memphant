@@ -28,6 +28,29 @@ def test_python_sdk_round_trips_all_public_verbs() -> None:
         )
         assert retained["episode_id"] == "ep_test"
 
+        client.retain_resource(
+            tenant_id="00000000-0000-0000-0000-0000000186a0",
+            scope_id="00000000-0000-0000-0000-0000000186a1",
+            actor_id="00000000-0000-0000-0000-0000000186a2",
+            source_trust="trusted_user",
+            uri="repo://demo/src/main.rs",
+            mime_type="text/x-rust",
+            content_hash="sha256:abc",
+            kind="code",
+            revision="abc123",
+            body="fn main() {}",
+        )
+        client.retain_unit(
+            tenant_id="00000000-0000-0000-0000-0000000186a0",
+            scope_id="00000000-0000-0000-0000-0000000186a1",
+            actor_id="00000000-0000-0000-0000-0000000186a2",
+            source_trust="trusted_user",
+            kind="semantic",
+            subject="release region",
+            predicate="value",
+            body="Release region is Taipei.",
+        )
+
         reflected = client.reflect(
             tenant_id="00000000-0000-0000-0000-0000000186a0",
             scope_id="00000000-0000-0000-0000-0000000186a1",
@@ -77,6 +100,8 @@ def test_python_sdk_round_trips_all_public_verbs() -> None:
         paths = [request["path"] for request in server.requests]
         assert paths == [
             "/v1/episodes",
+            "/v1/episodes",
+            "/v1/episodes",
             "/v1/reflect",
             "/v1/recall",
             "/v1/traces/00000000-0000-0000-0000-000000099001",
@@ -88,6 +113,15 @@ def test_python_sdk_round_trips_all_public_verbs() -> None:
             request["headers"].get("authorization") == "Bearer test-key"
             for request in server.requests
         )
+
+        resource_request = server.requests[1]["body"]
+        assert resource_request["resource"]["uri"] == "repo://demo/src/main.rs"
+        assert resource_request["resource"]["revision"] == "abc123"
+        assert "body" not in resource_request
+
+        unit_request = server.requests[2]["body"]
+        assert unit_request["unit"]["subject"] == "release region"
+        assert unit_request["unit"]["kind"] == "semantic"
     finally:
         server.close()
 

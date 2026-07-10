@@ -6,6 +6,8 @@ from typing import Any
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+__version__ = "0.2.0"
+
 
 class MemPhantError(Exception):
     def __init__(
@@ -93,6 +95,83 @@ class MemPhant:
                 "source_trust": source_trust,
                 "subject_hint": subject_hint,
                 "body": body,
+                "compiler_version": compiler_version,
+            },
+        )
+
+    def retain_resource(
+        self,
+        *,
+        tenant_id: str,
+        scope_id: str,
+        actor_id: str,
+        source_trust: str,
+        uri: str,
+        mime_type: str,
+        content_hash: str,
+        kind: str | None = None,
+        revision: str | None = None,
+        body: str | None = None,
+        source_kind: str = "resource",
+        compiler_version: str | None = None,
+    ) -> dict[str, Any]:
+        """Retain a resource payload (spec 08 `resource` shape): documents and
+        code carry a URI + content hash; `revision` is the commit identity."""
+        return self._post(
+            "/v1/episodes",
+            {
+                "tenant_id": tenant_id,
+                "scope_id": scope_id,
+                "actor_id": actor_id,
+                "source_kind": source_kind,
+                "source_trust": source_trust,
+                "subject_hint": None,
+                "resource": {
+                    "uri": uri,
+                    "mime_type": mime_type,
+                    "content_hash": content_hash,
+                    "kind": kind,
+                    "revision": revision,
+                    "body": body,
+                },
+                "compiler_version": compiler_version,
+            },
+        )
+
+    def retain_unit(
+        self,
+        *,
+        tenant_id: str,
+        scope_id: str,
+        actor_id: str,
+        source_trust: str,
+        kind: str,
+        subject: str,
+        predicate: str,
+        body: str,
+        churn_class: str | None = None,
+        source_kind: str = "direct",
+        compiler_version: str | None = None,
+    ) -> dict[str, Any]:
+        """Retain a direct pre-compiled unit (spec 08 `unit` shape): requires
+        an explicit subject/predicate; the admission trust policy still
+        applies (untrusted keys mint candidate tier)."""
+        return self._post(
+            "/v1/episodes",
+            {
+                "tenant_id": tenant_id,
+                "scope_id": scope_id,
+                "actor_id": actor_id,
+                "source_kind": source_kind,
+                "source_trust": source_trust,
+                "subject_hint": None,
+                "unit": {
+                    "kind": kind,
+                    "subject": subject,
+                    "predicate": predicate,
+                    "body": body,
+                    "churn_class": churn_class,
+                },
                 "compiler_version": compiler_version,
             },
         )
