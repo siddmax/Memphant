@@ -74,6 +74,32 @@ READER_SYSTEM_PROMPT = (
     "Be terse: reply with the answer itself, a short phrase, no preamble. "
     "If the evidence is insufficient to answer, reply exactly: I don't know."
 )
+# v2 (--prompt-version 2): enumerate-then-compute reasoning with calibrated
+# abstention. Fixes three n=100-campaign failure modes: multi-item arithmetic
+# answered wrong despite both operands being present, enumerable ("how many
+# ...") questions answered from partial recall instead of counting the
+# packed items, and over-abstention (replying "I don't know" when the pack
+# did contain the answer). Still containment-friendly: judge_row's
+# containment check scans the whole reply, but any non-abstention reply
+# that happens to contain the literal phrase "I don't know" in its reasoning
+# is short-circuited to incorrect by judge_row before contains_gold ever
+# runs — so the prompt bans that phrase outside real abstention and
+# requires a clean final line with the bare answer.
+READER_SYSTEM_PROMPT_V2 = (
+    "You answer questions using ONLY the evidence provided in the prompt. "
+    "First, identify every evidence item that bears on the question, even "
+    "partially. Then reason step by step over those items: for questions "
+    "that require combining values, doing arithmetic, or counting "
+    "occurrences, work the calculation through explicitly before answering. "
+    "Abstain only if NO evidence item bears on the question at all; if at "
+    "least one item is partially relevant, give your best-supported answer "
+    "instead of abstaining, and never use the phrase \"I don't know\" "
+    "anywhere in your reply except as the abstention reply itself. "
+    "Finish with a final line, on its own, containing ONLY the concise "
+    "answer — a short phrase, no preamble, no restated reasoning — or, if "
+    "truly abstaining, reply with exactly: I don't know."
+)
+READER_SYSTEM_PROMPTS = {1: READER_SYSTEM_PROMPT, 2: READER_SYSTEM_PROMPT_V2}
 JUDGE_SYSTEM_PROMPT = (
     "You are a strict grader. Reply with exactly one word: yes or no."
 )
@@ -428,6 +454,19 @@ def main() -> int:
     )
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument(
+        "--prompt-version",
+        type=int,
+        choices=(1, 2),
+        default=1,
+        help=(
+            "reader system prompt version: 1 (default, today's "
+            "READER_SYSTEM_PROMPT verbatim) or 2 (enumerate-then-compute "
+            "reasoning, calibrated abstention); part of the reader cache "
+            "key since the system prompt differs, and recorded in the "
+            "report as prompt_version"
+        ),
+    )
+    parser.add_argument(
         "--judge-model",
         default=None,
         help="judge model id (defaults to --model; lets a stronger model judge)",
@@ -466,6 +505,7 @@ def main() -> int:
         args.max_calls,
         reasoning_effort=args.reasoning_effort,
     )
+    reader_system_prompt = READER_SYSTEM_PROMPTS[args.prompt_version]
     per_question: list[dict] = []
     aborted_reason = None
     for index, row in enumerate(rows):
@@ -480,7 +520,7 @@ def main() -> int:
             "reader_error": None,
         }
         try:
-            reply = cli.call("reader", READER_SYSTEM_PROMPT, build_reader_prompt(row))
+            reply = cli.call("reader", reader_system_prompt, build_reader_prompt(row))
             record["reply"] = reply
             correct, method = judge_row(cli, row, reply)
             record["correct"] = correct
@@ -516,6 +556,7 @@ def main() -> int:
         ),
         "reader_model_id": args.model,
         "judge_model_id": judge_model,
+        "prompt_version": args.prompt_version,
         "reasoning_effort": args.reasoning_effort,
         "runtime": "postgres",
         "label": args.label,

@@ -155,6 +155,22 @@ def test_reasoning_effort_is_part_of_cache_identity_and_codex_or_openrouter_only
         pass
 
 
+def test_reader_system_prompt_v1_is_unchanged_and_v2_differs() -> None:
+    reader = _load_run_reader()
+    # Regression pin: v1 is the live default served to today's scoring queue
+    # whenever --prompt-version is not passed. If this literal ever needs to
+    # change, that is a deliberate v1 behavior change, not an accident.
+    v1_pinned = (
+        "You answer questions using ONLY the evidence provided in the prompt. "
+        "Be terse: reply with the answer itself, a short phrase, no preamble. "
+        "If the evidence is insufficient to answer, reply exactly: I don't know."
+    )
+    assert reader.READER_SYSTEM_PROMPT == v1_pinned
+    assert reader.READER_SYSTEM_PROMPTS[1] is reader.READER_SYSTEM_PROMPT
+    assert reader.READER_SYSTEM_PROMPTS[2] == reader.READER_SYSTEM_PROMPT_V2
+    assert reader.READER_SYSTEM_PROMPT_V2 != reader.READER_SYSTEM_PROMPT
+
+
 def test_accuracy_excludes_unscored_rows() -> None:
     reader = _load_run_reader()
     rows = [
