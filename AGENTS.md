@@ -29,14 +29,22 @@ MemPhant is the public Apache-2.0 memory substrate repo. Treat `docs/superpowers
 Run the narrowest meaningful checks while iterating, then the full gate before claiming a workstream exit:
 
 ```sh
-python3 -m pytest tests/test_repo_contract.py tests/test_wsa_migration_contract.py spikes/python-retain/test_spike.py -q
+python3 -m pytest tests/ spikes/python-retain/test_spike.py -q
 python3 scripts/check_spec_drift.py
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets --all-features
 cargo test --doc
+# Live-Postgres contract + worker-binary smoke tests: #[ignore]d by default,
+# only run with MEMPHANT_TEST_DATABASE_URL set (never point this at a
+# database another process is using — migrate a scratch database first).
+MEMPHANT_TEST_DATABASE_URL=postgres://memphant:memphant@localhost:5432/memphant \
+  cargo test -p memphant-store-postgres -p memphant-worker -- --ignored --test-threads=1
 cargo run -p memphant-cli -- db lint --provider plain-postgres
 cargo run -p memphant-cli -- db lint --provider supabase
 cargo run -p memphant-cli -- db lint --provider neon
 python3 scripts/apply_memphant_migrations.py --database-url postgres://memphant.invalid/memphant --dry-run
+# Real binaries + real Postgres end-to-end probe; requires a running
+# memphant-postgres-1 container (compose service `memphant-postgres`) on :5432.
+DATABASE_URL=postgres://memphant:memphant@localhost:5432/memphant bash scripts/e2e_probe.sh
 ```

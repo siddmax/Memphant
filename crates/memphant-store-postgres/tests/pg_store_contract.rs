@@ -584,6 +584,173 @@ async fn degraded_read_your_own_writes_serves_unreflected_episodes() {
     );
 }
 
+/// Six turns behind a `[session]` provenance line: turn windows of 4 yield
+/// two chunks (turns 1-4, 5-6). Mirrors
+/// `memphant-core/tests/contextual_chunk_write.rs::EPISODE_BODY`.
+const CHUNK_EPISODE_BODY: &str = "[session s1] [date 2023/05/30]\n\
+user: I moved to Berlin in March.\n\
+assistant: Got it, you moved to Berlin in March.\n\
+user: My favorite tea is oolong.\n\
+assistant: Noted, oolong tea it is.\n\
+user: I drive a blue Tesla.\n\
+assistant: A blue Tesla, understood.\n";
+
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn contextual_chunks_round_trip_through_postgres_via_fresh_pool() {
+    let store_a = connect().await;
+    let tenant = fresh_tenant(&store_a).await;
+    let scope = ScopeId::new();
+    let actor = ActorId::new();
+
+    // Default construction mints contextual chunks (promoted to default-on
+    // 2026-07-10) — the product path, same as `service()` elsewhere in this
+    // file.
+    let svc_a = service(store_a);
+    let retained = retain_episode(
+        svc_a.store(),
+        retain_request(tenant, scope, actor, CHUNK_EPISODE_BODY, None),
+    )
+    .await
+    .expect("retain");
+    svc_a.reflect(tenant, scope, None).await.expect("reflect");
+
+    // A COMPLETELY fresh pool must see the compiled unit's chunks: this is
+    // the payload jsonb round trip through `memphant.memory_unit`, never
+    // exercised by an automated test before this one (rung 4 was "by
+    // construction" only, per InMemoryStore assertions).
+    let store_b = connect().await;
+    let page = store_b
+        .scope_memory_page(tenant, scope, None, 100)
+        .await
+        .expect("page via fresh pool");
+    let unit = page
+        .items
+        .iter()
+        .find(|unit| unit.source_episode_id == Some(retained.episode_id))
+        .expect("episode-derived unit");
+
+    assert_eq!(
+        unit.contextual_chunks.len(),
+        2,
+        "six turns / window 4 yields two chunks, surviving the payload jsonb round trip"
+    );
+    let episode_uuid = retained.episode_id.as_uuid();
+    for chunk in &unit.contextual_chunks {
+        assert!(
+            chunk.id.starts_with(&format!("chunk-{episode_uuid}-")),
+            "chunk id derives from parent episode: {}",
+            chunk.id
+        );
+        assert!(
+            chunk.header.contains(&format!("[episode {episode_uuid}]")),
+            "header carries parent episode provenance: {}",
+            chunk.header
+        );
+        assert!(!chunk.body.trim().is_empty(), "no empty-body chunks");
+        assert!(
+            chunk
+                .source_span
+                .as_deref()
+                .is_some_and(|span| span.contains('-')),
+            "chunk carries a source span"
+        );
+    }
+    assert!(
+        unit.contextual_chunks[0].header.contains("[turns 1-4]"),
+        "first window covers turns 1-4: {}",
+        unit.contextual_chunks[0].header
+    );
+    assert!(
+        unit.contextual_chunks[1].header.contains("[turns 5-6]"),
+        "second window covers turns 5-6: {}",
+        unit.contextual_chunks[1].header
+    );
+    assert_ne!(
+        unit.contextual_chunks[0].id, unit.contextual_chunks[1].id,
+        "window ids are distinct"
+    );
+}
+
+/// Multi-tenant job-claim fairness (plan addendum W1-b): `claim_reflect_jobs`
+/// orders strictly by `created_at` with no per-tenant partitioning
+/// (`crates/memphant-store-postgres/src/store.rs::claim_reflect_jobs`, the
+/// `order by created_at ... limit $3` clause). A tenant with a large backlog
+/// starves out a tenant with a single, more urgent job for as many claim
+/// batches as it takes to drain the backlog. This is the exact gap that
+/// produced the orphaned-backlog e2e failure named in the research audit
+/// (scratchpad/research/tests-audit.md, gap 3).
+///
+/// CONFIRMED red baseline, pinned on purpose. Every test in this file is
+/// `#[ignore]`d by the file's own convention (gated on
+/// `MEMPHANT_TEST_DATABASE_URL`, opted into via `cargo test -- --ignored`),
+/// so an ordinary `#[ignore]` on just this test would NOT remove it from
+/// that same `--ignored` sweep — it would still run, and still fail, every
+/// time the documented gate runs. Per the W1 brief this task does NOT
+/// change claim logic, so instead of leaving a permanently-failing test in
+/// the gate, this test asserts TODAY'S observed (buggy) behavior: a single
+/// claim batch of 16 never includes tenant B's job while tenant A has a
+/// 50-job backlog created first. THIS ASSERTION MUST FLIP (to require
+/// tenant B's job IS claimed) the moment a per-tenant fairness fix lands —
+/// a flip to green on that line is the fix's proof.
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn multi_tenant_claim_batch_starves_the_low_volume_tenant_red_baseline() {
+    let store = connect().await;
+    let tenant_a = fresh_tenant(&store).await;
+    let tenant_b = fresh_tenant(&store).await;
+    let scope_a = ScopeId::new();
+    let scope_b = ScopeId::new();
+    let actor_a = ActorId::new();
+    let actor_b = ActorId::new();
+
+    // Tenant A floods the global queue with a 50-job backlog...
+    for index in 0..50 {
+        retain_episode(
+            &store,
+            retain_request(
+                tenant_a,
+                scope_a,
+                actor_a,
+                &format!("Tenant A backlog fact number {index}."),
+                None,
+            ),
+        )
+        .await
+        .expect("retain tenant A backlog item");
+    }
+
+    // ...then tenant B queues a single job strictly AFTER tenant A's backlog.
+    retain_episode(
+        &store,
+        retain_request(
+            tenant_b,
+            scope_b,
+            actor_b,
+            "Tenant B single urgent fact.",
+            None,
+        ),
+    )
+    .await
+    .expect("retain tenant B job");
+
+    // Same batch size the real memphant-worker binary claims per tick
+    // (crates/memphant-worker/src/main.rs::BATCH).
+    const WORKER_BATCH: usize = 16;
+    let claimed = store
+        .claim_reflect_jobs(JobFilter::default(), WORKER_BATCH)
+        .await
+        .expect("claim");
+
+    assert!(
+        !claimed.iter().any(|row| row.job.tenant_id == tenant_b),
+        "RED BASELINE FLIPPED: tenant B's job was claimed even though tenant A \
+         had a 50-job head-start backlog — a per-tenant fairness fix appears to \
+         have landed; flip this assertion to require inclusion (see the doc \
+         comment above) and rename the test to drop '_red_baseline'"
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
 async fn stub_embeddings_persist_and_power_the_vector_channel() {

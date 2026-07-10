@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -198,3 +199,86 @@ def test_accuracy_excludes_unscored_rows() -> None:
     ]
     result = reader.accuracy(rows)
     assert result == {"n": 3, "n_scored": 2, "qa_accuracy": 0.5}
+
+
+class _FakeHttpResponse:
+    """Minimal stand-in for the context-managed object
+    `urllib.request.urlopen` returns: supports `with ... as response:` and
+    `.read()` -> bytes, exactly what `_call_openrouter` uses."""
+
+    def __init__(self, payload: dict) -> None:
+        self._body = json.dumps(payload).encode()
+
+    def __enter__(self) -> "_FakeHttpResponse":
+        return self
+
+    def __exit__(self, *exc_info: object) -> bool:
+        return False
+
+    def read(self) -> bytes:
+        return self._body
+
+
+def test_openrouter_call_retries_urlerror_and_empty_choices_then_succeeds(
+    tmp_path, monkeypatch
+) -> None:
+    """`_call_openrouter` must retry a transient `URLError` and an
+    empty-`choices` response, then return the reply on the third attempt —
+    without sleeping for real (the real backoff is `(2, 8, 30)` seconds)."""
+    reader = _load_run_reader()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-not-real")
+    sleeps: list[float] = []
+    monkeypatch.setattr(reader.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    outcomes = [
+        reader.urllib.error.URLError("connection refused"),
+        _FakeHttpResponse({"choices": []}),
+        _FakeHttpResponse(
+            {"choices": [{"message": {"content": " final answer "}}]}
+        ),
+    ]
+    calls = {"n": 0}
+
+    def fake_urlopen(request, timeout=None):
+        outcome = outcomes[calls["n"]]
+        calls["n"] += 1
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(reader.urllib.request, "urlopen", fake_urlopen)
+
+    cli = reader.ReaderCli(
+        "openrouter", "openai/gpt-5.6-terra", "openai/gpt-5.6-terra", tmp_path, 10
+    )
+    reply = cli._call_openrouter("reader", "sys", "prompt")
+
+    assert reply == "final answer"
+    assert calls["n"] == 3, "one URLError attempt, one empty-choices attempt, one success"
+    assert sleeps == [2, 8], "backoff delays before attempts 2 and 3 (attempt 1 has no delay)"
+
+
+def test_openrouter_call_raises_runtime_error_after_four_failed_attempts(
+    tmp_path, monkeypatch
+) -> None:
+    """All 4 attempts failing (transient `URLError` every time) must raise a
+    `RuntimeError` naming the attempt count, never fall through silently."""
+    reader = _load_run_reader()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-not-real")
+    sleeps: list[float] = []
+    monkeypatch.setattr(reader.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    def fake_urlopen(request, timeout=None):
+        raise reader.urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(reader.urllib.request, "urlopen", fake_urlopen)
+
+    cli = reader.ReaderCli(
+        "openrouter", "openai/gpt-5.6-terra", "openai/gpt-5.6-terra", tmp_path, 10
+    )
+    try:
+        cli._call_openrouter("reader", "sys", "prompt")
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as error:
+        assert "4/4" in str(error), f"error must name the attempt count: {error}"
+    assert sleeps == [2, 8, 30], "all three backoff delays are used before giving up"
