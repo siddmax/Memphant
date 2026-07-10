@@ -2846,7 +2846,7 @@ fn pack_recall_context(
             }
         }
 
-        let unit_tokens = candidate.unit.body.split_whitespace().count();
+        let (rendered_body, unit_tokens) = packed_body_and_cost(&candidate.unit, query_tokens);
         let candidate_score = packing_relevance_score(&candidate, query_tokens);
         if items.len() >= output_limit {
             if let Some(replace_index) = replacement_index(
@@ -2867,7 +2867,12 @@ fn pack_recall_context(
                 });
                 packed_token_counts.push(unit_tokens);
                 packed_relevance_scores.push(candidate_score);
-                items.push(context_item_for(candidate, tenant_edges, query_tokens));
+                items.push(context_item_for(
+                    candidate,
+                    tenant_edges,
+                    query_tokens,
+                    rendered_body,
+                ));
                 continue;
             }
             dropped_items.push(RecallDroppedItem {
@@ -2897,7 +2902,12 @@ fn pack_recall_context(
                 });
                 packed_token_counts.push(unit_tokens);
                 packed_relevance_scores.push(candidate_score);
-                items.push(context_item_for(candidate, tenant_edges, query_tokens));
+                items.push(context_item_for(
+                    candidate,
+                    tenant_edges,
+                    query_tokens,
+                    rendered_body,
+                ));
                 continue;
             }
             dropped_items.push(RecallDroppedItem {
@@ -2909,7 +2919,12 @@ fn pack_recall_context(
         token_estimate += unit_tokens;
         packed_token_counts.push(unit_tokens);
         packed_relevance_scores.push(candidate_score);
-        items.push(context_item_for(candidate, tenant_edges, query_tokens));
+        items.push(context_item_for(
+            candidate,
+            tenant_edges,
+            query_tokens,
+            rendered_body,
+        ));
     }
 
     let abstention = items.is_empty()
@@ -2971,27 +2986,42 @@ fn replacement_index(
         .map(|(index, _)| index)
 }
 
+/// The packed body and the budget cost the packing loop charges for one
+/// candidate — computed ONCE per candidate during admission and reused for the
+/// item's rendered text (never rendered twice).
+///
+/// Chunk-aware pack rendering: when the unit carries contextual chunks and the
+/// query matched at least one, the item's text is rendered from its chunks
+/// (matched-first + neighbour expansion, header-prefixed, document order),
+/// bounded by the SAME budget share the whole body would have consumed
+/// (`unit.body` whitespace-token count). The item is then charged that RENDERED
+/// text's whitespace-token count — strictly `<=` the whole-body count — so the
+/// reclaimed difference frees budget for finer-grained items to fit.
+/// `None` (no chunks, or no chunk matched) keeps today's byte-identical
+/// whole-body rendering and charges the exact whole-body count.
+fn packed_body_and_cost(
+    unit: &StoredMemoryUnit,
+    query_tokens: &[String],
+) -> (Option<String>, usize) {
+    let whole_body_tokens = unit.body.split_whitespace().count();
+    let rendered_body =
+        render_chunked_item_body(&unit.contextual_chunks, query_tokens, whole_body_tokens);
+    let charged_tokens = match &rendered_body {
+        Some(rendered) => rendered.split_whitespace().count(),
+        None => whole_body_tokens,
+    };
+    (rendered_body, charged_tokens)
+}
+
 fn context_item_for(
     candidate: CandidateAccumulator,
     tenant_edges: &[StoredMemoryEdge],
     query_tokens: &[String],
+    rendered_body: Option<String>,
 ) -> RecallContextItem {
     let suppression_labels = suppression_labels_for(&candidate.unit, tenant_edges);
     let derived_by = derived_by_for_unit(&candidate.unit).to_string();
     let matched_contextual_chunk = contextual_chunk_score(&candidate.unit, query_tokens) > 0.0;
-    // Chunk-aware pack rendering: when the unit carries contextual chunks and the
-    // query matched at least one, render this item's packed text from its chunks
-    // (matched-first + neighbour expansion, header-prefixed, document order)
-    // instead of the whole body. Bounded by the SAME budget share the whole body
-    // would have consumed (`unit.body` whitespace-token count) so the item never
-    // uses more budget than before; scoring/ranking/citation are untouched.
-    // `None` (no chunks, or no chunk matched) keeps today's byte-identical
-    // whole-body rendering.
-    let rendered_body = render_chunked_item_body(
-        &candidate.unit.contextual_chunks,
-        query_tokens,
-        candidate.unit.body.split_whitespace().count(),
-    );
     let inclusion_reason = if candidate.unit.kind == MemoryKind::Procedural
         && procedure_signal_kind(&candidate.unit) == "failure"
     {
@@ -4728,5 +4758,307 @@ mod chunk_render_tests {
         for body in ["red mango pie", "green lime soda", "blue mango tart"] {
             assert_eq!(count(&rendered, body), 1, "{body} emitted once");
         }
+    }
+
+    /// Pins the whitespace-separator invariant the budget accounting relies on:
+    /// a block's declared token cost equals the rendered block string's actual
+    /// whitespace-token count. A future non-whitespace header/body separator
+    /// would desync `chunk_block_token_cost` from the charged text and must fail
+    /// here.
+    #[test]
+    fn chunk_block_cost_equals_block_whitespace_tokens() {
+        for c in [
+            chunk("1-4", "red apple pie crust"),
+            chunk("5-8", "single"),
+            chunk("9-12", "many little words here now"),
+        ] {
+            assert_eq!(
+                chunk_block_token_cost(&c),
+                chunk_block(&c).split_whitespace().count(),
+                "block cost == actual whitespace-token count for {}",
+                c.header
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod pack_cost_tests {
+    use super::*;
+
+    /// A chunk with the same 6-token header shape used elsewhere; a block's
+    /// budget cost is `6 + body_word_count`.
+    fn chunk(turns: &str, body: &str) -> ContextualChunk {
+        ContextualChunk {
+            id: format!("chunk-ep-{turns}"),
+            header: format!("[episode ep] [kind user] [turns {turns}]"),
+            body: body.to_string(),
+            source_span: Some("0-0".to_string()),
+        }
+    }
+
+    fn unit(id: u128, body: &str, chunks: Vec<ContextualChunk>) -> StoredMemoryUnit {
+        StoredMemoryUnit {
+            id: UnitId::from_u128(id),
+            tenant_id: TenantId::from_u128(1),
+            scope_id: ScopeId::from_u128(1),
+            kind: MemoryKind::Semantic,
+            state: UnitState::Active,
+            subject_key: None,
+            body: body.to_string(),
+            trust_level: TrustLevel::TrustedUser,
+            churn_class: None,
+            freshness_due_at: None,
+            actor_id: None,
+            source_kind: None,
+            source_episode_id: None,
+            source_resource_id: None,
+            deletion_generation: None,
+            contextual_chunks: chunks,
+            valid_from: None,
+            valid_to: None,
+            transaction_from: None,
+            transaction_to: None,
+            difficulty: None,
+            stability_days: None,
+            last_reinforced_at: None,
+            reinforcement_count: 0,
+        }
+    }
+
+    fn candidate(unit: StoredMemoryUnit, fused_score: f32) -> CandidateAccumulator {
+        let decay = DecayScore::neutral(&unit);
+        CandidateAccumulator {
+            unit,
+            fused_score,
+            rerank_rank: None,
+            rerank_score: 0.0,
+            decay,
+            l4_score: 0.0,
+            subquery_ids: Vec::new(),
+            decomposition_rank: None,
+            channels: Vec::new(),
+        }
+    }
+
+    /// A minimal request with abstention/rerank/decomposition OFF so the packing
+    /// loop is a straight budget-gated append in candidate order — isolating the
+    /// cost-charging behaviour under test.
+    fn request(budget_tokens: usize) -> RecallRequest {
+        RecallRequest {
+            tenant_id: TenantId::from_u128(1),
+            scope_id: ScopeId::from_u128(1),
+            actor_id: ActorId::from_u128(1),
+            allowed_scope_ids: vec![ScopeId::from_u128(1)],
+            query: "quantum".to_string(),
+            k: 10,
+            budget_tokens,
+            mode: RecallMode::Balanced,
+            include_beliefs: true,
+            edge_expansion_enabled: false,
+            context_packing_abstention_enabled: false,
+            rerank_enabled: false,
+            learned_rerank_profile: None,
+            query_decomposition_enabled: false,
+            procedure_recall_enabled: true,
+            decay_enabled: false,
+            engine_version: "pack-cost-test".to_string(),
+        }
+    }
+
+    /// `n` whitespace-separated filler words → an `n`-token whole body.
+    fn body_of(n: usize) -> String {
+        vec!["filler"; n].join(" ")
+    }
+
+    /// Budget reclaim: charging a chunk-rendered item its RENDERED token count
+    /// (not the whole-body count) frees budget so a second item that whole-body
+    /// charging would drop now fits. Same bodies, same budget, only chunking
+    /// differs — and the packed second item is the chunk render, not the raw body.
+    #[test]
+    fn rendered_cost_reclaim_admits_second_item() {
+        let query_tokens = tokenize("quantum");
+        let budget = 31;
+        // Item A: a plain 15-token item, packed first in both scenarios.
+        let plain = || candidate(unit(1, &body_of(15), Vec::new()), 5.0);
+        // Item B: a 40-token whole body. As chunks its matched render is two
+        // 8-token blocks (6-token header + 2-token body) = 16 tokens.
+        let chunks = || {
+            vec![
+                chunk("1-4", "quantum harmonica"), // matches the query
+                chunk("5-8", "berlin note"),       // neighbour, pulled by expansion
+            ]
+        };
+
+        // Whole-body charging (B has no chunks): B costs 40, does not fit → drop.
+        let whole = pack_recall_context(
+            vec![plain(), candidate(unit(2, &body_of(40), Vec::new()), 4.0)],
+            &request(budget),
+            &[],
+            &query_tokens,
+            Vec::new(),
+            2,
+        );
+        assert_eq!(
+            whole.items.len(),
+            1,
+            "whole-body charging packs only the plain item"
+        );
+        assert_eq!(whole.items[0].unit_id, UnitId::from_u128(1));
+        assert_eq!(whole.token_estimate, 15);
+
+        // Rendered charging (B chunked): B costs 16 → reclaimed budget admits it.
+        let rendered = pack_recall_context(
+            vec![plain(), candidate(unit(2, &body_of(40), chunks()), 4.0)],
+            &request(budget),
+            &[],
+            &query_tokens,
+            Vec::new(),
+            2,
+        );
+        assert_eq!(
+            rendered.items.len(),
+            2,
+            "rendered charging reclaims budget for the second item"
+        );
+        assert_eq!(
+            rendered.items[1].unit_id,
+            UnitId::from_u128(2),
+            "the reclaimed second item is B"
+        );
+        assert_eq!(
+            rendered.token_estimate, 31,
+            "token_estimate == plain 15 + rendered 16 (actual charged costs)"
+        );
+        let b_body = &rendered.items[1].body;
+        assert!(
+            b_body.contains("[turns 1-4]") && b_body.contains("quantum harmonica"),
+            "matched chunk rendered: {b_body}"
+        );
+        assert!(
+            b_body.contains("[turns 5-8]") && b_body.contains("berlin note"),
+            "neighbour chunk rendered: {b_body}"
+        );
+        assert!(
+            !b_body.contains("filler"),
+            "raw whole body not emitted: {b_body}"
+        );
+    }
+
+    /// Property (review M1/M2): for a chunk-rendered item the charged cost equals
+    /// the rendered text's whitespace-token count (so `token_estimate` is honest)
+    /// AND never exceeds the old whole-body count (reclaim can only free budget,
+    /// never overspend); an un-rendered item is charged exactly its whole-body
+    /// count.
+    #[test]
+    fn charged_cost_matches_rendered_tokens_and_never_exceeds_whole_body() {
+        let query_tokens = tokenize("quantum tart");
+        // (whole-body word count, chunks) across matched / unmatched / no-chunk /
+        // nothing-fits layouts.
+        let cases = vec![
+            (
+                40,
+                vec![
+                    chunk("1-4", "quantum harmonica"),
+                    chunk("5-8", "berlin note"),
+                ],
+            ),
+            (
+                12,
+                vec![
+                    chunk("1-4", "quantum tart glaze here"),
+                    chunk("5-8", "plum jam toast crust"),
+                ],
+            ),
+            // Tiny body: matched blocks each cost more than the whole-body cap,
+            // so nothing fits and render falls back (charged == whole body).
+            (
+                6,
+                vec![
+                    chunk("1-2", "quantum"),
+                    chunk("3-4", "berlin"),
+                    chunk("5-6", "tart"),
+                ],
+            ),
+            // No chunks → whole-body path.
+            (25, vec![]),
+            // Chunked but no chunk matches the query → whole-body fallback.
+            (
+                30,
+                vec![
+                    chunk("1-4", "red apple pie"),
+                    chunk("5-8", "green lime soda"),
+                ],
+            ),
+        ];
+        for (body_words, chunks) in cases {
+            let u = unit(1, &body_of(body_words), chunks);
+            let whole_body_tokens = u.body.split_whitespace().count();
+            let (rendered_body, charged) = packed_body_and_cost(&u, &query_tokens);
+            match &rendered_body {
+                Some(text) => {
+                    assert_eq!(
+                        charged,
+                        text.split_whitespace().count(),
+                        "charged cost == rendered token count (token_estimate honest)"
+                    );
+                    assert!(
+                        charged <= whole_body_tokens,
+                        "rendered charge {charged} <= whole-body {whole_body_tokens}"
+                    );
+                }
+                None => assert_eq!(
+                    charged, whole_body_tokens,
+                    "un-rendered item charged exactly its whole-body count"
+                ),
+            }
+        }
+    }
+
+    /// No-chunks path: every item is charged its exact whole-body count and
+    /// packing decisions / token_estimate are unchanged — the default caller
+    /// (chunk-write OFF) is bit-identical to before this change.
+    #[test]
+    fn no_chunks_path_charges_whole_body_and_is_unchanged() {
+        let query_tokens = tokenize("quantum");
+        let a = candidate(unit(1, &body_of(10), Vec::new()), 5.0);
+        let b = candidate(unit(2, &body_of(10), Vec::new()), 4.0);
+        let c = candidate(unit(3, &body_of(10), Vec::new()), 3.0);
+        // Budget 25 fits two 10-token bodies (20); the third overflows.
+        let packed = pack_recall_context(
+            vec![a, b, c],
+            &request(25),
+            &[],
+            &query_tokens,
+            Vec::new(),
+            3,
+        );
+        assert_eq!(
+            packed.items.iter().map(|i| i.unit_id).collect::<Vec<_>>(),
+            vec![UnitId::from_u128(1), UnitId::from_u128(2)],
+            "first two fit in candidate order"
+        );
+        assert_eq!(
+            packed.token_estimate, 20,
+            "token_estimate == sum of whole-body counts"
+        );
+        assert_eq!(
+            packed.items[0].body,
+            body_of(10),
+            "whole body emitted byte-identical"
+        );
+        assert_eq!(
+            packed.items[1].body,
+            body_of(10),
+            "whole body emitted byte-identical"
+        );
+        assert!(
+            packed
+                .dropped_items
+                .iter()
+                .any(|d| d.unit_id == UnitId::from_u128(3) && d.reason == RecallDropReason::Budget),
+            "third item dropped for budget: {:?}",
+            packed.dropped_items
+        );
     }
 }
