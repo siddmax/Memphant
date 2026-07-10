@@ -38,3 +38,4 @@ test-results/
 tmp/
 temp/
 benchmarks/data/
+.fastembed_cache/
