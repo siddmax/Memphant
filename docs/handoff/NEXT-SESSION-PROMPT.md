@@ -86,6 +86,11 @@ RESULTS_PLACEHOLDER if scoring didn't finish), docs/superpowers/specs/memphant/S
 
 ## Known small fixes queued
 
+- bench-lme shares the runtime Postgres and leaves reflect-job debris; killed
+  bench processes orphan `running` jobs whose lease-reclaims starve a fresh
+  job on single worker ticks (bit the e2e probe on 2026-07-10 — drained with
+  repeated `MEMPHANT_WORKER_ONCE=1` ticks). Fix: bench uses a disposable
+  schema/DB, or cleans its tenants' jobs on exit.
 - Dead `include_trace` request flag removal (types + OpenAPI regen).
 - Internal golden/security/ops eval subcommands are in-memory only — add
   --database-url paths so they also gate the Postgres runtime.
