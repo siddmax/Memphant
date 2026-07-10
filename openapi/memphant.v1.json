@@ -290,6 +290,16 @@
       },
       "HealthResponse": {
         "properties": {
+          "dead_letter_jobs": {
+            "default": null,
+            "description": "Dead-lettered reflect jobs (attempts exhausted); `null` when the\nbackend cannot report it cheaply.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "engine_version": {
             "type": "string"
           },
@@ -297,6 +307,11 @@
             "type": "string"
           },
           "status": {
+            "type": "string"
+          },
+          "store": {
+            "default": "",
+            "description": "The active store backend: `postgres` or `memory`.",
             "type": "string"
           },
           "trace_schema_version": {
@@ -785,6 +800,13 @@
             },
             "type": "array"
           },
+          "consolidation_lag_ms": {
+            "default": 0,
+            "description": "Non-zero when `degraded: true`: recall drew on raw un-reflected\nepisodes because consolidation had not caught up (spec 08 §4).",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "degraded": {
             "type": "boolean"
           },
@@ -888,13 +910,28 @@
         "format": "uuid",
         "type": "string"
       },
+      "ResourceKind": {
+        "enum": [
+          "document",
+          "code",
+          "conversation",
+          "other"
+        ],
+        "type": "string"
+      },
       "RetainEpisodeHttpRequest": {
+        "description": "The retain verb request: payload-dispatched between `episode` (default,\n`body` required), `resource`, and `unit` shapes.",
         "properties": {
           "actor_id": {
             "$ref": "#/components/schemas/ActorId"
           },
           "body": {
-            "type": "string"
+            "default": null,
+            "description": "Episode body; required for the episode payload shape.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "compiler_version": {
             "type": [
@@ -908,6 +945,18 @@
               "string",
               "null"
             ]
+          },
+          "resource": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RetainResourcePayload"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Present → resource payload shape."
           },
           "scope_id": {
             "$ref": "#/components/schemas/ScopeId"
@@ -933,6 +982,18 @@
           },
           "tenant_id": {
             "$ref": "#/components/schemas/TenantId"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RetainUnitPayload"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Present → direct unit payload shape."
           }
         },
         "required": [
@@ -940,15 +1001,34 @@
           "scope_id",
           "actor_id",
           "source_kind",
-          "source_trust",
-          "body"
+          "source_trust"
         ],
         "type": "object"
       },
       "RetainEpisodeHttpResponse": {
         "properties": {
+          "assigned_trust": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TrustLevel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The trust tier actually assigned after clamping to the API key's\n`max_trust` ceiling."
+          },
           "dedup": {
-            "$ref": "#/components/schemas/DedupOutcome"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DedupOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           },
           "enqueued": {
             "items": {
@@ -957,19 +1037,121 @@
             "type": "array"
           },
           "episode_id": {
-            "$ref": "#/components/schemas/EpisodeId"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EpisodeId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "resource_id": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResourceId"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           },
           "trace_ref": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "unit_ids": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/UnitId"
+            },
+            "type": "array"
           }
         },
         "required": [
-          "episode_id",
-          "dedup",
           "enqueued"
+        ],
+        "type": "object"
+      },
+      "RetainResourcePayload": {
+        "description": "Resource payload for the retain verb (spec 08 §209 `resource` shape).",
+        "properties": {
+          "body": {
+            "default": null,
+            "description": "Durable resource content the worker compiles from.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "content_hash": {
+            "type": "string"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResourceKind"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "mime_type": {
+            "type": "string"
+          },
+          "revision": {
+            "default": null,
+            "description": "Revision identity (e.g. a code commit hash).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "uri": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "uri",
+          "mime_type",
+          "content_hash"
+        ],
+        "type": "object"
+      },
+      "RetainUnitPayload": {
+        "description": "Direct pre-compiled unit payload for trusted callers (spec 08 §209 `unit`\nshape). Requires an explicit subject/predicate and kind; the admission\ntrust policy still applies.",
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "churn_class": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "$ref": "#/components/schemas/MemoryKind"
+          },
+          "predicate": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "subject",
+          "predicate",
+          "body"
         ],
         "type": "object"
       },
@@ -1412,6 +1594,14 @@
         ],
         "type": "string"
       }
+    },
+    "securitySchemes": {
+      "bearerApiKey": {
+        "bearerFormat": "mk_<key>",
+        "description": "MemPhant API key; the key binds the tenant and caps source_trust at its max_trust tier.",
+        "scheme": "bearer",
+        "type": "http"
+      }
     }
   },
   "info": {
@@ -1657,11 +1847,19 @@
           },
           {
             "in": "query",
-            "name": "tenant_id",
-            "required": true,
+            "name": "cursor",
+            "required": false,
             "schema": {
               "format": "uuid",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer"
             }
           }
         ],
@@ -1722,5 +1920,10 @@
         }
       }
     }
-  }
+  },
+  "security": [
+    {
+      "bearerApiKey": []
+    }
+  ]
 }

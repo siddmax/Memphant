@@ -125,7 +125,8 @@ def test_memory_utility_trend_is_wired_to_public_mark_contract() -> None:
     assert "mark_records_outcome_feedback_for_trace" in core_test
     assert '"/v1/mark"' in rest_test
     assert "MarkRequest" in mcp_source
-    assert "record_mark" in mcp_source
+    # The mark verb is wired through the shared MemoryService application layer.
+    assert ".mark(" in mcp_source
 
 
 def test_landscape_completeness_lists_every_verified_threshold_repo() -> None:

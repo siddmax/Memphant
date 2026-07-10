@@ -1,6 +1,9 @@
 #![allow(async_fn_in_trait)]
 
+pub mod service;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 
 use fsrs::{FSRS, FSRS6_DEFAULT_DECAY, MemoryState, current_retrievability};
@@ -161,6 +164,7 @@ pub type CorrectOutcome = CorrectResult;
 #[derive(Debug, Clone, Copy)]
 pub struct ForgetWrite {
     pub scope_id: ScopeId,
+    pub actor_id: ActorId,
     pub target: ForgetTarget,
 }
 
@@ -251,38 +255,38 @@ pub trait MemoryStore: Send + Sync {
     type Txn: Send;
 
     // Staged-write API.
-    async fn begin(&self) -> Self::Txn;
-    async fn commit(&self, tx: Self::Txn) -> Result<(), StoreError>;
-    async fn stage_episode(
+    fn begin(&self) -> impl Future<Output = Self::Txn> + Send;
+    fn commit(&self, tx: Self::Txn) -> impl Future<Output = Result<(), StoreError>> + Send;
+    fn stage_episode(
         &self,
         tx: &mut Self::Txn,
         episode: NewEpisode,
-    ) -> Result<RetainOutcome, StoreError>;
-    async fn stage_memory_unit(
+    ) -> impl Future<Output = Result<RetainOutcome, StoreError>> + Send;
+    fn stage_memory_unit(
         &self,
         tx: &mut Self::Txn,
         unit: NewMemoryUnit,
-    ) -> Result<UnitId, StoreError>;
-    async fn stage_resource(
+    ) -> impl Future<Output = Result<UnitId, StoreError>> + Send;
+    fn stage_resource(
         &self,
         tx: &mut Self::Txn,
         resource: NewResource,
-    ) -> Result<ResourceId, StoreError>;
-    async fn stage_memory_edge(
+    ) -> impl Future<Output = Result<ResourceId, StoreError>> + Send;
+    fn stage_memory_edge(
         &self,
         tx: &mut Self::Txn,
         edge: NewMemoryEdge,
-    ) -> Result<EdgeId, StoreError>;
-    async fn enqueue_reflect(
+    ) -> impl Future<Output = Result<EdgeId, StoreError>> + Send;
+    fn enqueue_reflect(
         &self,
         tx: &mut Self::Txn,
         job: ReflectJob,
-    ) -> Result<JobId, StoreError>;
+    ) -> impl Future<Output = Result<JobId, StoreError>> + Send;
 
     // Read seam. The candidate set is the UNION of FTS top-N, most-recent-M
     // per scope, vector top-K (when `query_vec` is given) and exact-subject
     // matches — deduped by id. The in-memory store returns all in-scope units.
-    async fn fetch_recall_candidates(
+    fn fetch_recall_candidates(
         &self,
         tenant: TenantId,
         scopes: &[ScopeId],
@@ -290,104 +294,120 @@ pub trait MemoryStore: Send + Sync {
         query_terms: &[String],
         query_vec: Option<&[f32]>,
         limit: usize,
-    ) -> Result<Vec<StoredMemoryUnit>, StoreError>;
-    async fn fetch_units_by_ids(
+    ) -> impl Future<Output = Result<Vec<StoredMemoryUnit>, StoreError>> + Send;
+    fn fetch_units_by_ids(
         &self,
         tenant: TenantId,
         ids: &[UnitId],
-    ) -> Result<Vec<StoredMemoryUnit>, StoreError>;
-    async fn fetch_edges(
+    ) -> impl Future<Output = Result<Vec<StoredMemoryUnit>, StoreError>> + Send;
+    fn fetch_edges(
         &self,
         tenant: TenantId,
         unit_ids: &[UnitId],
-    ) -> Result<Vec<StoredMemoryEdge>, StoreError>;
-    async fn fetch_review_events(
+    ) -> impl Future<Output = Result<Vec<StoredMemoryEdge>, StoreError>> + Send;
+    fn fetch_review_events(
         &self,
         tenant: TenantId,
         unit_ids: &[UnitId],
-    ) -> Result<Vec<ReviewEventRow>, StoreError>;
-    async fn fetch_episodes_for_scope(
+    ) -> impl Future<Output = Result<Vec<ReviewEventRow>, StoreError>> + Send;
+    fn fetch_episodes_for_scope(
         &self,
         tenant: TenantId,
         scope: ScopeId,
         limit: usize,
-    ) -> Result<Vec<StoredEpisode>, StoreError>;
-    async fn pending_job_count(
+    ) -> impl Future<Output = Result<Vec<StoredEpisode>, StoreError>> + Send;
+    fn pending_job_count(
         &self,
         tenant: TenantId,
         scope: ScopeId,
-    ) -> Result<usize, StoreError>;
-    async fn fetch_episode(
+    ) -> impl Future<Output = Result<usize, StoreError>> + Send;
+    fn fetch_episode(
         &self,
         tenant: TenantId,
         id: EpisodeId,
-    ) -> Result<Option<StoredEpisode>, StoreError>;
-    async fn fetch_resource(
+    ) -> impl Future<Output = Result<Option<StoredEpisode>, StoreError>> + Send;
+    fn fetch_resource(
         &self,
         tenant: TenantId,
         id: ResourceId,
-    ) -> Result<Option<StoredResource>, StoreError>;
+    ) -> impl Future<Output = Result<Option<StoredResource>, StoreError>> + Send;
 
     // Mutation seam.
-    async fn apply_correction(
+    fn apply_correction(
         &self,
         tenant: TenantId,
         correction: CorrectionWrite,
-    ) -> Result<CorrectOutcome, StoreError>;
-    async fn apply_forget(
+    ) -> impl Future<Output = Result<CorrectOutcome, StoreError>> + Send;
+    fn apply_forget(
         &self,
         tenant: TenantId,
         forget: ForgetWrite,
-    ) -> Result<ForgetOutcome, StoreError>;
-    async fn record_review_events(
+    ) -> impl Future<Output = Result<ForgetOutcome, StoreError>> + Send;
+    fn record_review_events(
         &self,
         tenant: TenantId,
         events: Vec<ReviewEventRow>,
-    ) -> Result<(), StoreError>;
-    async fn store_trace(&self, tenant: TenantId, trace: RetrievalTrace) -> Result<(), StoreError>;
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+    fn store_trace(
+        &self,
+        tenant: TenantId,
+        trace: RetrievalTrace,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
     /// TENANT-BOUND: a trace id from another tenant resolves to `None`.
-    async fn trace_by_id(
+    fn trace_by_id(
         &self,
         tenant: TenantId,
         id: TraceId,
-    ) -> Result<Option<RetrievalTrace>, StoreError>;
-    async fn scope_memory_page(
+    ) -> impl Future<Output = Result<Option<RetrievalTrace>, StoreError>> + Send;
+    fn scope_memory_page(
         &self,
         tenant: TenantId,
         scope: ScopeId,
         cursor: Option<UnitId>,
         limit: usize,
-    ) -> Result<ScopePage, StoreError>;
+    ) -> impl Future<Output = Result<ScopePage, StoreError>> + Send;
 
     // Reflect job queue (SKIP LOCKED semantics in Postgres).
-    async fn claim_reflect_jobs(
+    fn claim_reflect_jobs(
         &self,
         filter: JobFilter,
         limit: usize,
-    ) -> Result<Vec<ReflectJobRow>, StoreError>;
-    async fn complete_reflect_job(&self, id: JobId) -> Result<(), StoreError>;
+    ) -> impl Future<Output = Result<Vec<ReflectJobRow>, StoreError>> + Send;
+    fn complete_reflect_job(
+        &self,
+        id: JobId,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
     /// Persists one reflect compilation. MUST consult forgotten-source
     /// tombstones and refuse re-derivation of units from forgotten sources.
-    async fn persist_compiled_units(
+    fn persist_compiled_units(
         &self,
         tenant: TenantId,
         write: CompiledWrite,
-    ) -> Result<(), StoreError>;
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
     /// Idempotency lookup for reflect compilations keyed by
     /// (job_id, compiler_version).
-    async fn fetch_reflect_trace(
+    fn fetch_reflect_trace(
         &self,
         tenant: TenantId,
         job_id: JobId,
         compiler_version: &str,
-    ) -> Result<Option<ReflectTrace>, StoreError>;
+    ) -> impl Future<Output = Result<Option<ReflectTrace>, StoreError>> + Send;
 
-    async fn upsert_embeddings(
+    fn upsert_embeddings(
         &self,
         tenant: TenantId,
         rows: Vec<EmbeddingRow>,
-    ) -> Result<(), StoreError>;
-    async fn lookup_api_key(&self, key_hash: &str) -> Result<Option<ApiKeyRow>, StoreError>;
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+    fn lookup_api_key(
+        &self,
+        key_hash: &str,
+    ) -> impl Future<Output = Result<Option<ApiKeyRow>, StoreError>> + Send;
+
+    /// Backend liveness probe (`select 1` in Postgres; always healthy for the
+    /// in-memory store).
+    fn ping(&self) -> impl Future<Output = Result<(), StoreError>> + Send;
+    /// Reflect jobs dead-lettered after exhausting their claim attempts.
+    fn dead_letter_count(&self) -> impl Future<Output = Result<u64, StoreError>> + Send;
 }
 
 #[derive(Clone, Default)]
@@ -1359,6 +1379,19 @@ impl MemoryStore for InMemoryStore {
             .find(|row| row.key_hash == key_hash)
             .cloned())
     }
+
+    async fn ping(&self) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    async fn dead_letter_count(&self) -> Result<u64, StoreError> {
+        let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+        Ok(state
+            .job_meta
+            .values()
+            .filter(|meta| !meta.completed && meta.attempts >= JOB_DEAD_LETTER_ATTEMPTS)
+            .count() as u64)
+    }
 }
 
 pub async fn retain_episode<S>(
@@ -1506,6 +1539,7 @@ where
             request.tenant_id,
             ForgetWrite {
                 scope_id: request.selector.scope_id,
+                actor_id: request.actor_id,
                 target,
             },
         )
@@ -2052,6 +2086,7 @@ where
         citations,
         abstention,
         degraded: false,
+        consolidation_lag_ms: 0,
         suppression_labels,
     })
 }
@@ -2832,7 +2867,7 @@ fn derive_dedup_key(
     )
 }
 
-fn normalize_component(value: &str) -> String {
+pub(crate) fn normalize_component(value: &str) -> String {
     value
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -2853,7 +2888,7 @@ fn stable_hash(value: &str) -> u64 {
         })
 }
 
-fn tokenize(value: &str) -> Vec<String> {
+pub(crate) fn tokenize(value: &str) -> Vec<String> {
     normalize_component(value)
         .split(|ch: char| !ch.is_ascii_alphanumeric())
         .filter(|token| !token.is_empty())
@@ -3297,7 +3332,7 @@ fn contextual_chunk_score(unit: &StoredMemoryUnit, query_tokens: &[String]) -> f
         .fold(0.0, f32::max)
 }
 
-fn token_set_overlap_text_score(text: &str, query_tokens: &[String]) -> f32 {
+pub(crate) fn token_set_overlap_text_score(text: &str, query_tokens: &[String]) -> f32 {
     let body_tokens = tokenize(text);
     let union = body_tokens
         .iter()
@@ -3706,7 +3741,7 @@ where
                 let unit = minted_unit(
                     new_id,
                     &input,
-                    MemoryKind::Semantic,
+                    candidate.kind.unwrap_or(MemoryKind::Semantic),
                     UnitState::Active,
                     subject_key,
                     &candidate,
@@ -3732,10 +3767,16 @@ where
             AdmissionAction::Quarantine
         } else {
             let new_id = UnitId::new();
+            // Untrusted callers never mint semantic units — a kind hint is
+            // honored only when it does not escalate past candidate tier.
+            let low_trust_kind = candidate
+                .kind
+                .filter(|kind| *kind != MemoryKind::Semantic)
+                .unwrap_or(MemoryKind::Belief);
             let unit = minted_unit(
                 new_id,
                 &input,
-                MemoryKind::Belief,
+                low_trust_kind,
                 UnitState::Candidate,
                 subject_key,
                 &candidate,
@@ -3764,6 +3805,7 @@ where
         scope_id: input.scope_id,
         job_id: input.job_id,
         episode_id: input.episode_id,
+        resource_id: input.resource_id,
         compiler_version: input.compiler_version.clone(),
         cost_units: actions.len().max(1) as u32,
         actions,
@@ -3859,8 +3901,8 @@ fn minted_unit(
         churn_class: candidate.churn_class.clone(),
         actor_id: Some(candidate.actor_id),
         source_kind: Some(candidate.source_kind.clone()),
-        source_episode_id: Some(input.episode_id),
-        source_resource_id: None,
+        source_episode_id: input.episode_id,
+        source_resource_id: input.resource_id,
         deletion_generation: None,
         contextual_chunks: candidate.contextual_chunks.clone(),
         valid_from: candidate.valid_from.clone(),
@@ -3938,7 +3980,7 @@ fn compose_inferred_beliefs(
     tenant_id: TenantId,
     scope_id: ScopeId,
     actor_id: ActorId,
-    episode_id: EpisodeId,
+    episode_id: Option<EpisodeId>,
     now: &str,
 ) -> Vec<AdmissionAction> {
     let units: &[StoredMemoryUnit] = working;
@@ -4012,7 +4054,7 @@ fn compose_inferred_beliefs(
             churn_class: None,
             actor_id: Some(actor_id),
             source_kind: Some("composition".to_string()),
-            source_episode_id: Some(episode_id),
+            source_episode_id: episode_id,
             source_resource_id: None,
             deletion_generation: None,
             contextual_chunks: Vec::new(),

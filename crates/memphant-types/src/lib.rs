@@ -289,6 +289,10 @@ pub struct RecallResponse {
     pub citations: Vec<RecallCitation>,
     pub abstention: bool,
     pub degraded: bool,
+    /// Non-zero when `degraded: true`: recall drew on raw un-reflected
+    /// episodes because consolidation had not caught up (spec 08 §4).
+    #[serde(default)]
+    pub consolidation_lag_ms: u64,
     pub suppression_labels: Vec<String>,
 }
 
@@ -567,6 +571,10 @@ pub struct ReflectCandidate {
     pub actor_id: ActorId,
     pub subject: Option<String>,
     pub predicate: Option<String>,
+    /// Overrides the admission policy's minted kind (e.g. `resource` for
+    /// resource-derived units, or a direct-unit retain's declared kind).
+    #[serde(default)]
+    pub kind: Option<MemoryKind>,
     pub body: String,
     pub churn_class: Option<String>,
     pub admission_hint: Option<AdmissionAction>,
@@ -583,7 +591,11 @@ pub struct ReflectInput {
     pub tenant_id: TenantId,
     pub scope_id: ScopeId,
     pub actor_id: ActorId,
-    pub episode_id: EpisodeId,
+    /// The source episode, when this compilation derives from one.
+    pub episode_id: Option<EpisodeId>,
+    /// The source resource, when this compilation derives from one.
+    #[serde(default)]
+    pub resource_id: Option<ResourceId>,
     pub job_id: JobId,
     pub compiler_version: String,
     pub candidates: Vec<ReflectCandidate>,
@@ -600,7 +612,9 @@ pub struct ReflectTrace {
     pub tenant_id: TenantId,
     pub scope_id: ScopeId,
     pub job_id: JobId,
-    pub episode_id: EpisodeId,
+    pub episode_id: Option<EpisodeId>,
+    #[serde(default)]
+    pub resource_id: Option<ResourceId>,
     pub compiler_version: String,
     pub actions: Vec<AdmissionAction>,
     pub stages: Vec<ReflectStageFact>,
@@ -738,11 +752,49 @@ impl VerifyReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct HealthResponse {
     pub status: String,
+    /// The active store backend: `postgres` or `memory`.
+    #[serde(default)]
+    pub store: String,
+    /// Dead-lettered reflect jobs (attempts exhausted); `null` when the
+    /// backend cannot report it cheaply.
+    #[serde(default)]
+    pub dead_letter_jobs: Option<u64>,
     pub engine_version: String,
     pub trace_schema_version: String,
     pub schema_compat_revision: String,
 }
 
+/// Resource payload for the retain verb (spec 08 §209 `resource` shape).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RetainResourcePayload {
+    pub uri: String,
+    pub mime_type: String,
+    pub content_hash: String,
+    #[serde(default)]
+    pub kind: Option<ResourceKind>,
+    /// Revision identity (e.g. a code commit hash).
+    #[serde(default)]
+    pub revision: Option<String>,
+    /// Durable resource content the worker compiles from.
+    #[serde(default)]
+    pub body: Option<String>,
+}
+
+/// Direct pre-compiled unit payload for trusted callers (spec 08 §209 `unit`
+/// shape). Requires an explicit subject/predicate and kind; the admission
+/// trust policy still applies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RetainUnitPayload {
+    pub kind: MemoryKind,
+    pub subject: String,
+    pub predicate: String,
+    pub body: String,
+    #[serde(default)]
+    pub churn_class: Option<String>,
+}
+
+/// The retain verb request: payload-dispatched between `episode` (default,
+/// `body` required), `resource`, and `unit` shapes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RetainEpisodeHttpRequest {
     pub tenant_id: TenantId,
@@ -755,14 +807,32 @@ pub struct RetainEpisodeHttpRequest {
     pub subject: Option<String>,
     #[serde(default)]
     pub predicate: Option<String>,
-    pub body: String,
+    /// Episode body; required for the episode payload shape.
+    #[serde(default)]
+    pub body: Option<String>,
+    /// Present → resource payload shape.
+    #[serde(default)]
+    pub resource: Option<RetainResourcePayload>,
+    /// Present → direct unit payload shape.
+    #[serde(default)]
+    pub unit: Option<RetainUnitPayload>,
     pub compiler_version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RetainEpisodeHttpResponse {
-    pub episode_id: EpisodeId,
-    pub dedup: DedupOutcome,
+    #[serde(default)]
+    pub episode_id: Option<EpisodeId>,
+    #[serde(default)]
+    pub resource_id: Option<ResourceId>,
+    #[serde(default)]
+    pub unit_ids: Vec<UnitId>,
+    #[serde(default)]
+    pub dedup: Option<DedupOutcome>,
+    /// The trust tier actually assigned after clamping to the API key's
+    /// `max_trust` ceiling.
+    #[serde(default)]
+    pub assigned_trust: Option<TrustLevel>,
     pub enqueued: Vec<String>,
     pub trace_ref: Option<String>,
 }

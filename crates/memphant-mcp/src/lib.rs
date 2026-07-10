@@ -1,16 +1,15 @@
 use axum::extract::State;
 use axum::routing::post;
 use axum::{Json, Router};
-use memphant_core::{
-    CoreError, InMemoryStore, MemoryStore, SystemClock, correct_memory, forget_memory, recall,
-    record_mark, reflect_recorded, retain_episode,
-};
+use std::sync::Arc;
+
+use memphant_core::service::{MemoryService, ServiceError};
+use memphant_core::{CoreError, InMemoryStore, NoopEmbedding, SystemClock};
 use memphant_types::{
-    AdmissionAction, COMPILER_VERSION, CorrectRequest, CorrectResult, ENGINE_VERSION,
-    ForgetRequest, ForgetResult, MarkRequest, MarkResult, McpToolAnnotations, McpToolSpec,
-    RecallHttpRequest, RecallMode, RecallRequest, RecallResponse, ReflectCandidate, ReflectInput,
-    ReflectRequest, ReflectResult, RetainEpisodeHttpRequest, RetainEpisodeHttpResponse,
-    RetainRequest, RetrievalTrace, TraceRequest,
+    CorrectRequest, CorrectResult, ENGINE_VERSION, ForgetRequest, ForgetResult, MarkRequest,
+    MarkResult, McpToolAnnotations, McpToolSpec, RecallHttpRequest, RecallResponse, ReflectRequest,
+    ReflectResult, RetainEpisodeHttpRequest, RetainEpisodeHttpResponse, RetrievalTrace,
+    TraceRequest,
 };
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
@@ -95,15 +94,25 @@ pub fn tool_specs_json() -> Value {
     serde_json::to_value(tool_specs()).expect("MCP tool specs serialize")
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct McpRuntime {
-    store: InMemoryStore,
+    service: MemoryService<InMemoryStore>,
+}
+
+impl Default for McpRuntime {
+    fn default() -> Self {
+        Self::new_in_memory()
+    }
 }
 
 impl McpRuntime {
     pub fn new_in_memory() -> Self {
         Self {
-            store: InMemoryStore::default(),
+            service: MemoryService::new(
+                Arc::new(InMemoryStore::default()),
+                Arc::new(SystemClock),
+                Arc::new(NoopEmbedding),
+            ),
         }
     }
 
@@ -115,179 +124,68 @@ impl McpRuntime {
         match name {
             "retain" => {
                 let request: RetainEpisodeHttpRequest = serde_json::from_value(arguments)?;
-                let retained = retain_episode(
-                    &self.store,
-                    RetainRequest {
-                        tenant_id: request.tenant_id,
-                        scope_id: request.scope_id,
-                        actor_id: request.actor_id,
-                        source_kind: request.source_kind,
-                        source_trust: request.source_trust,
-                        subject_hint: request.subject_hint,
-                        subject: request.subject,
-                        predicate: request.predicate,
-                        body: request.body,
-                        compiler_version: request
-                            .compiler_version
-                            .unwrap_or_else(|| COMPILER_VERSION.to_string()),
-                    },
-                )
-                .await?;
+                let tenant = request.tenant_id;
                 ok(
-                    "Retained episode and enqueued reflection.",
-                    RetainEpisodeHttpResponse {
-                        episode_id: retained.episode_id,
-                        dedup: retained.dedup,
-                        enqueued: vec!["reflect_episode".to_string()],
-                        trace_ref: None,
-                    },
+                    "Retained memory and enqueued reflection.",
+                    self.service.retain(tenant, request).await?,
                 )
             }
             "reflect" => {
                 let request: ReflectRequest = serde_json::from_value(arguments)?;
-                let reflected = self.reflect(request).await?;
-                ok("Reflected pending episodes for scope.", reflected)
+                ok(
+                    "Reflected pending episodes for scope.",
+                    self.service
+                        .reflect(
+                            request.tenant_id,
+                            request.scope_id,
+                            request.compiler_version,
+                        )
+                        .await?,
+                )
             }
             "recall" => {
                 let request: RecallHttpRequest = serde_json::from_value(arguments)?;
-                let recalled = recall(
-                    &self.store,
-                    RecallRequest {
-                        tenant_id: request.tenant_id,
-                        scope_id: request.scope_id,
-                        actor_id: request.actor_id,
-                        allowed_scope_ids: request
-                            .allowed_scope_ids
-                            .unwrap_or_else(|| vec![request.scope_id]),
-                        query: request.query,
-                        k: request.limit.unwrap_or(8),
-                        budget_tokens: request.budget_tokens.unwrap_or(512),
-                        mode: request.mode.unwrap_or(RecallMode::Fast),
-                        include_beliefs: request.include_beliefs.unwrap_or(false),
-                        edge_expansion_enabled: request.edge_expansion_enabled.unwrap_or(true),
-                        context_packing_abstention_enabled: request
-                            .context_packing_abstention_enabled
-                            .unwrap_or(true),
-                        rerank_enabled: request.rerank_enabled.unwrap_or(true),
-                        learned_rerank_profile: None,
-                        query_decomposition_enabled: request
-                            .query_decomposition_enabled
-                            .unwrap_or(true),
-                        procedure_recall_enabled: request.procedure_recall_enabled.unwrap_or(true),
-                        decay_enabled: request.decay_enabled.unwrap_or(true),
-                        engine_version: ENGINE_VERSION.to_string(),
-                    },
-                    &SystemClock,
+                let tenant = request.tenant_id;
+                ok(
+                    "Returned cited memory evidence.",
+                    self.service.recall(tenant, request).await?,
                 )
-                .await?;
-                ok("Returned cited memory evidence.", recalled)
             }
             "correct" => {
                 let request: CorrectRequest = serde_json::from_value(arguments)?;
+                let tenant = request.tenant_id;
                 ok(
                     "Corrected selected memory.",
-                    correct_memory(&self.store, request, &SystemClock).await?,
+                    self.service.correct(tenant, request).await?,
                 )
             }
             "forget" => {
                 let request: ForgetRequest = serde_json::from_value(arguments)?;
+                let tenant = request.tenant_id;
                 ok(
                     "Forgot selected memory.",
-                    forget_memory(&self.store, request, &SystemClock).await?,
+                    self.service.forget(tenant, request).await?,
                 )
             }
             "trace" => {
                 let request: TraceRequest = serde_json::from_value(arguments)?;
                 let trace = self
-                    .store
-                    .trace_by_id(request.tenant_id, request.trace_id)
-                    .await
-                    .map_err(|error| McpRuntimeError::Tool(error.to_string()))?
+                    .service
+                    .trace(request.tenant_id, request.trace_id)
+                    .await?
                     .ok_or_else(|| McpRuntimeError::Tool("trace not found".to_string()))?;
                 ok("Returned retrieval trace.", trace)
             }
             "mark" => {
                 let request: MarkRequest = serde_json::from_value(arguments)?;
+                let tenant = request.tenant_id;
                 ok(
                     "Recorded recall outcome feedback.",
-                    record_mark(&self.store, request).await?,
+                    self.service.mark(tenant, request).await?,
                 )
             }
             other => Err(McpRuntimeError::Tool(format!("unknown tool: {other}"))),
         }
-    }
-
-    async fn reflect(&self, request: ReflectRequest) -> Result<ReflectResult, CoreError> {
-        let jobs = self
-            .store
-            .reflect_jobs(request.tenant_id)
-            .into_iter()
-            .filter(|job| job.scope_id == request.scope_id)
-            .collect::<Vec<_>>();
-        let episodes = self.store.episodes(request.tenant_id);
-        let compiler_version = request
-            .compiler_version
-            .unwrap_or_else(|| COMPILER_VERSION.to_string());
-        let mut consumed = 0;
-        let mut created = 0;
-        let mut trace_ref = None;
-
-        for job in jobs {
-            let Some(episode_id) = job.episode_id else {
-                continue;
-            };
-            let Some(episode) = episodes.iter().find(|episode| episode.id == episode_id) else {
-                continue;
-            };
-            consumed += 1;
-            let trace = reflect_recorded(
-                &self.store,
-                ReflectInput {
-                    tenant_id: request.tenant_id,
-                    scope_id: request.scope_id,
-                    actor_id: request.actor_id,
-                    episode_id,
-                    job_id: job.id,
-                    compiler_version: compiler_version.clone(),
-                    candidates: vec![ReflectCandidate {
-                        source_kind: episode.source_kind.clone(),
-                        trust_level: episode.source_trust,
-                        actor_id: episode.actor_id,
-                        subject: job.subject.clone(),
-                        predicate: job.predicate.clone(),
-                        body: episode.body.clone(),
-                        churn_class: None,
-                        admission_hint: None,
-                        contextual_chunks: Vec::new(),
-                        valid_from: None,
-                        valid_to: None,
-                    }],
-                },
-                &SystemClock,
-            )
-            .await?;
-            created += trace
-                .actions
-                .iter()
-                .filter(|action| {
-                    matches!(
-                        action,
-                        AdmissionAction::Append
-                            | AdmissionAction::Supersede
-                            | AdmissionAction::Quarantine
-                            | AdmissionAction::Invalidate
-                    )
-                })
-                .count();
-            trace_ref = Some(format!("memphant://trace/{}", trace.job_id.as_uuid()));
-        }
-
-        Ok(ReflectResult {
-            reflect_id: format!("rfl_{}", request.scope_id.as_uuid()),
-            episodes_consumed: consumed,
-            candidates_created: created,
-            trace_ref,
-        })
     }
 }
 
@@ -393,6 +291,8 @@ pub enum McpRuntimeError {
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Core(#[from] CoreError),
+    #[error(transparent)]
+    Service(#[from] ServiceError),
     #[error("{0}")]
     Tool(String),
 }

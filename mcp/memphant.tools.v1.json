@@ -13,6 +13,103 @@
           "format": "uuid",
           "type": "string"
         },
+        "MemoryKind": {
+          "enum": [
+            "episodic",
+            "semantic",
+            "procedural",
+            "belief",
+            "resource"
+          ],
+          "type": "string"
+        },
+        "ResourceKind": {
+          "enum": [
+            "document",
+            "code",
+            "conversation",
+            "other"
+          ],
+          "type": "string"
+        },
+        "RetainResourcePayload": {
+          "description": "Resource payload for the retain verb (spec 08 §209 `resource` shape).",
+          "properties": {
+            "body": {
+              "default": null,
+              "description": "Durable resource content the worker compiles from.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content_hash": {
+              "type": "string"
+            },
+            "kind": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ResourceKind"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "mime_type": {
+              "type": "string"
+            },
+            "revision": {
+              "default": null,
+              "description": "Revision identity (e.g. a code commit hash).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "uri": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "uri",
+            "mime_type",
+            "content_hash"
+          ],
+          "type": "object"
+        },
+        "RetainUnitPayload": {
+          "description": "Direct pre-compiled unit payload for trusted callers (spec 08 §209 `unit`\nshape). Requires an explicit subject/predicate and kind; the admission\ntrust policy still applies.",
+          "properties": {
+            "body": {
+              "type": "string"
+            },
+            "churn_class": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "$ref": "#/$defs/MemoryKind"
+            },
+            "predicate": {
+              "type": "string"
+            },
+            "subject": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "subject",
+            "predicate",
+            "body"
+          ],
+          "type": "object"
+        },
         "ScopeId": {
           "format": "uuid",
           "type": "string"
@@ -36,12 +133,18 @@
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The retain verb request: payload-dispatched between `episode` (default,\n`body` required), `resource`, and `unit` shapes.",
       "properties": {
         "actor_id": {
           "$ref": "#/$defs/ActorId"
         },
         "body": {
-          "type": "string"
+          "default": null,
+          "description": "Episode body; required for the episode payload shape.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "compiler_version": {
           "type": [
@@ -55,6 +158,18 @@
             "string",
             "null"
           ]
+        },
+        "resource": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetainResourcePayload"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Present → resource payload shape."
         },
         "scope_id": {
           "$ref": "#/$defs/ScopeId"
@@ -80,6 +195,18 @@
         },
         "tenant_id": {
           "$ref": "#/$defs/TenantId"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetainUnitPayload"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Present → direct unit payload shape."
         }
       },
       "required": [
@@ -87,8 +214,7 @@
         "scope_id",
         "actor_id",
         "source_kind",
-        "source_trust",
-        "body"
+        "source_trust"
       ],
       "title": "RetainEpisodeHttpRequest",
       "type": "object"
@@ -116,12 +242,53 @@
         "EpisodeId": {
           "format": "uuid",
           "type": "string"
+        },
+        "ResourceId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "TrustLevel": {
+          "enum": [
+            "trusted_user",
+            "trusted_system",
+            "verified_tool",
+            "unverified_tool",
+            "web_content",
+            "agent_output",
+            "imported_external",
+            "quarantined"
+          ],
+          "type": "string"
+        },
+        "UnitId": {
+          "format": "uuid",
+          "type": "string"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "assigned_trust": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrustLevel"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The trust tier actually assigned after clamping to the API key's\n`max_trust` ceiling."
+        },
         "dedup": {
-          "$ref": "#/$defs/DedupOutcome"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DedupOutcome"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "enqueued": {
           "items": {
@@ -130,18 +297,42 @@
           "type": "array"
         },
         "episode_id": {
-          "$ref": "#/$defs/EpisodeId"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EpisodeId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "resource_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResourceId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "trace_ref": {
           "type": [
             "string",
             "null"
           ]
+        },
+        "unit_ids": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/UnitId"
+          },
+          "type": "array"
         }
       },
       "required": [
-        "episode_id",
-        "dedup",
         "enqueued"
       ],
       "title": "RetainEpisodeHttpResponse",
@@ -417,6 +608,13 @@
             "$ref": "#/$defs/RecallCitation"
           },
           "type": "array"
+        },
+        "consolidation_lag_ms": {
+          "default": 0,
+          "description": "Non-zero when `degraded: true`: recall drew on raw un-reflected\nepisodes because consolidation had not caught up (spec 08 §4).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
         },
         "degraded": {
           "type": "boolean"

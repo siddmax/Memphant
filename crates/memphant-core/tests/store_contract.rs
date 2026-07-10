@@ -391,7 +391,8 @@ async fn forget_by_episode_hides_units_and_tombstone_blocks_recompilation() {
         tenant_id,
         scope_id,
         actor_id,
-        episode_id: retained.episode_id,
+        episode_id: Some(retained.episode_id),
+        resource_id: None,
         job_id: job.id,
         compiler_version: compiler_version.to_string(),
         candidates: vec![ReflectCandidate {
@@ -400,6 +401,7 @@ async fn forget_by_episode_hides_units_and_tombstone_blocks_recompilation() {
             actor_id,
             subject: Some("payment processor".to_string()),
             predicate: Some("value".to_string()),
+            kind: None,
             body: "Payment processor is AcmePay.".to_string(),
             churn_class: None,
             admission_hint: None,
