@@ -71,8 +71,14 @@ distraction; the same lesson as the budget-16384 falsification).
 
 Judge-family sensitivity: the same turns evidence scores 0.56 under judge=terra
 (codex CLI lattice) and 0.60 under judge=sonnet-5 — levels are judge-relative;
-only same-lattice paired deltas are read. Cross-engine terra-CLI validation runs
-for w8/b16384/session-chunks re-launched after the quota reset (artifacts land as
+only same-lattice paired deltas are read.
+
+**Cross-engine validation (codex CLI lattice: reader terra@medium, judge terra —
+fully independent of the OpenRouter lattice above):** w8 −0.060 [−0.120, 0.000]
+ns-harmful (replicates −0.070); b16384 +0.020 [0.000, +0.050] ns (OR lattice
+−0.030 ns; no-ship either way); **session+chunks rendering arm +0.130
+[+0.050, +0.210] vs session — CI excludes zero on BOTH lattices.** The rung-4
+promotion delta is reader/judge-robust (artifacts
 `scaled-reader-{turns-w8,turns-b16384,session-chunks}-rerank-off.json`).
 
 ## Verdicts applied (promotions and falsifications)

@@ -344,7 +344,7 @@ class ReaderCli:
                 ) as response:
                     data = json.loads(response.read())
                 content = (
-                    data.get("choices", [{}])[0].get("message", {}).get("content")
+                    (data.get("choices") or [{}])[0].get("message", {}).get("content")
                 )
                 if not content:
                     last_error = RuntimeError(

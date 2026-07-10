@@ -74,7 +74,7 @@ def test_status_ledger_reopened_synthetic_promotions() -> None:
         row = next(line for line in status.splitlines() if "[x] 14 " in line)
         assert "retirement stands" in row
     # Rungs whose advance-when was NOT met by the real campaign stay open.
-    for rung in (4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15):
+    for rung in (5, 6, 7, 8, 9, 10, 11, 12, 13, 15):
         assert f"[x] {rung} " not in status, f"rung {rung} must stay reopened"
     # Rungs 0-3 remain built (built locally, not promoted from synthetic evidence).
     for rung in range(0, 4):

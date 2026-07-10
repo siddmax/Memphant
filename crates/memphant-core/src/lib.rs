@@ -3049,9 +3049,11 @@ fn context_item_for(
 
 /// Renders a packed item's text from its contextual chunks instead of the whole
 /// unit body. Returns `None` — signalling the caller to keep today's whole-body
-/// rendering — when there are no chunks, when no chunk matched the query, or (a
-/// defensive guard that never fires in practice, since the top matched chunk is
-/// always a strict subset of the body) when nothing fit the budget.
+/// rendering — when there are no chunks, when no chunk matched the query, or
+/// when nothing fit the budget: each chunk block costs header tokens plus body
+/// tokens, so on a small enough body every block can exceed the whole-body cap
+/// even though the chunk text itself is a subset of the body. In that case the
+/// fallback safely renders the whole body instead.
 ///
 /// Selection: matched chunks first (per-chunk lexical score vs the query, desc),
 /// then expansion to adjacent siblings (window index ±1, then ±2, …) around the
