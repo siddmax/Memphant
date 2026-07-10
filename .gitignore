@@ -39,3 +39,6 @@ tmp/
 temp/
 benchmarks/data/
 .fastembed_cache/
+# Reader-lane evidence packs embed raw LongMemEval session text (the raw
+# dataset stays out of the repo); the scored reader-*.json reports are committed.
+docs/build-log/artifacts/*/reader-evidence-*.jsonl

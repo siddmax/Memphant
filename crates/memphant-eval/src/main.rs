@@ -430,6 +430,8 @@ fn bench_lme_command(args: Vec<String>) -> ExitCode {
     let mut mode = memphant_types::RecallMode::Fast;
     let mut baseline = None;
     let mut out = None;
+    let mut granularity = "session".to_string();
+    let mut emit_qa = None;
     let mut index = 0;
     while index < args.len() {
         let take = |index: usize| -> Option<String> { args.get(index + 1).cloned() };
@@ -480,6 +482,21 @@ fn bench_lme_command(args: Vec<String>) -> ExitCode {
                 baseline = take(index);
                 index += 2;
             }
+            "--granularity" => {
+                match take(index).as_deref() {
+                    Some("session") => granularity = "session".to_string(),
+                    Some("turns") => granularity = "turns".to_string(),
+                    _ => {
+                        usage();
+                        return ExitCode::from(2);
+                    }
+                }
+                index += 2;
+            }
+            "--emit-qa" => {
+                emit_qa = take(index);
+                index += 2;
+            }
             "--out" => {
                 out = take(index).map(PathBuf::from);
                 index += 2;
@@ -507,6 +524,8 @@ fn bench_lme_command(args: Vec<String>) -> ExitCode {
         disable,
         mode,
         baseline,
+        granularity,
+        emit_qa,
         command,
     };
     match memphant_eval::bench_lme::run_bench_lme(&options) {
@@ -549,6 +568,6 @@ fn bench_lme_command(args: Vec<String>) -> ExitCode {
 
 fn usage() {
     eprintln!(
-        "usage: memphant-eval bench-lme --database-url <url> --data <longmemeval.json> --sample <n> --seed <s> [--k 10] [--disable vector|edge_expansion|rerank|query_decomposition|procedure_recall|decay|packing] [--mode fast|balanced|exhaustive] [--baseline <report.json>] [--out <report.json>] | memphant-eval run <suite.yaml> [--archive-traces] [--archive-dir <dir>] [--disable-contextual-chunks] [--disable-temporal-validity] [--disable-edge-expansion] [--disable-context-packing-abstention] [--disable-rerank] [--disable-learned-rerank] [--disable-query-decomposition] [--disable-procedure-recall] [--disable-decay] [--disable-l4-exhaustive] [--filesystem-control] | memphant-eval verify-golden <suite.yaml> | memphant-eval security <suite.yaml> | memphant-eval ops <suite.yaml> | memphant-eval syndai-trace-compare <fixture.yaml> [--archive-traces] [--archive-dir <dir>] | memphant-eval profile <profile.yaml> --compare-to <baseline> [--archive <path>] | memphant-eval schema trace"
+        "usage: memphant-eval bench-lme --database-url <url> --data <longmemeval.json> --sample <n> --seed <s> [--k 10] [--disable vector|edge_expansion|rerank|query_decomposition|procedure_recall|decay|packing] [--mode fast|balanced|exhaustive] [--granularity session|turns] [--emit-qa <evidence.jsonl>] [--baseline <report.json>] [--out <report.json>] | memphant-eval run <suite.yaml> [--archive-traces] [--archive-dir <dir>] [--disable-contextual-chunks] [--disable-temporal-validity] [--disable-edge-expansion] [--disable-context-packing-abstention] [--disable-rerank] [--disable-learned-rerank] [--disable-query-decomposition] [--disable-procedure-recall] [--disable-decay] [--disable-l4-exhaustive] [--filesystem-control] | memphant-eval verify-golden <suite.yaml> | memphant-eval security <suite.yaml> | memphant-eval ops <suite.yaml> | memphant-eval syndai-trace-compare <fixture.yaml> [--archive-traces] [--archive-dir <dir>] | memphant-eval profile <profile.yaml> --compare-to <baseline> [--archive <path>] | memphant-eval schema trace"
     );
 }

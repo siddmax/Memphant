@@ -12,7 +12,19 @@
 //!
 //! Honesty header: every report records the dataset sha256, sample seed,
 //! `runtime: "postgres"`, `retrieval_only: true` and the exact command line.
-//! This lane makes NO reader/QA-accuracy claim.
+//! This lane makes NO reader/QA-accuracy claim by itself.
+//!
+//! Reader lane: `--emit-qa <path>` additionally writes one JSONL row per
+//! question (question, question_date, gold answer, top-k evidence bodies with
+//! provenance) so `scripts/run_reader.py` can drive an external reader/judge
+//! (`claude -p`) without re-running ingestion. QA accuracy is computed and
+//! labeled by that script, never by this lane.
+//!
+//! Granularity: `--granularity session` (default) ingests each haystack
+//! session as ONE episode; `--granularity turns` ingests each session as
+//! multiple episodes of up to `TURNS_WINDOW` consecutive turns (same
+//! `[session <id>]` prefix), mapping every minted episode back to its session
+//! for provenance scoring.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -28,12 +40,17 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 const BOOTSTRAP_RESAMPLES: usize = 1000;
+/// Turn-window size for `--granularity turns`.
+const TURNS_WINDOW: usize = 4;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct LmeQuestion {
     pub question_id: String,
     pub question_type: String,
     pub question: String,
+    /// Gold answer (string or number in the published dataset).
+    #[serde(default)]
+    pub answer: serde_json::Value,
     #[serde(default)]
     pub question_date: Option<String>,
     pub haystack_session_ids: Vec<String>,
@@ -61,7 +78,38 @@ pub struct BenchLmeOptions {
     pub mode: RecallMode,
     /// Baseline report path for paired per-question deltas.
     pub baseline: Option<String>,
+    /// Ingestion granularity: "session" (one episode per haystack session)
+    /// or "turns" (episodes of up to `TURNS_WINDOW` consecutive turns).
+    pub granularity: String,
+    /// When set, write one QA-evidence JSONL row per question to this path
+    /// (question + gold answer + top-k evidence bodies) for the external
+    /// reader/judge in `scripts/run_reader.py`.
+    pub emit_qa: Option<String>,
     pub command: String,
+}
+
+/// One top-k evidence item handed to the external reader.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QaEvidenceItem {
+    pub rank: usize,
+    /// Haystack session this item's citation maps back to, when known.
+    pub session_id: Option<String>,
+    pub body: String,
+}
+
+/// One QA-evidence JSONL row (input contract of `scripts/run_reader.py`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QaEvidenceRow {
+    pub question_id: String,
+    pub question_type: String,
+    pub is_abstention: bool,
+    pub question: String,
+    pub question_date: Option<String>,
+    pub gold_answer: serde_json::Value,
+    pub abstained: bool,
+    pub granularity: String,
+    pub k: usize,
+    pub evidence: Vec<QaEvidenceItem>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,6 +174,9 @@ pub struct BenchLmeReport {
     pub embeddings: String,
     pub ingestion: String,
     pub reflect: String,
+    /// "session" or "turns" (defaults to "session" for pre-granularity reports).
+    #[serde(default = "default_granularity")]
+    pub granularity: String,
     pub mode: String,
     pub disabled: Option<String>,
     pub command: String,
@@ -134,6 +185,10 @@ pub struct BenchLmeReport {
     pub strata: Vec<StratumMetrics>,
     pub per_question: Vec<QuestionResult>,
     pub paired_vs_baseline: Option<PairedComparison>,
+}
+
+fn default_granularity() -> String {
+    "session".to_string()
 }
 
 /// Deterministic splitmix64 PRNG — no external randomness anywhere in the
@@ -385,6 +440,40 @@ fn session_body(session_id: &str, date: &str, turns: &[LmeTurn]) -> String {
     body
 }
 
+/// Episode bodies for one haystack session at the requested granularity:
+/// "session" yields one body; "turns" yields one body per window of up to
+/// `TURNS_WINDOW` consecutive turns, each keeping the `[session <id>]`
+/// prefix plus a `[turns a-b]` marker so provenance stays per-session.
+pub fn session_bodies(
+    granularity: &str,
+    session_id: &str,
+    date: &str,
+    turns: &[LmeTurn],
+) -> Vec<String> {
+    if granularity != "turns" {
+        return vec![session_body(session_id, date, turns)];
+    }
+    if turns.is_empty() {
+        return vec![session_body(session_id, date, turns)];
+    }
+    turns
+        .chunks(TURNS_WINDOW)
+        .enumerate()
+        .map(|(window_index, window)| {
+            let first = window_index * TURNS_WINDOW + 1;
+            let last = window_index * TURNS_WINDOW + window.len();
+            let mut body = format!("[session {session_id}] [date {date}] [turns {first}-{last}]\n");
+            for turn in window {
+                body.push_str(&turn.role);
+                body.push_str(": ");
+                body.push_str(&turn.content);
+                body.push('\n');
+            }
+            body
+        })
+        .collect()
+}
+
 #[cfg(feature = "fastembed")]
 fn build_fastembed() -> Result<Arc<dyn EmbeddingProvider>, String> {
     memphant_runtime::embeddings::FastEmbedProvider::new()
@@ -455,6 +544,13 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
         ingest_service.clone()
     };
 
+    if options.granularity != "session" && options.granularity != "turns" {
+        return Err(format!(
+            "unknown --granularity: {} (known: session, turns)",
+            options.granularity
+        ));
+    }
+
     let disable = options.disable.as_deref();
     if let Some(stage) = disable {
         let known = [
@@ -481,6 +577,7 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
         .unwrap_or(0);
 
     let mut per_question = Vec::new();
+    let mut qa_rows: Vec<QaEvidenceRow> = Vec::new();
     for (index, question_id) in sampled_ids.iter().enumerate() {
         let question = by_id
             .get(question_id.as_str())
@@ -515,35 +612,38 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
         let mut episode_sessions = HashMap::new();
         for session_index in order {
             let session_id = &question.haystack_session_ids[session_index];
-            let body = session_body(
+            let bodies = session_bodies(
+                &options.granularity,
                 session_id,
                 &question.haystack_dates[session_index],
                 &question.haystack_sessions[session_index],
             );
-            let response = ingest_service
-                .retain(
-                    tenant,
-                    RetainEpisodeHttpRequest {
-                        tenant_id: tenant,
-                        scope_id: scope,
-                        actor_id: actor,
-                        source_kind: "user".to_string(),
-                        source_trust: TrustLevel::TrustedUser,
-                        subject_hint: Some(format!("session {session_id}")),
-                        subject: None,
-                        predicate: None,
-                        body: Some(body),
-                        resource: None,
-                        unit: None,
-                        compiler_version: None,
-                    },
-                )
-                .await
-                .map_err(|error| format!("retain {session_id}: {error}"))?;
-            if let Some(episode_id) = response.episode_id {
-                episode_sessions
-                    .entry(episode_id)
-                    .or_insert_with(|| session_id.clone());
+            for body in bodies {
+                let response = ingest_service
+                    .retain(
+                        tenant,
+                        RetainEpisodeHttpRequest {
+                            tenant_id: tenant,
+                            scope_id: scope,
+                            actor_id: actor,
+                            source_kind: "user".to_string(),
+                            source_trust: TrustLevel::TrustedUser,
+                            subject_hint: Some(format!("session {session_id}")),
+                            subject: None,
+                            predicate: None,
+                            body: Some(body),
+                            resource: None,
+                            unit: None,
+                            compiler_version: None,
+                        },
+                    )
+                    .await
+                    .map_err(|error| format!("retain {session_id}: {error}"))?;
+                if let Some(episode_id) = response.episode_id {
+                    episode_sessions
+                        .entry(episode_id)
+                        .or_insert_with(|| session_id.clone());
+                }
             }
         }
 
@@ -587,6 +687,30 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
             })
             .collect();
         let is_abstention = question.question_id.contains("_abs");
+        if options.emit_qa.is_some() {
+            qa_rows.push(QaEvidenceRow {
+                question_id: question.question_id.clone(),
+                question_type: question.question_type.clone(),
+                is_abstention,
+                question: question.question.clone(),
+                question_date: question.question_date.clone(),
+                gold_answer: question.answer.clone(),
+                abstained: response.abstention,
+                granularity: options.granularity.clone(),
+                k: options.k,
+                evidence: response
+                    .items
+                    .iter()
+                    .zip(item_sessions.iter())
+                    .enumerate()
+                    .map(|(rank_index, (item, session))| QaEvidenceItem {
+                        rank: rank_index + 1,
+                        session_id: session.clone(),
+                        body: item.body.clone(),
+                    })
+                    .collect(),
+            });
+        }
         let (hit_at_5, hit_at_10, abstention_correct, first_answer_rank) = score_question(
             &item_sessions,
             &question.answer_session_ids,
@@ -624,6 +748,19 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
         })
         .collect();
     let overall = aggregate("overall", &per_question.iter().collect::<Vec<_>>());
+
+    if let Some(path) = &options.emit_qa {
+        let mut lines = String::new();
+        for row in &qa_rows {
+            lines.push_str(
+                &serde_json::to_string(row)
+                    .map_err(|error| format!("serialize qa row: {error}"))?,
+            );
+            lines.push('\n');
+        }
+        std::fs::write(path, lines).map_err(|error| format!("write qa jsonl {path}: {error}"))?;
+        eprintln!("bench-lme qa evidence rows={} out={path}", qa_rows.len());
+    }
 
     let paired_vs_baseline = match &options.baseline {
         Some(path) => {
@@ -667,8 +804,16 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
         } else {
             embedder.id().to_string()
         },
-        ingestion: "one episode per haystack session, chronological by haystack_dates; turns concatenated as `role: content`; body prefixed with [session <id>] [date <date>]".to_string(),
-        reflect: "MemoryService::reflect (worker claim/complete path), synchronous after ingestion".to_string(),
+        ingestion: if options.granularity == "turns" {
+            format!(
+                "episodes of up to {TURNS_WINDOW} consecutive turns per haystack session, chronological by haystack_dates; turns concatenated as `role: content`; body prefixed with [session <id>] [date <date>] [turns a-b]"
+            )
+        } else {
+            "one episode per haystack session, chronological by haystack_dates; turns concatenated as `role: content`; body prefixed with [session <id>] [date <date>]".to_string()
+        },
+        reflect: "MemoryService::reflect (worker claim/complete path), synchronous after ingestion"
+            .to_string(),
+        granularity: options.granularity.clone(),
         mode: match options.mode {
             RecallMode::Fast => "fast",
             RecallMode::Balanced => "balanced",
@@ -821,6 +966,34 @@ mod tests {
         assert!(first.ci_excludes_zero);
         let null = bootstrap_ci(&[0.0, 0.0, 1.0, -1.0], 1000, 7);
         assert!(!null.ci_excludes_zero);
+    }
+
+    #[test]
+    fn session_bodies_windows_turns_and_keeps_session_prefix() {
+        let turns: Vec<LmeTurn> = (0..9)
+            .map(|index| LmeTurn {
+                role: if index % 2 == 0 { "user" } else { "assistant" }.to_string(),
+                content: format!("turn {index}"),
+            })
+            .collect();
+        let session = session_bodies("session", "s1", "2023/05/30", &turns);
+        assert_eq!(session.len(), 1);
+        assert!(session[0].starts_with("[session s1] [date 2023/05/30]\n"));
+
+        let windows = session_bodies("turns", "s1", "2023/05/30", &turns);
+        // 9 turns at window 4 -> 4 + 4 + 1.
+        assert_eq!(windows.len(), 3);
+        assert!(windows[0].starts_with("[session s1] [date 2023/05/30] [turns 1-4]\n"));
+        assert!(windows[1].starts_with("[session s1] [date 2023/05/30] [turns 5-8]\n"));
+        assert!(windows[2].starts_with("[session s1] [date 2023/05/30] [turns 9-9]\n"));
+        assert!(windows[2].contains("user: turn 8"));
+        // Every turn appears exactly once across windows.
+        let joined = windows.join("");
+        for index in 0..9 {
+            assert_eq!(joined.matches(&format!("turn {index}\n")).count(), 1);
+        }
+        // Empty sessions still produce one (header-only) episode body.
+        assert_eq!(session_bodies("turns", "s2", "2023/06/01", &[]).len(), 1);
     }
 
     #[test]
