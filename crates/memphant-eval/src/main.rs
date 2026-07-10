@@ -431,6 +431,8 @@ fn bench_lme_command(args: Vec<String>) -> ExitCode {
     let mut baseline = None;
     let mut out = None;
     let mut granularity = memphant_eval::bench_lme::DEFAULT_GRANULARITY.to_string();
+    let mut turns_window = memphant_eval::bench_lme::DEFAULT_TURNS_WINDOW;
+    let mut budget_tokens = memphant_eval::bench_lme::DEFAULT_BUDGET_TOKENS;
     let mut emit_qa = None;
     let mut index = 0;
     while index < args.len() {
@@ -493,6 +495,34 @@ fn bench_lme_command(args: Vec<String>) -> ExitCode {
                 }
                 index += 2;
             }
+            "--turns-window" => {
+                match take(index).and_then(|value| value.parse::<usize>().ok()) {
+                    Some(0) => {
+                        eprintln!("bench_lme=error\n--turns-window must be > 0");
+                        return ExitCode::from(2);
+                    }
+                    Some(value) => turns_window = value,
+                    None => {
+                        usage();
+                        return ExitCode::from(2);
+                    }
+                }
+                index += 2;
+            }
+            "--budget-tokens" => {
+                match take(index).and_then(|value| value.parse::<usize>().ok()) {
+                    Some(0) => {
+                        eprintln!("bench_lme=error\n--budget-tokens must be > 0");
+                        return ExitCode::from(2);
+                    }
+                    Some(value) => budget_tokens = value,
+                    None => {
+                        usage();
+                        return ExitCode::from(2);
+                    }
+                }
+                index += 2;
+            }
             "--emit-qa" => {
                 emit_qa = take(index);
                 index += 2;
@@ -525,6 +555,8 @@ fn bench_lme_command(args: Vec<String>) -> ExitCode {
         mode,
         baseline,
         granularity,
+        turns_window,
+        budget_tokens,
         emit_qa,
         command,
     };
@@ -568,6 +600,6 @@ fn bench_lme_command(args: Vec<String>) -> ExitCode {
 
 fn usage() {
     eprintln!(
-        "usage: memphant-eval bench-lme --database-url <url> --data <longmemeval.json> --sample <n> --seed <s> [--k 10] [--disable vector|edge_expansion|rerank|query_decomposition|procedure_recall|decay|packing] [--mode fast|balanced|exhaustive] [--granularity turns|session (default: turns)] [--emit-qa <evidence.jsonl>] [--baseline <report.json>] [--out <report.json>] | memphant-eval run <suite.yaml> [--archive-traces] [--archive-dir <dir>] [--disable-contextual-chunks] [--disable-temporal-validity] [--disable-edge-expansion] [--disable-context-packing-abstention] [--disable-rerank] [--disable-learned-rerank] [--disable-query-decomposition] [--disable-procedure-recall] [--disable-decay] [--disable-l4-exhaustive] [--filesystem-control] | memphant-eval verify-golden <suite.yaml> | memphant-eval security <suite.yaml> | memphant-eval ops <suite.yaml> | memphant-eval syndai-trace-compare <fixture.yaml> [--archive-traces] [--archive-dir <dir>] | memphant-eval profile <profile.yaml> --compare-to <baseline> [--archive <path>] | memphant-eval schema trace"
+        "usage: memphant-eval bench-lme --database-url <url> --data <longmemeval.json> --sample <n> --seed <s> [--k 10] [--disable vector|edge_expansion|rerank|query_decomposition|procedure_recall|decay|packing] [--mode fast|balanced|exhaustive] [--granularity turns|session (default: turns)] [--turns-window <n> (default: 4)] [--budget-tokens <n> (default: 8192)] [--emit-qa <evidence.jsonl>] [--baseline <report.json>] [--out <report.json>] | memphant-eval run <suite.yaml> [--archive-traces] [--archive-dir <dir>] [--disable-contextual-chunks] [--disable-temporal-validity] [--disable-edge-expansion] [--disable-context-packing-abstention] [--disable-rerank] [--disable-learned-rerank] [--disable-query-decomposition] [--disable-procedure-recall] [--disable-decay] [--disable-l4-exhaustive] [--filesystem-control] | memphant-eval verify-golden <suite.yaml> | memphant-eval security <suite.yaml> | memphant-eval ops <suite.yaml> | memphant-eval syndai-trace-compare <fixture.yaml> [--archive-traces] [--archive-dir <dir>] | memphant-eval profile <profile.yaml> --compare-to <baseline> [--archive <path>] | memphant-eval schema trace"
     );
 }

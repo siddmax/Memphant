@@ -22,9 +22,10 @@
 //!
 //! Granularity: `--granularity turns` (default since 2026-07-10, see
 //! `DEFAULT_GRANULARITY`) ingests each session as multiple episodes of up to
-//! `TURNS_WINDOW` consecutive turns (same `[session <id>]` prefix), mapping
-//! every minted episode back to its session for provenance scoring;
-//! `--granularity session` ingests each haystack session as ONE episode.
+//! `--turns-window` consecutive turns (default `DEFAULT_TURNS_WINDOW`=4, same
+//! `[session <id>]` prefix), mapping every minted episode back to its session
+//! for provenance scoring; `--granularity session` ingests each haystack
+//! session as ONE episode.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -40,8 +41,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 const BOOTSTRAP_RESAMPLES: usize = 1000;
-/// Turn-window size for `--granularity turns`.
-const TURNS_WINDOW: usize = 4;
+/// Default turn-window size for `--granularity turns`, overridable via
+/// `--turns-window`.
+pub const DEFAULT_TURNS_WINDOW: usize = 4;
+/// Default packing token budget threaded to the recall call, overridable via
+/// `--budget-tokens`.
+pub const DEFAULT_BUDGET_TOKENS: usize = 8192;
 /// Lane default ingestion granularity. Promoted to "turns" on 2026-07-10:
 /// LME-S n=100 seed 20260710 paired vs session granularity — ΔR@5 +0.085
 /// [+0.011, +0.160], ΔR@10 +0.128 [+0.053, +0.202], ΔQA +0.13 [+0.04, +0.21]
@@ -87,8 +92,12 @@ pub struct BenchLmeOptions {
     /// Baseline report path for paired per-question deltas.
     pub baseline: Option<String>,
     /// Ingestion granularity: "session" (one episode per haystack session)
-    /// or "turns" (episodes of up to `TURNS_WINDOW` consecutive turns).
+    /// or "turns" (episodes of up to `turns_window` consecutive turns).
     pub granularity: String,
+    /// Turn-window size for `--granularity turns` (no-op for "session").
+    pub turns_window: usize,
+    /// Packing token budget threaded to the recall call.
+    pub budget_tokens: usize,
     /// When set, write one QA-evidence JSONL row per question to this path
     /// (question + gold answer + top-k evidence bodies) for the external
     /// reader/judge in `scripts/run_reader.py`.
@@ -185,6 +194,14 @@ pub struct BenchLmeReport {
     /// "session" or "turns" (defaults to "session" for pre-granularity reports).
     #[serde(default = "default_granularity")]
     pub granularity: String,
+    /// Turn-window size used for `--granularity turns` (defaults to 4 for
+    /// pre-flag reports — see `default_turns_window`).
+    #[serde(default = "default_turns_window")]
+    pub turns_window: usize,
+    /// Packing token budget threaded to the recall call (defaults to 8192
+    /// for pre-flag reports — see `default_budget_tokens`).
+    #[serde(default = "default_budget_tokens")]
+    pub budget_tokens: usize,
     pub mode: String,
     pub disabled: Option<String>,
     pub command: String,
@@ -197,6 +214,22 @@ pub struct BenchLmeReport {
 
 fn default_granularity() -> String {
     "session".to_string()
+}
+
+/// Parsing default for pre-flag reports (no `turns_window` field). Unlike
+/// `default_granularity`, this genuinely coincides with the lane default
+/// (`DEFAULT_TURNS_WINDOW`): every report ever written before this field
+/// existed actually used window 4.
+fn default_turns_window() -> usize {
+    DEFAULT_TURNS_WINDOW
+}
+
+/// Parsing default for pre-flag reports (no `budget_tokens` field). As with
+/// `default_turns_window`, this coincides with the lane default
+/// (`DEFAULT_BUDGET_TOKENS`): every report ever written before this field
+/// existed actually used budget 8192.
+fn default_budget_tokens() -> usize {
+    DEFAULT_BUDGET_TOKENS
 }
 
 /// Deterministic splitmix64 PRNG — no external randomness anywhere in the
@@ -450,10 +483,11 @@ fn session_body(session_id: &str, date: &str, turns: &[LmeTurn]) -> String {
 
 /// Episode bodies for one haystack session at the requested granularity:
 /// "session" yields one body; "turns" yields one body per window of up to
-/// `TURNS_WINDOW` consecutive turns, each keeping the `[session <id>]`
+/// `turns_window` consecutive turns, each keeping the `[session <id>]`
 /// prefix plus a `[turns a-b]` marker so provenance stays per-session.
 pub fn session_bodies(
     granularity: &str,
+    turns_window: usize,
     session_id: &str,
     date: &str,
     turns: &[LmeTurn],
@@ -465,11 +499,11 @@ pub fn session_bodies(
         return vec![session_body(session_id, date, turns)];
     }
     turns
-        .chunks(TURNS_WINDOW)
+        .chunks(turns_window)
         .enumerate()
         .map(|(window_index, window)| {
-            let first = window_index * TURNS_WINDOW + 1;
-            let last = window_index * TURNS_WINDOW + window.len();
+            let first = window_index * turns_window + 1;
+            let last = window_index * turns_window + window.len();
             let mut body = format!("[session {session_id}] [date {date}] [turns {first}-{last}]\n");
             for turn in window {
                 body.push_str(&turn.role);
@@ -622,6 +656,7 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
             let session_id = &question.haystack_session_ids[session_index];
             let bodies = session_bodies(
                 &options.granularity,
+                options.turns_window,
                 session_id,
                 &question.haystack_dates[session_index],
                 &question.haystack_sessions[session_index],
@@ -671,7 +706,7 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
                     allowed_scope_ids: None,
                     query: question.question.clone(),
                     limit: Some(options.k),
-                    budget_tokens: Some(8192),
+                    budget_tokens: Some(options.budget_tokens),
                     mode: Some(options.mode),
                     include_beliefs: Some(false),
                     edge_expansion_enabled: Some(disable != Some("edge_expansion")),
@@ -814,7 +849,8 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
         },
         ingestion: if options.granularity == "turns" {
             format!(
-                "episodes of up to {TURNS_WINDOW} consecutive turns per haystack session, chronological by haystack_dates; turns concatenated as `role: content`; body prefixed with [session <id>] [date <date>] [turns a-b]"
+                "episodes of up to {} consecutive turns per haystack session, chronological by haystack_dates; turns concatenated as `role: content`; body prefixed with [session <id>] [date <date>] [turns a-b]",
+                options.turns_window
             )
         } else {
             "one episode per haystack session, chronological by haystack_dates; turns concatenated as `role: content`; body prefixed with [session <id>] [date <date>]".to_string()
@@ -822,6 +858,8 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
         reflect: "MemoryService::reflect (worker claim/complete path), synchronous after ingestion"
             .to_string(),
         granularity: options.granularity.clone(),
+        turns_window: options.turns_window,
+        budget_tokens: options.budget_tokens,
         mode: match options.mode {
             RecallMode::Fast => "fast",
             RecallMode::Balanced => "balanced",
@@ -994,11 +1032,11 @@ mod tests {
                 content: format!("turn {index}"),
             })
             .collect();
-        let session = session_bodies("session", "s1", "2023/05/30", &turns);
+        let session = session_bodies("session", DEFAULT_TURNS_WINDOW, "s1", "2023/05/30", &turns);
         assert_eq!(session.len(), 1);
         assert!(session[0].starts_with("[session s1] [date 2023/05/30]\n"));
 
-        let windows = session_bodies("turns", "s1", "2023/05/30", &turns);
+        let windows = session_bodies("turns", DEFAULT_TURNS_WINDOW, "s1", "2023/05/30", &turns);
         // 9 turns at window 4 -> 4 + 4 + 1.
         assert_eq!(windows.len(), 3);
         assert!(windows[0].starts_with("[session s1] [date 2023/05/30] [turns 1-4]\n"));
@@ -1011,7 +1049,87 @@ mod tests {
             assert_eq!(joined.matches(&format!("turn {index}\n")).count(), 1);
         }
         // Empty sessions still produce one (header-only) episode body.
-        assert_eq!(session_bodies("turns", "s2", "2023/06/01", &[]).len(), 1);
+        assert_eq!(
+            session_bodies("turns", DEFAULT_TURNS_WINDOW, "s2", "2023/06/01", &[]).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn session_bodies_windows_turns_with_custom_window_size() {
+        // Mirrors `session_bodies_windows_turns_and_keeps_session_prefix` but
+        // pins a non-default `turns_window` (2) to prove the window size is a
+        // real parameter, not a re-read of `DEFAULT_TURNS_WINDOW`.
+        let turns: Vec<LmeTurn> = (0..9)
+            .map(|index| LmeTurn {
+                role: if index % 2 == 0 { "user" } else { "assistant" }.to_string(),
+                content: format!("turn {index}"),
+            })
+            .collect();
+        let windows = session_bodies("turns", 2, "s1", "2023/05/30", &turns);
+        // 9 turns at window 2 -> 2 + 2 + 2 + 2 + 1.
+        assert_eq!(windows.len(), 5);
+        assert!(windows[0].starts_with("[session s1] [date 2023/05/30] [turns 1-2]\n"));
+        assert!(windows[1].starts_with("[session s1] [date 2023/05/30] [turns 3-4]\n"));
+        assert!(windows[2].starts_with("[session s1] [date 2023/05/30] [turns 5-6]\n"));
+        assert!(windows[3].starts_with("[session s1] [date 2023/05/30] [turns 7-8]\n"));
+        assert!(windows[4].starts_with("[session s1] [date 2023/05/30] [turns 9-9]\n"));
+        assert!(windows[4].contains("user: turn 8"));
+        // Every turn appears exactly once across windows.
+        let joined = windows.join("");
+        for index in 0..9 {
+            assert_eq!(joined.matches(&format!("turn {index}\n")).count(), 1);
+        }
+    }
+
+    #[test]
+    fn turn_window_and_budget_tokens_defaults_are_pinned() {
+        assert_eq!(DEFAULT_TURNS_WINDOW, 4);
+        assert_eq!(DEFAULT_BUDGET_TOKENS, 8192);
+    }
+
+    #[test]
+    fn pre_flag_report_json_parses_turns_window_and_budget_tokens_as_defaults() {
+        // A report written before `turns_window`/`budget_tokens` existed
+        // (also missing `granularity`, for the same reason) must still
+        // parse, with both new fields defaulting to the values every such
+        // report actually used: window 4, budget 8192.
+        let json = r#"{
+            "benchmark": "longmemeval_retrieval_only",
+            "dataset_path": "data.json",
+            "dataset_sha256": "abc123",
+            "dataset_questions": 10,
+            "sample_seed": 20260710,
+            "sample_n": 1,
+            "k": 10,
+            "runtime": "postgres",
+            "retrieval_only": true,
+            "embeddings": "noop",
+            "ingestion": "one episode per haystack session",
+            "reflect": "MemoryService::reflect",
+            "mode": "fast",
+            "disabled": null,
+            "command": "bench-lme --sample 1 --seed 20260710",
+            "generated_at_unix": 0,
+            "overall": {
+                "question_type": "overall",
+                "n": 0,
+                "n_scored": 0,
+                "recall_at_5": null,
+                "recall_at_10": null,
+                "abstention_n": 0,
+                "abstention_correct": 0
+            },
+            "strata": [],
+            "per_question": [],
+            "paired_vs_baseline": null
+        }"#;
+        let report: BenchLmeReport = serde_json::from_str(json).expect("pre-flag report parses");
+        assert_eq!(report.granularity, "session");
+        assert_eq!(report.turns_window, 4);
+        assert_eq!(report.budget_tokens, 8192);
+        assert_eq!(report.turns_window, DEFAULT_TURNS_WINDOW);
+        assert_eq!(report.budget_tokens, DEFAULT_BUDGET_TOKENS);
     }
 
     #[test]
