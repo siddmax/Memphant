@@ -47,13 +47,13 @@ Preferred production mode:
 Syndai backend -> MemPhant Python SDK -> MemPhant HTTP service -> MemPhant DB
 ```
 
-Allowed local mode:
+Allowed local mode — `status: not-built (2026-07-09 truth pass — the Python package is a pure HTTP SDK; no MCP wiring exists in Syndai)`:
 
 ```text
 Syndai backend -> MemPhant Python native binding -> local/dev DB
 ```
 
-MCP dogfood mode:
+MCP dogfood mode — `status: not-built (2026-07-09 truth pass — the Python package is a pure HTTP SDK; no MCP wiring exists in Syndai)`:
 
 ```text
 Syndai agent runtime -> MemPhant MCP server

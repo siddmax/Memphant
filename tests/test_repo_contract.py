@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import importlib.util
-import os
 import re
 import subprocess
 from pathlib import Path
@@ -93,37 +92,9 @@ def test_spec_drift_check_passes_against_linked_syndai_docs() -> None:
     )
 
     output = result.stdout + result.stderr
-    if result.returncode == 0:
-        assert "spec_drift=clean" in result.stdout or (
-            "spec_drift=skipped reason=private_specs_missing" in result.stdout
-        )
-        return
-
-    # Self-retiring allowance for the 2026-07-09 evidence reset: the reset
-    # lands in MemPhant first; the Syndai mirror is byte-copied in a follow-up
-    # task. Until then, drift is acceptable ONLY when it is confined to the two
-    # evidence-reset spec files AND the private copy is verifiably the stale
-    # pre-reset mirror (it lacks the promotion-provenance rule). Any other
-    # drift, or drift persisting after the mirror sync, fails.
-    drifted = {
-        line.strip() for line in result.stdout.splitlines()[1:] if line.strip()
-    }
-    allowed = {"STATUS.md:content", "27-sota-ladder-and-validation.md:content"}
-    assert drifted and drifted <= allowed, output
-
-    private_dir = Path(
-        os.environ.get(
-            "MEMPHANT_PRIVATE_SPEC_DIR",
-            ROOT.parent / "Syndai" / "docs/superpowers/specs/memphant",
-        )
-    )
-    private_status = (private_dir / "STATUS.md").read_text(encoding="utf-8")
-    public_status = (ROOT / "docs/superpowers/specs/memphant/STATUS.md").read_text(
-        encoding="utf-8"
-    )
-    assert "Promotion-provenance rule (2026-07-09)" in public_status
-    assert "Promotion-provenance rule (2026-07-09)" not in private_status, (
-        "mirror already synced; remove this drift allowance"
+    assert result.returncode == 0, output
+    assert "spec_drift=clean" in result.stdout or (
+        "spec_drift=skipped reason=private_specs_missing" in result.stdout
     )
 
 
