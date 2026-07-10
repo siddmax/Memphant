@@ -3,7 +3,10 @@
 Current STATUS mirror: RUNTIME COMPLETE — BENCHMARK EVIDENCE PENDING
 
 Written at session pause (context budget). Everything below is committed on
-`main` in both repos; nothing is pushed.
+`main` in both repos; nothing is pushed. **Resume with the paste-ready prompt
+in `docs/handoff/NEXT-SESSION-PROMPT.md`** — it reflects the n=100 scaled
+campaign state (retrieval runs done, gpt-5.6-terra reader scoring mid-flight,
+`85ac338`) and supersedes this file's NEXT list where they differ.
 
 ## What is DONE (verified, with proof pointers)
 
