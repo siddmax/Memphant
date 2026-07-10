@@ -20,12 +20,13 @@
 //! (`claude -p`) without re-running ingestion. QA accuracy is computed and
 //! labeled by that script, never by this lane.
 //!
-//! Granularity: `--granularity turns` (default since 2026-07-10, see
-//! `DEFAULT_GRANULARITY`) ingests each session as multiple episodes of up to
-//! `--turns-window` consecutive turns (default `DEFAULT_TURNS_WINDOW`=4, same
-//! `[session <id>]` prefix), mapping every minted episode back to its session
-//! for provenance scoring; `--granularity session` ingests each haystack
-//! session as ONE episode.
+//! Granularity: `--granularity session` (the lane default again — the product
+//! path is session ingestion + service-side runtime contextual chunks, see
+//! `DEFAULT_GRANULARITY`) ingests each haystack session as ONE episode;
+//! `--granularity turns` (still available for the ablation) ingests each
+//! session as multiple episodes of up to `--turns-window` consecutive turns
+//! (default `DEFAULT_TURNS_WINDOW`=4, same `[session <id>]` prefix), mapping
+//! every minted episode back to its session for provenance scoring.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -47,14 +48,18 @@ pub const DEFAULT_TURNS_WINDOW: usize = 4;
 /// Default packing token budget threaded to the recall call, overridable via
 /// `--budget-tokens`.
 pub const DEFAULT_BUDGET_TOKENS: usize = 8192;
-/// Lane default ingestion granularity. Promoted to "turns" on 2026-07-10:
-/// LME-S n=100 seed 20260710 paired vs session granularity — ΔR@5 +0.085
-/// [+0.011, +0.160], ΔR@10 +0.128 [+0.053, +0.202], ΔQA +0.13 [+0.04, +0.21]
-/// (all 95% CIs exclude zero; reader gpt-5.6-terra@medium; proof:
-/// `docs/build-log/2026-07-10-scaled-reader-campaign.md`). Note the serde
-/// `default_granularity` below stays "session": it is a parsing default for
-/// pre-granularity REPORTS (which were session runs), not this lane default.
-pub const DEFAULT_GRANULARITY: &str = "turns";
+/// Lane default ingestion granularity, back to "session" as of the 2026-07-10
+/// rung 4 promotion: the lane now measures the PRODUCT path (session ingestion
+/// plus service-side runtime contextual chunks, default-on). The earlier
+/// same-day "turns" promotion is SUPERSEDED by the runtime embodiment: runtime
+/// chunks tie client-side turns windowing (ΔQA +0.000 [−0.080, +0.080] ns)
+/// while needing no caller-side windowing, so the product path is measured
+/// directly. Proof:
+/// `docs/build-log/artifacts/real-retrieval-20260710/scaled-reader-or-session-chunkpack-rerank-off.json`.
+/// `--granularity turns` stays available for the ablation. The serde
+/// `default_granularity` below also reads "session", but for an independent
+/// reason (pre-granularity REPORTS were session runs), not this lane default.
+pub const DEFAULT_GRANULARITY: &str = "session";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct LmeQuestion {
@@ -98,9 +103,10 @@ pub struct BenchLmeOptions {
     pub turns_window: usize,
     /// Packing token budget threaded to the recall call.
     pub budget_tokens: usize,
-    /// Rung 4 runtime contextual-chunk write path: when true the ingest
-    /// service mints per-episode contextual chunks at reflect time (default
-    /// off = today's chunk-free behavior).
+    /// Rung 4 runtime contextual-chunk write path opt-in flag
+    /// (`--runtime-chunks`, default true = the product path). The EFFECTIVE
+    /// state also depends on `--disable runtime_chunks`, which forces the
+    /// chunks-off control arm; see `runtime_chunks_enabled` in `run_bench_lme`.
     pub runtime_chunks: bool,
     /// When set, write one QA-evidence JSONL row per question to this path
     /// (question + gold answer + top-k evidence bodies) for the external
@@ -207,8 +213,11 @@ pub struct BenchLmeReport {
     #[serde(default = "default_budget_tokens")]
     pub budget_tokens: usize,
     /// Whether the rung 4 runtime contextual-chunk write path was enabled for
-    /// ingestion (defaults to false for pre-flag reports, matching today's
-    /// chunk-free behavior).
+    /// this run — records the EFFECTIVE state (default-on since the 2026-07-10
+    /// promotion; `--disable runtime_chunks` records false). The serde default
+    /// STAYS false: every pre-promotion report was a chunks-off run unless it
+    /// recorded otherwise, so an absent field ⇒ false, never following the lane
+    /// default.
     #[serde(default)]
     pub runtime_chunks: bool,
     pub mode: String,
@@ -577,12 +586,18 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
             .map_err(|error| format!("postgres connect: {error}"))?,
     );
     let embedder = build_fastembed()?;
+    // Effective runtime contextual-chunk state: default-on (the product path)
+    // unless the control arm explicitly disables it. `--disable runtime_chunks`
+    // forces the builder off; `--runtime-chunks` is redundant with the default
+    // but kept as an explicit opt-in. The report records THIS effective value.
+    let runtime_chunks_enabled =
+        options.runtime_chunks && options.disable.as_deref() != Some("runtime_chunks");
     let ingest_service = MemoryService::new(
         Arc::clone(&store),
         Arc::new(SystemClock),
         Arc::clone(&embedder),
     )
-    .with_contextual_chunks_write_enabled(options.runtime_chunks);
+    .with_contextual_chunks_write_enabled(runtime_chunks_enabled);
     let vector_disabled = options.disable.as_deref() == Some("vector");
     // Vector ablation: same store/units, but the recall-side service embeds
     // with Noop so `query_vec` is None and the vector channel is honestly off.
@@ -613,6 +628,7 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
             "procedure_recall",
             "decay",
             "packing",
+            "runtime_chunks",
         ];
         if !known.contains(&stage) {
             return Err(format!(
@@ -870,7 +886,7 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
         granularity: options.granularity.clone(),
         turns_window: options.turns_window,
         budget_tokens: options.budget_tokens,
-        runtime_chunks: options.runtime_chunks,
+        runtime_chunks: runtime_chunks_enabled,
         mode: match options.mode {
             RecallMode::Fast => "fast",
             RecallMode::Balanced => "balanced",
@@ -1026,12 +1042,16 @@ mod tests {
     }
 
     #[test]
-    fn lane_default_granularity_is_turns_but_old_reports_parse_as_session() {
-        // Promoted 2026-07-10 (scaled reader campaign: retrieval AND QA
-        // paired CIs exclude zero for turns vs session at n=100).
-        assert_eq!(DEFAULT_GRANULARITY, "turns");
-        // Reports written before the granularity field existed were session
-        // runs; the serde parsing default must never follow the lane default.
+    fn lane_default_granularity_is_session_and_old_reports_parse_as_session() {
+        // Back to "session" as of the 2026-07-10 rung 4 promotion: the lane
+        // measures the product path (session ingestion + service-side runtime
+        // chunks). The earlier same-day "turns" promotion is superseded by the
+        // runtime embodiment (ΔQA +0.000 ns tie, no client-side windowing).
+        assert_eq!(DEFAULT_GRANULARITY, "session");
+        // The serde parsing default is ALSO "session" here, but for an
+        // independent reason: reports written before the granularity field
+        // existed were session runs. It must never merely track the lane
+        // default.
         assert_eq!(default_granularity(), "session");
     }
 
@@ -1141,6 +1161,14 @@ mod tests {
         assert_eq!(report.budget_tokens, 8192);
         assert_eq!(report.turns_window, DEFAULT_TURNS_WINDOW);
         assert_eq!(report.budget_tokens, DEFAULT_BUDGET_TOKENS);
+        // The runtime_chunks report field serde default STAYS false even after
+        // the write path was promoted to default-on: every pre-promotion report
+        // was a chunks-off run, so an absent field must parse chunks-OFF and
+        // never follow the default-on lane behavior.
+        assert!(
+            !report.runtime_chunks,
+            "absent runtime_chunks must parse false (pre-promotion runs were chunks-off)"
+        );
     }
 
     #[test]

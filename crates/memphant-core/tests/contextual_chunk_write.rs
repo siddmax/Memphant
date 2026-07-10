@@ -150,9 +150,12 @@ async fn reflect_mints_contextual_chunks_when_write_enabled() {
 }
 
 #[tokio::test]
-async fn reflect_stays_chunk_free_by_default() {
+async fn reflect_mints_contextual_chunks_by_default() {
     let store = InMemoryStore::default();
-    // Default construction (no builder call) must retain today's behavior.
+    // Default construction (no builder call) now mints chunks: the rung 4
+    // runtime path was promoted to default-on on 2026-07-10 once the paired
+    // ablation THROUGH this path cleared (see the field doc on
+    // `contextual_chunks_write_enabled`). This is the product path.
     let service = MemoryService::new(
         Arc::new(store.clone()),
         Arc::new(CLOCK),
@@ -178,9 +181,45 @@ async fn reflect_stays_chunk_free_by_default() {
         .iter()
         .find(|unit| unit.source_episode_id == Some(episode_id))
         .expect("episode-derived unit");
+    // Six turns / window 4 → two chunks (turns 1-4, 5-6): the product path
+    // mints them with no builder opt-in.
+    assert_eq!(
+        unit.contextual_chunks.len(),
+        2,
+        "default construction mints per-episode chunks (promoted 2026-07-10)"
+    );
+}
+
+/// Explicit control arm: `with_contextual_chunks_write_enabled(false)` forces
+/// the pre-promotion chunk-free behavior — the baseline the bench lane's
+/// `--disable runtime_chunks` runs. This is the surviving explicit-off test.
+#[tokio::test]
+async fn reflect_stays_chunk_free_when_write_disabled() {
+    let store = InMemoryStore::default();
+    let service = service(store.clone(), false);
+    let tenant = TenantId::new();
+    let scope = ScopeId::new();
+    let actor = ActorId::new();
+
+    let retained = service
+        .retain(tenant, retain_request(tenant, scope, actor))
+        .await
+        .expect("retain");
+    let episode_id = retained.episode_id.expect("episode retained");
+    service.reflect(tenant, scope, None).await.expect("reflect");
+
+    let page = store
+        .scope_memory_page(tenant, scope, None, 100)
+        .await
+        .expect("page");
+    let unit = page
+        .items
+        .iter()
+        .find(|unit| unit.source_episode_id == Some(episode_id))
+        .expect("episode-derived unit");
     assert!(
         unit.contextual_chunks.is_empty(),
-        "chunks are default-off until the paired ablation clears"
+        "explicit builder-off keeps the chunk-free control arm (old behavior)"
     );
 }
 

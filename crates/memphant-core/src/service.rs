@@ -69,9 +69,17 @@ pub struct MemoryService<S: MemoryStore> {
     clock: Arc<dyn Clock>,
     embedder: Arc<dyn EmbeddingProvider>,
     /// Rung 4 write-time toggle: when set, the reflect-stage compile mints
-    /// per-episode contextual chunks (§`compile_job`). DEFAULT FALSE — the
-    /// promotion-provenance rule forbids default-on until the paired ablation
-    /// through this path clears.
+    /// per-episode contextual chunks (§`compile_job`). DEFAULT TRUE (promoted
+    /// 2026-07-10): the paired ablation through THIS runtime path cleared —
+    /// LME-S n=100 seed 20260710 session+runtime-chunks (shipped code incl.
+    /// reclaim) vs session baseline: ΔQA +0.110 [+0.020, +0.190], ΔR@5 +0.117
+    /// [+0.053, +0.191], ΔR@10 +0.117 [+0.053, +0.191] (all 95% CIs exclude
+    /// zero; reader gpt-5.6-terra@medium, judge claude-sonnet-5, 1000-resample
+    /// paired bootstrap). Proof:
+    /// `docs/build-log/artifacts/real-retrieval-20260710/scaled-reader-or-session-chunkpack-rerank-off.json`
+    /// and `scaled-lme-s-session-chunkpack-rerank-off.json`. The
+    /// `with_contextual_chunks_write_enabled(false)` builder stays so ablations
+    /// can force the chunks-off control arm.
     contextual_chunks_write_enabled: bool,
 }
 
@@ -92,14 +100,14 @@ impl<S: MemoryStore> MemoryService<S> {
             store,
             clock,
             embedder,
-            contextual_chunks_write_enabled: false,
+            contextual_chunks_write_enabled: true,
         }
     }
 
-    /// Enables (or disables) the rung 4 contextual-chunk write path. A builder
-    /// override so every existing `new` caller keeps today's chunk-free
-    /// default; only callers that opt in (the bench lane's `--runtime-chunks`)
-    /// flip it on.
+    /// Overrides the rung 4 contextual-chunk write path (default on since the
+    /// 2026-07-10 promotion). A builder override so ablations can force the
+    /// control arm: the bench lane's `--disable runtime_chunks` passes `false`
+    /// here to run the chunk-free baseline (old behavior).
     pub fn with_contextual_chunks_write_enabled(mut self, enabled: bool) -> Self {
         self.contextual_chunks_write_enabled = enabled;
         self
@@ -500,9 +508,9 @@ impl<S: MemoryStore> MemoryService<S> {
                     return Ok(CompileOutcome::default());
                 };
                 // Rung 4: mint contextual chunks tied to this raw episode when
-                // the write path is enabled (default off). Every other
-                // candidate construction (resource jobs, direct-unit retains)
-                // stays chunk-free — episodes only.
+                // the write path is enabled (default on since 2026-07-10).
+                // Every other candidate construction (resource jobs,
+                // direct-unit retains) stays chunk-free — episodes only.
                 let contextual_chunks = if self.contextual_chunks_write_enabled {
                     episode_contextual_chunks(episode.id, &episode.source_kind, &episode.body)
                 } else {
