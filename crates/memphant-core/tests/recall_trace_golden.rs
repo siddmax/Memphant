@@ -51,6 +51,7 @@ async fn recall_writes_trace_for_scope_denial() {
             decay_enabled: true,
             engine_version: "engine-wsc-test".to_string(),
         },
+        None,
         &CLOCK,
     )
     .await
@@ -177,6 +178,7 @@ async fn dsr_decay_fold_promotes_reinforced_memory_over_ignored_stale_candidate(
             decay_enabled: true,
             engine_version: "engine-rung11-test".to_string(),
         },
+        None,
         &CLOCK,
     )
     .await
@@ -333,6 +335,7 @@ async fn exhaustive_mode_gathers_buried_raw_episode_evidence_without_changing_fa
             decay_enabled: true,
             engine_version: "engine-rung12-test".to_string(),
         },
+        None,
         &CLOCK,
     )
     .await
@@ -362,6 +365,7 @@ async fn exhaustive_mode_gathers_buried_raw_episode_evidence_without_changing_fa
             decay_enabled: true,
             engine_version: "engine-rung12-test".to_string(),
         },
+        None,
         &CLOCK,
     )
     .await
@@ -478,6 +482,7 @@ async fn contextual_chunk_recall_finds_source_unit_and_traces_flag() {
             decay_enabled: true,
             engine_version: "engine-ws4-test".to_string(),
         },
+        None,
         &CLOCK,
     )
     .await
@@ -574,6 +579,7 @@ async fn servicenow_query_does_not_trigger_temporal_recency_match() {
             decay_enabled: true,
             engine_version: "engine-temporal-token-test".to_string(),
         },
+        None,
         &CLOCK,
     )
     .await
@@ -705,6 +711,7 @@ async fn high_risk_action_query_drops_private_profile_context() {
                 decay_enabled: true,
                 engine_version: "engine-restraint-test".to_string(),
             },
+            None,
             &CLOCK,
         )
         .await
@@ -806,6 +813,7 @@ async fn recall_drops_expired_validity_window_for_current_query() {
             decay_enabled: true,
             engine_version: "engine-rung5-test".to_string(),
         },
+        None,
         &CLOCK,
     )
     .await
@@ -924,6 +932,7 @@ async fn edge_expansion_can_be_disabled_and_traces_related_candidates() {
             decay_enabled: true,
             engine_version: "engine-rung6-test".to_string(),
         },
+        None,
         &CLOCK,
     )
     .await
@@ -951,6 +960,7 @@ async fn edge_expansion_can_be_disabled_and_traces_related_candidates() {
             decay_enabled: true,
             engine_version: "engine-rung6-test".to_string(),
         },
+        None,
         &CLOCK,
     )
     .await
@@ -1062,6 +1072,7 @@ async fn packing_collapses_duplicate_decoys_and_preserves_answer_under_budget() 
             decay_enabled: true,
             engine_version: "engine-rung7-test".to_string(),
         },
+        None,
         &CLOCK,
     )
     .await
@@ -1192,6 +1203,7 @@ async fn packing_abstains_when_top_evidence_is_unresolved_contradiction() {
             decay_enabled: true,
             engine_version: "engine-rung7-test".to_string(),
         },
+        None,
         &CLOCK,
     )
     .await
@@ -1293,6 +1305,7 @@ async fn bounded_rerank_reorders_rank_sensitive_candidate_and_traces_decision() 
             decay_enabled: true,
             engine_version: "engine-rung8-test".to_string(),
         },
+        None,
         &CLOCK,
     )
     .await
@@ -1331,6 +1344,7 @@ async fn bounded_rerank_reorders_rank_sensitive_candidate_and_traces_decision() 
             decay_enabled: true,
             engine_version: "engine-rung8-test".to_string(),
         },
+        None,
         &CLOCK,
     )
     .await
@@ -1452,6 +1466,7 @@ async fn learned_rerank_profile_reorders_protected_topk_and_traces_training_set(
             decay_enabled: true,
             engine_version: "engine-rung13-test".to_string(),
         },
+        None,
         &CLOCK,
     )
     .await
@@ -1489,6 +1504,7 @@ async fn learned_rerank_profile_reorders_protected_topk_and_traces_training_set(
             decay_enabled: true,
             engine_version: "engine-rung13-test".to_string(),
         },
+        None,
         &CLOCK,
     )
     .await
@@ -1646,6 +1662,7 @@ async fn query_decomposition_recovers_composite_answer_and_traces_subqueries() {
             decay_enabled: true,
             engine_version: "engine-rung9-test".to_string(),
         },
+        None,
         &CLOCK,
     )
     .await
@@ -1691,6 +1708,7 @@ async fn query_decomposition_recovers_composite_answer_and_traces_subqueries() {
             decay_enabled: true,
             engine_version: "engine-rung9-test".to_string(),
         },
+        None,
         &CLOCK,
     )
     .await
@@ -1931,6 +1949,7 @@ async fn procedural_memory_replays_only_validated_safe_procedures_and_traces_gat
             decay_enabled: true,
             engine_version: "engine-rung10-test".to_string(),
         },
+        None,
         &CLOCK,
     )
     .await
@@ -1959,6 +1978,7 @@ async fn procedural_memory_replays_only_validated_safe_procedures_and_traces_gat
             decay_enabled: true,
             engine_version: "engine-rung10-test".to_string(),
         },
+        None,
         &CLOCK,
     )
     .await
@@ -2125,6 +2145,7 @@ async fn recall_golden_fixtures_pass() {
                 decay_enabled: true,
                 engine_version: "engine-wsc-test".to_string(),
             },
+            None,
             &CLOCK,
         )
         .await

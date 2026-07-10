@@ -53,7 +53,7 @@ async fn fast_mode_recall_holds_release_hot_path_slo() {
     };
 
     for _ in 0..5 {
-        recall(&store, request.clone(), &CLOCK)
+        recall(&store, request.clone(), None, &CLOCK)
             .await
             .expect("warm recall");
     }
@@ -61,7 +61,7 @@ async fn fast_mode_recall_holds_release_hot_path_slo() {
     let mut samples = Vec::with_capacity(80);
     for _ in 0..80 {
         let started = Instant::now();
-        let response = recall(&store, request.clone(), &CLOCK)
+        let response = recall(&store, request.clone(), None, &CLOCK)
             .await
             .expect("fast recall");
         assert!(!response.items.is_empty());

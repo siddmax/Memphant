@@ -7,6 +7,10 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+fastembed = { version = "5", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries"], optional = true }
 memphant-core.workspace = true
 memphant-store-postgres = { path = "../memphant-store-postgres" }
 memphant-types.workspace = true
+
+[features]
+fastembed = ["dep:fastembed"]

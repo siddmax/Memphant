@@ -1762,6 +1762,7 @@ async fn run_syndai_trace_compare(
             decay_enabled: true,
             engine_version: ENGINE_VERSION.to_string(),
         },
+        None,
         &EVAL_CLOCK,
     )
     .await
@@ -1877,6 +1878,7 @@ async fn run_golden_case_inner(
             decay_enabled: controls.decay_enabled,
             engine_version: ENGINE_VERSION.to_string(),
         },
+        None,
         &EVAL_CLOCK,
     )
     .await
@@ -2191,6 +2193,7 @@ async fn run_high_risk_lane(lane: &SecurityLane) -> EvalResult<String> {
             decay_enabled: true,
             engine_version: ENGINE_VERSION.to_string(),
         },
+        None,
         &EVAL_CLOCK,
     )
     .await
@@ -2304,6 +2307,7 @@ async fn run_deletion_lane(lane: &SecurityLane) -> EvalResult<String> {
             decay_enabled: true,
             engine_version: ENGINE_VERSION.to_string(),
         },
+        None,
         &EVAL_CLOCK,
     )
     .await

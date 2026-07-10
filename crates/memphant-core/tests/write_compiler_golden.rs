@@ -1,4 +1,6 @@
-use memphant_core::{FixedClock, InMemoryStore, correct_memory, reflect_recorded, retain_episode};
+use memphant_core::{
+    FixedClock, InMemoryStore, NoopEmbedding, correct_memory, reflect_recorded, retain_episode,
+};
 use memphant_types::{
     ActorId, AdmissionAction, ContextualChunk, CorrectRequest, CorrectSelector, CorrectionPayload,
     MemoryEdgeKind, MemoryKind, ReflectCandidate, ReflectInput, RetainRequest, ScopeId, TenantId,
@@ -74,6 +76,7 @@ async fn retain_and_reflect(
                 valid_to: None,
             }],
         },
+        &NoopEmbedding,
         &CLOCK,
     )
     .await
@@ -180,6 +183,7 @@ async fn write_compiler_golden_fixtures_pass() {
                         valid_to: None,
                     }],
                 },
+                &NoopEmbedding,
                 &CLOCK,
             )
             .await
@@ -308,10 +312,10 @@ async fn reflect_recorded_is_idempotent_for_duplicate_job_delivery() {
         }],
     };
 
-    let first = reflect_recorded(&store, input.clone(), &CLOCK)
+    let first = reflect_recorded(&store, input.clone(), &NoopEmbedding, &CLOCK)
         .await
         .expect("first reflect succeeds");
-    let second = reflect_recorded(&store, input, &CLOCK)
+    let second = reflect_recorded(&store, input, &NoopEmbedding, &CLOCK)
         .await
         .expect("redelivery reflect succeeds");
 
@@ -376,6 +380,7 @@ async fn reflect_candidate_contextual_chunks_are_stored_with_source_episode() {
                 valid_to: None,
             }],
         },
+        &NoopEmbedding,
         &CLOCK,
     )
     .await
@@ -706,6 +711,7 @@ async fn two_trusted_retains_with_distinct_content_do_not_supersede() {
                     valid_to: None,
                 }],
             },
+            &NoopEmbedding,
             &CLOCK,
         )
         .await
@@ -824,6 +830,7 @@ async fn unit_transaction_from_uses_injected_clock() {
                 valid_to: None,
             }],
         },
+        &NoopEmbedding,
         &future_clock,
     )
     .await

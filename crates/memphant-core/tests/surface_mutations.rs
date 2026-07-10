@@ -106,6 +106,7 @@ async fn correct_supersedes_old_generation_and_recall_returns_new_value() {
             decay_enabled: true,
             engine_version: "engine-wsd-test".to_string(),
         },
+        None,
         &CLOCK,
     )
     .await
@@ -184,6 +185,7 @@ async fn forget_marks_memory_deleted_and_recall_hides_it() {
             decay_enabled: true,
             engine_version: "engine-wsd-test".to_string(),
         },
+        None,
         &CLOCK,
     )
     .await

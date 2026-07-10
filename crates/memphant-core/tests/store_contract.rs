@@ -338,6 +338,7 @@ async fn trace_by_id_with_wrong_tenant_returns_none() {
             decay_enabled: true,
             engine_version: "store-contract-test".to_string(),
         },
+        None,
         &memphant_core::FixedClock("2026-07-03T00:00:00Z"),
     )
     .await
@@ -358,7 +359,7 @@ async fn trace_by_id_with_wrong_tenant_returns_none() {
 
 #[tokio::test]
 async fn forget_by_episode_hides_units_and_tombstone_blocks_recompilation() {
-    use memphant_core::{FixedClock, forget_memory, recall, reflect_recorded};
+    use memphant_core::{FixedClock, NoopEmbedding, forget_memory, recall, reflect_recorded};
     use memphant_types::{
         ForgetRequest, ForgetSelector, RecallMode, RecallRequest, ReflectCandidate, ReflectInput,
     };
@@ -410,9 +411,14 @@ async fn forget_by_episode_hides_units_and_tombstone_blocks_recompilation() {
             valid_to: None,
         }],
     };
-    reflect_recorded(&store, reflect_input("compiler-forget-test"), &CLOCK)
-        .await
-        .expect("reflect succeeds");
+    reflect_recorded(
+        &store,
+        reflect_input("compiler-forget-test"),
+        &NoopEmbedding,
+        &CLOCK,
+    )
+    .await
+    .expect("reflect succeeds");
     assert_eq!(store.active_semantic_units(tenant_id).len(), 1);
 
     let forgotten = forget_memory(
@@ -442,9 +448,14 @@ async fn forget_by_episode_hides_units_and_tombstone_blocks_recompilation() {
 
     // A second reflect with a BUMPED compiler version must NOT resurrect the
     // forgotten fact: the forgotten-source tombstone blocks re-derivation.
-    reflect_recorded(&store, reflect_input("compiler-forget-test-v2"), &CLOCK)
-        .await
-        .expect("recompilation runs");
+    reflect_recorded(
+        &store,
+        reflect_input("compiler-forget-test-v2"),
+        &NoopEmbedding,
+        &CLOCK,
+    )
+    .await
+    .expect("recompilation runs");
     assert!(
         store.active_semantic_units(tenant_id).is_empty(),
         "tombstoned episode must not re-derive units"
@@ -471,6 +482,7 @@ async fn forget_by_episode_hides_units_and_tombstone_blocks_recompilation() {
             decay_enabled: true,
             engine_version: "store-contract-test".to_string(),
         },
+        None,
         &CLOCK,
     )
     .await

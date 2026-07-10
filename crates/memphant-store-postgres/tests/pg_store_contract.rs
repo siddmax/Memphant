@@ -147,6 +147,7 @@ async fn durability_write_with_pool_a_read_with_fresh_pool_b() {
     let recalled = recall(
         &store_b,
         recall_request(tenant, scope, actor, "Where is the durable release region?"),
+        None,
         &CLOCK,
     )
     .await
@@ -195,6 +196,7 @@ async fn cross_tenant_candidates_and_traces_are_isolated() {
     let recalled = recall(
         &store,
         recall_request(tenant_a, scope, actor, "secret deploy fact"),
+        None,
         &CLOCK,
     )
     .await
@@ -324,6 +326,7 @@ async fn forget_by_episode_tombstone_blocks_recompilation_durably() {
     let recalled = recall(
         &store,
         recall_request(tenant, scope, actor, "Which payment processor do we use?"),
+        None,
         &CLOCK,
     )
     .await
@@ -373,6 +376,7 @@ async fn forget_by_episode_tombstone_blocks_recompilation_durably() {
     let recalled_again = recall(
         &store,
         recall_request(tenant, scope, actor, "Which payment processor do we use?"),
+        None,
         &CLOCK,
     )
     .await
@@ -420,6 +424,7 @@ async fn resource_retain_reflect_recall_round_trips_via_service() {
             actor,
             "How does the deploy runbook roll forward?",
         ),
+        None,
         &CLOCK,
     )
     .await
@@ -576,5 +581,82 @@ async fn degraded_read_your_own_writes_serves_unreflected_episodes() {
     assert_eq!(
         response.items[0].body,
         "Fallback rollout window is Thursday night."
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn stub_embeddings_persist_and_power_the_vector_channel() {
+    use memphant_core::StubEmbedding;
+
+    let store = connect().await;
+    let tenant = fresh_tenant(&store).await;
+    let scope = ScopeId::new();
+    let actor = ActorId::new();
+    let svc = MemoryService::new(
+        Arc::new(store.clone()),
+        Arc::new(CLOCK),
+        Arc::new(StubEmbedding::default()),
+    );
+
+    retain_episode(
+        svc.store(),
+        retain_request(tenant, scope, actor, "Release region is Taipei.", None),
+    )
+    .await
+    .expect("retain");
+    svc.reflect(tenant, scope, None).await.expect("reflect");
+
+    let page = store
+        .scope_memory_page(tenant, scope, None, 100)
+        .await
+        .expect("page");
+    assert!(!page.items.is_empty());
+    let unit_ids: Vec<_> = page.items.iter().map(|unit| unit.id).collect();
+    let rows = store
+        .fetch_embeddings(tenant, &unit_ids)
+        .await
+        .expect("fetch embeddings");
+    assert!(
+        !rows.is_empty(),
+        "compiled unit embeddings are durably persisted in Postgres"
+    );
+    assert!(rows.iter().all(|row| row.vec.len() == 32));
+
+    let response = svc
+        .recall(
+            tenant,
+            RecallHttpRequest {
+                tenant_id: tenant,
+                scope_id: scope,
+                actor_id: actor,
+                allowed_scope_ids: Some(vec![scope]),
+                query: "Release region is Taipei.".to_string(),
+                limit: Some(4),
+                budget_tokens: Some(256),
+                mode: None,
+                include_beliefs: None,
+                edge_expansion_enabled: None,
+                context_packing_abstention_enabled: None,
+                rerank_enabled: None,
+                query_decomposition_enabled: None,
+                procedure_recall_enabled: None,
+                decay_enabled: None,
+                include_trace: None,
+            },
+        )
+        .await
+        .expect("recall");
+    assert!(!response.items.is_empty());
+    let trace = svc
+        .trace(tenant, response.trace_id)
+        .await
+        .expect("trace fetch")
+        .expect("trace stored");
+    assert!(
+        trace.candidates.iter().any(|candidate| candidate.channel
+            == memphant_types::RecallChannel::Vector
+            && candidate.channel_score > 0.0),
+        "pgvector-backed vector channel produced scored candidates"
     );
 }

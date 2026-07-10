@@ -6,8 +6,9 @@
 use std::collections::{HashMap, HashSet};
 
 use memphant_core::{
-    ApiKeyRow, CompiledWrite, CorrectOutcome, CorrectionWrite, EmbeddingRow, ForgetOutcome,
-    ForgetWrite, JobFilter, MemoryStore, ReflectJobRow, ReviewEventRow, ScopePage, StoreError,
+    ApiKeyRow, CompiledWrite, CorrectOutcome, CorrectionWrite, EmbeddingProfileRow, EmbeddingRow,
+    ForgetOutcome, ForgetWrite, JobFilter, MemoryStore, ReflectJobRow, ReviewEventRow, ScopePage,
+    StoreError,
 };
 use memphant_types::{
     ActorId, ContextualChunk, CorrectResult, EdgeId, EpisodeId, ForgetTarget, JobId, MemoryKind,
@@ -44,6 +45,22 @@ fn enum_str<T: Serialize>(value: &T) -> String {
 fn enum_from_str<T: DeserializeOwned>(value: &str) -> Result<T, StoreError> {
     serde_json::from_value(serde_json::Value::String(value.to_string()))
         .map_err(|error| StoreError::Backend(format!("bad enum value {value}: {error}")))
+}
+
+fn parse_vec_literal(text: &str) -> Result<Vec<f32>, StoreError> {
+    let inner = text.trim().trim_start_matches('[').trim_end_matches(']');
+    if inner.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    inner
+        .split(',')
+        .map(|value| {
+            value
+                .trim()
+                .parse::<f32>()
+                .map_err(|error| StoreError::Backend(format!("bad halfvec literal: {error}")))
+        })
+        .collect()
 }
 
 fn vec_literal(vec: &[f32]) -> String {
@@ -1562,6 +1579,67 @@ impl MemoryStore for PgStore {
             .map_err(backend)?;
         }
         tx.commit().await.map_err(backend)
+    }
+
+    async fn upsert_embedding_profile(
+        &self,
+        tenant: TenantId,
+        profile: EmbeddingProfileRow,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "insert into memphant.embedding_profile
+               (id, tenant_id, provider, model, dimensions, distance, version, index_strategy)
+             values ($1, $2, $3, $4, $5, $6, $7, $8)
+             on conflict (tenant_id, id) do nothing",
+        )
+        .bind(profile.id)
+        .bind(tenant.as_uuid())
+        .bind(&profile.provider)
+        .bind(&profile.model)
+        .bind(profile.dimensions as i32)
+        .bind(&profile.distance)
+        .bind(&profile.version)
+        .bind(&profile.index_strategy)
+        .execute(&self.pool)
+        .await
+        .map_err(backend)?;
+        Ok(())
+    }
+
+    async fn fetch_embeddings(
+        &self,
+        tenant: TenantId,
+        unit_ids: &[UnitId],
+    ) -> Result<Vec<EmbeddingRow>, StoreError> {
+        let uuids: Vec<Uuid> = unit_ids.iter().map(|id| id.as_uuid()).collect();
+        let rows = sqlx::query(
+            "select memory_unit_id, embedding_profile_id, vec::text as vec
+             from memphant.embedding
+             where tenant_id = $1 and memory_unit_id = any($2)",
+        )
+        .bind(tenant.as_uuid())
+        .bind(uuids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(backend)?;
+        rows.iter()
+            .map(|row| {
+                Ok(EmbeddingRow {
+                    memory_unit_id: UnitId::from_u128(
+                        row.try_get::<Uuid, _>("memory_unit_id")
+                            .map_err(backend)?
+                            .as_u128(),
+                    ),
+                    embedding_profile_id: row.try_get("embedding_profile_id").map_err(backend)?,
+                    vec: parse_vec_literal(
+                        row.try_get::<Option<String>, _>("vec")
+                            .map_err(backend)?
+                            .as_deref()
+                            .unwrap_or(""),
+                    )?,
+                })
+            })
+            .collect()
     }
 
     async fn lookup_api_key(&self, key_hash: &str) -> Result<Option<ApiKeyRow>, StoreError> {

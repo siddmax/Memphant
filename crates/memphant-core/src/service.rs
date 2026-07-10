@@ -178,6 +178,7 @@ impl<S: MemoryStore> MemoryService<S> {
                             valid_to: None,
                         }],
                     },
+                    self.embedder.as_ref(),
                     self.clock.as_ref(),
                 )
                 .await?;
@@ -250,6 +251,22 @@ impl<S: MemoryStore> MemoryService<S> {
         let scope_id = request.scope_id;
         let query = request.query.clone();
         let k = request.limit.unwrap_or(8);
+        // Real embedding provider → embed the query and run the vector
+        // channel; the Noop provider keeps the channel honestly disabled.
+        let query_vec = if self.embedder.dimensions() > 0 {
+            self.embedder
+                .embed(std::slice::from_ref(&query))
+                .map_err(|error| {
+                    ServiceError::Core(CoreError::Store(StoreError::Backend(format!(
+                        "query embedding failed: {error}"
+                    ))))
+                })?
+                .into_iter()
+                .next()
+                .filter(|vec| !vec.is_empty())
+        } else {
+            None
+        };
         let response = recall(
             self.store.as_ref(),
             RecallRequest {
@@ -276,6 +293,7 @@ impl<S: MemoryStore> MemoryService<S> {
                 decay_enabled: request.decay_enabled.unwrap_or(true),
                 engine_version: ENGINE_VERSION.to_string(),
             },
+            query_vec.as_deref(),
             self.clock.as_ref(),
         )
         .await?;
@@ -530,6 +548,7 @@ impl<S: MemoryStore> MemoryService<S> {
                 compiler_version,
                 candidates: vec![candidate],
             },
+            self.embedder.as_ref(),
             self.clock.as_ref(),
         )
         .await?;

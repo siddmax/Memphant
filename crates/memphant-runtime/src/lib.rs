@@ -7,9 +7,10 @@ use std::sync::Arc;
 
 use memphant_core::service::MemoryService;
 use memphant_core::{
-    ApiKeyRow, CompiledWrite, CorrectOutcome, CorrectionWrite, EmbeddingProvider, EmbeddingRow,
-    ForgetOutcome, ForgetWrite, InMemoryStore, InMemoryTxn, JobFilter, MemoryStore, NoopEmbedding,
-    ReflectJobRow, ReviewEventRow, ScopePage, StoreError, SystemClock,
+    ApiKeyRow, CompiledWrite, CorrectOutcome, CorrectionWrite, EmbeddingProfileRow,
+    EmbeddingProvider, EmbeddingRow, ForgetOutcome, ForgetWrite, InMemoryStore, InMemoryTxn,
+    JobFilter, MemoryStore, NoopEmbedding, ReflectJobRow, ReviewEventRow, ScopePage, StoreError,
+    SystemClock,
 };
 use memphant_store_postgres::{PgStore, PgTxn};
 use memphant_types::{
@@ -64,10 +65,34 @@ pub async fn build_store() -> Result<AnyStore, StoreError> {
     }
 }
 
-/// The embedding provider seam. Noop today (vector channel traced as
-/// disabled); a fastembed-backed provider lands behind a feature flag.
+#[cfg(feature = "fastembed")]
+pub mod embeddings;
+
+/// The embedding provider seam, selected by `MEMPHANT_EMBEDDINGS`:
+/// - unset/empty/`noop` → `NoopEmbedding` (vector channel traced as disabled)
+/// - `fastembed` → local bge-small-en-v1.5 (requires the `fastembed` cargo
+///   feature; refuses loudly instead of silently degrading when it is absent
+///   or the model cannot be initialized).
 pub fn build_embedder() -> Arc<dyn EmbeddingProvider> {
-    Arc::new(NoopEmbedding)
+    match std::env::var("MEMPHANT_EMBEDDINGS").as_deref() {
+        Ok("fastembed") => {
+            #[cfg(feature = "fastembed")]
+            {
+                Arc::new(
+                    embeddings::FastEmbedProvider::new()
+                        .expect("MEMPHANT_EMBEDDINGS=fastembed: model initialization failed"),
+                )
+            }
+            #[cfg(not(feature = "fastembed"))]
+            {
+                panic!(
+                    "MEMPHANT_EMBEDDINGS=fastembed requires a binary built with --features fastembed"
+                );
+            }
+        }
+        Ok("") | Ok("noop") | Err(_) => Arc::new(NoopEmbedding),
+        Ok(other) => panic!("unknown MEMPHANT_EMBEDDINGS provider: {other}"),
+    }
 }
 
 /// Standard `MemoryService` wiring: injected system clock + embedder seam.
@@ -320,6 +345,22 @@ impl MemoryStore for AnyStore {
         rows: Vec<EmbeddingRow>,
     ) -> Result<(), StoreError> {
         delegate!(self, store => store.upsert_embeddings(tenant, rows).await)
+    }
+
+    async fn upsert_embedding_profile(
+        &self,
+        tenant: TenantId,
+        profile: EmbeddingProfileRow,
+    ) -> Result<(), StoreError> {
+        delegate!(self, store => store.upsert_embedding_profile(tenant, profile).await)
+    }
+
+    async fn fetch_embeddings(
+        &self,
+        tenant: TenantId,
+        unit_ids: &[UnitId],
+    ) -> Result<Vec<EmbeddingRow>, StoreError> {
+        delegate!(self, store => store.fetch_embeddings(tenant, unit_ids).await)
     }
 
     async fn lookup_api_key(&self, key_hash: &str) -> Result<Option<ApiKeyRow>, StoreError> {

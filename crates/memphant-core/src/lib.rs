@@ -115,6 +115,107 @@ impl EmbeddingProvider for NoopEmbedding {
     }
 }
 
+/// Deterministic hash-bucket embedding for tests: each token is hashed into a
+/// bucket, the bag-of-buckets vector is L2-normalized. Identical texts embed
+/// identically; token-overlapping texts have positive cosine similarity. No
+/// model download, no network — test-support only, never a semantic model.
+#[derive(Debug, Clone, Copy)]
+pub struct StubEmbedding {
+    pub dimensions: usize,
+}
+
+impl Default for StubEmbedding {
+    fn default() -> Self {
+        Self { dimensions: 32 }
+    }
+}
+
+impl EmbeddingProvider for StubEmbedding {
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
+        Ok(texts
+            .iter()
+            .map(|text| {
+                let dimensions = self.dimensions.max(1);
+                let mut vec = vec![0.0_f32; dimensions];
+                for token in tokenize(text) {
+                    let hash = token
+                        .bytes()
+                        .fold(1_469_598_103_934_665_603_u64, |hash, byte| {
+                            (hash ^ u64::from(byte)).wrapping_mul(1_099_511_628_211)
+                        });
+                    vec[(hash % dimensions as u64) as usize] += 1.0;
+                }
+                let norm = vec.iter().map(|value| value * value).sum::<f32>().sqrt();
+                if norm > 0.0 {
+                    for value in &mut vec {
+                        *value /= norm;
+                    }
+                }
+                vec
+            })
+            .collect())
+    }
+
+    fn dimensions(&self) -> usize {
+        self.dimensions
+    }
+
+    fn id(&self) -> &str {
+        "stub"
+    }
+}
+
+/// Cosine similarity between two vectors (0.0 on dimension mismatch or zero
+/// norm) — the in-memory analogue of pgvector's `<=>` cosine operator.
+pub fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
+    if left.len() != right.len() || left.is_empty() {
+        return 0.0;
+    }
+    let dot: f32 = left.iter().zip(right).map(|(a, b)| a * b).sum();
+    let norm_left = left.iter().map(|value| value * value).sum::<f32>().sqrt();
+    let norm_right = right.iter().map(|value| value * value).sum::<f32>().sqrt();
+    if norm_left <= 0.0 || norm_right <= 0.0 {
+        return 0.0;
+    }
+    dot / (norm_left * norm_right)
+}
+
+/// One `embedding_profile` row: the provider identity every stored embedding
+/// FKs. Seeded (idempotent upsert) before embeddings are written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddingProfileRow {
+    pub id: Uuid,
+    pub provider: String,
+    pub model: String,
+    pub dimensions: usize,
+    pub distance: String,
+    pub version: String,
+    pub index_strategy: String,
+}
+
+/// The deterministic profile row for a provider: the id is derived from
+/// (provider id, dimensions) so every service instance seeds the same row.
+pub fn embedding_profile_for(embedder: &dyn EmbeddingProvider) -> EmbeddingProfileRow {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"memphant-embedding-profile:");
+    hasher.update(embedder.id().as_bytes());
+    hasher.update(b":");
+    hasher.update(embedder.dimensions().to_string().as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    EmbeddingProfileRow {
+        id: Uuid::from_bytes(bytes),
+        provider: embedder.id().to_string(),
+        model: embedder.id().to_string(),
+        dimensions: embedder.dimensions(),
+        distance: "cosine".to_string(),
+        version: "1".to_string(),
+        index_strategy: "exact".to_string(),
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("transaction already committed")]
@@ -398,6 +499,18 @@ pub trait MemoryStore: Send + Sync {
         tenant: TenantId,
         rows: Vec<EmbeddingRow>,
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
+    /// Idempotently seeds the `embedding_profile` row every embedding FKs.
+    fn upsert_embedding_profile(
+        &self,
+        tenant: TenantId,
+        profile: EmbeddingProfileRow,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+    /// Embedding rows for the given units (all profiles).
+    fn fetch_embeddings(
+        &self,
+        tenant: TenantId,
+        unit_ids: &[UnitId],
+    ) -> impl Future<Output = Result<Vec<EmbeddingRow>, StoreError>> + Send;
     fn lookup_api_key(
         &self,
         key_hash: &str,
@@ -442,6 +555,7 @@ struct InMemoryState {
     forgotten_sources: HashSet<(TenantId, SourceKindKey, Uuid)>,
     api_keys: Vec<ApiKeyRow>,
     embeddings: HashMap<TenantId, Vec<EmbeddingRow>>,
+    embedding_profiles: HashMap<TenantId, Vec<EmbeddingProfileRow>>,
     job_meta: HashMap<JobId, JobMeta>,
     deletion_generation: u64,
 }
@@ -1371,6 +1485,37 @@ impl MemoryStore for InMemoryStore {
         Ok(())
     }
 
+    async fn upsert_embedding_profile(
+        &self,
+        tenant: TenantId,
+        profile: EmbeddingProfileRow,
+    ) -> Result<(), StoreError> {
+        let mut state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+        let profiles = state.embedding_profiles.entry(tenant).or_default();
+        if !profiles.iter().any(|existing| existing.id == profile.id) {
+            profiles.push(profile);
+        }
+        Ok(())
+    }
+
+    async fn fetch_embeddings(
+        &self,
+        tenant: TenantId,
+        unit_ids: &[UnitId],
+    ) -> Result<Vec<EmbeddingRow>, StoreError> {
+        let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+        Ok(state
+            .embeddings
+            .get(&tenant)
+            .map(|rows| {
+                rows.iter()
+                    .filter(|row| unit_ids.contains(&row.memory_unit_id))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
     async fn lookup_api_key(&self, key_hash: &str) -> Result<Option<ApiKeyRow>, StoreError> {
         let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
         Ok(state
@@ -1610,6 +1755,7 @@ where
             decay_enabled: false,
             engine_version: "forget-verification-probe".to_string(),
         },
+        None,
         clock,
     )
     .await?;
@@ -1650,6 +1796,7 @@ where
 pub async fn recall<S>(
     store: &S,
     request: RecallRequest,
+    query_vec: Option<&[f32]>,
     clock: &dyn Clock,
 ) -> Result<RecallResponse, CoreError>
 where
@@ -1710,17 +1857,34 @@ where
     }
 
     let query_tokens = tokenize(&request.query);
+    let query_vec = query_vec.filter(|vec| !vec.is_empty());
     let tenant_units = store
         .fetch_recall_candidates(
             request.tenant_id,
             &request.allowed_scope_ids,
             &[],
             &query_tokens,
-            None,
+            query_vec,
             usize::MAX,
         )
         .await?;
     let unit_ids: Vec<UnitId> = tenant_units.iter().map(|unit| unit.id).collect();
+    // Real vector channel: cosine between the query embedding and stored unit
+    // embeddings (best score across profiles). `None` when no real embedding
+    // provider is configured — the channel is then traced as disabled.
+    let vector_scores: Option<HashMap<UnitId, f32>> = match query_vec {
+        Some(query_vec) => {
+            let rows = store.fetch_embeddings(request.tenant_id, &unit_ids).await?;
+            let mut scores: HashMap<UnitId, f32> = HashMap::new();
+            for row in rows {
+                let score = cosine_similarity(query_vec, &row.vec);
+                let entry = scores.entry(row.memory_unit_id).or_insert(score);
+                *entry = entry.max(score);
+            }
+            Some(scores)
+        }
+        None => None,
+    };
     let tenant_edges = store.fetch_edges(request.tenant_id, &unit_ids).await?;
     let mut tenant_episodes = Vec::new();
     if request.mode == RecallMode::Exhaustive {
@@ -1752,7 +1916,11 @@ where
         ChannelPass::Temporal,
         ChannelPass::Edge,
     ];
-    for pass in channels
+    let mut main_channels: Vec<ChannelPass> = channels.to_vec();
+    if vector_scores.is_some() {
+        main_channels.push(ChannelPass::Vector);
+    }
+    for pass in main_channels
         .into_iter()
         .filter(|pass| request.edge_expansion_enabled || *pass != ChannelPass::Edge)
     {
@@ -1763,6 +1931,7 @@ where
             &tenant_edges,
             &request,
             &query_tokens,
+            vector_scores.as_ref(),
             &now,
         );
         ranked.sort_by(|left, right| {
@@ -1829,6 +1998,7 @@ where
                     &tenant_edges,
                     &request,
                     &subquery_tokens,
+                    None,
                     &now,
                 );
                 ranked.sort_by(|left, right| {
@@ -2028,7 +2198,7 @@ where
         .collect::<Vec<_>>();
     let procedure_validation_states = procedure_trace_facts(&tenant_units, &request);
     let trace_id = TraceId::new();
-    let mut feature_flags = recall_feature_flags(&request);
+    let mut feature_flags = recall_feature_flags(&request, vector_scores.is_some());
     if candidate_traces
         .iter()
         .any(|candidate| candidate.derived_by == "composition")
@@ -2044,7 +2214,7 @@ where
         query_hash: hash_query(&request.query),
         engine_version: request.engine_version.clone(),
         feature_flags,
-        channel_runs: recall_stage_facts(),
+        channel_runs: recall_stage_facts(vector_scores.is_some()),
         candidates: candidate_traces,
         policy_filters: Vec::new(),
         context_items: items.clone(),
@@ -2907,6 +3077,8 @@ enum ChannelPass {
     Semantic,
     Temporal,
     Edge,
+    /// Real embedding cosine scores; only runs when a query vector exists.
+    Vector,
 }
 
 impl ChannelPass {
@@ -2916,6 +3088,7 @@ impl ChannelPass {
             Self::Lexical | Self::Semantic => RecallChannel::Lexical,
             Self::Temporal => RecallChannel::Temporal,
             Self::Edge => RecallChannel::Edge,
+            Self::Vector => RecallChannel::Vector,
         }
     }
 }
@@ -2926,6 +3099,7 @@ fn channel_candidates(
     edges: &[StoredMemoryEdge],
     request: &RecallRequest,
     query_tokens: &[String],
+    vector_scores: Option<&HashMap<UnitId, f32>>,
     now: &str,
 ) -> Vec<(StoredMemoryUnit, f32)> {
     units
@@ -2955,6 +3129,9 @@ fn channel_candidates(
                     request.procedure_recall_enabled,
                     now,
                 ),
+                ChannelPass::Vector => vector_scores
+                    .and_then(|scores| scores.get(&unit.id).copied())
+                    .unwrap_or(0.0),
             };
             (score > 0.0).then(|| (unit.clone(), score))
         })
@@ -3397,6 +3574,7 @@ fn channel_weight(pass: ChannelPass, query: &str) -> f32 {
         }
         ChannelPass::Temporal => 0.5,
         ChannelPass::Edge => 0.5,
+        ChannelPass::Vector => 2.0,
     }
 }
 
@@ -3526,7 +3704,7 @@ fn review_grade_adjustment(review_events: &[ReviewEvent], unit_id: UnitId) -> f3
     adjustment.clamp(0.2, 1.15)
 }
 
-fn recall_stage_facts() -> Vec<ReflectStageFact> {
+fn recall_stage_facts(vector_enabled: bool) -> Vec<ReflectStageFact> {
     [
         "stage0_policy",
         "query_decomposition",
@@ -3547,7 +3725,7 @@ fn recall_stage_facts() -> Vec<ReflectStageFact> {
         stage: stage.to_string(),
         // The vector channel only reports scores when a real embedding
         // provider is configured; the default runtime traces it as disabled.
-        detail: if stage == "vector" {
+        detail: if stage == "vector" && !vector_enabled {
             "disabled".to_string()
         } else {
             "completed".to_string()
@@ -3556,11 +3734,15 @@ fn recall_stage_facts() -> Vec<ReflectStageFact> {
     .collect()
 }
 
-fn recall_feature_flags(request: &RecallRequest) -> Vec<String> {
+fn recall_feature_flags(request: &RecallRequest, vector_enabled: bool) -> Vec<String> {
     let mut flags = vec![
         "entity_exact_enabled".to_string(),
         "fts_enabled".to_string(),
-        "vector_disabled".to_string(),
+        if vector_enabled {
+            "vector_enabled".to_string()
+        } else {
+            "vector_disabled".to_string()
+        },
         "temporal_enabled".to_string(),
         "contextual_chunks_enabled".to_string(),
     ];
@@ -3594,6 +3776,7 @@ fn recall_feature_flags(request: &RecallRequest) -> Vec<String> {
 pub async fn reflect_recorded<S>(
     store: &S,
     input: ReflectInput,
+    embedder: &dyn EmbeddingProvider,
     clock: &dyn Clock,
 ) -> Result<ReflectTrace, CoreError>
 where
@@ -3852,13 +4035,40 @@ where
                 scope_id: input.scope_id,
                 job_id: input.job_id,
                 compiler_version: input.compiler_version,
-                new_units,
+                new_units: new_units.clone(),
                 new_edges,
                 unit_updates,
                 trace: trace.clone(),
             },
         )
         .await?;
+
+    // Embedding write-through: when a real provider is configured, newly
+    // compiled unit bodies are embedded and persisted under the provider's
+    // (idempotently seeded) embedding profile. Noop providers skip entirely.
+    if embedder.dimensions() > 0 && !new_units.is_empty() {
+        let profile = embedding_profile_for(embedder);
+        let bodies: Vec<String> = new_units.iter().map(|unit| unit.body.clone()).collect();
+        let vectors = embedder
+            .embed(&bodies)
+            .map_err(|error| StoreError::Backend(format!("embedding failed: {error}")))?;
+        let rows: Vec<EmbeddingRow> = new_units
+            .iter()
+            .zip(vectors)
+            .filter(|(_, vec)| !vec.is_empty())
+            .map(|(unit, vec)| EmbeddingRow {
+                memory_unit_id: unit.id,
+                embedding_profile_id: profile.id,
+                vec,
+            })
+            .collect();
+        if !rows.is_empty() {
+            store
+                .upsert_embedding_profile(input.tenant_id, profile)
+                .await?;
+            store.upsert_embeddings(input.tenant_id, rows).await?;
+        }
+    }
     Ok(trace)
 }
 
