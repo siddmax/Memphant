@@ -20,11 +20,11 @@
 //! (`claude -p`) without re-running ingestion. QA accuracy is computed and
 //! labeled by that script, never by this lane.
 //!
-//! Granularity: `--granularity session` (default) ingests each haystack
-//! session as ONE episode; `--granularity turns` ingests each session as
-//! multiple episodes of up to `TURNS_WINDOW` consecutive turns (same
-//! `[session <id>]` prefix), mapping every minted episode back to its session
-//! for provenance scoring.
+//! Granularity: `--granularity turns` (default since 2026-07-10, see
+//! `DEFAULT_GRANULARITY`) ingests each session as multiple episodes of up to
+//! `TURNS_WINDOW` consecutive turns (same `[session <id>]` prefix), mapping
+//! every minted episode back to its session for provenance scoring;
+//! `--granularity session` ingests each haystack session as ONE episode.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -42,6 +42,14 @@ use sha2::{Digest, Sha256};
 const BOOTSTRAP_RESAMPLES: usize = 1000;
 /// Turn-window size for `--granularity turns`.
 const TURNS_WINDOW: usize = 4;
+/// Lane default ingestion granularity. Promoted to "turns" on 2026-07-10:
+/// LME-S n=100 seed 20260710 paired vs session granularity — ΔR@5 +0.085
+/// [+0.011, +0.160], ΔR@10 +0.128 [+0.053, +0.202], ΔQA +0.13 [+0.04, +0.21]
+/// (all 95% CIs exclude zero; reader gpt-5.6-terra@medium; proof:
+/// `docs/build-log/2026-07-10-scaled-reader-campaign.md`). Note the serde
+/// `default_granularity` below stays "session": it is a parsing default for
+/// pre-granularity REPORTS (which were session runs), not this lane default.
+pub const DEFAULT_GRANULARITY: &str = "turns";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct LmeQuestion {
@@ -966,6 +974,16 @@ mod tests {
         assert!(first.ci_excludes_zero);
         let null = bootstrap_ci(&[0.0, 0.0, 1.0, -1.0], 1000, 7);
         assert!(!null.ci_excludes_zero);
+    }
+
+    #[test]
+    fn lane_default_granularity_is_turns_but_old_reports_parse_as_session() {
+        // Promoted 2026-07-10 (scaled reader campaign: retrieval AND QA
+        // paired CIs exclude zero for turns vs session at n=100).
+        assert_eq!(DEFAULT_GRANULARITY, "turns");
+        // Reports written before the granularity field existed were session
+        // runs; the serde parsing default must never follow the lane default.
+        assert_eq!(default_granularity(), "session");
     }
 
     #[test]
