@@ -49,7 +49,7 @@ def test_status_ledger_reopened_synthetic_promotions() -> None:
 
     assert "**Promotion-provenance rule (2026-07-09):**" in status
     assert "Synthetic fixtures gate regressions, never promotions." in status
-    assert "CURRENT PHASE: `RUNTIME INCOMPLETE`" in status
+    assert "CURRENT PHASE: `RUNTIME COMPLETE — BENCHMARK EVIDENCE PENDING`" in status
 
     for label in REOPENED_GATE_LABELS:
         assert not checked(label), label

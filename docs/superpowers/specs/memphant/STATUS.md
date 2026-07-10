@@ -7,7 +7,9 @@
 >
 > **Promotion-provenance rule (2026-07-09):** Promotion evidence must be produced by the packaged Postgres-backed runtime against pinned real corpora with recorded hashes and an executed reader/scorer. Synthetic fixtures gate regressions, never promotions.
 >
-> # CURRENT PHASE: `RUNTIME INCOMPLETE`
+> # CURRENT PHASE: `RUNTIME COMPLETE — BENCHMARK EVIDENCE PENDING`
+>
+> Runtime proof (2026-07-10): `docs/build-log/2026-07-10-runtime-postgres-proof.md` — durable Postgres-backed REST/MCP/CLI/worker with API-key tenancy; `scripts/e2e_probe.sh` passes end-to-end (durability across restart, cross-tenant denial, correct/forget without resurrection, tri-domain resource ingest). SOTA/benchmark rungs stay open under the promotion-provenance rule.
 >
 > WS-0 proof artifact: `docs/build-log/artifacts/ws0-two-language-spike.json`.
 > R83 spike measured warm no-recompile Rust policy-change iteration at **0.073×** Python (`rust_proceeds`).
@@ -54,11 +56,11 @@
 - [x] **WS-A** Schema, core types, store seam — all tables incl. `belief_observation`/`review_event`/`scope_block`; bootstrap + provider lint green (proof: `docs/build-log/2026-07-03-wsa-progress.md`)
 - [x] **WS-B** Write path + memory compiler — retain/reflect/dedup/contradiction/corroboration golden fixtures pass (proof: `docs/build-log/2026-07-03-wsb-progress.md`)
 - [x] **WS-C** Read path + trace spine — every recall traced; oracle + isolation + citation + small-tenant fixtures pass (proof: `docs/build-log/2026-07-03-wsc-progress.md`)
-- [ ] **WS-D** Public surfaces — REST/MCP/Python SDK contract smoke exists, but packaged REST/MCP still use `InMemoryStore`; runtime exit requires Postgres-backed REST/MCP/CLI proof (current audit: `docs/build-log/2026-07-06-runtime-completion-gap-audit.md`)
+- [x] **WS-D** Public surfaces — REST (auth, tenant-bound traces/pages), rmcp 2.2 MCP, CLI memory verbs, and Python SDK all run against Postgres-backed storage through the shared `MemoryService` (proof: `docs/build-log/2026-07-10-runtime-postgres-proof.md` + `scripts/e2e_probe.sh`)
 - [x] **WS-E** Eval, security, ops — golden oracle + manifest guard + security suites + nightly sampled runner + deletion-completeness lane (proof: `docs/build-log/2026-07-03-wse-progress.md`)
 - [ ] **WS-F** Syndai dogfood cutover — first low-risk surface exported + trace-compared (proof: `docs/build-log/2026-07-03-wsf-progress.md`; stop-rule honored; launch not hostage to full cutover) (reopened 2026-07-09: promotion evidence was synthetic fixtures; see provenance rule)
 - [ ] **WS-G** Public UI/docs/launch surface (proof: `docs/build-log/2026-07-03-wsg-progress.md`) (reopened 2026-07-09: promotion evidence was synthetic fixtures; see provenance rule)
-- [ ] **WS-H** BYOC + hosted packaging — Docker/Compose/provider profiles exist, but packaged server/worker do not yet use durable Postgres storage (current audit: `docs/build-log/2026-07-06-runtime-completion-gap-audit.md`)
+- [x] **WS-H** BYOC + hosted packaging — the packaged server and worker consume the `DATABASE_URL` the Compose stack provides (AnyStore selection; loud EPHEMERAL warning without it); durability proven across process restarts (proof: `docs/build-log/2026-07-10-runtime-postgres-proof.md`)
 - [x] **WS-I** Advanced lever activation audit (proof: `docs/build-log/2026-07-03-wsi-progress.md`; `docs/build-log/artifacts/wsi-local-sota-profile.json` records 0 activated, 15 dormant)
 
 ## 3. SOTA ladder rungs (activation/disable contracts owned by `27` §2; check = advance-when met with archived profile proof)

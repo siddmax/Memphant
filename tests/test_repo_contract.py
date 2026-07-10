@@ -190,8 +190,11 @@ def test_status_cannot_claim_complete_while_runtime_is_in_memory() -> None:
         in (ROOT / "crates/memphant-mcp/src/main.rs").read_text(encoding="utf-8"),
         "worker_stub": "memphant-worker ws0"
         in (ROOT / "crates/memphant-worker/src/main.rs").read_text(encoding="utf-8"),
-        "postgres_store_lint_only": "impl MemoryStore for PostgresMemoryStore"
-        not in (ROOT / "crates/memphant-store-postgres/src/lib.rs").read_text(encoding="utf-8"),
+        "postgres_store_lint_only": "impl MemoryStore for PgStore"
+        not in (
+            (ROOT / "crates/memphant-store-postgres/src/lib.rs").read_text(encoding="utf-8")
+            + (ROOT / "crates/memphant-store-postgres/src/store.rs").read_text(encoding="utf-8")
+        ),
     }
     postgres_manifest = (ROOT / "crates/memphant-store-postgres/Cargo.toml").read_text(
         encoding="utf-8"
