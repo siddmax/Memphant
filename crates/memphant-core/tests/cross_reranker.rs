@@ -97,7 +97,6 @@ fn recall_request(
         query_decomposition_enabled: Some(false),
         procedure_recall_enabled: None,
         decay_enabled: None,
-        include_trace: None,
     }
 }
 

@@ -904,7 +904,6 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
                     query_decomposition_enabled: Some(disable != Some("query_decomposition")),
                     procedure_recall_enabled: Some(disable != Some("procedure_recall")),
                     decay_enabled: Some(disable != Some("decay")),
-                    include_trace: Some(false),
                 },
             )
             .await

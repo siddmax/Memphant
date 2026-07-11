@@ -447,12 +447,6 @@
             "null"
           ]
         },
-        "include_trace": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
         "limit": {
           "format": "uint",
           "minimum": 0,

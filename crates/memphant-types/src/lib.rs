@@ -870,7 +870,6 @@ pub struct RecallHttpRequest {
     pub query_decomposition_enabled: Option<bool>,
     pub procedure_recall_enabled: Option<bool>,
     pub decay_enabled: Option<bool>,
-    pub include_trace: Option<bool>,
 }
 
 fn default_true() -> bool {

@@ -572,7 +572,6 @@ async fn degraded_read_your_own_writes_serves_unreflected_episodes() {
                 query_decomposition_enabled: None,
                 procedure_recall_enabled: None,
                 decay_enabled: None,
-                include_trace: None,
             },
         )
         .await
@@ -809,7 +808,6 @@ async fn stub_embeddings_persist_and_power_the_vector_channel() {
                 query_decomposition_enabled: None,
                 procedure_recall_enabled: None,
                 decay_enabled: None,
-                include_trace: None,
             },
         )
         .await
