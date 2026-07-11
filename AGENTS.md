@@ -48,3 +48,9 @@ python3 scripts/apply_memphant_migrations.py --database-url postgres://memphant.
 # memphant-postgres-1 container (compose service `memphant-postgres`) on :5432.
 DATABASE_URL=postgres://memphant:memphant@localhost:5432/memphant bash scripts/e2e_probe.sh
 ```
+
+## CI monitoring
+
+After pushing to remote main, verify CI is green before claiming done. Poll no more
+often than **once every 2 minutes** (`gh run list --branch main --limit 1` /
+`gh run watch`) — CI runs take minutes; tighter polling wastes quota and adds noise.

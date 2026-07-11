@@ -93,8 +93,7 @@ Stable error catalog (HTTP status × retryable × MCP mapping). The same `code` 
   "memory_kinds": ["episodic", "semantic", "procedural", "resource"],
   "trust_policy": "default",
   "mode": "fast",
-  "limit": 8,
-  "include_trace": true
+  "limit": 8
 }
 ```
 
@@ -118,7 +117,6 @@ Tenant/subject may come from auth context in hosted mode. They are explicit in e
 | `include_quarantined` | bool | `false` | analyst/admin only; ignored (not errored) otherwise |
 | `budget` | `{tokens?, max_items?}` | tier default | Stage-7 pack budget; over-budget → `dropped[]` |
 | `limit` | int | `8` | hard cap after packing |
-| `include_trace` | bool | `false` | inline compact trace; full always via `trace_ref` |
 | `breadth` | `context`\|`search` | `context` | `search` widens episodic/temporal windows for user-facing memory search **through the same policy-gated path** — one recall chokepoint, two scoping modes, never a second endpoint (the Syndai-proven pattern) |
 | `delta_since` | trace_id | — | **rung-gated** (`recall_delta_enabled`, R80): return only the diff vs the archived pack — new units, superseded units (with the replacing generation), freshness downgrades, and a **count-only** `no_longer_available` (never names or describes removed content — forgotten memory must not be reconstructable from diffs; deletion-completeness eval covers this path) |
 | `include_pinned_block` | bool | `true` | opt-out of the `04` §12 pinned block in Stage-7 packing (R88); when included it is guaranteed-present under its own sub-budget, `inclusion_reason: pinned_block` |
