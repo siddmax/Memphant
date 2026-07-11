@@ -2398,7 +2398,7 @@ where
         );
     }
 
-    let iterative_scan_depth = recall_pack_scan_limit(&request, fused.len());
+    let iterative_scan_depth = recall_pack_scan_limit(&request, fused.len(), pack_levers);
     let packed = pack_recall_context(
         fused,
         &request,
@@ -3463,13 +3463,29 @@ fn sibling_gather_pass(acc: &mut PackAccumulator, budget_tokens: usize) {
     }
 }
 
-fn recall_pack_scan_limit(request: &RecallRequest, candidate_count: usize) -> usize {
+fn recall_pack_scan_limit(
+    request: &RecallRequest,
+    candidate_count: usize,
+    pack_levers: PackLevers,
+) -> usize {
     let output_limit = request.k.max(1);
-    match request.mode {
+    let scan_limit = match request.mode {
         RecallMode::Exhaustive => candidate_count
             .min(output_limit.saturating_mul(25).max(25))
             .max(output_limit),
         RecallMode::Fast | RecallMode::Balanced => output_limit.min(candidate_count).max(1),
+    };
+    // wave-final-review finding: in Fast/Balanced, scan_limit == output_limit
+    // == k, so the session-diversity quota (W4, `pack_levers.session_quota`)
+    // could only reshuffle the already-admitted top-k and could never surface
+    // a below-k distinct episode — its entire purpose. The quota's cap needs
+    // scan headroom past k to have candidates worth deferring, so widen to at
+    // least 2*k whenever the quota is enabled. `.take(scan_limit)` downstream
+    // clamps to `candidate_count`, so widening past it is harmless. Quota off
+    // leaves `scan_limit` untouched — byte-identical to today.
+    match pack_levers.session_quota {
+        Some(_) => scan_limit.max(output_limit.saturating_mul(2)),
+        None => scan_limit,
     }
 }
 
@@ -6408,6 +6424,116 @@ mod pack_cost_tests {
             on.token_estimate, off.token_estimate,
             "no budget left unused vs the unrestricted fill"
         );
+    }
+
+    /// wave-final-review finding: `recall_pack_scan_limit` clamped
+    /// `scan_limit == output_limit == k` in Fast/Balanced, so the quota could
+    /// only reshuffle the already-admitted top-k and never surface a below-k
+    /// distinct episode — its entire purpose. Quota off must reproduce
+    /// today's exact formula (`output_limit.min(candidate_count).max(1)`);
+    /// quota on must widen to give the quota scan headroom past k.
+    #[test]
+    fn recall_pack_scan_limit_quota_off_is_unchanged_quota_on_widens() {
+        let mut req = request(10_000);
+        req.k = 8;
+        let candidate_count = 100;
+
+        for mode in [RecallMode::Fast, RecallMode::Balanced] {
+            req.mode = mode;
+            let off = recall_pack_scan_limit(&req, candidate_count, PackLevers::default());
+            assert_eq!(
+                off, 8,
+                "{mode:?}: quota off must match today's output_limit.min(candidate_count).max(1)"
+            );
+
+            let on = recall_pack_scan_limit(
+                &req,
+                candidate_count,
+                PackLevers {
+                    sibling_gather_enabled: false,
+                    session_quota: Some(DEFAULT_SESSION_DIVERSITY_QUOTA),
+                },
+            );
+            assert_eq!(
+                on, 16,
+                "{mode:?}: quota on widens to 2*k so the quota has headroom"
+            );
+        }
+    }
+
+    /// wave-final-review: the same monopoly corpus as
+    /// `session_quota_admits_distinct_episodes_over_monopoly`, but run
+    /// through the REAL `recall_pack_scan_limit` derivation (as
+    /// `recall_with_pool` calls it) instead of a hand-passed `scan_limit`,
+    /// and in Fast mode — the mode where the quota was inert before this fix.
+    #[test]
+    fn fast_mode_quota_surfaces_diversity_via_real_scan_limit_derivation() {
+        let query_tokens = tokenize("quantum");
+        let candidates = || {
+            let mut v = Vec::new();
+            for i in 0..8u128 {
+                v.push(candidate(
+                    unit_ep(100 + i, 1, "alpha beta", Vec::new()),
+                    1.0,
+                ));
+            }
+            for episode in 2..=5u128 {
+                for j in 0..2u128 {
+                    v.push(candidate(
+                        unit_ep(episode * 10 + j, episode, "alpha beta", Vec::new()),
+                        1.0,
+                    ));
+                }
+            }
+            v
+        };
+        let mut req = request(10_000);
+        req.k = 8;
+        req.mode = RecallMode::Fast;
+
+        let off_levers = PackLevers::default();
+        let off_scan_limit = recall_pack_scan_limit(&req, candidates().len(), off_levers);
+        let off = pack_recall_context(
+            candidates(),
+            &req,
+            &[],
+            &query_tokens,
+            Vec::new(),
+            off_scan_limit,
+            off_levers,
+            false,
+        );
+        assert_eq!(
+            distinct_episodes(&off).len(),
+            1,
+            "quota off: Fast mode's real derivation still monopolises episode 1"
+        );
+
+        let on_levers = PackLevers {
+            sibling_gather_enabled: false,
+            session_quota: Some(DEFAULT_SESSION_DIVERSITY_QUOTA),
+        };
+        let on_scan_limit = recall_pack_scan_limit(&req, candidates().len(), on_levers);
+        assert!(
+            on_scan_limit > req.k,
+            "quota on: the real derivation must widen past k, got {on_scan_limit}"
+        );
+        let on = pack_recall_context(
+            candidates(),
+            &req,
+            &[],
+            &query_tokens,
+            Vec::new(),
+            on_scan_limit,
+            on_levers,
+            false,
+        );
+        assert!(
+            distinct_episodes(&on).len() > 1,
+            "quota on: the real derivation gives the quota headroom to surface >1 distinct episode, got {:?}",
+            distinct_episodes(&on)
+        );
+        assert_eq!(on.items.len(), 8, "the pack is still filled to k");
     }
 
     /// §5 off-flags byte-identical: with both levers OFF the packer matches a
