@@ -450,3 +450,14 @@ champion; winners confirmed on held-out 20260711 before promotion (two-seed rule
 now binding for promotions — forking-paths defense); promotions + STATUS + build-log
 + mirror in the same wave. Priorities: Accuracy/UX > cost > perf/latency > security
 (RLS/roles stay queued, not in this wave).
+
+## 2026-07-11 Round 2 — prosumer-reframed (canonical pointer)
+
+The accuracy wave measured NO promotions (two-seed rule; `docs/build-log/2026-07-11-accuracy-wave.md`)
+and the Syndai doc gate returned HOLD. Round 2 is pre-registered in
+`docs/reports/2026-07-11-prosumer-memory-campaign-report.md` §6: dev n=300 (seed
+20260712) / confirm full-500 with virgin-200 subset; levers R1 Chain-of-Note reader,
+R2 preference profile block, R3 voyage-context-3 contextualized embedder (doc lane
+first, re-run the gate), R4 temporal re-measure, R5 HyDE A/B, R6 months-scale
+hygiene. Verbatim-is-the-memory rule adopted; prosumer scale retires the ANN/graph
+work items.
