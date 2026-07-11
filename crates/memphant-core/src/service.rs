@@ -20,8 +20,8 @@ use memphant_types::{
 use crate::{
     Clock, CoreError, DEFAULT_CANDIDATE_POOL_SIZE, EmbeddingProvider, JobFilter, MemoryStore,
     PackLevers, ReflectJobRow, ScopePage, StoreError, VectorQuery, correct_memory,
-    embedding_profile_for, forget_memory, parse_content_date, recall_with_pool, record_mark,
-    reflect_recorded, retain_episode, retain_resource, tokenize,
+    embedding_profile_for, forget_memory, normalize_component, parse_content_date,
+    recall_with_pool, record_mark, reflect_recorded, retain_episode, retain_resource, tokenize,
 };
 
 /// Errors surfaced by the application layer. Transport layers map these onto
@@ -100,6 +100,16 @@ pub struct MemoryService<S: MemoryStore> {
     /// those paths is byte-identical to today. Promotion is measurement-only, so
     /// it ships off and the bench threads it via `with_temporal_grounding_enabled`.
     temporal_grounding_enabled: bool,
+    /// W6 deterministic fact-extraction toggle (DEFAULT OFF). When on, the
+    /// reflect-stage compile of an EPISODE mines its user turns for first-person
+    /// preference/attribute statements and emits extra short, honest-subject-key
+    /// ReflectCandidates alongside the raw episode unit (`compile_job`). Off means
+    /// the compile is byte-identical to today (only the raw episode candidate).
+    /// Independent of `temporal_grounding_enabled`: the two only interact so that
+    /// a mined fact body is `[date ...]`-prefixed when BOTH are on and the body
+    /// carries a parseable content date. Measurement-only promotion, so it ships
+    /// off and the bench threads it via `with_fact_extraction_enabled`.
+    fact_extraction_enabled: bool,
 }
 
 impl<S: MemoryStore> Clone for MemoryService<S> {
@@ -112,6 +122,7 @@ impl<S: MemoryStore> Clone for MemoryService<S> {
             candidate_pool_size: self.candidate_pool_size,
             pack_levers: self.pack_levers,
             temporal_grounding_enabled: self.temporal_grounding_enabled,
+            fact_extraction_enabled: self.fact_extraction_enabled,
         }
     }
 }
@@ -126,6 +137,7 @@ impl<S: MemoryStore> MemoryService<S> {
             candidate_pool_size: DEFAULT_CANDIDATE_POOL_SIZE,
             pack_levers: PackLevers::default(),
             temporal_grounding_enabled: false,
+            fact_extraction_enabled: false,
         }
     }
 
@@ -178,6 +190,16 @@ impl<S: MemoryStore> MemoryService<S> {
     /// its value here. Off ⇒ all three paths behave exactly as today.
     pub fn with_temporal_grounding_enabled(mut self, enabled: bool) -> Self {
         self.temporal_grounding_enabled = enabled;
+        self
+    }
+
+    /// Enables W6 deterministic fact extraction (default OFF): the reflect-stage
+    /// episode compile mines user turns for preference/attribute statements and
+    /// emits extra short, honest-subject-key ReflectCandidates. Construction-time
+    /// only, mirroring the W3/W4/W5 knobs; the bench lane's `--fact-extraction`
+    /// threads its value here. Off ⇒ the compile is byte-identical to today.
+    pub fn with_fact_extraction_enabled(mut self, enabled: bool) -> Self {
+        self.fact_extraction_enabled = enabled;
         self
     }
 
@@ -571,54 +593,56 @@ impl<S: MemoryStore> MemoryService<S> {
     ) -> Result<CompileOutcome, ServiceError> {
         let compiler_version =
             compiler_override.unwrap_or_else(|| job.job.compiler_version.clone());
-        let (episode_id, resource_id, candidate) = match job.job.kind {
-            ReflectJobKind::ReflectEpisode => {
-                let Some(episode_id) = job.job.episode_id else {
-                    return Ok(CompileOutcome::default());
-                };
-                let Some(episode) = self
-                    .store
-                    .fetch_episode(job.job.tenant_id, episode_id)
-                    .await?
-                else {
-                    // Episode gone (e.g. forgotten before compile): nothing to do.
-                    return Ok(CompileOutcome::default());
-                };
-                // W5 temporal grounding: extract the episode's primary content
-                // date (deterministic, clock-free) once. Fallback order is
-                // parsed content date → episode first_observed_at → none; the
-                // store carries no first_observed_at column today, so the middle
-                // rung is NOT-YET-WIRED and we go straight to `None` when parsing
-                // fails (the bench corpus always carries the `[date ...]` prefix,
-                // so measurement is unaffected). Gated: off ⇒ no date at all.
-                let content_date = if self.temporal_grounding_enabled {
-                    parse_content_date(&episode.body)
-                } else {
-                    None
-                };
-                // `YYYY-MM-DD` for the chunk header slot; midnight-UTC RFC 3339
-                // for the grounded `valid_from`. Both derive from the SAME parsed
-                // date so the header and the window agree.
-                let content_date_header = content_date.map(|date| date.to_string());
-                let valid_from = content_date.map(|date| format!("{date}T00:00:00Z"));
-                // Rung 4: mint contextual chunks tied to this raw episode when
-                // the write path is enabled (default on since 2026-07-10).
-                // Every other candidate construction (resource jobs,
-                // direct-unit retains) stays chunk-free — episodes only.
-                let contextual_chunks = if self.contextual_chunks_write_enabled {
-                    episode_contextual_chunks(
-                        episode.id,
-                        &episode.source_kind,
-                        &episode.body,
-                        content_date_header.as_deref(),
-                    )
-                } else {
-                    Vec::new()
-                };
-                (
-                    Some(episode.id),
-                    None,
-                    ReflectCandidate {
+        let (episode_id, resource_id, candidates): (_, _, Vec<ReflectCandidate>) =
+            match job.job.kind {
+                ReflectJobKind::ReflectEpisode => {
+                    let Some(episode_id) = job.job.episode_id else {
+                        return Ok(CompileOutcome::default());
+                    };
+                    let Some(episode) = self
+                        .store
+                        .fetch_episode(job.job.tenant_id, episode_id)
+                        .await?
+                    else {
+                        // Episode gone (e.g. forgotten before compile): nothing to do.
+                        return Ok(CompileOutcome::default());
+                    };
+                    // W5 temporal grounding: extract the episode's primary content
+                    // date (deterministic, clock-free) once. Fallback order is
+                    // parsed content date → episode first_observed_at → none; the
+                    // store carries no first_observed_at column today, so the middle
+                    // rung is NOT-YET-WIRED and we go straight to `None` when parsing
+                    // fails (the bench corpus always carries the `[date ...]` prefix,
+                    // so measurement is unaffected). Gated: off ⇒ no date at all.
+                    let content_date = if self.temporal_grounding_enabled {
+                        parse_content_date(&episode.body)
+                    } else {
+                        None
+                    };
+                    // `YYYY-MM-DD` for the chunk header slot; midnight-UTC RFC 3339
+                    // for the grounded `valid_from`. Both derive from the SAME parsed
+                    // date so the header and the window agree.
+                    let content_date_header = content_date.map(|date| date.to_string());
+                    let valid_from = content_date.map(|date| format!("{date}T00:00:00Z"));
+                    // Rung 4: mint contextual chunks tied to this raw episode when
+                    // the write path is enabled (default on since 2026-07-10).
+                    // Every other candidate construction (resource jobs,
+                    // direct-unit retains) stays chunk-free — episodes only.
+                    let contextual_chunks = if self.contextual_chunks_write_enabled {
+                        episode_contextual_chunks(
+                            episode.id,
+                            &episode.source_kind,
+                            &episode.body,
+                            content_date_header.as_deref(),
+                        )
+                    } else {
+                        Vec::new()
+                    };
+                    // The raw episode candidate (unchanged), then — only when W6 fact
+                    // extraction is on — the mined preference/attribute facts. The
+                    // `[date ...]` body prefix couples to temporal grounding only:
+                    // `content_date_header` is already `None` unless that flag is on.
+                    let mut candidates = vec![ReflectCandidate {
                         source_kind: episode.source_kind.clone(),
                         trust_level: episode.source_trust,
                         actor_id: episode.actor_id,
@@ -631,44 +655,56 @@ impl<S: MemoryStore> MemoryService<S> {
                         contextual_chunks,
                         valid_from,
                         valid_to: None,
-                    },
-                )
-            }
-            ReflectJobKind::ReflectResource => {
-                let Some(resource_id) = job.job.resource_id else {
-                    return Ok(CompileOutcome::default());
-                };
-                let Some(resource) = self
-                    .store
-                    .fetch_resource(job.job.tenant_id, resource_id)
-                    .await?
-                else {
-                    return Ok(CompileOutcome::default());
-                };
-                let Some(body) = resource.body.clone().filter(|body| !body.trim().is_empty())
-                else {
-                    // Pointer-only resource: nothing durable to compile yet.
-                    return Ok(CompileOutcome::default());
-                };
-                (
-                    None,
-                    Some(resource.id),
-                    ReflectCandidate {
-                        source_kind: "resource".to_string(),
-                        trust_level: resource.source_trust,
-                        actor_id: resource.actor_id,
-                        subject: None,
-                        predicate: None,
-                        kind: Some(MemoryKind::Resource),
-                        body,
-                        churn_class: None,
-                        admission_hint: None,
-                        contextual_chunks: Vec::new(),
-                        valid_from: None,
-                        valid_to: None,
-                    },
-                )
-            }
+                    }];
+                    if self.fact_extraction_enabled {
+                        candidates.extend(extract_fact_candidates(
+                            &episode,
+                            content_date_header.as_deref(),
+                        ));
+                    }
+                    (Some(episode.id), None, candidates)
+                }
+                ReflectJobKind::ReflectResource => {
+                    let Some(resource_id) = job.job.resource_id else {
+                        return Ok(CompileOutcome::default());
+                    };
+                    let Some(resource) = self
+                        .store
+                        .fetch_resource(job.job.tenant_id, resource_id)
+                        .await?
+                    else {
+                        return Ok(CompileOutcome::default());
+                    };
+                    let Some(body) = resource.body.clone().filter(|body| !body.trim().is_empty())
+                    else {
+                        // Pointer-only resource: nothing durable to compile yet.
+                        return Ok(CompileOutcome::default());
+                    };
+                    (
+                        None,
+                        Some(resource.id),
+                        vec![ReflectCandidate {
+                            source_kind: "resource".to_string(),
+                            trust_level: resource.source_trust,
+                            actor_id: resource.actor_id,
+                            subject: None,
+                            predicate: None,
+                            kind: Some(MemoryKind::Resource),
+                            body,
+                            churn_class: None,
+                            admission_hint: None,
+                            contextual_chunks: Vec::new(),
+                            valid_from: None,
+                            valid_to: None,
+                        }],
+                    )
+                }
+            };
+
+        // Every candidate in a job shares the episode/resource actor; the raw
+        // candidate is always first, so its actor drives the ReflectInput.
+        let Some(actor_id) = candidates.first().map(|candidate| candidate.actor_id) else {
+            return Ok(CompileOutcome::default());
         };
 
         let trace = reflect_recorded(
@@ -676,12 +712,12 @@ impl<S: MemoryStore> MemoryService<S> {
             ReflectInput {
                 tenant_id: job.job.tenant_id,
                 scope_id: job.job.scope_id,
-                actor_id: candidate.actor_id,
+                actor_id,
                 episode_id,
                 resource_id,
                 job_id: job.job.id,
                 compiler_version,
-                candidates: vec![candidate],
+                candidates,
             },
             self.embedder.as_ref(),
             self.clock.as_ref(),
@@ -726,20 +762,26 @@ const CONTEXTUAL_CHUNK_WINDOW: usize = 4;
 /// (covering up to `MAX_CONTEXTUAL_CHUNKS * CONTEXTUAL_CHUNK_WINDOW` turns).
 const MAX_CONTEXTUAL_CHUNKS: usize = 32;
 
-/// A body line reads as a conversational turn when it has the `role: content`
-/// shape: a short leading role token, then `": "`, then non-empty content. The
-/// bench lane's per-session episodes ingest in exactly this form; a bracketed
-/// provenance line like `[session s1] [date ...]` has no `": "` and is skipped.
-fn line_is_turn(line: &str) -> bool {
-    let Some((role, content)) = line.trim().split_once(": ") else {
-        return false;
-    };
-    !role.is_empty()
+/// Parses a body line's `role: content` turn shape: a short leading role token,
+/// then `": "`, then non-empty content. Returns `(role, content)` or `None` for
+/// non-turn lines. The bench lane's per-session episodes ingest in exactly this
+/// form; a bracketed provenance line like `[session s1] [date ...]` has no `": "`
+/// and parses as `None`. Shared by the chunk segmenter and the W6 fact miner so
+/// there is ONE turn parser, not two.
+fn parse_turn(line: &str) -> Option<(&str, &str)> {
+    let (role, content) = line.trim().split_once(": ")?;
+    let ok = !role.is_empty()
         && role.len() <= 32
         && !content.trim().is_empty()
         && role
             .chars()
-            .all(|c| c.is_alphanumeric() || matches!(c, ' ' | '_' | '-'))
+            .all(|c| c.is_alphanumeric() || matches!(c, ' ' | '_' | '-'));
+    ok.then_some((role, content))
+}
+
+/// A body line reads as a conversational turn when it parses as `role: content`.
+fn line_is_turn(line: &str) -> bool {
+    parse_turn(line).is_some()
 }
 
 /// Byte spans of the segments to window over, plus whether the body parsed as
@@ -816,6 +858,552 @@ fn episode_contextual_chunks(
                 // the chunk body directly even over multi-byte text.
                 source_span: Some(format!("{start}-{end}")),
             })
+        })
+        .collect()
+}
+
+// ===========================================================================
+// W6 deterministic fact extraction (preference/attribute mining at reflect).
+//
+// v1 is a hand-rolled, clock-free, LLM-free pattern miner (canonical plan: NO
+// LLM in the write path). It scans an episode's USER turns for first-person
+// preference/attribute statements and emits SHORT, embeddable ReflectCandidates
+// with HONEST subject keys — the lever the single-session-preference stratum
+// needs, and the fix for the opaque-content-hash keys that starve supersedence.
+//
+// PRECISION over recall (§6): a noisy fact index poisons packs, so every rule is
+// conservative — demonstrative/pronoun objects and conversational meta nouns
+// ("my point is", "I like that idea") are dropped, and the ambiguous "I'm a
+// <desc>" family is keyed by its own description (each a standalone fact that
+// only an exact repeat or an explicit negation supersedes) rather than guessing
+// a shared occupation/identity slot. The cost is missed updates on that family;
+// the win is never wrongly superseding "I'm a teacher" with "I'm a vegetarian".
+//
+// Patterns are hand-rolled rather than regex: core carries no regex dependency
+// and the v1 shapes (fixed trigger phrases + token scans) stay readable without
+// one (KISS). An LLM extractor is a later experiment behind this same seam.
+// ===========================================================================
+
+/// Per-episode hard cap on extracted facts (§3 bloat guard). An episode dense
+/// with first-person statements keeps only the most recent `MAX_EXTRACTED_FACTS`
+/// — a noisy fact index costs more recall than it earns.
+const MAX_EXTRACTED_FACTS: usize = 8;
+
+/// Minimum word count for a mineable sentence (§3). Sub-4-word fragments
+/// ("I love it", "my bad") are almost always conversational noise, not durable
+/// facts; counted on the raw sentence, before any date prefix.
+const MIN_FACT_SENTENCE_WORDS: usize = 4;
+
+/// A deterministic preference/attribute fact mined from one episode body. The
+/// `family`/`subject_phrase` pair becomes the honest subject key
+/// (`{scope}:{family}:{subject_phrase}`, via `derive_subject_key`) so the SAME
+/// subject in a later episode supersedes; `body` is the verbatim source sentence
+/// (optionally `[date ...]`-prefixed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExtractedFact {
+    family: &'static str,
+    subject_phrase: String,
+    body: String,
+}
+
+/// Pronoun / demonstrative objects that read as conversational filler, never a
+/// durable subject ("I love it", "my favorite is that", "I like these").
+const PRONOUN_STOPS: &[&str] = &[
+    "it",
+    "that",
+    "this",
+    "these",
+    "those",
+    "them",
+    "they",
+    "he",
+    "she",
+    "him",
+    "her",
+    "you",
+    "us",
+    "me",
+    "myself",
+    "one",
+    "ones",
+    "everything",
+    "anything",
+    "something",
+    "nothing",
+    "everyone",
+    "anyone",
+    "someone",
+    "itself",
+    "here",
+    "there",
+    "who",
+    "what",
+    "which",
+];
+
+/// Meta / conversational nouns for the "my <noun> is <value>" rule — these are
+/// discourse moves, not attributes ("my point is", "my question is").
+const NOUN_STOPS: &[&str] = &[
+    "point",
+    "question",
+    "guess",
+    "concern",
+    "answer",
+    "goal",
+    "issue",
+    "problem",
+    "idea",
+    "opinion",
+    "view",
+    "take",
+    "understanding",
+    "assumption",
+    "mistake",
+    "bad",
+    "apologies",
+    "sense",
+    "hope",
+    "plan",
+    "thought",
+    "thoughts",
+    "feeling",
+    "feelings",
+    "response",
+    "reply",
+    "suggestion",
+    "recommendation",
+    "advice",
+    "impression",
+    "worry",
+    "fear",
+];
+
+/// Description heads that follow "I'm a/an" but signal filler, not identity
+/// ("I'm a bit tired", "I'm a huge fan", "I'm a little confused").
+const IDENTITY_STOPS: &[&str] = &[
+    "bit", "little", "tad", "lot", "fan", "huge", "big", "couple", "few", "sort", "kind", "loyal",
+];
+
+/// Tokens skipped between the first-person "I" and a preference verb (negation
+/// and hedges) so "I don't really like X" and "I like X" find the same verb.
+const PREF_FILLERS: &[&str] = &[
+    "do",
+    "don't",
+    "dont",
+    "did",
+    "didn't",
+    "not",
+    "never",
+    "really",
+    "no",
+    "longer",
+    "just",
+    "also",
+    "still",
+    "actually",
+    "totally",
+    "absolutely",
+    "genuinely",
+    "truly",
+    "simply",
+    "so",
+    "much",
+    "always",
+    "generally",
+    "usually",
+    "kinda",
+    "sort",
+    "of",
+];
+
+/// Single-word preference verbs. Polarity (love vs hate) lives in the body, not
+/// the key, so a reversal supersedes/contradicts the prior fact.
+const PREF_VERBS: &[&str] = &[
+    "love",
+    "loved",
+    "like",
+    "liked",
+    "prefer",
+    "preferred",
+    "enjoy",
+    "enjoyed",
+    "hate",
+    "hated",
+    "dislike",
+    "disliked",
+    "adore",
+    "adored",
+    "fancy",
+];
+
+/// Trailing temporal/update words stripped from an object phrase so the key is
+/// stable across "I like coffee", "I like coffee now", "...coffee anymore".
+const OBJECT_TRAILERS: &[&str] = &[
+    "anymore",
+    "now",
+    "today",
+    "currently",
+    "lately",
+    "recently",
+    "nowadays",
+    "days",
+    "these",
+    "any",
+    "more",
+    "longer",
+    "too",
+    "though",
+    "either",
+    "here",
+];
+
+/// Clause-boundary words: an object/desc/noun phrase ends before the first of
+/// these so "I love hiking but hate crowds" keys on "hiking", not the whole tail.
+const CLAUSE_STOPS: &[&str] = &[
+    "and", "but", "because", "so", "although", "though", "however", "yet", "while", "whereas",
+];
+
+/// Strips leading/trailing punctuation from a token, keeping inner apostrophes
+/// (so "don't" / "can't" survive intact for verb matching).
+fn strip_punct(token: &str) -> &str {
+    token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '\'')
+}
+
+/// Splits a turn's content into sentences on terminal `.`/`!`/`?`. A deterministic
+/// extension of the line/turn splitting — NOT a second word tokenizer. All three
+/// delimiters are single-byte ASCII, so the byte slices land on char boundaries
+/// even over multi-byte content.
+fn split_sentences(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    for (i, byte) in text.bytes().enumerate() {
+        if matches!(byte, b'.' | b'!' | b'?') {
+            let sentence = text[start..i].trim();
+            if !sentence.is_empty() {
+                out.push(sentence);
+            }
+            start = i + 1;
+        }
+    }
+    let tail = text[start..].trim();
+    if !tail.is_empty() {
+        out.push(tail);
+    }
+    out
+}
+
+/// Trims a token slice at the first clause boundary, returning the leading
+/// tokens (may be empty).
+fn clause_trim<'a>(tokens: &[&'a str]) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    for token in tokens {
+        let word = strip_punct(token);
+        if CLAUSE_STOPS.contains(&word) {
+            break;
+        }
+        out.push(*token);
+        // A trailing comma/semicolon ends the clause after including this word.
+        if token.ends_with([',', ';', ':']) {
+            break;
+        }
+    }
+    out
+}
+
+/// Cleans a preference object phrase into a stable normalized key half, or
+/// `None` when it is empty or a bare pronoun/demonstrative (§6).
+fn clean_object(tokens: &[&str]) -> Option<String> {
+    let mut words: Vec<&str> = clause_trim(tokens)
+        .iter()
+        .map(|token| strip_punct(token))
+        .filter(|word| !word.is_empty())
+        .collect();
+    // Drop a single leading article so "I love the ocean" / "I hate the ocean"
+    // share `preference:ocean`.
+    if matches!(words.first().copied(), Some("a" | "an" | "the")) {
+        words.remove(0);
+    }
+    // Drop trailing temporal/update words.
+    while matches!(words.last().copied(), Some(word) if OBJECT_TRAILERS.contains(&word)) {
+        words.pop();
+    }
+    let first = *words.first()?;
+    if PRONOUN_STOPS.contains(&first) {
+        return None;
+    }
+    let phrase = normalize_component(&words.join(" "));
+    (!phrase.is_empty()).then_some(phrase)
+}
+
+/// Normalizes a noun/desc phrase (subject-side), rejecting empties and bare
+/// pronouns; unlike `clean_object` it keeps leading articles out by caller
+/// choice and never strips trailers (subjects are not temporal).
+fn clean_subject_phrase(tokens: &[&str]) -> Option<String> {
+    let words: Vec<&str> = clause_trim(tokens)
+        .iter()
+        .map(|token| strip_punct(token))
+        .filter(|word| !word.is_empty())
+        .collect();
+    let first = *words.first()?;
+    if PRONOUN_STOPS.contains(&first) {
+        return None;
+    }
+    let phrase = normalize_component(&words.join(" "));
+    (!phrase.is_empty()).then_some(phrase)
+}
+
+/// Matches ONE fact in a single sentence, first rule wins (superlative before
+/// the generic "my <noun> is" so "favorite" lands in the preference namespace).
+/// `None` when the sentence is too short or matches no v1 pattern.
+fn match_fact(sentence: &str) -> Option<ExtractedFact> {
+    if sentence.split_whitespace().count() < MIN_FACT_SENTENCE_WORDS {
+        return None;
+    }
+    let lower = sentence.to_ascii_lowercase();
+    let tokens: Vec<&str> = lower.split_whitespace().collect();
+    let (family, subject_phrase) = match_superlative(&tokens)
+        .or_else(|| match_my_new_noun(&tokens))
+        .or_else(|| match_my_noun_is(&tokens))
+        .or_else(|| match_identity(&tokens))
+        .or_else(|| match_preference_verb(&tokens))?;
+    Some(ExtractedFact {
+        family,
+        subject_phrase,
+        body: sentence.to_string(),
+    })
+}
+
+/// "my [all-time] favorite <noun> is <value>" → `preference:favorite <noun>`
+/// (the value is deliberately OUT of the key so a later value supersedes).
+fn match_superlative(tokens: &[&str]) -> Option<(&'static str, String)> {
+    let fav = tokens
+        .iter()
+        .position(|token| strip_punct(token) == "favorite")?;
+    // The word(s) before "favorite" must root it in "my [all-time] favorite".
+    let before =
+        |offset: usize| -> Option<&str> { fav.checked_sub(offset).map(|i| strip_punct(tokens[i])) };
+    let rooted = before(1) == Some("my")
+        || (before(1) == Some("all-time") && before(2) == Some("my"))
+        || (before(1) == Some("time") && before(2) == Some("all") && before(3) == Some("my"));
+    if !rooted {
+        return None;
+    }
+    let is_at = tokens
+        .iter()
+        .enumerate()
+        .skip(fav + 1)
+        .find(|(_, token)| strip_punct(token) == "is")
+        .map(|(index, _)| index)?;
+    let noun = clean_subject_phrase(&tokens[fav + 1..is_at])?;
+    // A value must follow, and it must not be a bare pronoun.
+    let _value = clean_subject_phrase(&tokens[is_at + 1..])?;
+    Some(("preference", format!("favorite {noun}")))
+}
+
+/// "my new <noun> is <value>" → `attribute:<noun>` (shares the key of the plain
+/// "my <noun> is <value>" so an explicit update supersedes).
+fn match_my_new_noun(tokens: &[&str]) -> Option<(&'static str, String)> {
+    let my = tokens.iter().position(|token| strip_punct(token) == "my")?;
+    if strip_punct(tokens.get(my + 1)?) != "new" {
+        return None;
+    }
+    let is_at = tokens
+        .iter()
+        .enumerate()
+        .skip(my + 2)
+        .find(|(_, token)| strip_punct(token) == "is")
+        .map(|(index, _)| index)?;
+    let noun = clean_subject_phrase(&tokens[my + 2..is_at])?;
+    let _value = clean_subject_phrase(&tokens[is_at + 1..])?;
+    (!NOUN_STOPS.contains(&noun.as_str())).then_some(("attribute", noun))
+}
+
+/// "my <noun> is <value>" → `attribute:<noun>`, dropping meta/discourse nouns.
+fn match_my_noun_is(tokens: &[&str]) -> Option<(&'static str, String)> {
+    let my = tokens.iter().position(|token| strip_punct(token) == "my")?;
+    let is_at = tokens
+        .iter()
+        .enumerate()
+        .skip(my + 1)
+        .find(|(_, token)| strip_punct(token) == "is")
+        .map(|(index, _)| index)?;
+    let noun_tokens = &tokens[my + 1..is_at];
+    // Keep the noun tight (1..=3 words) so "my <clause> is" prose doesn't key.
+    if noun_tokens.is_empty() || noun_tokens.len() > 3 {
+        return None;
+    }
+    let noun = clean_subject_phrase(noun_tokens)?;
+    let _value = clean_subject_phrase(&tokens[is_at + 1..])?;
+    // Reject any meta noun (checked per word so "only point" is caught too).
+    if noun.split(' ').any(|word| NOUN_STOPS.contains(&word)) {
+        return None;
+    }
+    Some(("attribute", noun))
+}
+
+/// "I am a/an <desc>" / "I'm a/an <desc>" (incl. negated "not a/an") →
+/// `attribute:<desc>`. Keyed by the description itself: two different identities
+/// coexist, and only an exact repeat or an explicit negation supersedes.
+fn match_identity(tokens: &[&str]) -> Option<(&'static str, String)> {
+    // Locate the "I'm" / "I am" anchor and the token index just after it.
+    let mut after_pronoun = None;
+    for (i, token) in tokens.iter().enumerate() {
+        match strip_punct(token) {
+            "i'm" => {
+                after_pronoun = Some(i + 1);
+                break;
+            }
+            "i" if strip_punct(tokens.get(i + 1).copied().unwrap_or("")) == "am" => {
+                after_pronoun = Some(i + 2);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let mut idx = after_pronoun?;
+    // Skip a negation/hedge ("not", "no longer", "really").
+    while matches!(
+        strip_punct(tokens.get(idx).copied().unwrap_or("")),
+        "not" | "no" | "longer" | "really" | "actually" | "also" | "still"
+    ) {
+        idx += 1;
+    }
+    // Require an article: "a"/"an" — this filters bare "I am happy" adjectives.
+    if !matches!(
+        strip_punct(tokens.get(idx).copied().unwrap_or("")),
+        "a" | "an"
+    ) {
+        return None;
+    }
+    let desc_tokens = &tokens[idx + 1..];
+    if desc_tokens.is_empty() {
+        return None;
+    }
+    let desc = clean_subject_phrase(desc_tokens)?;
+    let head = desc.split(' ').next().unwrap_or("");
+    if IDENTITY_STOPS.contains(&head) {
+        return None;
+    }
+    // Keep the description tight (1..=4 words).
+    if desc.split(' ').count() > 4 {
+        return None;
+    }
+    Some(("attribute", desc))
+}
+
+/// Preference verbs (incl. multi-word "can't stand", "switched to") → the
+/// `preference:<object>` key, with negation/hedges skipped between "I" and the
+/// verb so update phrasings share the positive assertion's key.
+fn match_preference_verb(tokens: &[&str]) -> Option<(&'static str, String)> {
+    for (i, token) in tokens.iter().enumerate() {
+        if strip_punct(token) != "i" {
+            continue;
+        }
+        let mut j = i + 1;
+        while j < tokens.len() && PREF_FILLERS.contains(&strip_punct(tokens[j])) {
+            j += 1;
+        }
+        if j >= tokens.len() {
+            continue;
+        }
+        let verb = strip_punct(tokens[j]);
+        let next = tokens.get(j + 1).map(|token| strip_punct(token));
+        // Multi-word verbs ("can't stand", "switched to") consume two tokens.
+        let verb_end = if (matches!(verb, "can't" | "cannot" | "can") && next == Some("stand"))
+            || (verb == "switched" && next == Some("to"))
+        {
+            j + 2
+        } else if PREF_VERBS.contains(&verb) {
+            j + 1
+        } else {
+            // This "I" did not front a preference verb (e.g. "When I travel I
+            // love X"); try the next "I" rather than giving up on the sentence.
+            continue;
+        };
+        // A verb was found: its object decides the fact. A bad (pronoun) object
+        // rejects the sentence outright (precision) — we do not hunt further.
+        return clean_object(&tokens[verb_end..]).map(|object| ("preference", object));
+    }
+    None
+}
+
+/// Mines an episode body for W6 facts: scans USER turns (and non-role prose)
+/// sentence-by-sentence, dedups by subject keeping the LAST occurrence (later
+/// turns win), caps at `MAX_EXTRACTED_FACTS` keeping the most recent, and bakes
+/// the `[date ...]` prefix into each body when `content_date` is supplied.
+fn extract_facts(body: &str, content_date: Option<&str>) -> Vec<ExtractedFact> {
+    let mut found: Vec<ExtractedFact> = Vec::new();
+    for line in body.split_inclusive('\n') {
+        let content = line.trim();
+        if content.is_empty() {
+            continue;
+        }
+        // §3: only user turns are mined. A role-prefixed line with any role
+        // other than "user" (assistant/system/tool) is skipped; a non-role prose
+        // line is treated as user-authored text.
+        let text = match parse_turn(content) {
+            Some((role, turn)) => {
+                if normalize_component(role) != "user" {
+                    continue;
+                }
+                turn
+            }
+            None => content,
+        };
+        for sentence in split_sentences(text) {
+            if let Some(fact) = match_fact(sentence) {
+                found.push(fact);
+            }
+        }
+    }
+
+    // Within-episode dedup by subject, keeping the LAST occurrence and its
+    // position (later turns win), then cap to the most recent.
+    let mut deduped: Vec<ExtractedFact> = Vec::new();
+    for fact in found {
+        if let Some(pos) = deduped.iter().position(|kept| {
+            kept.family == fact.family && kept.subject_phrase == fact.subject_phrase
+        }) {
+            deduped.remove(pos);
+        }
+        deduped.push(fact);
+    }
+    if deduped.len() > MAX_EXTRACTED_FACTS {
+        deduped.drain(0..deduped.len() - MAX_EXTRACTED_FACTS);
+    }
+
+    if let Some(date) = content_date {
+        for fact in &mut deduped {
+            fact.body = format!("[date {date}]\n{}", fact.body);
+        }
+    }
+    deduped
+}
+
+/// Turns mined facts into extra ReflectCandidates for one episode: honest
+/// `subject`/`predicate` (→ the `{scope}:{family}:{phrase}` key), the parent
+/// episode's trust/actor so citations and admission are unchanged, NO contextual
+/// chunks (§3), and NO `valid_from` (the date is baked into the body prefix
+/// instead, so recall's dated-pack pass never double-prefixes).
+fn extract_fact_candidates(
+    episode: &StoredEpisode,
+    content_date: Option<&str>,
+) -> Vec<ReflectCandidate> {
+    extract_facts(&episode.body, content_date)
+        .into_iter()
+        .map(|fact| ReflectCandidate {
+            source_kind: episode.source_kind.clone(),
+            trust_level: episode.source_trust,
+            actor_id: episode.actor_id,
+            subject: Some(fact.family.to_string()),
+            predicate: Some(fact.subject_phrase),
+            kind: None,
+            body: fact.body,
+            churn_class: None,
+            admission_hint: None,
+            contextual_chunks: Vec::new(),
+            valid_from: None,
+            valid_to: None,
         })
         .collect()
 }
@@ -1080,6 +1668,151 @@ user: fifth turn plain.\n";
             &body[start..end],
             chunk.body,
             "slicing the episode body at the reported byte span reproduces the chunk body exactly"
+        );
+    }
+}
+
+#[cfg(test)]
+mod fact_tests {
+    use super::*;
+
+    /// Reduce a matched fact to `(family, subject_phrase)` for table assertions;
+    /// `None` when the sentence is a near-miss the extractor rejects.
+    fn matched(sentence: &str) -> Option<(&'static str, String)> {
+        match_fact(sentence).map(|fact| (fact.family, fact.subject_phrase))
+    }
+
+    /// §5 pattern table: deterministic hits across all four v1 families, plus the
+    /// §6 near-miss rejections (conversational false positives). Precision matters
+    /// more than recall — a demonstrative/pronoun object or a meta noun is dropped.
+    #[test]
+    fn pattern_table_hits_and_near_miss_rejections() {
+        // Hits: (sentence, family, subject_phrase).
+        let hits: &[(&str, &str, &str)] = &[
+            // superlative → preference, keyed on the SUBJECT ("favorite tea"),
+            // never the value, so a later value supersedes.
+            ("My favorite tea is chamomile", "preference", "favorite tea"),
+            (
+                "My all-time favorite band is Queen",
+                "preference",
+                "favorite band",
+            ),
+            // preference verbs → preference, keyed on the object.
+            (
+                "I really love hiking outdoors",
+                "preference",
+                "hiking outdoors",
+            ),
+            ("I switched to oat milk lately", "preference", "oat milk"),
+            // explicit update: negation + trailing "anymore" normalize to the
+            // same object key as the positive assertion (→ supersede).
+            ("I don't like coffee anymore", "preference", "coffee"),
+            (
+                "I can't stand loud crowded bars",
+                "preference",
+                "loud crowded bars",
+            ),
+            // a non-verb-fronting leading "I" does not blind the scan to the
+            // verb-fronting "I" later in the sentence.
+            (
+                "When I travel I love quiet trails",
+                "preference",
+                "quiet trails",
+            ),
+            // identity / attribute.
+            ("My name is Sidney Carter", "attribute", "name"),
+            ("My birthday is in early May", "attribute", "birthday"),
+            ("I am a software engineer", "attribute", "software engineer"),
+            // "my new <noun> is" shares the attribute:<noun> key (→ supersede).
+            ("My new phone is a pixel", "attribute", "phone"),
+        ];
+        for (sentence, family, phrase) in hits {
+            assert_eq!(
+                matched(sentence),
+                Some((*family, phrase.to_string())),
+                "hit: {sentence:?}"
+            );
+        }
+
+        // Near-miss rejections → None.
+        let rejects: &[&str] = &[
+            "I like that idea",                // demonstrative object
+            "I love it",                       // pronoun object (and < 4 words)
+            "My point is that we ship",        // meta noun
+            "My question is whether it works", // meta noun
+            "I'm a big fan of yours",          // filler identity ("big fan")
+            "The weather is nice today",       // no first-person marker
+            "She loves the ocean",             // not first person
+            "I think we should go soon",       // no preference verb
+        ];
+        for sentence in rejects {
+            assert_eq!(matched(sentence), None, "reject: {sentence:?}");
+        }
+    }
+
+    /// §3 word-count guard: sentences under `MIN_FACT_SENTENCE_WORDS` are never
+    /// mined even when they match a pattern.
+    #[test]
+    fn short_sentences_are_skipped() {
+        assert_eq!(matched("I love it"), None);
+        assert_eq!(
+            matched("My car is red"),
+            Some(("attribute", "car".to_string()))
+        );
+    }
+
+    /// §3 assistant-turn exclusion at the pure level: a first-person statement in
+    /// an assistant turn is never mined; user turns and non-role prose are.
+    #[test]
+    fn extract_skips_assistant_turns() {
+        let body = "[session s1]\n\
+assistant: I love that plan and my favorite bit is the finish.\n\
+user: My favorite fruit is a ripe mango.\n";
+        let facts = extract_facts(body, None);
+        assert_eq!(facts.len(), 1, "only the user turn is mined: {facts:?}");
+        assert_eq!(facts[0].family, "preference");
+        assert_eq!(facts[0].subject_phrase, "favorite fruit");
+        assert_eq!(facts[0].body, "My favorite fruit is a ripe mango");
+    }
+
+    /// §3 within-episode dedup keeps the LAST occurrence of a subject (later
+    /// turns win) and the §2 date prefix is baked into the body only when a date
+    /// is supplied.
+    #[test]
+    fn dedup_keeps_last_and_dates_prefix_when_supplied() {
+        let body = "user: My favorite tea is plain green tea.\n\
+user: My favorite tea is smoky oolong tea.\n";
+        let facts = extract_facts(body, Some("2023-05-30"));
+        assert_eq!(facts.len(), 1, "deduped to one favorite-tea fact");
+        assert!(
+            facts[0].body.contains("oolong") && !facts[0].body.contains("green"),
+            "later assertion wins: {}",
+            facts[0].body
+        );
+        assert!(
+            facts[0].body.starts_with("[date 2023-05-30]"),
+            "date prefix baked in: {}",
+            facts[0].body
+        );
+    }
+
+    /// §3 cap: never more than `MAX_EXTRACTED_FACTS`, keeping the most recent.
+    #[test]
+    fn cap_holds_and_keeps_most_recent() {
+        let mut body = String::new();
+        for i in 0..(MAX_EXTRACTED_FACTS + 4) {
+            body.push_str(&format!("user: I really love hobby number {i} here.\n"));
+        }
+        let facts = extract_facts(&body, None);
+        assert_eq!(facts.len(), MAX_EXTRACTED_FACTS, "cap holds");
+        assert!(
+            facts
+                .last()
+                .unwrap()
+                .body
+                .contains(&format!("number {} here", MAX_EXTRACTED_FACTS + 3)),
+            "the most recent facts are kept: {:?}",
+            facts.last().unwrap().body
         );
     }
 }

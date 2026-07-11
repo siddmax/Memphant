@@ -119,6 +119,11 @@ pub struct BenchLmeOptions {
     /// `valid_from` and chunk headers are date-grounded at reflect) and the
     /// recall service (query-date windowing + dated packs).
     pub temporal_grounding: bool,
+    /// W6 deterministic fact-extraction flag (`--fact-extraction`, default off)
+    /// threaded via `with_fact_extraction_enabled` to the INGEST service so the
+    /// reflect stage mines preference/attribute facts. Recall needs no flag —
+    /// mined facts are ordinary units.
+    pub fact_extraction: bool,
     /// Rung 4 runtime contextual-chunk write path opt-in flag
     /// (`--runtime-chunks`, default true = the product path). The EFFECTIVE
     /// state also depends on `--disable runtime_chunks`, which forces the
@@ -247,6 +252,11 @@ pub struct BenchLmeReport {
     /// was a temporal-grounding-off run, so an absent field ⇒ off.
     #[serde(default)]
     pub temporal_grounding: bool,
+    /// Whether W6 deterministic fact extraction (`--fact-extraction`) was on for
+    /// this run. Serde default `false`: every report written before the flag
+    /// existed was a fact-extraction-off run, so an absent field ⇒ off.
+    #[serde(default)]
+    pub fact_extraction: bool,
     /// Whether the rung 4 runtime contextual-chunk write path was enabled for
     /// this run — records the EFFECTIVE state (default-on since the 2026-07-10
     /// promotion; `--disable runtime_chunks` records false). The serde default
@@ -643,7 +653,10 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
     .with_contextual_chunks_write_enabled(runtime_chunks_enabled)
     // W5: the ingest path grounds `valid_from` + dates chunk headers at reflect,
     // so the flag must be set here as well as on the recall service.
-    .with_temporal_grounding_enabled(options.temporal_grounding);
+    .with_temporal_grounding_enabled(options.temporal_grounding)
+    // W6: fact extraction is INGEST-time only — the reflect stage mines the facts
+    // as ordinary units, so only the ingest service carries the flag.
+    .with_fact_extraction_enabled(options.fact_extraction);
     let vector_disabled = options.disable.as_deref() == Some("vector");
     // Vector ablation: same store/units, but the recall-side service embeds
     // with Noop so `query_vec` is None and the vector channel is honestly off.
@@ -947,6 +960,7 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
         sibling_gather: options.sibling_gather,
         session_quota: options.session_quota,
         temporal_grounding: options.temporal_grounding,
+        fact_extraction: options.fact_extraction,
         runtime_chunks: runtime_chunks_enabled,
         mode: match options.mode {
             RecallMode::Fast => "fast",
@@ -1254,6 +1268,13 @@ mod tests {
         assert!(
             !report.temporal_grounding,
             "absent temporal_grounding must parse false (pre-flag runs were grounding-off)"
+        );
+        // W6: a report written before the fact-extraction flag existed must parse
+        // with it off — every such report ran without mined preference/attribute
+        // facts.
+        assert!(
+            !report.fact_extraction,
+            "absent fact_extraction must parse false (pre-flag runs mined no facts)"
         );
     }
 

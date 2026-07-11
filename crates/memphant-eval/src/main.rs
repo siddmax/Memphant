@@ -441,6 +441,9 @@ fn bench_lme_command(args: Vec<String>) -> ExitCode {
     // W5 temporal grounding: default off (measurement-only promotion). See
     // `MemoryService::with_temporal_grounding_enabled`.
     let mut temporal_grounding = false;
+    // W6 deterministic fact extraction: default off (measurement-only). See
+    // `MemoryService::with_fact_extraction_enabled`.
+    let mut fact_extraction = false;
     // Default-on: the lane measures the product path (service-side runtime
     // contextual chunks). `--disable runtime_chunks` runs the chunks-off
     // control arm; `--runtime-chunks` is a now-redundant explicit opt-in.
@@ -579,6 +582,10 @@ fn bench_lme_command(args: Vec<String>) -> ExitCode {
                 temporal_grounding = true;
                 index += 1;
             }
+            "--fact-extraction" => {
+                fact_extraction = true;
+                index += 1;
+            }
             "--emit-qa" => {
                 emit_qa = take(index);
                 index += 2;
@@ -617,6 +624,7 @@ fn bench_lme_command(args: Vec<String>) -> ExitCode {
         sibling_gather,
         session_quota,
         temporal_grounding,
+        fact_extraction,
         runtime_chunks,
         emit_qa,
         command,
@@ -661,6 +669,6 @@ fn bench_lme_command(args: Vec<String>) -> ExitCode {
 
 fn usage() {
     eprintln!(
-        "usage: memphant-eval bench-lme --database-url <url> --data <longmemeval.json> --sample <n> --seed <s> [--k 10] [--disable vector|edge_expansion|rerank|query_decomposition|procedure_recall|decay|packing|runtime_chunks] [--mode fast|balanced|exhaustive] [--granularity turns|session (default: session)] [--turns-window <n> (default: 4)] [--budget-tokens <n> (default: 8192)] [--pool <n> (default: 32; vector-channel candidate-pool size)] [--sibling-gather (default: off; W4 sibling-gather packing lever)] [--session-quota <n> (default: off; W4 per-session diversity cap)] [--temporal-grounding (default: off; W5 content-date grounding + windowed recall + dated packs)] [--runtime-chunks (default: on; --disable runtime_chunks for the control arm)] [--emit-qa <evidence.jsonl>] [--baseline <report.json>] [--out <report.json>] | memphant-eval run <suite.yaml> [--archive-traces] [--archive-dir <dir>] [--disable-contextual-chunks] [--disable-temporal-validity] [--disable-edge-expansion] [--disable-context-packing-abstention] [--disable-rerank] [--disable-learned-rerank] [--disable-query-decomposition] [--disable-procedure-recall] [--disable-decay] [--disable-l4-exhaustive] [--filesystem-control] | memphant-eval verify-golden <suite.yaml> | memphant-eval security <suite.yaml> | memphant-eval ops <suite.yaml> | memphant-eval syndai-trace-compare <fixture.yaml> [--archive-traces] [--archive-dir <dir>] | memphant-eval profile <profile.yaml> --compare-to <baseline> [--archive <path>] | memphant-eval schema trace"
+        "usage: memphant-eval bench-lme --database-url <url> --data <longmemeval.json> --sample <n> --seed <s> [--k 10] [--disable vector|edge_expansion|rerank|query_decomposition|procedure_recall|decay|packing|runtime_chunks] [--mode fast|balanced|exhaustive] [--granularity turns|session (default: session)] [--turns-window <n> (default: 4)] [--budget-tokens <n> (default: 8192)] [--pool <n> (default: 32; vector-channel candidate-pool size)] [--sibling-gather (default: off; W4 sibling-gather packing lever)] [--session-quota <n> (default: off; W4 per-session diversity cap)] [--temporal-grounding (default: off; W5 content-date grounding + windowed recall + dated packs)] [--fact-extraction (default: off; W6 deterministic preference/attribute fact mining at reflect)] [--runtime-chunks (default: on; --disable runtime_chunks for the control arm)] [--emit-qa <evidence.jsonl>] [--baseline <report.json>] [--out <report.json>] | memphant-eval run <suite.yaml> [--archive-traces] [--archive-dir <dir>] [--disable-contextual-chunks] [--disable-temporal-validity] [--disable-edge-expansion] [--disable-context-packing-abstention] [--disable-rerank] [--disable-learned-rerank] [--disable-query-decomposition] [--disable-procedure-recall] [--disable-decay] [--disable-l4-exhaustive] [--filesystem-control] | memphant-eval verify-golden <suite.yaml> | memphant-eval security <suite.yaml> | memphant-eval ops <suite.yaml> | memphant-eval syndai-trace-compare <fixture.yaml> [--archive-traces] [--archive-dir <dir>] | memphant-eval profile <profile.yaml> --compare-to <baseline> [--archive <path>] | memphant-eval schema trace"
     );
 }
