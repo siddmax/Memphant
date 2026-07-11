@@ -190,6 +190,207 @@ def test_reader_system_prompt_v1_is_unchanged_and_v2_differs() -> None:
     assert reader.READER_SYSTEM_PROMPT_V2 != reader.READER_SYSTEM_PROMPT
 
 
+def test_prompt_v3_router_table() -> None:
+    reader = _load_run_reader()
+    # temporal-reasoning always routes to the v2 CoT prompt, regardless of
+    # question text.
+    route, prompt = reader.route_v3("temporal-reasoning", "What did I do first?")
+    assert route == "cot"
+    assert prompt == reader.READER_SYSTEM_PROMPT_V2
+    # A counting cue routes to CoT even in a non-temporal stratum.
+    route, prompt = reader.route_v3(
+        "multi-session", "How many books did I mention reading this year?"
+    )
+    assert route == "cot"
+    assert prompt == reader.READER_SYSTEM_PROMPT_V2
+    # A non-counting, non-temporal question routes to the terse v3 route.
+    route, prompt = reader.route_v3(
+        "single-session-preference", "What is my favorite coffee order?"
+    )
+    assert route == "terse"
+    assert prompt == reader.READER_SYSTEM_PROMPT_V3_TERSE
+
+
+def test_prompt_v3_counting_cues_are_case_insensitive_and_whole_word() -> None:
+    reader = _load_run_reader()
+    for cue_question in [
+        "How many dogs do I have?",
+        "how much did I spend total?",
+        "How often do I go running?",
+        "What is the number of items I bought?",
+        "What was the total cost?",
+        "Please count the sessions.",
+    ]:
+        assert reader.is_counting_question(cue_question), cue_question
+    # Whole-word guard: "totally"/"discount"/"recount" must not false-positive.
+    for non_cue_question in [
+        "What did I totally forget to mention?",
+        "Did I get a discount on the ticket?",
+        "Can you recount the story?",
+    ]:
+        assert not reader.is_counting_question(non_cue_question), non_cue_question
+
+
+def test_prompt_v3_abstention_text_present_in_both_routes() -> None:
+    reader = _load_run_reader()
+    assert "Abstain only if NO evidence item bears" in reader.READER_SYSTEM_PROMPT_V2
+    assert (
+        "Abstain only if NO evidence item bears"
+        in reader.READER_SYSTEM_PROMPT_V3_TERSE
+    )
+
+
+def test_prompt_v3_terse_route_keeps_terse_phrasing_but_not_v1_abstention() -> None:
+    reader = _load_run_reader()
+    assert (
+        "Be terse: reply with the answer itself"
+        in reader.READER_SYSTEM_PROMPT_V3_TERSE
+    )
+    # v3's terse route does NOT carry v1's plain abstention line -- it uses
+    # v2's calibrated-abstention instruction instead (brief requirement 1).
+    assert (
+        "If the evidence is insufficient to answer, reply exactly"
+        not in reader.READER_SYSTEM_PROMPT_V3_TERSE
+    )
+    assert reader.READER_SYSTEM_PROMPT_V3_TERSE != reader.READER_SYSTEM_PROMPT
+    assert reader.READER_SYSTEM_PROMPT_V3_TERSE != reader.READER_SYSTEM_PROMPT_V2
+
+
+def test_prompt_v1_and_v2_unchanged_after_v3_factoring() -> None:
+    """Regression pin: factoring v1/v2/v3 out of shared components must not
+    change v1's or v2's byte-for-byte prompt text."""
+    reader = _load_run_reader()
+    v1_pinned = (
+        "You answer questions using ONLY the evidence provided in the prompt. "
+        "Be terse: reply with the answer itself, a short phrase, no preamble. "
+        "If the evidence is insufficient to answer, reply exactly: I don't know."
+    )
+    v2_pinned = (
+        "You answer questions using ONLY the evidence provided in the prompt. "
+        "First, identify every evidence item that bears on the question, even "
+        "partially. Then reason step by step over those items: for questions "
+        "that require combining values, doing arithmetic, or counting "
+        "occurrences, work the calculation through explicitly before answering. "
+        "Abstain only if NO evidence item bears on the question at all; if at "
+        "least one item is partially relevant, give your best-supported answer "
+        "instead of abstaining, and never use the phrase \"I don't know\" "
+        "anywhere in your reply except as the abstention reply itself. "
+        "Finish with a final line, on its own, containing ONLY the concise "
+        "answer — a short phrase, no preamble, no restated reasoning — or, if "
+        "truly abstaining, reply with exactly: I don't know."
+    )
+    assert reader.READER_SYSTEM_PROMPT == v1_pinned
+    assert reader.READER_SYSTEM_PROMPT_V2 == v2_pinned
+
+
+def test_prompt_v3_routing_counts_in_report(tmp_path, monkeypatch) -> None:
+    reader = _load_run_reader()
+    rows = [
+        {
+            "question_id": "q1",
+            "question_type": "temporal-reasoning",
+            "is_abstention": False,
+            "question": "What did I do first, the museum or the park?",
+            "question_date": "2023/01/01",
+            "gold_answer": "the museum",
+            "evidence": [],
+        },
+        {
+            "question_id": "q2",
+            "question_type": "multi-session",
+            "is_abstention": False,
+            "question": "How many books did I mention reading?",
+            "question_date": "2023/01/01",
+            "gold_answer": "3",
+            "evidence": [],
+        },
+        {
+            "question_id": "q3",
+            "question_type": "single-session-preference",
+            "is_abstention": False,
+            "question": "What is my favorite coffee order?",
+            "question_date": "2023/01/01",
+            "gold_answer": "latte",
+            "evidence": [],
+        },
+    ]
+    evidence_path = tmp_path / "evidence.jsonl"
+    evidence_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    out_path = tmp_path / "report.json"
+
+    # Every reader call just abstains; judge_row short-circuits abstention
+    # replies via containment, so no "judge"-kind call is ever made -- this
+    # stub only needs to handle "reader".
+    monkeypatch.setattr(
+        reader.ReaderCli,
+        "call",
+        lambda self, kind, system_prompt, prompt: "I don't know",
+    )
+    monkeypatch.setattr(
+        reader.sys,
+        "argv",
+        [
+            "run_reader.py",
+            "--evidence",
+            str(evidence_path),
+            "--out",
+            str(out_path),
+            "--label",
+            "test-v3-routing",
+            "--prompt-version",
+            "3",
+            "--cache-dir",
+            str(tmp_path / "cache"),
+        ],
+    )
+    reader.main()
+    report = json.loads(out_path.read_text())
+    assert report["prompt_version"] == 3
+    assert report["routing"] == {"cot": 2, "terse": 1}
+
+
+def test_prompt_v1_and_v2_reports_carry_no_routing_breakdown(tmp_path, monkeypatch) -> None:
+    reader = _load_run_reader()
+    rows = [
+        {
+            "question_id": "q1",
+            "question_type": "single-session-user",
+            "is_abstention": False,
+            "question": "What's my dog's name?",
+            "question_date": "2023/01/01",
+            "gold_answer": "Waffles",
+            "evidence": [],
+        }
+    ]
+    evidence_path = tmp_path / "evidence.jsonl"
+    evidence_path.write_text(json.dumps(rows[0]) + "\n")
+    out_path = tmp_path / "report.json"
+    monkeypatch.setattr(
+        reader.ReaderCli,
+        "call",
+        lambda self, kind, system_prompt, prompt: "I don't know",
+    )
+    monkeypatch.setattr(
+        reader.sys,
+        "argv",
+        [
+            "run_reader.py",
+            "--evidence",
+            str(evidence_path),
+            "--out",
+            str(out_path),
+            "--label",
+            "test-v1-no-routing",
+            "--cache-dir",
+            str(tmp_path / "cache"),
+        ],
+    )
+    reader.main()
+    report = json.loads(out_path.read_text())
+    assert report["prompt_version"] == 1
+    assert report["routing"] is None
+
+
 def test_accuracy_excludes_unscored_rows() -> None:
     reader = _load_run_reader()
     rows = [

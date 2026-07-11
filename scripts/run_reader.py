@@ -69,10 +69,47 @@ CODEX_NO_TOOLS_GUARD = (
     "Do not run any commands or use any tools; answer directly from this "
     "prompt in your final message."
 )
-READER_SYSTEM_PROMPT = (
-    "You answer questions using ONLY the evidence provided in the prompt. "
-    "Be terse: reply with the answer itself, a short phrase, no preamble. "
+# Prompt components, shared across v1/v2/v3 (--prompt-version) so the reader
+# prompts are composed rather than triplicated. v1 and v2 below are each a
+# join of these fragments (byte-identical to their pre-W7 literals — pinned
+# by test_prompt_v1_and_v2_unchanged_after_v3_factoring); v3's two routes
+# (further down) reuse the same fragments.
+READER_BASE_INSTRUCTION = (
+    "You answer questions using ONLY the evidence provided in the prompt."
+)
+READER_TERSE_INSTRUCTION = (
+    "Be terse: reply with the answer itself, a short phrase, no preamble."
+)
+# v1's plain abstention line. Used by v1 only; v2 and v3 use the calibrated
+# abstention instruction below instead.
+READER_V1_ABSTENTION = (
     "If the evidence is insufficient to answer, reply exactly: I don't know."
+)
+# v2's enumerate-then-compute chain-of-thought instruction.
+READER_COT_INSTRUCTION = (
+    "First, identify every evidence item that bears on the question, even "
+    "partially. Then reason step by step over those items: for questions "
+    "that require combining values, doing arithmetic, or counting "
+    "occurrences, work the calculation through explicitly before answering."
+)
+# v2's calibrated-abstention instruction: fixes over-abstention (replying
+# "I don't know" when the pack did contain the answer). A pure win, 6/6, on
+# the v2 campaign — kept in every --prompt-version 3 route (W7 requirement 1).
+READER_CALIBRATED_ABSTENTION = (
+    "Abstain only if NO evidence item bears on the question at all; if at "
+    "least one item is partially relevant, give your best-supported answer "
+    "instead of abstaining, and never use the phrase \"I don't know\" "
+    "anywhere in your reply except as the abstention reply itself."
+)
+# v2's instruction to isolate the final answer from its CoT reasoning.
+READER_FINAL_LINE_INSTRUCTION = (
+    "Finish with a final line, on its own, containing ONLY the concise "
+    "answer — a short phrase, no preamble, no restated reasoning — or, if "
+    "truly abstaining, reply with exactly: I don't know."
+)
+
+READER_SYSTEM_PROMPT = " ".join(
+    [READER_BASE_INSTRUCTION, READER_TERSE_INSTRUCTION, READER_V1_ABSTENTION]
 )
 # v2 (--prompt-version 2): enumerate-then-compute reasoning with calibrated
 # abstention. Fixes three n=100-campaign failure modes: multi-item arithmetic
@@ -85,21 +122,53 @@ READER_SYSTEM_PROMPT = (
 # is short-circuited to incorrect by judge_row before contains_gold ever
 # runs — so the prompt bans that phrase outside real abstention and
 # requires a clean final line with the bare answer.
-READER_SYSTEM_PROMPT_V2 = (
-    "You answer questions using ONLY the evidence provided in the prompt. "
-    "First, identify every evidence item that bears on the question, even "
-    "partially. Then reason step by step over those items: for questions "
-    "that require combining values, doing arithmetic, or counting "
-    "occurrences, work the calculation through explicitly before answering. "
-    "Abstain only if NO evidence item bears on the question at all; if at "
-    "least one item is partially relevant, give your best-supported answer "
-    "instead of abstaining, and never use the phrase \"I don't know\" "
-    "anywhere in your reply except as the abstention reply itself. "
-    "Finish with a final line, on its own, containing ONLY the concise "
-    "answer — a short phrase, no preamble, no restated reasoning — or, if "
-    "truly abstaining, reply with exactly: I don't know."
+READER_SYSTEM_PROMPT_V2 = " ".join(
+    [
+        READER_BASE_INSTRUCTION,
+        READER_COT_INSTRUCTION,
+        READER_CALIBRATED_ABSTENTION,
+        READER_FINAL_LINE_INSTRUCTION,
+    ]
+)
+# v3 (--prompt-version 3) terse route: v1-style terse phrasing, but v2's
+# calibrated-abstention instruction (W7 requirement 1) instead of v1's plain
+# one. Used for every question NOT routed to the v2 CoT prompt.
+READER_SYSTEM_PROMPT_V3_TERSE = " ".join(
+    [READER_BASE_INSTRUCTION, READER_TERSE_INSTRUCTION, READER_CALIBRATED_ABSTENTION]
 )
 READER_SYSTEM_PROMPTS = {1: READER_SYSTEM_PROMPT, 2: READER_SYSTEM_PROMPT_V2}
+
+# v3 (--prompt-version 3): stratum-routed prompt. Evidence: v2's CoT +
+# calibrated abstention moved temporal-reasoning 0.52->0.78 but regressed
+# multi-session 0.44->0.26 on the same lattice — the CoT reasoning helps
+# where it's needed (temporal ordering, counting/arithmetic) and hurts where
+# terse recall was already working. v3 routes per question: the v2 CoT
+# prompt where the win is real (the temporal-reasoning stratum, or a
+# counting question in any stratum), the terse route elsewhere — but keeps
+# the calibrated-abstention instruction (a pure win, 6/6) in both routes.
+COUNTING_CUE_PATTERN = re.compile(
+    r"\b(how many|how much|how often|number of|total|count)\b", re.IGNORECASE
+)
+
+
+def is_counting_question(question: str) -> bool:
+    """True if the question text matches a deterministic counting cue ("how
+    many", "how much", "how often", "number of", "total", "count"),
+    word-boundary matched so "totally"/"discount"/"recount" don't
+    false-positive."""
+    return COUNTING_CUE_PATTERN.search(question) is not None
+
+
+def route_v3(question_type: str, question: str) -> tuple[str, str]:
+    """Router for --prompt-version 3. Returns (route_name, system_prompt):
+    "cot" (the v2 CoT prompt) for temporal-reasoning questions and counting
+    questions in any stratum; "terse" (READER_SYSTEM_PROMPT_V3_TERSE)
+    otherwise."""
+    if question_type == "temporal-reasoning" or is_counting_question(question):
+        return "cot", READER_SYSTEM_PROMPT_V2
+    return "terse", READER_SYSTEM_PROMPT_V3_TERSE
+
+
 JUDGE_SYSTEM_PROMPT = (
     "You are a strict grader. Reply with exactly one word: yes or no."
 )
@@ -467,14 +536,18 @@ def main() -> int:
     parser.add_argument(
         "--prompt-version",
         type=int,
-        choices=(1, 2),
+        choices=(1, 2, 3),
         default=1,
         help=(
             "reader system prompt version: 1 (default, today's "
-            "READER_SYSTEM_PROMPT verbatim) or 2 (enumerate-then-compute "
-            "reasoning, calibrated abstention); part of the reader cache "
-            "key since the system prompt differs, and recorded in the "
-            "report as prompt_version"
+            "READER_SYSTEM_PROMPT verbatim), 2 (enumerate-then-compute "
+            "reasoning, calibrated abstention), or 3 (stratum router: the "
+            "v2 CoT prompt for temporal-reasoning questions and counting "
+            "questions in any stratum, the terse route elsewhere, "
+            "calibrated abstention kept in both routes); part of the "
+            "reader cache key since the system prompt differs per row "
+            "under v3, and recorded in the report as prompt_version plus "
+            "a routing breakdown"
         ),
     )
     parser.add_argument(
@@ -516,7 +589,8 @@ def main() -> int:
         args.max_calls,
         reasoning_effort=args.reasoning_effort,
     )
-    reader_system_prompt = READER_SYSTEM_PROMPTS[args.prompt_version]
+    reader_system_prompt = READER_SYSTEM_PROMPTS.get(args.prompt_version)
+    routing_counts = {"cot": 0, "terse": 0} if args.prompt_version == 3 else None
     per_question: list[dict] = []
     aborted_reason = None
     for index, row in enumerate(rows):
@@ -530,8 +604,13 @@ def main() -> int:
             "correct": None,
             "reader_error": None,
         }
+        if args.prompt_version == 3:
+            route, system_prompt = route_v3(row["question_type"], row["question"])
+            routing_counts[route] += 1
+        else:
+            system_prompt = reader_system_prompt
         try:
-            reply = cli.call("reader", reader_system_prompt, build_reader_prompt(row))
+            reply = cli.call("reader", system_prompt, build_reader_prompt(row))
             record["reply"] = reply
             correct, method = judge_row(cli, row, reply)
             record["correct"] = correct
@@ -568,6 +647,7 @@ def main() -> int:
         "reader_model_id": args.model,
         "judge_model_id": judge_model,
         "prompt_version": args.prompt_version,
+        "routing": routing_counts,
         "reasoning_effort": args.reasoning_effort,
         "runtime": "postgres",
         "label": args.label,
