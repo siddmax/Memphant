@@ -18,8 +18,8 @@ use memphant_types::{
 };
 
 use crate::{
-    Clock, CoreError, DEFAULT_CANDIDATE_POOL_SIZE, EmbeddingProvider, JobFilter, MemoryStore,
-    PackLevers, ReflectJobRow, ScopePage, StoreError, VectorQuery, correct_memory,
+    Clock, CoreError, CrossReranker, DEFAULT_CANDIDATE_POOL_SIZE, EmbeddingProvider, JobFilter,
+    MemoryStore, PackLevers, ReflectJobRow, ScopePage, StoreError, VectorQuery, correct_memory,
     embedding_profile_for, forget_memory, normalize_component, parse_content_date,
     recall_with_pool, record_mark, reflect_recorded, retain_episode, retain_resource, tokenize,
 };
@@ -110,6 +110,13 @@ pub struct MemoryService<S: MemoryStore> {
     /// carries a parseable content date. Measurement-only promotion, so it ships
     /// off and the bench threads it via `with_fact_extraction_enabled`.
     fact_extraction_enabled: bool,
+    /// W8 cross-encoder rerank seam (DEFAULT `None`). When set, recall reorders
+    /// the top `candidate_pool_size` fused candidates by a real `(query, body)`
+    /// cross-encoder AFTER fusion and BEFORE packing — the widened-pool rerank
+    /// arm. `None` leaves recall byte-identical to today. Independent of the
+    /// retired heuristic rerank stage. Set via `with_cross_reranker`; the bench
+    /// lane's `--cross-rerank` threads the real fastembed reranker here.
+    cross_reranker: Option<Arc<dyn CrossReranker>>,
 }
 
 impl<S: MemoryStore> Clone for MemoryService<S> {
@@ -123,6 +130,7 @@ impl<S: MemoryStore> Clone for MemoryService<S> {
             pack_levers: self.pack_levers,
             temporal_grounding_enabled: self.temporal_grounding_enabled,
             fact_extraction_enabled: self.fact_extraction_enabled,
+            cross_reranker: self.cross_reranker.clone(),
         }
     }
 }
@@ -138,6 +146,7 @@ impl<S: MemoryStore> MemoryService<S> {
             pack_levers: PackLevers::default(),
             temporal_grounding_enabled: false,
             fact_extraction_enabled: false,
+            cross_reranker: None,
         }
     }
 
@@ -200,6 +209,17 @@ impl<S: MemoryStore> MemoryService<S> {
     /// threads its value here. Off ⇒ the compile is byte-identical to today.
     pub fn with_fact_extraction_enabled(mut self, enabled: bool) -> Self {
         self.fact_extraction_enabled = enabled;
+        self
+    }
+
+    /// Installs the W8 cross-encoder rerank seam (default `None`). When set,
+    /// recall reorders the top `candidate_pool_size` fused candidates by this
+    /// reranker's `(query, body)` scores AFTER fusion and BEFORE packing.
+    /// Construction-time only, mirroring the W3/W4/W5 knobs; the bench lane's
+    /// `--cross-rerank` threads the real fastembed reranker here. Unset ⇒ recall
+    /// is byte-identical to today. Independent of the retired heuristic rerank.
+    pub fn with_cross_reranker(mut self, reranker: Arc<dyn CrossReranker>) -> Self {
+        self.cross_reranker = Some(reranker);
         self
     }
 
@@ -421,6 +441,7 @@ impl<S: MemoryStore> MemoryService<S> {
             self.candidate_pool_size,
             self.pack_levers,
             self.temporal_grounding_enabled,
+            self.cross_reranker.as_deref(),
         )
         .await?;
 

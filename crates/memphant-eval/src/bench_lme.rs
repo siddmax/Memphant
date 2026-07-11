@@ -33,7 +33,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use memphant_core::service::MemoryService;
-use memphant_core::{DEFAULT_CANDIDATE_POOL_SIZE, EmbeddingProvider, NoopEmbedding, SystemClock};
+use memphant_core::{
+    CrossReranker, DEFAULT_CANDIDATE_POOL_SIZE, EmbeddingProvider, NoopEmbedding, SystemClock,
+};
 use memphant_store_postgres::PgStore;
 use memphant_types::{
     ActorId, RecallHttpRequest, RecallMode, RetainEpisodeHttpRequest, ScopeId, TenantId, TrustLevel,
@@ -129,6 +131,14 @@ pub struct BenchLmeOptions {
     /// state also depends on `--disable runtime_chunks`, which forces the
     /// chunks-off control arm; see `runtime_chunks_enabled` in `run_bench_lme`.
     pub runtime_chunks: bool,
+    /// W8 embedding arm (`--embed-model`, `small` [default] | `base`). Derived
+    /// ONCE and shared by the ingest and recall services so their embedding
+    /// profiles always match (mixing 384d/768d vectors is incoherent).
+    pub embed_model: String,
+    /// W8 cross-encoder rerank flag (`--cross-rerank`, default off). Requires the
+    /// fastembed feature; installs the real reranker on the recall service via
+    /// `with_cross_reranker`. Off reproduces today's fusion order.
+    pub cross_rerank: bool,
     /// When set, write one QA-evidence JSONL row per question to this path
     /// (question + gold answer + top-k evidence bodies) for the external
     /// reader/judge in `scripts/run_reader.py`.
@@ -265,6 +275,20 @@ pub struct BenchLmeReport {
     /// default.
     #[serde(default)]
     pub runtime_chunks: bool,
+    /// W8 embedding arm selector for this run (`small` | `base`). Serde default
+    /// `small`: every report written before the arm existed used bge-small.
+    #[serde(default = "default_embed_model")]
+    pub embed_model: String,
+    /// The active embedder's dimensionality (bge-small=384, bge-base=768) — the
+    /// second half of the embedder id+dims provenance. Serde default 384 for
+    /// pre-flag reports (all of which were bge-small runs).
+    #[serde(default = "default_embedding_dimensions")]
+    pub embedding_dimensions: usize,
+    /// Whether the W8 cross-encoder rerank (`--cross-rerank`) was on for this
+    /// run. Serde default `false`: every report written before the flag existed
+    /// was a rerank-off run, so an absent field ⇒ off.
+    #[serde(default)]
+    pub cross_rerank: bool,
     pub mode: String,
     pub disabled: Option<String>,
     pub command: String,
@@ -301,6 +325,18 @@ fn default_budget_tokens() -> usize {
 /// (32).
 fn default_candidate_pool_size() -> usize {
     DEFAULT_CANDIDATE_POOL_SIZE
+}
+
+/// Parsing default for pre-flag reports (no `embed_model` field): every such
+/// report was a bge-small run.
+fn default_embed_model() -> String {
+    "small".to_string()
+}
+
+/// Parsing default for pre-flag reports (no `embedding_dimensions` field): the
+/// bge-small dimensionality every such report used.
+fn default_embedding_dimensions() -> usize {
+    384
 }
 
 /// Deterministic splitmix64 PRNG — no external randomness anywhere in the
@@ -588,15 +624,61 @@ pub fn session_bodies(
 }
 
 #[cfg(feature = "fastembed")]
-fn build_fastembed() -> Result<Arc<dyn EmbeddingProvider>, String> {
-    memphant_runtime::embeddings::FastEmbedProvider::new()
+fn build_fastembed(embed_model: &str) -> Result<Arc<dyn EmbeddingProvider>, String> {
+    let model = memphant_runtime::embeddings::FastEmbedModel::parse(embed_model)
+        .ok_or_else(|| format!("unknown --embed-model: {embed_model} (known: small, base)"))?;
+    memphant_runtime::embeddings::FastEmbedProvider::with_model(model)
         .map(|provider| Arc::new(provider) as Arc<dyn EmbeddingProvider>)
         .map_err(|error| format!("fastembed initialization failed: {error}"))
 }
 
 #[cfg(not(feature = "fastembed"))]
-fn build_fastembed() -> Result<Arc<dyn EmbeddingProvider>, String> {
+fn build_fastembed(_embed_model: &str) -> Result<Arc<dyn EmbeddingProvider>, String> {
     Err("bench-lme requires a binary built with --features fastembed (real embeddings are part of the benchmark contract)".to_string())
+}
+
+/// Builds the real cross-encoder reranker (bge-reranker-base), wrapped so each
+/// call reports its latency to stderr — the W8 `--cross-rerank` arm. A clear
+/// error when the fastembed feature is absent.
+#[cfg(feature = "fastembed")]
+fn build_cross_reranker() -> Result<Arc<dyn CrossReranker>, String> {
+    memphant_runtime::embeddings::FastEmbedCrossReranker::new()
+        .map(|reranker| {
+            Arc::new(TimedCrossReranker::new(Arc::new(reranker))) as Arc<dyn CrossReranker>
+        })
+        .map_err(|error| format!("cross-reranker initialization failed: {error}"))
+}
+
+#[cfg(not(feature = "fastembed"))]
+fn build_cross_reranker() -> Result<Arc<dyn CrossReranker>, String> {
+    Err("--cross-rerank requires a binary built with --features fastembed (the cross-encoder is a fastembed model)".to_string())
+}
+
+/// Wraps a cross-reranker so every `rerank` call prints its wall time and doc
+/// count to stderr — the campaign-cost visibility the W8 arm needs. Timing lives
+/// in the eval layer (a decorator), keeping the core stage and runtime provider
+/// free of measurement I/O.
+struct TimedCrossReranker {
+    inner: Arc<dyn CrossReranker>,
+}
+
+impl TimedCrossReranker {
+    fn new(inner: Arc<dyn CrossReranker>) -> Self {
+        Self { inner }
+    }
+}
+
+impl CrossReranker for TimedCrossReranker {
+    fn rerank(&self, query: &str, docs: &[&str]) -> Vec<f32> {
+        let started = std::time::Instant::now();
+        let scores = self.inner.rerank(query, docs);
+        eprintln!(
+            "bench-lme rerank ms={} docs={}",
+            started.elapsed().as_millis(),
+            docs.len()
+        );
+        scores
+    }
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
@@ -638,7 +720,10 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
             .await
             .map_err(|error| format!("postgres connect: {error}"))?,
     );
-    let embedder = build_fastembed()?;
+    // W8: derive the embedding arm ONCE and share it — ingest and recall must
+    // embed under the same profile (id+dims), else the vector channel compares
+    // incompatible spaces.
+    let embedder = build_fastembed(&options.embed_model)?;
     // Effective runtime contextual-chunk state: default-on (the product path)
     // unless the control arm explicitly disables it. `--disable runtime_chunks`
     // forces the builder off; `--runtime-chunks` is redundant with the default
@@ -680,6 +765,14 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
     // explicitly here too so the vector-disabled fresh recall service (which is
     // not a clone of `ingest_service`) also carries the flag.
     .with_temporal_grounding_enabled(options.temporal_grounding);
+
+    // W8 cross-encoder rerank: recall-time only. When on, install the real
+    // fastembed reranker (timed) so it reorders the widened pool before packing.
+    let recall_service = if options.cross_rerank {
+        recall_service.with_cross_reranker(build_cross_reranker()?)
+    } else {
+        recall_service
+    };
 
     if options.granularity != "session" && options.granularity != "turns" {
         return Err(format!(
@@ -962,6 +1055,12 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
         temporal_grounding: options.temporal_grounding,
         fact_extraction: options.fact_extraction,
         runtime_chunks: runtime_chunks_enabled,
+        embed_model: options.embed_model.clone(),
+        // The active embedder's dims — for the vector-disabled arm the recall
+        // side is Noop, but ingestion still embedded under `embedder`, so its
+        // dimensionality is the honest provenance.
+        embedding_dimensions: embedder.dimensions(),
+        cross_rerank: options.cross_rerank,
         mode: match options.mode {
             RecallMode::Fast => "fast",
             RecallMode::Balanced => "balanced",
@@ -1275,6 +1374,21 @@ mod tests {
         assert!(
             !report.fact_extraction,
             "absent fact_extraction must parse false (pre-flag runs mined no facts)"
+        );
+        // W8: a report written before the embedding-arm / cross-rerank fields
+        // existed must parse as a bge-small (384d), rerank-off run — the arm
+        // every such report actually ran.
+        assert_eq!(
+            report.embed_model, "small",
+            "absent embed_model must parse as the historical bge-small arm"
+        );
+        assert_eq!(
+            report.embedding_dimensions, 384,
+            "absent embedding_dimensions must parse as bge-small's 384"
+        );
+        assert!(
+            !report.cross_rerank,
+            "absent cross_rerank must parse false (pre-flag runs were rerank-off)"
         );
     }
 

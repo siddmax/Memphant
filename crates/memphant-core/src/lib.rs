@@ -115,6 +115,22 @@ impl EmbeddingProvider for NoopEmbedding {
     }
 }
 
+/// Cross-encoder reranker seam (W8). A `(query, doc)`-pair scorer that reorders
+/// a widened candidate pool AFTER fusion and BEFORE packing — the highest-ROI
+/// retrieval layer, distinct from the retired deterministic heuristic rerank.
+///
+/// Contract: `rerank` returns exactly one score per input doc, IN INPUT ORDER
+/// (higher = more relevant). Any other length (including the empty vec) is read
+/// by the recall stage as "no-op — leave the fused order unchanged", so a real
+/// backend that fails inference degrades to the pre-rerank order rather than
+/// erroring the whole recall. Inference is expected to be deterministic (same
+/// inputs → same scores), which the recall stage relies on for stable ordering.
+pub trait CrossReranker: Send + Sync {
+    /// Scores each `(query, docs[i])` pair; result `i` is the score for
+    /// `docs[i]`. See the trait contract for the length/no-op rule.
+    fn rerank(&self, query: &str, docs: &[&str]) -> Vec<f32>;
+}
+
 /// Deterministic hash-bucket embedding for tests: each token is hashed into a
 /// bucket, the bag-of-buckets vector is L2-normalized. Identical texts embed
 /// identically; token-overlapping texts have positive cosine similarity. No
@@ -1935,6 +1951,7 @@ where
         DEFAULT_CANDIDATE_POOL_SIZE,
         PackLevers::default(),
         false,
+        None,
     )
     .await
 }
@@ -1958,6 +1975,15 @@ where
 /// carry a `[date YYYY-MM-DD]` prefix resolved from each unit's grounded
 /// `valid_from`. Off, the parsed window is `None` and every downstream path is
 /// byte-identical to today.
+///
+/// `cross_reranker` (W8, `None` via the plain [`recall`]) is the cross-encoder
+/// rerank seam: when present, AFTER fusion produces the ranked candidate list
+/// and BEFORE packing, the top `candidate_pool_size` candidates are scored as
+/// `(query, unit body)` pairs and reordered by cross-encoder score (ties broken
+/// by prior fused rank via a stable sort). `None` leaves the fused order
+/// untouched — byte-identical to today. This is independent of, and never
+/// entangled with, the retired deterministic heuristic [`rerank_candidates`]
+/// stage (gated by `request.rerank_enabled`, off by default).
 #[allow(clippy::too_many_arguments)]
 pub async fn recall_with_pool<S>(
     store: &S,
@@ -1967,6 +1993,7 @@ pub async fn recall_with_pool<S>(
     candidate_pool_size: usize,
     pack_levers: PackLevers,
     temporal_grounding_enabled: bool,
+    cross_reranker: Option<&dyn CrossReranker>,
 ) -> Result<RecallResponse, CoreError>
 where
     S: MemoryStore,
@@ -2152,6 +2179,7 @@ where
                     fused_score: contribution,
                     rerank_rank: None,
                     rerank_score: 0.0,
+                    cross_rerank_rank: None,
                     decay,
                     l4_score: 0.0,
                     subquery_ids: Vec::new(),
@@ -2223,6 +2251,7 @@ where
                             fused_score: contribution,
                             rerank_rank: None,
                             rerank_score: 0.0,
+                            cross_rerank_rank: None,
                             decay,
                             l4_score: 0.0,
                             subquery_ids: vec![subquery.id.clone()],
@@ -2294,6 +2323,7 @@ where
                     fused_score: contribution,
                     rerank_rank: None,
                     rerank_score: 0.0,
+                    cross_rerank_rank: None,
                     decay,
                     l4_score: score,
                     subquery_ids: Vec::new(),
@@ -2353,6 +2383,19 @@ where
             trace_candidate.rerank_score = candidate.rerank_score;
             trace_candidate.subquery_ids = candidate.subquery_ids.clone();
         }
+    }
+
+    // W8 cross-encoder rerank: reorder the top `candidate_pool_size` fused
+    // candidates by a real (query, body) cross-encoder before packing. A no-op
+    // when no reranker is wired (the default) or the pool is empty — the fused
+    // order then flows unchanged into packing.
+    if let Some(reranker) = cross_reranker {
+        cross_rerank_candidates(
+            fused.as_mut_slice(),
+            &request.query,
+            reranker,
+            candidate_pool_size,
+        );
     }
 
     let iterative_scan_depth = recall_pack_scan_limit(&request, fused.len());
@@ -2743,6 +2786,56 @@ fn push_unique(values: &mut Vec<String>, value: String) {
     }
 }
 
+/// W8 cross-encoder rerank stage: reorder the top `pool` fused candidates by a
+/// real `(query, body)` cross-encoder, in place. Distinct from the retired
+/// heuristic [`rerank_candidates`] — this reads `CandidateAccumulator::unit.body`
+/// only and never touches the heuristic `rerank_score`/`rerank_rank` fields.
+///
+/// Determinism + ties: the top-`pool` slice is already in fused-rank order, and
+/// a STABLE sort by descending cross-encoder score preserves that order for
+/// equal scores — so ties break by prior rank. The tail (below `pool`) is left
+/// exactly where fusion put it. A reranker that returns a score vector whose
+/// length != the pool (the seam's "no-op" signal, e.g. inference failure) is
+/// honored by leaving the whole order unchanged.
+fn cross_rerank_candidates(
+    fused: &mut [CandidateAccumulator],
+    query: &str,
+    reranker: &dyn CrossReranker,
+    pool: usize,
+) {
+    let head = pool.min(fused.len());
+    if head == 0 {
+        return;
+    }
+    let docs: Vec<&str> = fused[..head]
+        .iter()
+        .map(|candidate| candidate.unit.body.as_str())
+        .collect();
+    let scores = reranker.rerank(query, &docs);
+    // Contract: one score per doc, in input order. Any other length is a no-op.
+    if scores.len() != head {
+        return;
+    }
+    let mut order: Vec<usize> = (0..head).collect();
+    order.sort_by(|&left, &right| {
+        scores[right]
+            .partial_cmp(&scores[left])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut reordered: Vec<CandidateAccumulator> = order
+        .into_iter()
+        .map(|index| fused[index].clone())
+        .collect();
+    // Stamp the 0-based cross-encoder rank so packing honors this order first
+    // (it re-sorts by `fused_score` otherwise, which would undo a bare reorder).
+    // Physically reordering too keeps the head correct when the abstention
+    // re-sort is disabled (packing then greedily fills in Vec order).
+    for (rank, candidate) in reordered.iter_mut().enumerate() {
+        candidate.cross_rerank_rank = Some(rank);
+    }
+    fused[..head].clone_from_slice(&reordered);
+}
+
 fn rerank_candidates(
     fused: &mut [CandidateAccumulator],
     request: &RecallRequest,
@@ -2868,6 +2961,12 @@ struct CandidateAccumulator {
     fused_score: f32,
     rerank_rank: Option<usize>,
     rerank_score: f32,
+    /// W8 cross-encoder rank (0-based): `Some` only for candidates the
+    /// cross-reranker scored (the top `candidate_pool_size` fused head). Packing
+    /// honors it FIRST when any candidate carries one, so the cross-encoder
+    /// ordering survives the pack re-sort. `None` for the unreranked tail and
+    /// for every run without a cross-reranker (then packing is unchanged).
+    cross_rerank_rank: Option<usize>,
     decay: DecayScore,
     l4_score: f32,
     subquery_ids: Vec<String>,
@@ -3051,7 +3150,23 @@ fn pack_recall_context(
 
     if request.context_packing_abstention_enabled {
         fused.sort_by(|left, right| {
-            if request.query_decomposition_enabled
+            if left.cross_rerank_rank.is_some() || right.cross_rerank_rank.is_some() {
+                // W8: the cross-encoder ordering governs when it ran. The scored
+                // head (0-based `cross_rerank_rank`) leads in cross-encoder order;
+                // the unscored tail (`None` → `usize::MAX`) follows in fusion
+                // order (fused_score desc), body-tie-broken. Independent of the
+                // heuristic-rerank and decomposition branches below.
+                left.cross_rerank_rank
+                    .unwrap_or(usize::MAX)
+                    .cmp(&right.cross_rerank_rank.unwrap_or(usize::MAX))
+                    .then_with(|| {
+                        right
+                            .fused_score
+                            .partial_cmp(&left.fused_score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .then_with(|| left.unit.body.cmp(&right.unit.body))
+            } else if request.query_decomposition_enabled
                 && (left.decomposition_rank.is_some() || right.decomposition_rank.is_some())
             {
                 left.decomposition_rank
@@ -5822,6 +5937,7 @@ mod pack_cost_tests {
             fused_score,
             rerank_rank: None,
             rerank_score: 0.0,
+            cross_rerank_rank: None,
             decay,
             l4_score: 0.0,
             subquery_ids: Vec::new(),
