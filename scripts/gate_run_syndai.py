@@ -49,6 +49,7 @@ sys.path.insert(0, MEMPHANT_SCRIPTS)
 import gate_common as gc  # noqa: E402
 
 # Syndai backend imports (available under its .venv / uv run).
+from sqlalchemy.exc import IntegrityError  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine  # noqa: E402
 
 import src.model_registry  # noqa: E402,F401  (register every ORM model)
@@ -79,10 +80,18 @@ GOLDEN_PATH = gc.MEMPHANT_ROOT / "benchmarks" / "data" / "syndai_docs_golden.jso
 GOLDEN_LOCK_PATH = gc.MEMPHANT_ROOT / "benchmarks" / "data" / "syndai_docs_golden.lock.json"
 
 
-async def _ingest_one(session, agent, user, rel: str, text: str) -> int:
+async def _ingest_one(
+    session, agent, user, rel: str, text: str, *, with_sections: bool = True
+) -> int:
     """Ingest one file as a KnowledgeSource via the real pipeline; returns its
-    chunk count. Raises if the file cannot be chunked (caller rolls back the
-    savepoint and skips it)."""
+    chunk count. ``with_sections=False`` is the steelman fallback for a latent
+    Syndai bug: their ``_add_sections_and_edges`` inserts KnowledgeSectionEdge
+    rows referencing ``section.id`` BEFORE the sections are flushed, so any
+    document whose sectionizer emits cross-reference edges dies with
+    NotNullViolation (11/108 real product docs; their eval fixture sidesteps it
+    with explicit uuid4 ids). The fallback stores chunks WITHOUT the section
+    tree — chunks keep heading_hierarchy/context prefixes and stay fully
+    searchable; only structure expansion is lost for those files."""
     source = KnowledgeSource(
         id=uuid4(),
         user_id=user.id,
@@ -113,7 +122,7 @@ async def _ingest_one(session, agent, user, rel: str, text: str) -> int:
         prepared.chunks,
         version=version,
         language="en",
-        sectionized_document=prepared.sectionized_document,
+        sectionized_document=prepared.sectionized_document if with_sections else None,
     )
     version.chunk_count = len(prepared.chunks)
     source.active_version_id = version.id
@@ -129,11 +138,14 @@ async def _ingest_one(session, agent, user, rel: str, text: str) -> int:
     return len(prepared.chunks)
 
 
-async def ingest_corpus(engine, root: Path, files: list[str]) -> tuple[str, str, int, int]:
+async def ingest_corpus(
+    engine, root: Path, files: list[str]
+) -> tuple[str, str, int, int, list[str], list[str]]:
     """Ingest each corpus file as a KnowledgeSource via the real pipeline.
-    Returns (agent_id, user_id, source_count, chunk_count). A file that fails
-    to chunk is rolled back to a savepoint and skipped so one bad file cannot
-    abort the whole ingest."""
+    Returns (agent_id, user_id, source_count, chunk_count, fallback_files,
+    skipped_files). A file that trips the upstream section-edge bug is retried
+    chunks-only (see _ingest_one); a file that still fails is rolled back to a
+    savepoint and skipped so one bad file cannot abort the whole ingest."""
     total_chunks = 0
     sources = 0
     async with AsyncSession(engine, expire_on_commit=False) as session:
@@ -158,6 +170,7 @@ async def ingest_corpus(engine, root: Path, files: list[str]) -> tuple[str, str,
         agent_id, user_id = str(agent.id), str(user.id)
 
         skipped: list[str] = []
+        fallback: list[str] = []
         for i, rel in enumerate(files):
             text = (root / rel).read_text(encoding="utf-8", errors="replace")
             if not text.strip():
@@ -166,6 +179,21 @@ async def ingest_corpus(engine, root: Path, files: list[str]) -> tuple[str, str,
             try:
                 n_chunks = await _ingest_one(session, agent, user, rel, text)
                 await savepoint.commit()
+            except IntegrityError:
+                await savepoint.rollback()
+                retry_savepoint = await session.begin_nested()
+                try:
+                    n_chunks = await _ingest_one(
+                        session, agent, user, rel, text, with_sections=False
+                    )
+                    await retry_savepoint.commit()
+                    fallback.append(rel)
+                    print(f"  FALLBACK (chunks-only) {rel}", file=sys.stderr)
+                except Exception as exc:  # noqa: BLE001
+                    await retry_savepoint.rollback()
+                    skipped.append(f"{rel}: {type(exc).__name__}: {exc}")
+                    print(f"  SKIP {rel}: {exc}", file=sys.stderr)
+                    continue
             except Exception as exc:  # noqa: BLE001
                 await savepoint.rollback()
                 skipped.append(f"{rel}: {type(exc).__name__}: {exc}")
@@ -176,11 +204,13 @@ async def ingest_corpus(engine, root: Path, files: list[str]) -> tuple[str, str,
             if (i + 1) % 20 == 0:
                 print(f"  ingested {i + 1}/{len(files)} files, {total_chunks} chunks", file=sys.stderr)
 
+        if fallback:
+            print(f"  ingest used chunks-only fallback for {len(fallback)} files", file=sys.stderr)
         if skipped:
             print(f"  ingest skipped {len(skipped)} files", file=sys.stderr)
         # Commit so the detached search (its own sessions) can see the rows.
         await session.commit()
-    return agent_id, user_id, sources, total_chunks
+    return agent_id, user_id, sources, total_chunks, fallback, skipped
 
 
 async def run(args) -> int:
@@ -218,9 +248,18 @@ async def run(args) -> int:
 
     try:
         t0 = time.time()
-        agent_id, user_id, n_sources, n_chunks = await ingest_corpus(engine, root, files)
+        (
+            agent_id,
+            user_id,
+            n_sources,
+            n_chunks,
+            fallback_files,
+            skipped_files,
+        ) = await ingest_corpus(engine, root, files)
         print(
-            f"ingest done: sources={n_sources} chunks={n_chunks} in {time.time() - t0:.1f}s",
+            f"ingest done: sources={n_sources} chunks={n_chunks} "
+            f"fallback={len(fallback_files)} skipped={len(skipped_files)} "
+            f"in {time.time() - t0:.1f}s",
             file=sys.stderr,
         )
 
@@ -282,6 +321,8 @@ async def run(args) -> int:
         "ingest_granularity": "per-file (real sectionizer+chunker)",
         "sources": n_sources,
         "chunks": n_chunks,
+        "chunks_only_fallback_files": fallback_files,
+        "skipped_files": skipped_files,
         "golden_sha256": actual_sha,
         "golden_count": n,
         "recall_at_5": r5,
