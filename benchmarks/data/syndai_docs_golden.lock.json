@@ -1,0 +1,23 @@
+{
+  "golden_path": "benchmarks/data/syndai_docs_golden.jsonl",
+  "sha256": "c424b08f02608510445007a5d75dcf5903c8ac34d31c073c629717db9a0f0c83",
+  "bytes": 51502,
+  "count": 60,
+  "multi_hop_count": 12,
+  "strata": {
+    "ops": 7,
+    "plans": 4,
+    "root": 15,
+    "specs": 10,
+    "tools": 3,
+    "decisions": 2,
+    "contracts": 1,
+    "runbooks": 6,
+    "multi-hop": 12
+  },
+  "generator_engine": "openrouter",
+  "generator_model": "google/gemini-3.1-pro-preview",
+  "sample_seed": 20260711,
+  "corpus_manifest": "benchmarks/manifests/syndai_docs_gate.lock.json",
+  "corpus_git_commit": "6945f429a81d66440751840f7368b3358186ecb1"
+}

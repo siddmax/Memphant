@@ -37,9 +37,17 @@ test-results/
 *.log
 tmp/
 temp/
-benchmarks/data/
+# Ignore fetched benchmark datasets, but keep the mined syndai-gate golden
+# set + lock (small, version-pinned; the W10 gate scores against them).
+benchmarks/data/*
+!benchmarks/data/syndai_docs_golden.jsonl
+!benchmarks/data/syndai_docs_golden.lock.json
 .fastembed_cache/
 # Reader-lane evidence packs embed raw LongMemEval session text (the raw
 # dataset stays out of the repo); the scored reader-*.json reports are committed.
 docs/build-log/artifacts/*/reader-evidence-*.jsonl
 docs/build-log/artifacts/*/reader-cache/
+# Syndai-gate lane: evidence packs embed raw retrieved doc bodies and the miner
+# cache embeds full corpus sections; scored reports + compare verdict are committed.
+docs/build-log/artifacts/syndai-gate/*_evidence.jsonl
+docs/build-log/artifacts/syndai-gate/miner-cache/

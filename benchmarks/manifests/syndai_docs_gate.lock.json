@@ -1,0 +1,448 @@
+{
+  "corpus": "syndai_product_docs",
+  "syndai_root": "/Users/sidsharma/Syndai",
+  "git_commit": "6945f429a81d66440751840f7368b3358186ecb1",
+  "globs": [
+    "docs/*.md",
+    "docs/**/*.md"
+  ],
+  "excluded_prefixes": [
+    "docs/superpowers/"
+  ],
+  "exclusion_rationale": "docs/superpowers/ is SDD process scaffolding (plans, audits, briefs, research), not product documentation; the gate corpus is the real product/architecture/spec docs.",
+  "file_count": 108,
+  "files": {
+    "docs/APP_UX_DESIGN.md": {
+      "sha256": "e01867428ca4828079efadcf37e61803ae5cb2ac2d896dfd91885655b8d68822",
+      "bytes": 88527
+    },
+    "docs/AUTOSCALING.md": {
+      "sha256": "c56ee74adc3b8a2f8a5715a7536150c07b8aad79ee31b804941ed20a53c61d91",
+      "bytes": 70046
+    },
+    "docs/AUTO_TASK_NAMING_RESEARCH.md": {
+      "sha256": "6688def0011d32f2de7d48f7505373c352e00d4165bda4f8d85481472e06453e",
+      "bytes": 14671
+    },
+    "docs/BARE_MVP_PRD.md": {
+      "sha256": "7ae4fe32217866bb1782655187b3180ccd489dd52d24b1dcfc79270c2975a476",
+      "bytes": 76776
+    },
+    "docs/BARE_MVP_STATUS.md": {
+      "sha256": "f20b59c16afff5f14e749735853010c6448b689d513933d08384e98b89ac3085",
+      "bytes": 96527
+    },
+    "docs/DATABASE_SCHEMA.md": {
+      "sha256": "4f978971309075a73993784a9925fc7a345e8172021af60b1ed5bf925c42c552",
+      "bytes": 53296
+    },
+    "docs/DEPLOYMENT_GUIDE.md": {
+      "sha256": "3025e4d359ad17cfceda835804805acf02283b18806d9064465e18ea6a2433d0",
+      "bytes": 8196
+    },
+    "docs/IMPLEMENTATION_ROADMAP.md": {
+      "sha256": "9c728fc8a34bbb940a38ac307ad95745289a89affa3b15d2fedf6461a0aaa7bd",
+      "bytes": 433027
+    },
+    "docs/IMPLEMENTATION_STATUS.md": {
+      "sha256": "740e30f8355b5360df74193dddeefc9c470f392decb35c97890e869673462ba0",
+      "bytes": 11409
+    },
+    "docs/KNOWLEDGE_BASE_DESIGN.md": {
+      "sha256": "04d722e17e778589511f9e8274bbcbcde37cde6da91e17cd0bbdcd3902206158",
+      "bytes": 343497
+    },
+    "docs/LANDING_PAGE_REDESIGN_PLAN.md": {
+      "sha256": "d83975fb5545afa45803ba7a3b634e44879d1a321791fd2a7af1a5596f2ff3bb",
+      "bytes": 37759
+    },
+    "docs/LLM_CONFIG.md": {
+      "sha256": "e938aa3ed85245bd3908960f6ea513eca3c3cac03fdc3175ec788434a74a5e4d",
+      "bytes": 4080
+    },
+    "docs/MARKETPLACE_VERIFICATION.md": {
+      "sha256": "0a69aa134e1f742ee07250a73e1c76334a207f9bf933418b06fc4ee47c11d543",
+      "bytes": 282159
+    },
+    "docs/MEMORY_ARCHITECTURE.md": {
+      "sha256": "1a4abfe754775db12f41993bb4c1eeba480b4b779a54a3400212a3f383b71ba2",
+      "bytes": 31004
+    },
+    "docs/MIGRATION_TASK_MODEL.md": {
+      "sha256": "eea23a9ccfb4d4ecfd69b778ab574a7dfc0594f70fd2be9e6756943c8d1d4dad",
+      "bytes": 5190
+    },
+    "docs/README.md": {
+      "sha256": "af3ca5b9c5a3f9f3fe813862276c73540cf6a16568f684407f3553da0e5a2e60",
+      "bytes": 3716
+    },
+    "docs/SCREENSHOTS_NEEDED.md": {
+      "sha256": "56f513eca323c1a1a273d29598e5121ef40c9d31f3a70389f0fed3cb033a664b",
+      "bytes": 5556
+    },
+    "docs/TECHNICAL_ARCHITECTURE.md": {
+      "sha256": "0ca64b692167870ec469225f2544246a34dcb5a0837bd1c641f1783aa419f2de",
+      "bytes": 261427
+    },
+    "docs/TOOL_SELECTION.md": {
+      "sha256": "1b61d632c9e8b1ad592295cf6c18fca8cfcf75fd889fdfc75b326dc151b1e550",
+      "bytes": 44655
+    },
+    "docs/UI_FLOWS.md": {
+      "sha256": "4b822de6e847b850c5fc6cfff6a28d663905533dd501e5dea99533787a470a40",
+      "bytes": 206971
+    },
+    "docs/V3_OPERATOR_HANDOFF.md": {
+      "sha256": "094d1dc9d6bd98156bb0348dfb48da766f338198c42b17950f81299910b1059a",
+      "bytes": 3073
+    },
+    "docs/VOICE_AGENT_ARCHITECTURE.md": {
+      "sha256": "921c6bdf3fde7cbc01e804de5c47a2a3e8d6e1f3eaf9e221352a135569bb690c",
+      "bytes": 27186
+    },
+    "docs/agents/AGENT_CREATION.md": {
+      "sha256": "26a2637dcf13de049d165edbd352c718360a5a59a873512328400e6b139feca3",
+      "bytes": 3234
+    },
+    "docs/contracts/POLICY_CONFIG_SCHEMA.md": {
+      "sha256": "34bf86f58d15bda78a51af63dd2974783acb83489833bec76eed32b2631c9083",
+      "bytes": 3924
+    },
+    "docs/decisions/2026-05-20-coding-executor-b-test-evidence.md": {
+      "sha256": "aa82c5af5d9d0a631e359e1e1cfb49767f222d4a03bada0e6c297e718424693d",
+      "bytes": 10290
+    },
+    "docs/decisions/2026-05-24-delete-swebench-stub.md": {
+      "sha256": "ae96ce99a5a7a0d9542a1f174ae3ff0781e2b8c861a7d6372f737e745bec4da4",
+      "bytes": 1899
+    },
+    "docs/decisions/2026-05-24-harbor-single-wrapper-adapter.md": {
+      "sha256": "3720c258b806096ea474316688d33666a798f05f81964b79eaaa1f817239a4ea",
+      "bytes": 1348
+    },
+    "docs/decisions/2026-05-24-lean-pi-replaces-pi-acp.md": {
+      "sha256": "e1007acfdc15589fa82c93388176c792a5173e6d781d27c16869130ee598c7a3",
+      "bytes": 2024
+    },
+    "docs/decisions/2026-05-24-opencode-executor-adoption.md": {
+      "sha256": "17b9d17d3cb4fcfde0f739199014795235f0324ff6c4b6cc42266e41a6cf5988",
+      "bytes": 1194
+    },
+    "docs/decisions/2026-05-24-phase-4-cross-validation-fanout.md": {
+      "sha256": "62757211a1c7af34bb3617c146e1468e36ea0309361b05ff5f4a42826a1c7e25",
+      "bytes": 5502
+    },
+    "docs/decisions/2026-05-24-rename-swebench-to-cross-validation.md": {
+      "sha256": "66c53c463ffbae443b88182563362a5a92204fdd606465bc100eadd7f49a2c79",
+      "bytes": 1957
+    },
+    "docs/decisions/2026-05-24-veto-layer-quality-formula.md": {
+      "sha256": "1aa5b0ad82d00690a99e505f143ad8cb42a30ebc8dc65ea92e65d21acd2163c9",
+      "bytes": 4657
+    },
+    "docs/decisions/2026-05-25-phase-4-cross-validation-writer-fanout-impl.md": {
+      "sha256": "678edd0cd90174bce7ed7175dc9498bc4cf1d2284726b050056cf22d2a09f1dc",
+      "bytes": 4141
+    },
+    "docs/decisions/2026-05-25-phase-8-veto-layer-activation.md": {
+      "sha256": "95ac3da7bbb87407d653075dd5511fd1bb572b0e27a561906220a9415f874e1a",
+      "bytes": 4560
+    },
+    "docs/decisions/2026-05-26-phase-6-meta-eval-correlation-contract.md": {
+      "sha256": "bbcc3df449cb558adf8047f8d54009c2f4c1b160c1019b6c9e912e97979c6850",
+      "bytes": 7684
+    },
+    "docs/decisions/2026-05-30-meridian-vs-direct-env-overlay-for-subscription-auth.md": {
+      "sha256": "e0e7de868f117607536fa8e6fa0cee9258acea8e724e3c661aa333bea72c670b",
+      "bytes": 13201
+    },
+    "docs/decisions/2026-05-31-pi-qwen-openrouter-platform-default.md": {
+      "sha256": "07b6d946a7679fc47ece90942a7d57efbc73debaf85e76e0502162dee7c4eb02",
+      "bytes": 13693
+    },
+    "docs/decisions/2026-06-15-cross-vm-patch-merge-contract.md": {
+      "sha256": "5b3c1cc521c9b2443fe0568229df356c6b8d6e774e145bea24c7c56497253757",
+      "bytes": 4408
+    },
+    "docs/decisions/ADR_MULTI_AGENT_ARCHITECTURE_MAPPING.md": {
+      "sha256": "84f4787da6d130688c83b43e6563dc8b90f37f003afa7671b1a64db5224321ac",
+      "bytes": 3986
+    },
+    "docs/ops/FTL_BLAZE_ACTIVATION.md": {
+      "sha256": "ccb99462371e79551acd62a690de1b6244049c2f5d30e0a8209854bb2c565e2e",
+      "bytes": 6279
+    },
+    "docs/ops/GITHUB_LAUNCH_CONTROLS.md": {
+      "sha256": "0b87951fb82b5b7260be4c30556d9bdb7508143c97c869bcd170a21f395303f9",
+      "bytes": 3379
+    },
+    "docs/plans/2026-05-21-pr-8-1-capsolver-browser-runtime.md": {
+      "sha256": "5a8159b8299f942dc06d33741e784956f483eaeb2370061052c1eaf4f6008d43",
+      "bytes": 29065
+    },
+    "docs/plans/2026-05-23-eval-pyramid-finishing-work.md": {
+      "sha256": "6f226f1cbee412a68675278312e64308b2bbdab2cbc454eb2c8dac317058b4d4",
+      "bytes": 12305
+    },
+    "docs/plans/2026-05-24-coding-eval-architecture-v2.md": {
+      "sha256": "86cab11eea429648e7c114dc1ef6a2a62ce052e3eda6eacebdaa92f8e0a640ef",
+      "bytes": 15836
+    },
+    "docs/plans/2026-05-24-flesh-out-all-eval-fixtures.md": {
+      "sha256": "d61d0d3b16c4508f0dfb5b8e20e7b161866a86f94e5596525e3c98cf15f6e241",
+      "bytes": 5703
+    },
+    "docs/plans/2026-05-24-l3-orchestration-eval-pyramid.md": {
+      "sha256": "cd8c3bb37065cec4d4e019a8df34601de160a524c5b07a32f86c2b009441b96d",
+      "bytes": 11994
+    },
+    "docs/products.md": {
+      "sha256": "2026f2e2ae29fa410c0396533a57afd291ee5f776f5fb9a9cd961878a0118085",
+      "bytes": 34741
+    },
+    "docs/runbooks/code-intel-ab-measurement.md": {
+      "sha256": "b590a9bf8ad6e40ef5f0c1f1f9538eb70555c9c488199fbf8a8bd713d75946e5",
+      "bytes": 11230
+    },
+    "docs/runbooks/frontier-monitor-live-weekly-digest.md": {
+      "sha256": "9e5cd367958bd8f3c5d200d5dd0848a7406816ececdbaea724ff80e1f09c1024",
+      "bytes": 7733
+    },
+    "docs/runbooks/ios-build-lane-activation.md": {
+      "sha256": "e03705181ce354bfc506c5c6e3e98d90bcc77de3145a55cf2e33fac9c2f29a4e",
+      "bytes": 27772
+    },
+    "docs/runbooks/llm-tier-frontier-bump-2026-05-30.md": {
+      "sha256": "fd1f5a8674727539c62fa40ac111ac86610bbbb3708fc484e85fc29dac7de550",
+      "bytes": 5036
+    },
+    "docs/runbooks/local-coding-e2e-three-harness.md": {
+      "sha256": "a23dd2837ba6ca365d49dc62a5887e7f8ba3354bab744ddc4c8ace85fbbf48f2",
+      "bytes": 14604
+    },
+    "docs/runbooks/prod-coding-e2e-three-harness.md": {
+      "sha256": "9ae6599f1b4a895b715e8d75d41708664b4be55f204e8cd5a47a9239c2ef5d9e",
+      "bytes": 17725
+    },
+    "docs/runbooks/sandbox-ux-gate-activation.md": {
+      "sha256": "d431f31bcb85af4abf4db8207676ae8bffdab4407df183c5e1acfdb7819b8981",
+      "bytes": 18320
+    },
+    "docs/runbooks/stripe-outcome-billing-bring-up.md": {
+      "sha256": "af0ba4c52d0929c0eb474b43780be9a9bdf39c02a090987d49ce9e07b228cda5",
+      "bytes": 2464
+    },
+    "docs/runbooks/temporal-worker-version-promotion.md": {
+      "sha256": "c226872958df4a61ba3d6517901a700e3db10f65b5ee067af99550b7a308e42c",
+      "bytes": 5479
+    },
+    "docs/specs/AREAS_SINGLE_SURFACE_UX_SPEC.md": {
+      "sha256": "95a4b3000f5bad2ddfcd541066567cd0dafb3b92e185686d3b3bf6efb88962b8",
+      "bytes": 2167
+    },
+    "docs/specs/PHASE_10_DELEGATION.md": {
+      "sha256": "2e8f18376577de1168f4bf30d65c279e24bca0e5a52beef4c04c5fe99633ac18",
+      "bytes": 87216
+    },
+    "docs/specs/PHASE_11_REVENUECAT.md": {
+      "sha256": "fc9a614e89bfa95c9f032c5789ed5b907c876e3775dea37466c7c8112058b4cd",
+      "bytes": 47252
+    },
+    "docs/specs/PHASE_12_10_OPENROUTER.md": {
+      "sha256": "71dc6afa5f8e3cc4fd19f72fe9995d6d49d912148ea7f69fbeaa3b3223bb6025",
+      "bytes": 26329
+    },
+    "docs/specs/PHASE_12_5_STATE_SYNC.md": {
+      "sha256": "c31e9ddbf01748308570fb2313fe8b5d2ecd58c2e04987ea0640f368a639bbc4",
+      "bytes": 26031
+    },
+    "docs/specs/PHASE_12_6_SAFE_APPROVALS.md": {
+      "sha256": "e9b916597c77a029071c19b3dede70b3406d2647c0275a593353e581f1ad8f88",
+      "bytes": 40922
+    },
+    "docs/specs/PHASE_12_7_AGENTIC_TOOL_LOOP.md": {
+      "sha256": "36ea480629f2e9e397c64f9d2024df377bdff5cea7d4230e216ab67d94491b09",
+      "bytes": 17030
+    },
+    "docs/specs/PHASE_12_8_MOBILE_API_GAPS.md": {
+      "sha256": "5a8b40acdc96a426ceef9a3dce98e66945e47c611c2b92218cf5a1e9259939a9",
+      "bytes": 9522
+    },
+    "docs/specs/PHASE_12_9_COST_GOVERNOR.md": {
+      "sha256": "f69c639b49d5b3af4b66acd012fbffec403698f7b41522faded006655da2f97c",
+      "bytes": 19386
+    },
+    "docs/specs/PHASE_12_OBSERVABILITY.md": {
+      "sha256": "68243b395e985b097cde7b7a28add93d957711ef856edc46bbbeaf8fa9ab7958",
+      "bytes": 31611
+    },
+    "docs/specs/PHASE_13A_AUTH.md": {
+      "sha256": "0da6f7316b64ba01837fe84898b238c757fc32e90ae8e19bb6f6ffb7d48f83b4",
+      "bytes": 83926
+    },
+    "docs/specs/PHASE_13B_TASKS.md": {
+      "sha256": "0bccdcaaff8348994f3f5c0669bceb25b51633f9821c083c9cb1225366835699",
+      "bytes": 236549
+    },
+    "docs/specs/PHASE_13C_TEAM.md": {
+      "sha256": "745a8801cd862fd01f93d67f1fb32cc12c8b68c3c9d18c40f501d415e6a6a053",
+      "bytes": 162222
+    },
+    "docs/specs/PHASE_13D_CREDITS.md": {
+      "sha256": "10d182591a9a393e058276bf2527d60c9ab4781c9b7606ef2b7bd34562dcef72",
+      "bytes": 70765
+    },
+    "docs/specs/PHASE_13E_POLISH.md": {
+      "sha256": "2a8750cd067e4e0527d7aef188372f158e729ac5a99a0593ef9d2b164b6d4906",
+      "bytes": 53877
+    },
+    "docs/specs/PHASE_13_FOUNDATION.md": {
+      "sha256": "85475a5169a04f696e8f98d3b2f3de30999c978bab96f3f08f353f449e9637e9",
+      "bytes": 293884
+    },
+    "docs/specs/PHASE_13_MOBILE_APP.md": {
+      "sha256": "ee0db9dda18db2b9c53d417f2fb6b77a315a7aa49cf6f4a2b91baaa3f3975fb0",
+      "bytes": 160017
+    },
+    "docs/specs/PHASE_14_NOTIFICATIONS.md": {
+      "sha256": "7216295cb0f0e6f0a56bc939207c0a8b4f3c72d8d87b0696921cd6c92a558ef7",
+      "bytes": 34087
+    },
+    "docs/specs/PHASE_15_INTELLIGENT_ROUTING.md": {
+      "sha256": "513f48bda853771ac48fd46e54f582fa5c740d6fe1a9c1823907a865ba114c5d",
+      "bytes": 55082
+    },
+    "docs/specs/PHASE_16_UNIVERSAL_AGENT_PLATFORM.md": {
+      "sha256": "65640915956a9b2d6fa0fbefd67faf998b63fd2eabea0a87f9e87681e3178053",
+      "bytes": 69815
+    },
+    "docs/specs/PHASE_17_5B_SCOPE.md": {
+      "sha256": "be3c44c105922331830fa8fafbbd89d826aec517fdbbbb85e8ae3d29b1292ab4",
+      "bytes": 20482
+    },
+    "docs/specs/PHASE_17_5_IDEAL_CODING_LOOP.md": {
+      "sha256": "170f825eaa788e064b78414ed5eb0abde5875a6c4e90015cc71a46203af83253",
+      "bytes": 43998
+    },
+    "docs/specs/PHASE_17_6_CAAS_PRODUCTIZATION.md": {
+      "sha256": "18f77b9eae59f40859856fe2127dfa6c27752882a8b74f9cd4ea1f11e5abc926",
+      "bytes": 28974
+    },
+    "docs/specs/PHASE_17_7_POST_CORE_HARDENING.md": {
+      "sha256": "cd4d011cc73fb9e2ee35e77efb28df02478f338e4675f3010311b306c27116f4",
+      "bytes": 2174
+    },
+    "docs/specs/PHASE_17_8A_CC_LOOP_CUSTOMER_READINESS.md": {
+      "sha256": "be540895bb897467795827f4a28f4794b2efb333ec8b86cdab4d44671f022d24",
+      "bytes": 13801
+    },
+    "docs/specs/PHASE_17_8B_VALIDATION_CUSTOMER_READINESS.md": {
+      "sha256": "0c329240952ccbcdaf6e5f099436f20fc14236ed250994e1df8d62561bba085b",
+      "bytes": 16426
+    },
+    "docs/specs/PHASE_17_8C_CAAS_CUSTOMER_READINESS.md": {
+      "sha256": "a498f4f361ad633349641919345c74d6e485914d73f4c56bf5212fb4213a24eb",
+      "bytes": 13464
+    },
+    "docs/specs/PHASE_17_8D_TRUST_SECURITY_OPS_READINESS.md": {
+      "sha256": "238e51b50e2ff62e7c39858d8fca48047bcb5ba2ff45a8b837dd3fdad68de1eb",
+      "bytes": 10291
+    },
+    "docs/specs/PHASE_17_AI_CODING_WORKFLOW.md": {
+      "sha256": "132c515c0263ab16bb3533a6959cdb59b13d36638e453b129c39dd41f1515bba",
+      "bytes": 13137
+    },
+    "docs/specs/PHASE_17_BACKEND_CLI_VALIDATION.md": {
+      "sha256": "ba0e05c48c2430759e8199ddafb4e4b48eacffd4729e099459e88c40865cdf4d",
+      "bytes": 22679
+    },
+    "docs/specs/PHASE_17_MOBILE_VALIDATION.md": {
+      "sha256": "e84fe3756fa946557444e2fbb9da02cd0ff9c9a3059d34380d2efc054b3d65c1",
+      "bytes": 22305
+    },
+    "docs/specs/PHASE_17_WEB_VALIDATION.md": {
+      "sha256": "cb45b543ca5ae668a977a0d3aa19ab010af20f7071ea87f698aab61fcd1dc225",
+      "bytes": 17103
+    },
+    "docs/specs/PHASE_18I_LOCALIZATION.md": {
+      "sha256": "22a7b97a324d04173c4241349c1113e553f9dfbef209bc90e0285d93c72b6526",
+      "bytes": 8585
+    },
+    "docs/specs/PHASE_18_PLATFORM_POLISH.md": {
+      "sha256": "e3f693b18c9365717037687dd8689ebb05eaff751a9659e784a6f0df4d4ff45a",
+      "bytes": 106681
+    },
+    "docs/specs/PHASE_1_AUTH_CREDITS.md": {
+      "sha256": "86e54e2a652624600785d7f32ed73db436beaf5e61d51300f7ba9e122de3a6d8",
+      "bytes": 30895
+    },
+    "docs/specs/PHASE_29_AI_MANAGEMENT_UI.md": {
+      "sha256": "d545145579454acf4a4f436ad43124028236a08e264092aab69c08ed27588fbc",
+      "bytes": 241874
+    },
+    "docs/specs/PHASE_2_USER_FACTS.md": {
+      "sha256": "e3a8682c49db4624737d5cade068c20dcfe393f9171fe99a24f2ee304b9ae536",
+      "bytes": 34190
+    },
+    "docs/specs/PHASE_30_VIDAS.md": {
+      "sha256": "c903a81c9b71b59f5dcfcd2c75145b2a019fc74593108a0456280cb901110f81",
+      "bytes": 8533
+    },
+    "docs/specs/PHASE_31_VNEXT_MIGRATION.md": {
+      "sha256": "d25267c30cd147c5c2c0b83c651844d1e7a7d83926133c9d9387ddabf875b211",
+      "bytes": 110042
+    },
+    "docs/specs/PHASE_32_PROJECT_SCOPED_L0_AND_AGENT_FIRST_MISSIONS.md": {
+      "sha256": "87a8680c27954846f580db48da97aff3b85f9ee6b7f8db5a2f9f3f6ab0ba8765",
+      "bytes": 12107
+    },
+    "docs/specs/PHASE_3_CHAT_MEMORY.md": {
+      "sha256": "fdf5ad99cba7bfb403ec8856835149cb5cb3813ce83bc6ae39a9eb732c3e7655",
+      "bytes": 119214
+    },
+    "docs/specs/PHASE_42_CONNECTION_AUTHORITIES_AND_AUTHLIB.md": {
+      "sha256": "18e3b20c8dfd34d674b746bb54cd662b0c578ae72b67a3e59c7574700750f8a2",
+      "bytes": 15073
+    },
+    "docs/specs/PHASE_43_POCKET_AI_HEDGE_FUND.md": {
+      "sha256": "7b7bf240f9de243607a0d6d09b1321d08937b37720cd250af026123f2fa1601d",
+      "bytes": 73768
+    },
+    "docs/specs/PHASE_4_AUTO_MEMORY.md": {
+      "sha256": "03e379455c7920447cf7408a77991ad8516d1b49c40ca218a662bf4a4ea23876",
+      "bytes": 60101
+    },
+    "docs/specs/PHASE_5_CUSTOM_TOOLS.md": {
+      "sha256": "abaaeb1f0ca07f3b88bc2da382a9fa93ca9cdc73ddf134d492f2d2f8e82a7860",
+      "bytes": 74949
+    },
+    "docs/specs/PHASE_6A_VERIFICATION.md": {
+      "sha256": "99c14369527715410da9a921b109aa44f77da298b1514d73436d04127420fc85",
+      "bytes": 68037
+    },
+    "docs/specs/PHASE_6B_TOOL_EXECUTION.md": {
+      "sha256": "3d4428d9f7007104df612a34f2809e86d0d1ea4aafb5ed53a831a69d5068327c",
+      "bytes": 53245
+    },
+    "docs/specs/PHASE_7_TOOL_IMPORTERS.md": {
+      "sha256": "fb8012970701ed177a1454b0d1304aabe536b859c3ff3fe995464a555df9a132",
+      "bytes": 44150
+    },
+    "docs/specs/PHASE_8_SUB_AGENTS.md": {
+      "sha256": "1770eb800042ac7c7e87a88a5734f34d8791bb9cd639815b7579c44a8fb1a691",
+      "bytes": 66002
+    },
+    "docs/specs/PHASE_9_KNOWLEDGE_RAG.md": {
+      "sha256": "28376980714fc5a9a74ffafa27f420db3cfed0c83cc9673d405b701aef2e4af2",
+      "bytes": 74088
+    },
+    "docs/spikes/2026-06-18-coding-sandbox-e2b-vs-freestyle.md": {
+      "sha256": "484314207dc081f1c30bdf238fe69b494416770776d83a131d60e29070f135ef",
+      "bytes": 13055
+    },
+    "docs/tools/TOOL_CREATION.md": {
+      "sha256": "60f9b53df9b103cb3179dbac76bd88541b586969d5e8cea2b52ddff3041e658e",
+      "bytes": 4350
+    }
+  }
+}
