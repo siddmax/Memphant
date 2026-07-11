@@ -111,18 +111,19 @@ RESULTS_PLACEHOLDER if scoring didn't finish), docs/superpowers/specs/memphant/S
 - Full local gate (AGENTS.md) + spec-drift green before any "done" claim;
   commits small with Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>.
 
-> Update 2026-07-11 (FINAL — supersedes the resume order above): the accuracy wave
-> completed with NO promotions (docs/build-log/2026-07-11-accuracy-wave.md); the
-> Syndai doc gate is HOLD (Syndai 0.217 vs MemPhant 0.050 —
-> docs/build-log/2026-07-11-syndai-gate.md). THE authoritative next plan is
-> docs/reports/2026-07-11-prosumer-memory-campaign-report.md §6 + §8 (prosumer
-> reframe; ordered execution R0→R5): R0 stack bench (gte-modernbert drop-in vs
-> bge-small in our harness first), R1 doc lane (new embedder + late-chunking +
-> voyage-context-3 arm → re-run the Syndai gate until MemPhant WINS), R2 chat round
-> at n=300 seed 20260712 confirmed on the full 500 (Chain-of-Note v4, profile
-> block, temporal re-measure, HyDE), R3 coding-continuity lane over the 63.6k
-> events, R4 additive consolidation framework gated by MemoryStress+FAMA, R5
-> replacement wiring only after R1 flips. Self-hosted stack: gte-modernbert-base /
-> bge-reranker-v2-m3 / Qwen3-8B-2507 offline consolidator; voyage-context-3 is the
-> one API buy. Binding: verbatim-is-the-memory; deterministic writes; full-500 +
-> virgin-200 promotion bar; SOTA language locked until R2's protocol run.
+> Update 2026-07-11 (FINAL v2 — supersedes everything above): plan of record is
+> docs/reports/2026-07-11-prosumer-memory-campaign-report.md §9 (Memory-OS plan v2;
+> §6/§8 remain as evidence context). Order: R0 embedder bakeoff FIRST (local
+> bge-base/modernbert-embed-large/EmbeddingGemma vs API voyage-context-4/
+> voyage-4-lite/gemini-embedding-001; API ships only on ≥3pt docs-QA win, CI>0, two
+> seeds; chat lane stays local for privacy; voyage-code-3 code sub-bakeoff) → R1
+> flip the Syndai docs gate → R2 chat n=300 seed 20260712 + full-500 confirm
+> (Chain-of-Note v4, hot-plane profile block, temporal, HyDE) → R3 governance spec +
+> hot/file planes (markdown exports = projection-not-source, owned regions) → R4
+> coding lane + outcome write-back over the 63.6k events → R5 MemoryStress+FAMA
+> longitudinal gate (demotion/consolidation adjudicated there) → R6 replacement
+> wiring. Verified: voyage-context-4 real (vendor numbers only); OpenAI
+> text-embedding-4 does NOT exist; fastembed has modernbert-embed-large, NOT
+> gte-modernbert. Binding: five-plane architecture (hot ≤1k / warm verbatim / cold
+> demotion-not-deletion / file plane / governance core); forgetting = demotion,
+> hard-delete only for privacy; verbatim is the memory; deterministic writes.

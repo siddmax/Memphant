@@ -209,3 +209,79 @@ better codebase memory than Syndai, magic for prosumers, months-scale durability
 Standing rules apply throughout: verbatim is the memory; deterministic writes;
 pre-registration + full-500/virgin-subset confirmation for promotions; accuracy/UX
 > cost > perf/latency; "SOTA" language unlocked only by R2's protocol run.
+
+## 9. Memory-OS plan v2 (2026-07-11, second research round — SUPERSEDES §8's order)
+
+Verified corrections from the adversarial round: **voyage-context-4 is real** (GA
+2026-06-29, $0.12/1M; all numbers vendor-only — our bakeoff decides); **OpenAI
+text-embedding-4 does NOT exist** (aggregator hallucination); **fastembed-rs does
+NOT ship gte-modernbert-base** — its native ModernBERT is `modernbert-embed-large`
+(shortlist corrected accordingly).
+
+### The reframe: memory is a lifecycle, not a retriever
+
+Field verdict (2026): "agents need a write path, not just a retriever" — the open
+design surface is WHAT to store, WHERE (flat files / episodic / KB / profile),
+WHEN to update/supersede/demote, and HOW to retrieve across stores. Nobody ships
+the full loop. Five unclaimed openings map directly onto MemPhant machinery:
+outcome-grounded coding write-back (measured), query-type routing that reads FEWER
+stores, a write-gate closed on retrieval outcomes, measured multi-agent shared
+memory (contamination/scope-leak rates), and supersession-without-deletion as a
+first-class semantic — literally our evidence-reset thesis, unshipped by anyone.
+
+### The five-plane architecture (target state)
+
+1. **Hot plane (≤1k tokens, always injected):** profile facts + active-project
+   state, assembled deterministically from supersedence chain-heads. Evidence: every
+   shipping product converges on a tiny hot core (ChatGPT ~1.2-1.4k words cap).
+2. **Warm plane:** today's substrate — verbatim episodes + contextual chunks + KB
+   resources, hybrid retrieval. Verbatim stays the memory.
+3. **Cold plane (demotion, not deletion):** stale/interfering/deep-superseded items
+   demoted out of fast recall (reachable in exhaustive mode). Evidence: add-all
+   memory measures WORSE than no memory; selective management +10% absolute; the
+   harm mechanism is stale-reuse + semantic crowding — both already blunted by our
+   supersedence. Hard-delete ONLY for privacy, tombstoned.
+4. **File plane (the coding-agent surface):** AGENTS.md/MEMORY.md/learnings.md-class
+   markdown as deterministic EXPORTS of the governed store — projection, not source:
+   owned regions, human edits preserved outside them, provenance held in-store.
+   Also ingestion sources (auto-memory dirs, existing flat files). Key evidence:
+   LLM-generated context files measurably HURT (−3% vs human +4%) — exports must be
+   evidence-derived and terse, never model prose dumps. 1,925-repo study: teams
+   churn these files by hand (median re-edit ~1 day) — the pain is real and unserved.
+5. **Governance core:** typed write-router (knowledge=supersession /
+   episodic=decay-to-cold / procedural=evidence-gated / preference=chain-head →
+   hot), write-gate ("store what changes future behavior", later closed on
+   retrieval outcomes), post-action write-back (outcome records from coding/mission
+   traces), principal-scoped multi-agent access (one user, many Syndai + coding
+   agents at Claude-Code frequency).
+
+### Execution order v2 (decisive)
+
+- **R0 — Embedder bakeoff (FIRST; API-justification test included).** Candidates:
+  local `bge-base-en-v1.5` (anchor), `modernbert-embed-large`, `EmbeddingGemma-300m`
+  (all fastembed-native; Qwen3-0.6B reserve via candle); API `voyage-context-4`,
+  `voyage-4-lite`, `gemini-embedding-001`; code sub-bakeoff `voyage-code-3` vs local.
+  Fixtures: LME chat lane, Syndai-docs 60Q golden (retrieval + downstream QA), code
+  events sample. **Promotion rule: an API embedder ships only if it beats best-local
+  by ≥3 pts downstream docs-QA with CI floor > 0 on both lanes, two seeds; the
+  personal-chat lane defaults LOCAL regardless (privacy egress).**
+- **R1 — Doc lane / flip the Syndai gate** with R0's winner (+contextual-embedding
+  arm). "Better RAG than Syndai" becomes true here or nowhere.
+- **R2 — Chat round** n=300 (seed 20260712) → full-500 confirmation: Chain-of-Note
+  v4, hot-plane profile block v1, temporal re-measure, HyDE.
+- **R3 — Governance spec + hot/file planes v1:** spec amendment (typed write-router,
+  demotion policy, file-plane projection contract with owned regions + churn
+  guards); implement hot plane (R2 profile generalized) + MEMORY.md-class
+  export/ingest MVP behind flags; document the multi-agent scope model.
+- **R4 — Coding lane (first-mover, measured):** golden set over the 63.6k
+  coding-execution events; post-action outcome write-back (worked/failed/invalidated
+  assumptions) into procedural memory; learnings.md-class export. This is "better
+  codebase memory than Syndai" — they have nothing here.
+- **R5 — Longitudinal gate:** MemoryStress + FAMA harness; demotion/decay and the
+  additive consolidation framework (§8) adjudicated THERE, never on LME-class
+  benches (95.4% vs 38.3% divergence proves the blind spot).
+- **R6 — Replacement wiring** after R1 flips; then episodic/behavioral consolidation
+  onto one substrate.
+
+§8's model-stack picks stand except: local embedder shortlist corrected as above;
+reranker/consolidator unchanged (`bge-reranker-v2-m3`, `Qwen3-8B-2507`).
