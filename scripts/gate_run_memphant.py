@@ -49,42 +49,19 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gate_common as gc  # noqa: E402
 
+# The API-arm key map + fail-fast check live in the shared gate_runtime
+# module (single source of truth for every gate runner — this script's copy
+# and code_lane_run_memphant.py's copy drifted once already, so the map was
+# centralized; pinned against the Rust `embedder_from_id` grammar by
+# tests/test_gate_runtime.py). Names re-exported here unchanged so main()'s
+# call site and any external reference keep working.
+from gate_runtime import API_KEY_ENV_BY_ARM, check_embed_model_key  # noqa: E402, F401
+
 DEFAULT_DATABASE_URL = "postgres://memphant:memphant@localhost:5432/memphant_gate"
 DEFAULT_SYNDAI_ROOT = Path("/Users/sidsharma/Syndai")
 GOLDEN_PATH = gc.MEMPHANT_ROOT / "benchmarks" / "data" / "syndai_docs_golden.jsonl"
 SCOPE_ID = "7c000000-0000-4000-8000-0000000000a1"
 ACTOR_ID = "7c000000-0000-4000-8000-0000000000a2"
-
-# The API-arm ids from memphant-runtime's `embedder_from_id` grammar (T2) and
-# the provider key each one needs. Mirrors `api_embeddings::require_key`'s
-# error text so a missing key fails the same way here as it would inside the
-# Rust binary — just before spending time on tenant/server setup instead of
-# after the ingest has already started.
-API_KEY_ENV_BY_ARM = {
-    "voyage-4": "VOYAGE_API_KEY",
-    "voyage-4-lite": "VOYAGE_API_KEY",
-    "voyage-4-large": "VOYAGE_API_KEY",
-    "voyage-code-3": "VOYAGE_API_KEY",
-    "voyage-context-4": "VOYAGE_API_KEY",
-    "gemini-embedding-001": "GEMINI_API_KEY",
-    "openai-text-embedding-3-small": "OPENAI_API_KEY",
-}
-
-
-def check_embed_model_key(embed_model: str | None) -> None:
-    """Fail fast when an API embedder arm is selected but its provider key is
-    missing from the parent env. Local arms (small/base/modernbert/gemma/
-    qwen3) and off/noop need no key and are silently allowed through."""
-    if not embed_model:
-        return
-    var = API_KEY_ENV_BY_ARM.get(embed_model)
-    if var is None:
-        return
-    if not os.environ.get(var, "").strip():
-        raise RuntimeError(
-            f"--embed-model {embed_model}: {var} is not set (required to "
-            "construct this API embedding provider)"
-        )
 
 
 def golden_lock_path(golden_path: Path) -> Path:

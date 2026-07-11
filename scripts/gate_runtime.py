@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Shared MemPhant-server runtime harness for the embedder-bakeoff engine
-runners: server/worker process lifecycle, tenant provisioning, and a small
-retrying HTTP client. Factored out of ``gate_run_memphant.py`` (the docs-lane
-runner) so ``code_lane_run_memphant.py`` (R0-T6) doesn't copy-paste the
-~150-line process-management block; ``gate_run_memphant.py`` itself is left
-untouched (it is a live, already-running script during R0 — see its own
-module docstring) but is the pattern this module was lifted from.
+runners: server/worker process lifecycle, tenant provisioning, a small
+retrying HTTP client, and the API-arm key map. Factored out of
+``gate_run_memphant.py`` (the docs-lane runner) so
+``code_lane_run_memphant.py`` (R0-T6) doesn't copy-paste the ~150-line
+process-management block. ``gate_run_memphant.py`` keeps its own process
+classes (it is a live, already-running script during R0) but imports the
+API-key arm map from here — the one piece where a per-script copy already
+drifted once (see ``API_KEY_ENV_BY_ARM``).
 
 This module includes the ``check_port_free``/extended-health-wait/log-capture
 robustness landed in ``gate_run_memphant.py`` by commit ``cf17b35`` (a
@@ -34,6 +36,42 @@ from pathlib import Path
 HEALTH_WAIT_TIMEOUT_S = 600.0  # first boot may download embedding model weights (up to 1.5GB)
 HEALTH_POLL_INTERVAL_S = 0.5
 LOG_TAIL_LINES = 15
+
+# The API-arm ids from memphant-runtime's `embedder_from_id` grammar
+# (crates/memphant-runtime/src/lib.rs) and the provider key each one needs.
+# SINGLE SOURCE OF TRUTH for every gate runner: gate_run_memphant.py and
+# code_lane_run_memphant.py both import this map (a per-script copy drifted
+# once already — voyage-4-large landed in one script's copy but not the
+# other's, silently disabling the fail-fast for that arm). Mirrors
+# `api_embeddings::require_key`'s error text so a missing key fails the same
+# way here as it would inside the Rust binary — just before spending time on
+# tenant/server setup instead of after the ingest has already started.
+# Pinned against the Rust grammar by tests/test_gate_runtime.py.
+API_KEY_ENV_BY_ARM = {
+    "voyage-4": "VOYAGE_API_KEY",
+    "voyage-4-lite": "VOYAGE_API_KEY",
+    "voyage-4-large": "VOYAGE_API_KEY",
+    "voyage-code-3": "VOYAGE_API_KEY",
+    "voyage-context-4": "VOYAGE_API_KEY",
+    "gemini-embedding-001": "GEMINI_API_KEY",
+    "openai-text-embedding-3-small": "OPENAI_API_KEY",
+}
+
+
+def check_embed_model_key(embed_model: str | None) -> None:
+    """Fail fast when an API embedder arm is selected but its provider key is
+    missing from the parent env. Local arms (small/base/modernbert/gemma/
+    qwen3) and off/noop need no key and are silently allowed through."""
+    if not embed_model:
+        return
+    var = API_KEY_ENV_BY_ARM.get(embed_model)
+    if var is None:
+        return
+    if not os.environ.get(var, "").strip():
+        raise RuntimeError(
+            f"--embed-model {embed_model}: {var} is not set (required to "
+            "construct this API embedding provider)"
+        )
 
 
 def sh(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:

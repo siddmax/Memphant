@@ -40,7 +40,6 @@ never drop the gold" contract as the docs runner's ``--limit-haystack``.
 from __future__ import annotations
 
 import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -54,33 +53,6 @@ CORPUS_PATH = gc.MEMPHANT_ROOT / "benchmarks" / "data" / "coding_events_corpus.j
 GOLDEN_PATH = gc.MEMPHANT_ROOT / "benchmarks" / "data" / "coding_events_golden.jsonl"
 SCOPE_ID = "7c000000-0000-4000-8000-0000000000b1"
 ACTOR_ID = "7c000000-0000-4000-8000-0000000000b2"
-
-# Mirrors gate_run_memphant.py's API_KEY_ENV_BY_ARM (memphant-runtime's
-# embedder_from_id grammar); kept here rather than importing from that
-# script so this runner has no dependency on a script that is, during R0,
-# already a live running process (see this module's docstring).
-API_KEY_ENV_BY_ARM = {
-    "voyage-4": "VOYAGE_API_KEY",
-    "voyage-4-lite": "VOYAGE_API_KEY",
-    "voyage-code-3": "VOYAGE_API_KEY",
-    "voyage-context-4": "VOYAGE_API_KEY",
-    "gemini-embedding-001": "GEMINI_API_KEY",
-    "openai-text-embedding-3-small": "OPENAI_API_KEY",
-}
-
-
-def check_embed_model_key(embed_model: str | None) -> None:
-    if not embed_model:
-        return
-    var = API_KEY_ENV_BY_ARM.get(embed_model)
-    if var is None:
-        return
-    if not os.environ.get(var, "").strip():
-        raise RuntimeError(
-            f"--embed-model {embed_model}: {var} is not set (required to "
-            "construct this API embedding provider)"
-        )
-
 
 def golden_lock_path(golden_path: Path) -> Path:
     return golden_path.with_name(golden_path.stem + ".lock.json")
@@ -180,7 +152,7 @@ def main() -> int:
     parser.add_argument("--cli-bin", default=str(gc.MEMPHANT_ROOT / "target/release/memphant-cli"))
     args = parser.parse_args()
 
-    check_embed_model_key(args.embed_model)
+    gr.check_embed_model_key(args.embed_model)
     label_prefix = f"[{args.label}] " if args.label else ""
 
     golden_path = Path(args.golden)
