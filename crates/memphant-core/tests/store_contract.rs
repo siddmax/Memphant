@@ -301,7 +301,7 @@ async fn candidates_fetch_respects_tenant_and_scope() {
     }
 
     let candidates = store
-        .fetch_recall_candidates(tenant_a, &[scope_a], &[], &[], None, usize::MAX)
+        .fetch_recall_candidates(tenant_a, &[scope_a], &[], &[], usize::MAX)
         .await
         .expect("fetch succeeds");
 

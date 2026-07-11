@@ -1617,6 +1617,7 @@ dependencies = [
  "memphant-core",
  "memphant-store-postgres",
  "memphant-types",
+ "uuid",
 ]
 
 [[package]]

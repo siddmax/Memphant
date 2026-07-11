@@ -10,3 +10,9 @@ rust-version.workspace = true
 memphant-core.workspace = true
 memphant-runtime = { path = "../memphant-runtime" }
 tokio = { workspace = true, features = ["signal", "time"] }
+
+# The shipped worker embeds by DEFAULT (write-through embeds compiled units on
+# the same path the server reads). `MEMPHANT_EMBEDDINGS=off` opts out.
+[features]
+default = ["fastembed"]
+fastembed = ["memphant-runtime/fastembed"]

@@ -11,6 +11,7 @@ fastembed = { version = "5", default-features = false, features = ["hf-hub-rustl
 memphant-core.workspace = true
 memphant-store-postgres = { path = "../memphant-store-postgres" }
 memphant-types.workspace = true
+uuid.workspace = true
 
 [features]
 fastembed = ["dep:fastembed"]

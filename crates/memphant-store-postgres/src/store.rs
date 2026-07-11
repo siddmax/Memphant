@@ -651,7 +651,6 @@ impl MemoryStore for PgStore {
         scopes: &[ScopeId],
         kinds: &[MemoryKind],
         query_terms: &[String],
-        query_vec: Option<&[f32]>,
         limit: usize,
     ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
         let scope_uuids: Vec<Uuid> = scopes.iter().map(|scope| scope.as_uuid()).collect();
@@ -726,29 +725,62 @@ impl MemoryStore for PgStore {
             extend(fetched);
         }
 
-        // Family 4: vector top-K (only when a real embedding was provided).
-        if let Some(vec) = query_vec.filter(|vec| !vec.is_empty()) {
-            let sql = format!(
-                "select unit.* from ({inner}) unit
-                 join memphant.embedding embedding
-                   on embedding.tenant_id = $1 and embedding.memory_unit_id = unit.id
-                 order by embedding.vec <=> $4::halfvec limit 32",
-                inner = Self::unit_select(base, "")
-            );
-            let rows = sqlx::query(AssertSqlSafe(sql.as_str()))
-                .bind(tenant.as_uuid())
-                .bind(scope_uuids.clone())
-                .bind(kind_strs.clone())
-                .bind(vec_literal(vec))
-                .fetch_all(&self.pool)
-                .await
-                .map_err(backend)?;
-            let fetched: Result<Vec<_>, _> = rows.iter().map(Self::unit_from_row).collect();
-            extend(fetched?);
-        }
+        // The vector family lives in `fetch_vector_candidates` — it carries the
+        // `<=>` distance back to core fusion and applies the mandatory
+        // embedding_profile_id predicate.
 
         units.truncate(limit.min(1_000));
         Ok(units)
+    }
+
+    async fn fetch_vector_candidates(
+        &self,
+        tenant: TenantId,
+        scopes: &[ScopeId],
+        kinds: &[MemoryKind],
+        query_vec: &[f32],
+        profile_id: Uuid,
+        limit: usize,
+    ) -> Result<Vec<(StoredMemoryUnit, f32)>, StoreError> {
+        if query_vec.is_empty() {
+            return Ok(Vec::new());
+        }
+        let scope_uuids: Vec<Uuid> = scopes.iter().map(|scope| scope.as_uuid()).collect();
+        let kind_strs: Vec<String> = kinds.iter().map(enum_str).collect();
+        let base = "tenant_id = $1 and scope_id = any($2)
+                    and (cardinality($3::text[]) = 0 or kind = any($3))
+                    and transaction_to is null";
+        // The `embedding_profile_id = $5` predicate is mandatory (spec 03): it
+        // hits the per-profile partial index and keeps `<=>` from comparing
+        // vectors of different dimensions/models across profiles. `$4` is the
+        // query vector; the distance rides back as `<=>` (cosine distance).
+        let sql = format!(
+            "select unit.*, (embedding.vec <=> $4::halfvec) as vector_distance
+             from ({inner}) unit
+             join memphant.embedding embedding
+               on embedding.tenant_id = $1
+              and embedding.memory_unit_id = unit.id
+              and embedding.embedding_profile_id = $5
+             order by embedding.vec <=> $4::halfvec limit {limit}",
+            inner = Self::unit_select(base, ""),
+            limit = limit.min(1_000),
+        );
+        let rows = sqlx::query(AssertSqlSafe(sql.as_str()))
+            .bind(tenant.as_uuid())
+            .bind(scope_uuids)
+            .bind(kind_strs)
+            .bind(vec_literal(query_vec))
+            .bind(profile_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(backend)?;
+        rows.iter()
+            .map(|row| {
+                let unit = Self::unit_from_row(row)?;
+                let distance = row.try_get::<f64, _>("vector_distance").map_err(backend)? as f32;
+                Ok((unit, distance))
+            })
+            .collect()
     }
 
     async fn fetch_units_by_ids(

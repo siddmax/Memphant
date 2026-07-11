@@ -180,6 +180,22 @@ pub fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
     dot / (norm_left * norm_right)
 }
 
+/// The nearest-neighbour fan-out for the recall vector channel: how many
+/// units the store's vector query returns per recall. Matches the historical
+/// pgvector `<=>` top-K.
+pub const VECTOR_CANDIDATE_LIMIT: usize = 32;
+
+/// The active vector query for recall: the embedded query plus the embedding
+/// profile id its stored counterparts must match. The profile predicate is
+/// mandatory (spec 03 — the `<=>` path filters `embedding_profile_id = $pid`,
+/// else the per-profile partial index is skipped and cross-dimension vectors
+/// are compared); the store threads it into its vector-family query.
+#[derive(Debug, Clone, Copy)]
+pub struct VectorQuery<'a> {
+    pub vec: &'a [f32],
+    pub profile_id: Uuid,
+}
+
 /// One `embedding_profile` row: the provider identity every stored embedding
 /// FKs. Seeded (idempotent upsert) before embeddings are written.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -385,17 +401,33 @@ pub trait MemoryStore: Send + Sync {
     ) -> impl Future<Output = Result<JobId, StoreError>> + Send;
 
     // Read seam. The candidate set is the UNION of FTS top-N, most-recent-M
-    // per scope, vector top-K (when `query_vec` is given) and exact-subject
-    // matches — deduped by id. The in-memory store returns all in-scope units.
+    // per scope and exact-subject matches — deduped by id. The vector family
+    // is a separate query (`fetch_vector_candidates`) so it can carry the
+    // `<=>` distance back to the core fusion. The in-memory store returns all
+    // in-scope units.
     fn fetch_recall_candidates(
         &self,
         tenant: TenantId,
         scopes: &[ScopeId],
         kinds: &[MemoryKind],
         query_terms: &[String],
-        query_vec: Option<&[f32]>,
         limit: usize,
     ) -> impl Future<Output = Result<Vec<StoredMemoryUnit>, StoreError>> + Send;
+    /// The recall vector family: the nearest units to `query_vec` under the
+    /// ACTIVE embedding profile, each with its cosine DISTANCE (pgvector `<=>`;
+    /// the in-memory store returns `1 - cosine`). Core scores the vector
+    /// channel as `1 - distance` and folds these units into the candidate
+    /// union. Filtering by `profile_id` is mandatory — mixing embeddings across
+    /// profiles/dimensions is incoherent (spec 03).
+    fn fetch_vector_candidates(
+        &self,
+        tenant: TenantId,
+        scopes: &[ScopeId],
+        kinds: &[MemoryKind],
+        query_vec: &[f32],
+        profile_id: Uuid,
+        limit: usize,
+    ) -> impl Future<Output = Result<Vec<(StoredMemoryUnit, f32)>, StoreError>> + Send;
     fn fetch_units_by_ids(
         &self,
         tenant: TenantId,
@@ -1006,7 +1038,6 @@ impl MemoryStore for InMemoryStore {
         scopes: &[ScopeId],
         kinds: &[MemoryKind],
         _query_terms: &[String],
-        _query_vec: Option<&[f32]>,
         limit: usize,
     ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
         let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
@@ -1024,6 +1055,52 @@ impl MemoryStore for InMemoryStore {
             .unwrap_or_default();
         units.truncate(limit);
         Ok(units)
+    }
+
+    async fn fetch_vector_candidates(
+        &self,
+        tenant: TenantId,
+        scopes: &[ScopeId],
+        kinds: &[MemoryKind],
+        query_vec: &[f32],
+        profile_id: Uuid,
+        limit: usize,
+    ) -> Result<Vec<(StoredMemoryUnit, f32)>, StoreError> {
+        let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+        let embeddings = state.embeddings.get(&tenant);
+        let mut scored: Vec<(StoredMemoryUnit, f32)> = state
+            .memory_units
+            .get(&tenant)
+            .map(|units| {
+                units
+                    .iter()
+                    .filter(|unit| scopes.contains(&unit.scope_id))
+                    .filter(|unit| kinds.is_empty() || kinds.contains(&unit.kind))
+                    .filter_map(|unit| {
+                        // Best (nearest) embedding for this unit UNDER the
+                        // active profile; app-side cosine, returned as cosine
+                        // DISTANCE (1 - similarity) to mirror pgvector `<=>`.
+                        embeddings
+                            .into_iter()
+                            .flatten()
+                            .filter(|row| {
+                                row.memory_unit_id == unit.id
+                                    && row.embedding_profile_id == profile_id
+                            })
+                            .map(|row| 1.0 - cosine_similarity(query_vec, &row.vec))
+                            .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                            .map(|distance| (unit.clone(), distance))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        scored.sort_by(|left, right| {
+            left.1
+                .partial_cmp(&right.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        scored.truncate(limit);
+        Ok(scored)
     }
 
     async fn fetch_units_by_ids(
@@ -1796,7 +1873,7 @@ where
 pub async fn recall<S>(
     store: &S,
     request: RecallRequest,
-    query_vec: Option<&[f32]>,
+    vector_query: Option<VectorQuery<'_>>,
     clock: &dyn Clock,
 ) -> Result<RecallResponse, CoreError>
 where
@@ -1857,34 +1934,51 @@ where
     }
 
     let query_tokens = tokenize(&request.query);
-    let query_vec = query_vec.filter(|vec| !vec.is_empty());
-    let tenant_units = store
+    let vector_query = vector_query.filter(|query| !query.vec.is_empty());
+    let mut tenant_units = store
         .fetch_recall_candidates(
             request.tenant_id,
             &request.allowed_scope_ids,
             &[],
             &query_tokens,
-            query_vec,
             usize::MAX,
         )
         .await?;
-    let unit_ids: Vec<UnitId> = tenant_units.iter().map(|unit| unit.id).collect();
-    // Real vector channel: cosine between the query embedding and stored unit
-    // embeddings (best score across profiles). `None` when no real embedding
-    // provider is configured — the channel is then traced as disabled.
-    let vector_scores: Option<HashMap<UnitId, f32>> = match query_vec {
-        Some(query_vec) => {
-            let rows = store.fetch_embeddings(request.tenant_id, &unit_ids).await?;
+    // Real vector channel: the store returns (unit, cosine DISTANCE) for the
+    // nearest units under the active profile (pgvector `<=>`, or the in-memory
+    // app-side cosine), and the channel score is `1 - distance` — no app-side
+    // recompute from raw vectors. The vector-surfaced units are folded into the
+    // candidate union. `None` when no real embedding provider is configured —
+    // the channel is then traced as disabled.
+    let vector_scores: Option<HashMap<UnitId, f32>> = match vector_query {
+        Some(query) => {
+            let pairs = store
+                .fetch_vector_candidates(
+                    request.tenant_id,
+                    &request.allowed_scope_ids,
+                    &[],
+                    query.vec,
+                    query.profile_id,
+                    VECTOR_CANDIDATE_LIMIT,
+                )
+                .await?;
+            let mut seen: HashSet<UnitId> = tenant_units.iter().map(|unit| unit.id).collect();
             let mut scores: HashMap<UnitId, f32> = HashMap::new();
-            for row in rows {
-                let score = cosine_similarity(query_vec, &row.vec);
-                let entry = scores.entry(row.memory_unit_id).or_insert(score);
-                *entry = entry.max(score);
+            for (unit, distance) in pairs {
+                let score = 1.0 - distance;
+                scores
+                    .entry(unit.id)
+                    .and_modify(|best| *best = best.max(score))
+                    .or_insert(score);
+                if seen.insert(unit.id) {
+                    tenant_units.push(unit);
+                }
             }
             Some(scores)
         }
         None => None,
     };
+    let unit_ids: Vec<UnitId> = tenant_units.iter().map(|unit| unit.id).collect();
     let tenant_edges = store.fetch_edges(request.tenant_id, &unit_ids).await?;
     let mut tenant_episodes = Vec::new();
     if request.mode == RecallMode::Exhaustive {
@@ -3949,14 +4043,7 @@ where
 
     let now = clock.now_rfc3339();
     let mut working = store
-        .fetch_recall_candidates(
-            input.tenant_id,
-            &[input.scope_id],
-            &[],
-            &[],
-            None,
-            usize::MAX,
-        )
+        .fetch_recall_candidates(input.tenant_id, &[input.scope_id], &[], &[], usize::MAX)
         .await?;
     let originals: HashMap<UnitId, (UnitState, Option<String>)> = working
         .iter()

@@ -19,8 +19,8 @@ use memphant_types::{
 
 use crate::{
     Clock, CoreError, EmbeddingProvider, JobFilter, MemoryStore, ReflectJobRow, ScopePage,
-    StoreError, correct_memory, forget_memory, recall, record_mark, reflect_recorded,
-    retain_episode, retain_resource, tokenize,
+    StoreError, VectorQuery, correct_memory, embedding_profile_for, forget_memory, recall,
+    record_mark, reflect_recorded, retain_episode, retain_resource, tokenize,
 };
 
 /// Errors surfaced by the application layer. Transport layers map these onto
@@ -291,6 +291,12 @@ impl<S: MemoryStore> MemoryService<S> {
         } else {
             None
         };
+        // The stored counterparts of `query_vec` live under the active
+        // embedder's profile; the store filters `<=>` to that id (spec 03).
+        let vector_query = query_vec.as_deref().map(|vec| VectorQuery {
+            vec,
+            profile_id: embedding_profile_for(self.embedder()).id,
+        });
         let response = recall(
             self.store.as_ref(),
             RecallRequest {
@@ -320,7 +326,7 @@ impl<S: MemoryStore> MemoryService<S> {
                 decay_enabled: request.decay_enabled.unwrap_or(true),
                 engine_version: ENGINE_VERSION.to_string(),
             },
-            query_vec.as_deref(),
+            vector_query,
             self.clock.as_ref(),
         )
         .await?;

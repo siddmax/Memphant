@@ -18,6 +18,13 @@ sha2.workspace = true
 tokio.workspace = true
 uuid.workspace = true
 
+# The shipped server embeds by DEFAULT (pre-production; accuracy > startup
+# cost; the bge-small model is cached locally). `MEMPHANT_EMBEDDINGS=off`
+# opts out at runtime without rebuilding.
+[features]
+default = ["fastembed"]
+fastembed = ["memphant-runtime/fastembed"]
+
 [dev-dependencies]
 http-body-util.workspace = true
 tower.workspace = true

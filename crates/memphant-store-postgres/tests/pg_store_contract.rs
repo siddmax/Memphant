@@ -182,13 +182,13 @@ async fn cross_tenant_candidates_and_traces_are_isolated() {
     svc.reflect(tenant_a, scope, None).await.expect("reflect");
 
     let own = store
-        .fetch_recall_candidates(tenant_a, &[scope], &[], &["deploy".to_string()], None, 100)
+        .fetch_recall_candidates(tenant_a, &[scope], &[], &["deploy".to_string()], 100)
         .await
         .expect("candidates");
     assert!(!own.is_empty());
 
     let cross = store
-        .fetch_recall_candidates(tenant_b, &[scope], &[], &["deploy".to_string()], None, 100)
+        .fetch_recall_candidates(tenant_b, &[scope], &[], &["deploy".to_string()], 100)
         .await
         .expect("candidates");
     assert!(cross.is_empty(), "tenant B must never see tenant A units");
@@ -825,5 +825,121 @@ async fn stub_embeddings_persist_and_power_the_vector_channel() {
             == memphant_types::RecallChannel::Vector
             && candidate.channel_score > 0.0),
         "pgvector-backed vector channel produced scored candidates"
+    );
+}
+
+/// The spec-mandated `embedding_profile_id` predicate (spec 03): the vector
+/// query MUST filter by the active profile. This is not cosmetic — a unit that
+/// also carries an embedding under a DIFFERENT-dimension profile would make the
+/// `<=>` join compare mismatched dimensions and raise a pgvector error if the
+/// predicate were dropped. The query succeeding (and returning the unit via its
+/// active-profile row) is the regression guard.
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn vector_candidates_filter_by_embedding_profile() {
+    use memphant_core::{
+        EmbeddingProfileRow, EmbeddingProvider, EmbeddingRow, StubEmbedding,
+        VECTOR_CANDIDATE_LIMIT, embedding_profile_for,
+    };
+
+    let store = connect().await;
+    let tenant = fresh_tenant(&store).await;
+    let scope = ScopeId::new();
+    let actor = ActorId::new();
+    let svc = MemoryService::new(
+        Arc::new(store.clone()),
+        Arc::new(CLOCK),
+        Arc::new(StubEmbedding::default()),
+    );
+
+    retain_episode(
+        svc.store(),
+        retain_request(tenant, scope, actor, "Release region is Taipei.", None),
+    )
+    .await
+    .expect("retain");
+    svc.reflect(tenant, scope, None).await.expect("reflect");
+
+    let page = store
+        .scope_memory_page(tenant, scope, None, 100)
+        .await
+        .expect("page");
+    assert!(!page.items.is_empty());
+    let unit = page.items[0].id;
+
+    let stub = StubEmbedding::default();
+    let active_profile = embedding_profile_for(&stub); // 32-dim
+
+    // A SECOND profile with a DIFFERENT dimension, plus an embedding for the
+    // SAME unit under it. Without the `embedding_profile_id = $pid` predicate,
+    // the vector join would also select this 4-dim row and pgvector would raise
+    // a dimension-mismatch error against the 32-dim query vector.
+    let other_profile = EmbeddingProfileRow {
+        id: Uuid::now_v7(),
+        provider: "stub-alt".to_string(),
+        model: "stub-alt".to_string(),
+        dimensions: 4,
+        distance: "cosine".to_string(),
+        version: "1".to_string(),
+        index_strategy: "exact".to_string(),
+    };
+    store
+        .upsert_embedding_profile(tenant, other_profile.clone())
+        .await
+        .expect("seed cross profile");
+    store
+        .upsert_embeddings(
+            tenant,
+            vec![EmbeddingRow {
+                memory_unit_id: unit,
+                embedding_profile_id: other_profile.id,
+                vec: vec![0.1, 0.2, 0.3, 0.4],
+            }],
+        )
+        .await
+        .expect("insert cross-profile embedding");
+
+    let query_vec = stub
+        .embed(&["Release region Taipei.".to_string()])
+        .expect("embed query")
+        .remove(0);
+    assert_eq!(query_vec.len(), 32);
+
+    // WITH the predicate: only the 32-dim active-profile row is compared, so the
+    // query succeeds and returns the unit. WITHOUT it, this call errors.
+    let pairs = store
+        .fetch_vector_candidates(
+            tenant,
+            &[scope],
+            &[],
+            &query_vec,
+            active_profile.id,
+            VECTOR_CANDIDATE_LIMIT,
+        )
+        .await
+        .expect("vector query must filter cross-profile rows, not error on them");
+    assert!(
+        pairs.iter().any(|(candidate, _)| candidate.id == unit),
+        "unit is returned via its active-profile (32-dim) embedding"
+    );
+
+    // Querying under the OTHER profile with a matching 4-dim vector reaches the
+    // same unit via THAT profile's row — proving selection is by profile id.
+    let other_pairs = store
+        .fetch_vector_candidates(
+            tenant,
+            &[scope],
+            &[],
+            &[0.1_f32, 0.2, 0.3, 0.4],
+            other_profile.id,
+            VECTOR_CANDIDATE_LIMIT,
+        )
+        .await
+        .expect("other-profile query");
+    assert!(
+        other_pairs
+            .iter()
+            .any(|(candidate, _)| candidate.id == unit),
+        "unit is reachable under the cross profile via its 4-dim embedding"
     );
 }

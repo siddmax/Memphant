@@ -7,7 +7,7 @@ use std::sync::Arc;
 use memphant_core::service::MemoryService;
 use memphant_core::{
     EmbeddingProvider, FixedClock, InMemoryStore, MemoryStore, NoopEmbedding, StubEmbedding,
-    cosine_similarity, embedding_profile_for,
+    VECTOR_CANDIDATE_LIMIT, cosine_similarity, embedding_profile_for,
 };
 use memphant_types::{
     ActorId, RecallChannel, RecallHttpRequest, RetainEpisodeHttpRequest, ScopeId, TenantId,
@@ -182,6 +182,129 @@ async fn vector_channel_scores_candidates_with_real_provider() {
     assert!(
         trace.feature_flags.contains(&"vector_enabled".to_string()),
         "feature flags report the vector channel as enabled"
+    );
+}
+
+#[tokio::test]
+async fn in_memory_vector_candidates_return_cosine_distance() {
+    // The extended store contract: `fetch_vector_candidates` returns
+    // (unit, cosine DISTANCE) under the active profile — the in-memory analogue
+    // of pgvector `<=>`, NOT a raw-vector fetch the caller must re-cosine.
+    let store = InMemoryStore::default();
+    let service = stub_service(store.clone());
+    let tenant = TenantId::new();
+    let scope = ScopeId::new();
+    let actor = ActorId::new();
+
+    service
+        .retain(
+            tenant,
+            retain_request(tenant, scope, actor, "Release region is Taipei."),
+        )
+        .await
+        .expect("retain");
+    service.reflect(tenant, scope, None).await.expect("reflect");
+
+    let stub = StubEmbedding::default();
+    let profile = embedding_profile_for(&stub);
+    let query_vec = stub
+        .embed(&["Release region Osaka.".to_string()])
+        .expect("embed query")
+        .remove(0);
+
+    let pairs = store
+        .fetch_vector_candidates(
+            tenant,
+            &[scope],
+            &[],
+            &query_vec,
+            profile.id,
+            VECTOR_CANDIDATE_LIMIT,
+        )
+        .await
+        .expect("vector candidates");
+    assert_eq!(pairs.len(), 1, "the single embedded unit is returned once");
+    let (unit, distance) = &pairs[0];
+
+    let rows = store
+        .fetch_embeddings(tenant, &[unit.id])
+        .await
+        .expect("embeddings");
+    let stored = rows
+        .iter()
+        .find(|row| row.embedding_profile_id == profile.id)
+        .expect("row under the active profile");
+    let expected_distance = 1.0 - cosine_similarity(&query_vec, &stored.vec);
+    assert!(
+        (distance - expected_distance).abs() < 1e-6,
+        "store returns cosine distance (1 - similarity); got {distance}, expected {expected_distance}"
+    );
+    // A vector NEARER the query has a SMALLER distance — direction sanity.
+    assert!(*distance >= 0.0 && *distance <= 2.0);
+}
+
+#[tokio::test]
+async fn vector_channel_score_is_one_minus_store_distance() {
+    // The wiring contract: the recall vector channel's traced score is exactly
+    // `1 - distance` where `distance` is what the store returned — not an
+    // app-side recompute from raw vectors.
+    let store = InMemoryStore::default();
+    let service = stub_service(store.clone());
+    let tenant = TenantId::new();
+    let scope = ScopeId::new();
+    let actor = ActorId::new();
+    let query = "Release region Osaka.";
+
+    service
+        .retain(
+            tenant,
+            retain_request(tenant, scope, actor, "Release region is Taipei."),
+        )
+        .await
+        .expect("retain");
+    service.reflect(tenant, scope, None).await.expect("reflect");
+
+    let stub = StubEmbedding::default();
+    let profile = embedding_profile_for(&stub);
+    let query_vec = stub
+        .embed(&[query.to_string()])
+        .expect("embed query")
+        .remove(0);
+    let pairs = store
+        .fetch_vector_candidates(
+            tenant,
+            &[scope],
+            &[],
+            &query_vec,
+            profile.id,
+            VECTOR_CANDIDATE_LIMIT,
+        )
+        .await
+        .expect("vector candidates");
+    let unit_id = pairs[0].0.id;
+    let distance = pairs[0].1;
+
+    let response = service
+        .recall(tenant, recall_request(tenant, scope, actor, query))
+        .await
+        .expect("recall");
+    let trace = service
+        .trace(tenant, response.trace_id)
+        .await
+        .expect("trace fetch")
+        .expect("trace stored");
+    let vector_candidate = trace
+        .candidates
+        .iter()
+        .find(|candidate| {
+            candidate.channel == RecallChannel::Vector && candidate.unit_id == unit_id
+        })
+        .expect("vector candidate for the embedded unit");
+    assert!(
+        (vector_candidate.channel_score - (1.0 - distance)).abs() < 1e-6,
+        "vector channel score {} must equal 1 - store distance {}",
+        vector_candidate.channel_score,
+        1.0 - distance
     );
 }
 
