@@ -188,7 +188,6 @@ class MemPhant:
         budget_tokens: int | None = None,
         mode: str | None = None,
         include_beliefs: bool | None = None,
-        include_trace: bool | None = None,
     ) -> dict[str, Any]:
         return self._post(
             "/v1/recall",
@@ -202,7 +201,6 @@ class MemPhant:
                 "budget_tokens": budget_tokens,
                 "mode": mode,
                 "include_beliefs": include_beliefs,
-                "include_trace": include_trace,
             },
         )
 
