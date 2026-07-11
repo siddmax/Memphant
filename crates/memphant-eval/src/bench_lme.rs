@@ -625,8 +625,10 @@ pub fn session_bodies(
 
 #[cfg(feature = "fastembed")]
 fn build_fastembed(embed_model: &str) -> Result<Arc<dyn EmbeddingProvider>, String> {
-    let model = memphant_runtime::embeddings::FastEmbedModel::parse(embed_model)
-        .ok_or_else(|| format!("unknown --embed-model: {embed_model} (known: small, base)"))?;
+    let model =
+        memphant_runtime::embeddings::FastEmbedModel::parse(embed_model).ok_or_else(|| {
+            format!("unknown --embed-model: {embed_model} (known: small, base, modernbert, gemma)")
+        })?;
     memphant_runtime::embeddings::FastEmbedProvider::with_model(model)
         .map(|provider| Arc::new(provider) as Arc<dyn EmbeddingProvider>)
         .map_err(|error| format!("fastembed initialization failed: {error}"))

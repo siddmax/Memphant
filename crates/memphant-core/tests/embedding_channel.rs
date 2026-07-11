@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use memphant_core::service::MemoryService;
 use memphant_core::{
-    EmbeddingProvider, FixedClock, InMemoryStore, MemoryStore, NoopEmbedding, StubEmbedding,
-    VECTOR_CANDIDATE_LIMIT, cosine_similarity, embedding_profile_for,
+    EmbedError, EmbeddingProvider, FixedClock, InMemoryStore, MemoryStore, NoopEmbedding,
+    StubEmbedding, VECTOR_CANDIDATE_LIMIT, cosine_similarity, embedding_profile_for,
 };
 use memphant_types::{
     ActorId, RecallChannel, RecallHttpRequest, RetainEpisodeHttpRequest, ScopeId, TenantId,
@@ -15,6 +15,58 @@ use memphant_types::{
 };
 
 const CLOCK: FixedClock = FixedClock("2026-07-09T00:00:00Z");
+
+/// A provider whose `embed_query` deliberately diverges from `embed` (it
+/// nudges every component by a small constant, then renormalizes), so the
+/// R0-T1 query/document seam is observable: a regression that calls `embed`
+/// for the recall-time query (or `embed_query` for index-time documents)
+/// produces a measurably different, independently-computable vector-channel
+/// score. The nudge keeps the result positively correlated with `embed`'s
+/// output (unlike e.g. reversing components, which tends to land near-
+/// orthogonal for these sparse hash vectors and gets dropped by the vector
+/// channel's `score > 0.0` gate).
+#[derive(Clone, Copy, Default)]
+struct AsymmetricEmbedding {
+    inner: StubEmbedding,
+}
+
+impl EmbeddingProvider for AsymmetricEmbedding {
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
+        self.inner.embed(texts)
+    }
+
+    fn embed_query(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
+        let mut vectors = self.inner.embed(texts)?;
+        for vec in &mut vectors {
+            for value in vec.iter_mut() {
+                *value += 0.05;
+            }
+            let norm = vec.iter().map(|value| value * value).sum::<f32>().sqrt();
+            if norm > 0.0 {
+                for value in vec.iter_mut() {
+                    *value /= norm;
+                }
+            }
+        }
+        Ok(vectors)
+    }
+
+    fn dimensions(&self) -> usize {
+        self.inner.dimensions()
+    }
+
+    fn id(&self) -> &str {
+        "test-asymmetric"
+    }
+}
+
+fn asymmetric_service(store: InMemoryStore) -> MemoryService<InMemoryStore> {
+    MemoryService::new(
+        Arc::new(store),
+        Arc::new(CLOCK),
+        Arc::new(AsymmetricEmbedding::default()),
+    )
+}
 
 fn stub_service(store: InMemoryStore) -> MemoryService<InMemoryStore> {
     MemoryService::new(
@@ -361,4 +413,94 @@ async fn noop_provider_keeps_vector_channel_disabled() {
         .expect("vector stage traced");
     assert_eq!(vector_stage.detail, "disabled");
     assert!(trace.feature_flags.contains(&"vector_disabled".to_string()));
+}
+
+/// R0-T1 seam: `service.recall` embeds the query via `embed_query`, while
+/// `service.reflect` (index-time) embeds unit bodies via plain `embed`. With
+/// `AsymmetricEmbedding`, whose `embed_query` deliberately diverges from
+/// `embed`, this is directly observable — a regression that swapped the two
+/// calls would flip both assertions below.
+#[tokio::test]
+async fn recall_embeds_query_via_embed_query_index_time_via_embed() {
+    let store = InMemoryStore::default();
+    let service = asymmetric_service(store.clone());
+    let tenant = TenantId::new();
+    let scope = ScopeId::new();
+    let actor = ActorId::new();
+    let body = "Release region is Taipei.";
+    let provider = AsymmetricEmbedding::default();
+
+    service
+        .retain(tenant, retain_request(tenant, scope, actor, body))
+        .await
+        .expect("retain");
+    service.reflect(tenant, scope, None).await.expect("reflect");
+
+    // Index-time (reflect): the persisted vector matches `embed(body)`, NOT
+    // `embed_query(body)` — documents are never query-prefixed/transformed.
+    let page = store
+        .scope_memory_page(tenant, scope, None, 100)
+        .await
+        .expect("page");
+    let unit_id = page.items[0].id;
+    let rows = store
+        .fetch_embeddings(tenant, &[unit_id])
+        .await
+        .expect("embeddings");
+    let stored = &rows
+        .iter()
+        .find(|r| r.memory_unit_id == unit_id)
+        .expect("row")
+        .vec;
+    let doc_vec = provider
+        .embed(&[body.to_string()])
+        .expect("embed")
+        .remove(0);
+    assert!(
+        cosine_similarity(&doc_vec, stored) > 0.999,
+        "index-time embedding must use embed(), not embed_query()"
+    );
+
+    // Recall-time: the traced vector-channel score for this unit must equal
+    // `1 - cosine_distance(embed_query(query), stored)`, computed
+    // independently here — proving recall used `embed_query`, not `embed`.
+    let response = service
+        .recall(tenant, recall_request(tenant, scope, actor, body))
+        .await
+        .expect("recall");
+    let trace = service
+        .trace(tenant, response.trace_id)
+        .await
+        .expect("trace fetch")
+        .expect("trace stored");
+    let vector_candidate = trace
+        .candidates
+        .iter()
+        .find(|candidate| {
+            candidate.channel == RecallChannel::Vector && candidate.unit_id == unit_id
+        })
+        .expect("vector candidate for the embedded unit");
+
+    let query_vec_via_embed_query = provider
+        .embed_query(&[body.to_string()])
+        .expect("embed_query")
+        .remove(0);
+    let expected_score = cosine_similarity(&query_vec_via_embed_query, stored);
+    assert!(
+        (vector_candidate.channel_score - expected_score).abs() < 1e-6,
+        "recall vector channel score {} must match embed_query()-derived score {}",
+        vector_candidate.channel_score,
+        expected_score
+    );
+
+    // Sanity: embed_query really does diverge from embed for this body, or
+    // the test would not discriminate a regression that swapped the calls.
+    let query_vec_via_embed = provider
+        .embed(&[body.to_string()])
+        .expect("embed")
+        .remove(0);
+    assert!(
+        cosine_similarity(&query_vec_via_embed_query, &query_vec_via_embed) < 0.999,
+        "fixture sanity: embed_query must diverge from embed for the test body"
+    );
 }

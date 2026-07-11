@@ -93,6 +93,17 @@ pub enum EmbedError {
 /// case the recall `vector` channel is traced as disabled rather than faked.
 pub trait EmbeddingProvider: Send + Sync {
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError>;
+
+    /// Embeds `texts` as recall QUERIES rather than documents. Default =
+    /// `embed`, so `NoopEmbedding`, `StubEmbedding`, and any provider whose
+    /// model has no query/document distinction are unchanged. Providers whose
+    /// underlying model applies different conventions for queries vs
+    /// documents (e.g. a nomic-style `search_query:`/`search_document:`
+    /// prefix pair) override this to apply the query-side convention.
+    fn embed_query(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
+        self.embed(texts)
+    }
+
     fn dimensions(&self) -> usize;
     fn id(&self) -> &str;
 }

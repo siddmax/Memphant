@@ -389,7 +389,7 @@ impl<S: MemoryStore> MemoryService<S> {
         // channel; the Noop provider keeps the channel honestly disabled.
         let query_vec = if self.embedder.dimensions() > 0 {
             self.embedder
-                .embed(std::slice::from_ref(&query))
+                .embed_query(std::slice::from_ref(&query))
                 .map_err(|error| {
                     ServiceError::Core(CoreError::Store(StoreError::Backend(format!(
                         "query embedding failed: {error}"
