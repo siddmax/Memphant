@@ -7,15 +7,27 @@
 //! (1024d), and `embeddinggemma-300m` (768d). The default build stays Noop —
 //! no model download in CI or tests.
 //!
+//! A fifth arm, Qwen3-Embedding-0.6B ([`Qwen3Provider`], R0-T1b), lives
+//! behind the SEPARATE `qwen3` cargo feature: fastembed's candle backend
+//! (safetensors download, not the ort/ONNX path the four arms above use).
+//! `fastembed::Qwen3TextEmbedding` is its own public type, not a
+//! `TextEmbedding`/`EmbeddingModel` variant, so it does not fit
+//! [`FastEmbedModel`] and is wired up separately, additive to (never
+//! replacing) the `fastembed` feature.
+//!
 //! Query/document prefixes (R0-T1): some models are trained with distinct
 //! textual prefixes for queries vs documents. [`prefix_text`] is the pure,
-//! unit-testable seam for that; [`FastEmbedProvider`] applies it inside
-//! `embed`/`embed_query` so call sites never have to know about it. Verified
-//! against fastembed 5.17.2's source
+//! unit-testable seam for the four `FastEmbedModel` arms; [`FastEmbedProvider`]
+//! applies it inside `embed`/`embed_query` so call sites never have to know
+//! about it. Verified against fastembed 5.17.2's source
 //! (`~/.cargo/registry/.../fastembed-5.17.2/src/`): it does NOT apply any of
 //! these prefixes internally for these models (no `search_query`,
 //! `search_document`, `task: search`, or `title: none` strings anywhere in
-//! its source), so `prefix_text` never double-prefixes.
+//! its source), so `prefix_text` never double-prefixes. Qwen3 gets its own
+//! sibling pure fn, [`qwen3_query_instruction`], since it isn't
+//! `FastEmbedModel`-typed; verified the same way against
+//! `fastembed-5.17.2/src/models/qwen3.rs`'s `Qwen3TextEmbedding::embed`,
+//! which tokenizes input texts as-is with no added instruction wrapper.
 //!
 //! Reranking (W8): a local cross-encoder ([`FastEmbedCrossReranker`]) over
 //! fastembed's `TextRerank`, implementing the core [`CrossReranker`] seam. The
@@ -25,6 +37,10 @@
 
 use std::sync::Mutex;
 
+#[cfg(feature = "qwen3")]
+use candle_core::{DType, Device};
+#[cfg(feature = "qwen3")]
+use fastembed::Qwen3TextEmbedding;
 use fastembed::{
     EmbeddingModel, InitOptions, RerankInitOptions, RerankerModel, TextEmbedding, TextRerank,
 };
@@ -225,6 +241,116 @@ impl EmbeddingProvider for FastEmbedProvider {
     }
 }
 
+/// The Qwen3-Embedding-0.6B (R0-T1b) provider identity, keyed into the
+/// embedding profile.
+#[cfg(feature = "qwen3")]
+pub const QWEN3_MODEL_ID: &str = "fastembed:qwen3-embedding-0.6b";
+/// Qwen3-Embedding-0.6B's hidden size — verified against the model card and
+/// fastembed's own bundled `qwen3_06b_embed` test, which asserts
+/// `emb.len() == model.config().hidden_size`.
+#[cfg(feature = "qwen3")]
+pub const QWEN3_DIMENSIONS: usize = 1024;
+#[cfg(feature = "qwen3")]
+const QWEN3_REPO_ID: &str = "Qwen/Qwen3-Embedding-0.6B";
+// 8192, not fastembed's 512-token quick-test default: matches the official
+// reference-score test in fastembed's own bundled `tests/qwen3.rs`
+// (`qwen3_06b_reference_scores`) and covers our long (~1500 char) smoke texts
+// with headroom; Qwen3-Embedding supports up to 32k tokens of context.
+#[cfg(feature = "qwen3")]
+const QWEN3_MAX_LENGTH: usize = 8192;
+
+/// Qwen3's default query instruction for the "web search" task, per the
+/// official HF model card's (https://huggingface.co/Qwen/Qwen3-Embedding-0.6B)
+/// `get_detailed_instruct` example: `f'Instruct: {task_description}\nQuery:
+/// {query}'`. Verified there is NO space between `"Query:"` and the query
+/// text — confirmed against both the model card's published text and
+/// fastembed's own bundled `qwen3_06b_reference_scores` test (which
+/// reproduces the model card's published cosine scores using this exact,
+/// space-free template). Pure (no model load), so unit-testable without a
+/// download.
+///
+/// Documents are embedded RAW — no instruction wrapper — matching the model
+/// card's asymmetric convention (only queries carry a task instruction).
+#[cfg(feature = "qwen3")]
+pub fn qwen3_query_instruction(text: &str) -> String {
+    format!(
+        "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:{text}"
+    )
+}
+
+/// Local Qwen3-Embedding-0.6B (R0-T1b) via fastembed's `qwen3` cargo feature
+/// (candle backend). `fastembed::Qwen3TextEmbedding::embed` takes `&self`
+/// (unlike [`FastEmbedProvider`]'s onnx session, which needs `&mut self`), so
+/// no interior `Mutex` is needed here.
+#[cfg(feature = "qwen3")]
+pub struct Qwen3Provider {
+    model: Qwen3TextEmbedding,
+}
+
+#[cfg(feature = "qwen3")]
+impl Qwen3Provider {
+    /// Loads the model from `Qwen/Qwen3-Embedding-0.6B` on Hugging Face
+    /// (downloads ~1.2 GB of safetensors into the local fastembed cache on
+    /// first use; never in the default/CI build, since this whole type is
+    /// behind the additive `qwen3` feature).
+    ///
+    /// Fails fast: embeds one throwaway text immediately and asserts the
+    /// real output width matches [`QWEN3_DIMENSIONS`], so a dims mismatch
+    /// surfaces here at construction time rather than deep in a later
+    /// recall/store path.
+    pub fn new() -> Result<Self, EmbedError> {
+        let device = Device::Cpu;
+        let model =
+            Qwen3TextEmbedding::from_hf(QWEN3_REPO_ID, &device, DType::F32, QWEN3_MAX_LENGTH)
+                .map_err(|error| EmbedError::Unavailable(error.to_string()))?;
+
+        let probe = model
+            .embed(&["dimension probe"])
+            .map_err(|error| EmbedError::Unavailable(error.to_string()))?;
+        let actual_dims = probe.first().map(Vec::len).unwrap_or(0);
+        if actual_dims != QWEN3_DIMENSIONS {
+            return Err(EmbedError::Unavailable(format!(
+                "qwen3 embedding dims mismatch: declared {QWEN3_DIMENSIONS}, model produced {actual_dims}"
+            )));
+        }
+
+        Ok(Self { model })
+    }
+}
+
+#[cfg(feature = "qwen3")]
+impl EmbeddingProvider for Qwen3Provider {
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.model
+            .embed(texts)
+            .map_err(|error| EmbedError::Unavailable(error.to_string()))
+    }
+
+    fn embed_query(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let prefixed: Vec<String> = texts
+            .iter()
+            .map(|text| qwen3_query_instruction(text))
+            .collect();
+        self.model
+            .embed(&prefixed)
+            .map_err(|error| EmbedError::Unavailable(error.to_string()))
+    }
+
+    fn dimensions(&self) -> usize {
+        QWEN3_DIMENSIONS
+    }
+
+    fn id(&self) -> &str {
+        QWEN3_MODEL_ID
+    }
+}
+
 /// Cross-encoder reranker (W8) over fastembed's `TextRerank`, implementing the
 /// core [`CrossReranker`] seam. `rerank` is `&self` (the trait is object-safe
 /// and shared behind an `Arc`), but fastembed's inference takes `&mut self`, so
@@ -349,6 +475,12 @@ mod tests {
             Some(FastEmbedModel::EmbeddingGemma300M)
         );
         assert_eq!(FastEmbedModel::parse("bge"), None);
+        // Qwen3-Embedding-0.6B (R0-T1b) is intentionally NOT a `FastEmbedModel`
+        // variant — `fastembed::Qwen3TextEmbedding` is a separate public type,
+        // not a `TextEmbedding`/`EmbeddingModel` arm — so it must never parse
+        // here. The `--embed-model qwen3` selector is handled as a sibling
+        // case in the eval crate's CLI, dispatching to `Qwen3Provider`.
+        assert_eq!(FastEmbedModel::parse("qwen3"), None);
     }
 
     #[test]
@@ -461,6 +593,134 @@ mod tests {
                 "{arm:?} must prefix queries and documents differently"
             );
         }
+    }
+
+    /// A pure adapter reporting the Qwen3 arm's identity WITHOUT loading
+    /// candle/safetensors, mirroring [`ArmIdentity`] for the four
+    /// `FastEmbedModel` arms above.
+    #[cfg(feature = "qwen3")]
+    struct Qwen3Identity;
+    #[cfg(feature = "qwen3")]
+    impl EmbeddingProvider for Qwen3Identity {
+        fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
+            Ok(Vec::new())
+        }
+        fn dimensions(&self) -> usize {
+            QWEN3_DIMENSIONS
+        }
+        fn id(&self) -> &str {
+            QWEN3_MODEL_ID
+        }
+    }
+
+    #[cfg(feature = "qwen3")]
+    #[test]
+    fn qwen3_profile_is_distinct_from_all_fastembed_arms() {
+        // The R0-T1b arm must key its own profile, distinct from every T1
+        // arm, so its stored vectors never mix with theirs under `<=>`.
+        let qwen3_profile = embedding_profile_for(&Qwen3Identity);
+        assert_eq!(qwen3_profile.dimensions, 1024);
+        for &arm in &ALL_ARMS {
+            let arm_profile = embedding_profile_for(&ArmIdentity(arm));
+            assert_ne!(
+                qwen3_profile.id, arm_profile.id,
+                "qwen3 and {arm:?} must derive distinct profiles"
+            );
+        }
+    }
+
+    #[cfg(feature = "qwen3")]
+    #[test]
+    fn qwen3_query_instruction_matches_model_card_exact_string() {
+        // Verified against https://huggingface.co/Qwen/Qwen3-Embedding-0.6B's
+        // `get_detailed_instruct` example AND fastembed's own bundled
+        // `qwen3_06b_reference_scores` test (which reproduces the model
+        // card's published cosine scores using this exact template): NO
+        // space between "Query:" and the query text.
+        assert_eq!(
+            qwen3_query_instruction("What is the capital of China?"),
+            "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:What is the capital of China?"
+        );
+    }
+
+    #[cfg(feature = "qwen3")]
+    #[test]
+    fn qwen3_query_instruction_differs_from_raw_document_text() {
+        // Documents stay raw; only queries get the instruction wrapper. The
+        // provider's `embed` passes texts through unchanged while
+        // `embed_query` applies `qwen3_query_instruction` — this locks in
+        // that the two are never byte-identical for the same input.
+        let text = "same text";
+        assert_ne!(qwen3_query_instruction(text), text);
+    }
+
+    /// Env-gated real-model smoke: loads Qwen3-Embedding-0.6B (candle
+    /// backend, ~1.2 GB safetensors download) and times two batches — 32
+    /// short (~1 sentence) and 8 long (~1500 char) texts — printing
+    /// wall-clock and texts/sec for each. `#[ignore]` keeps it out of the
+    /// default suite; run with `MEMPHANT_QWEN3_SMOKE=1`. This is the
+    /// CPU-viability pre-gate the R0 bakeoff controller reads before running
+    /// the full campaign.
+    #[cfg(feature = "qwen3")]
+    #[test]
+    #[ignore = "downloads Qwen3-Embedding-0.6B (~1.2 GB); run with MEMPHANT_QWEN3_SMOKE=1"]
+    fn qwen3_latency_smoke_real_model() {
+        if std::env::var("MEMPHANT_QWEN3_SMOKE").as_deref() != Ok("1") {
+            eprintln!("qwen3 smoke skipped (set MEMPHANT_QWEN3_SMOKE=1 to run)");
+            return;
+        }
+        let provider = Qwen3Provider::new().expect("load qwen3-embedding-0.6b");
+
+        let short_texts: Vec<String> = (0..32)
+            .map(|index| format!("Sentence number {index} about a short everyday topic."))
+            .collect();
+
+        let long_sentence = "This is a longer passage meant to simulate a realistic memory \
+            document body that a user might store, repeating enough context to reach a \
+            document-scale length so the smoke test measures throughput on long inputs \
+            rather than single sentences. ";
+        let mut long_base = String::new();
+        while long_base.len() < 1500 {
+            long_base.push_str(long_sentence);
+        }
+        let long_texts: Vec<String> = (0..8)
+            .map(|index| format!("[doc {index}] {long_base}"))
+            .collect();
+        for text in &long_texts {
+            assert!(
+                text.len() >= 1500,
+                "long fixture text too short: {} chars",
+                text.len()
+            );
+        }
+
+        let started = std::time::Instant::now();
+        let short_vectors = provider.embed(&short_texts).expect("embed short batch");
+        let short_elapsed = started.elapsed();
+        assert_eq!(short_vectors.len(), short_texts.len());
+        assert_eq!(
+            short_vectors[0].len(),
+            QWEN3_DIMENSIONS,
+            "qwen3 must produce 1024-d vectors"
+        );
+
+        let started = std::time::Instant::now();
+        let long_vectors = provider.embed(&long_texts).expect("embed long batch");
+        let long_elapsed = started.elapsed();
+        assert_eq!(long_vectors.len(), long_texts.len());
+
+        let short_tps = short_texts.len() as f64 / short_elapsed.as_secs_f64();
+        let long_tps = long_texts.len() as f64 / long_elapsed.as_secs_f64();
+        eprintln!(
+            "qwen3 smoke: short batch {} texts in {} ms ({short_tps:.2} texts/sec)",
+            short_texts.len(),
+            short_elapsed.as_millis()
+        );
+        eprintln!(
+            "qwen3 smoke: long batch {} texts in {} ms ({long_tps:.2} texts/sec)",
+            long_texts.len(),
+            long_elapsed.as_millis()
+        );
     }
 
     /// Env-gated real-model smoke: loads `bge-reranker-base` and reranks a tiny

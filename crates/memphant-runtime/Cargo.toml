@@ -7,6 +7,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+candle-core = { version = "0.10", optional = true }
 fastembed = { version = "5", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries"], optional = true }
 memphant-core.workspace = true
 memphant-store-postgres = { path = "../memphant-store-postgres" }
@@ -15,3 +16,7 @@ uuid.workspace = true
 
 [features]
 fastembed = ["dep:fastembed"]
+# R0-T1b: Qwen3-Embedding-0.6B, fastembed's candle backend (safetensors, not
+# ort/ONNX). Additive, NOT in `default` — the R0 campaign builds once with
+# this on; default builds stay exactly as heavy as today.
+qwen3 = ["fastembed", "fastembed/qwen3", "dep:candle-core"]
