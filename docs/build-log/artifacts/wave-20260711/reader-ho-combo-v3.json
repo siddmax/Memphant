@@ -1,0 +1,1075 @@
+{
+  "benchmark": "longmemeval_reader_qa",
+  "engine": "openrouter",
+  "reader": "openai/gpt-5.6-terra (openrouter chat/completions API)",
+  "judge": "containment+anthropic/claude-sonnet-5 (normalized containment first; one LLM judge call on non-match; abstention = exact 'I don't know' containment)",
+  "reader_model_id": "openai/gpt-5.6-terra",
+  "judge_model_id": "anthropic/claude-sonnet-5",
+  "prompt_version": 3,
+  "routing": {
+    "cot": 65,
+    "terse": 35
+  },
+  "reasoning_effort": "medium",
+  "runtime": "postgres",
+  "label": "wave-ho-combo-v3",
+  "evidence_path": "docs/build-log/artifacts/wave-20260711/ev-ho-combo.jsonl",
+  "retrieval_report": "docs/build-log/artifacts/wave-20260711/lme-ho-combo.json",
+  "command": "scripts/run_reader.py --evidence docs/build-log/artifacts/wave-20260711/ev-ho-combo.jsonl --out docs/build-log/artifacts/wave-20260711/reader-ho-combo-v3.json --label wave-ho-combo-v3 --engine openrouter --model openai/gpt-5.6-terra --judge-model anthropic/claude-sonnet-5 --reasoning-effort medium --prompt-version 3 --retrieval-report docs/build-log/artifacts/wave-20260711/lme-ho-combo.json --baseline docs/build-log/artifacts/wave-20260711/reader-ho-base-v1.json --max-calls 170",
+  "generated_at_unix": 1783767748,
+  "aborted": null,
+  "fresh_calls": 143,
+  "cached_calls": 3,
+  "overall": {
+    "n": 100,
+    "n_scored": 100,
+    "qa_accuracy": 0.61
+  },
+  "strata": {
+    "knowledge-update": {
+      "n": 15,
+      "n_scored": 15,
+      "qa_accuracy": 0.6666666666666666
+    },
+    "multi-session": {
+      "n": 27,
+      "n_scored": 27,
+      "qa_accuracy": 0.4444444444444444
+    },
+    "single-session-assistant": {
+      "n": 11,
+      "n_scored": 11,
+      "qa_accuracy": 0.9090909090909091
+    },
+    "single-session-preference": {
+      "n": 6,
+      "n_scored": 6,
+      "qa_accuracy": 0.0
+    },
+    "single-session-user": {
+      "n": 14,
+      "n_scored": 14,
+      "qa_accuracy": 0.8571428571428571
+    },
+    "temporal-reasoning": {
+      "n": 27,
+      "n_scored": 27,
+      "qa_accuracy": 0.6296296296296297
+    }
+  },
+  "per_question": [
+    {
+      "question_id": "06db6396",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "5",
+      "reply": "Relevant evidence:\n- On 2023/08/16, you said you had completed 4 projects.\n- On 2023/10/09, you said you had just finished your 5th project.\n\nThe later statement establishes the total as 5 projects.\n\n5 projects",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "08e075c7",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "9 months",
+      "reply": "It isn\u2019t stated in the evidence.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "09ba9854",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "$50",
+      "reply": "Relevant evidence: taxi fare is about $60; train plus subway is about $20\u2013$30.\n\nSavings calculation: $60 \u2212 $20 = $40; $60 \u2212 $30 = $30.\n\n$30\u2013$40 saved",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "09ba9854_abs",
+      "question_type": "multi-session",
+      "is_abstention": true,
+      "gold_answer": "The information provided is not enough. You did not mention how much will the bus take.",
+      "reply": "Relevant evidence: the taxi was estimated at about $60, while the Airport Limousine Bus was estimated at about $10\u2013$20.\n\nCalculation: $60 \u2212 $20 = $40; $60 \u2212 $10 = $50. You would save approximately $40\u2013$50 by taking the bus.\n\n$40\u2013$50",
+      "judge_method": "abstention_exact",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "0bc8ad93",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "No, you did not visit with a friend.",
+      "reply": "Relevant evidence: the Science Museum visit was explicitly with a friend, but it occurred in October. The later museum visits\u2014\u201cArt in Bloom\u201d and the city-gallery private viewing\u2014do not mention a friend.\n\nTwo months before the March 11 question is roughly January; no museum visit from that time is recorded. Therefore, there is no evidence that the visit two months ago was with a friend.\n\nNot stated that you visited with a friend.",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "0ddfec37",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "15",
+      "reply": "Evidence item 2 states that you had collected 15 autographed baseballs since starting three months earlier. Evidence item 1\u2019s 20-ball total refers only to \u201cthe past few months,\u201d not specifically the first three months.\n\n15 autographed baseballs",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "0ea62687",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "2",
+      "reply": "Relevant evidence: your car got 30 MPG in the city a few months ago and is now getting 28 MPG.\n\nCalculation: 30 \u2212 28 = 2 MPG.\n\n2 MPG more",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "118b2229",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "45 minutes each way",
+      "reply": "90 minutes total\u201445 minutes each way.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "1568498a",
+      "question_type": "single-session-assistant",
+      "is_abstention": false,
+      "gold_answer": "28. Kg3",
+      "reply": "28. Kg3",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "1903aded",
+      "question_type": "single-session-assistant",
+      "is_abstention": false,
+      "gold_answer": "Transcriptionist.",
+      "reply": "Transcriptionist.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "19b5f2b3",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "two weeks",
+      "reply": "Two weeks.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "1c549ce4",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "$140",
+      "reply": "Evidence: the waterproof car cover cost $120; the detailing spray cost $20.  \nCalculation: $120 + $20 = $140.\n\n$140",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "1da05512",
+      "question_type": "single-session-preference",
+      "is_abstention": false,
+      "gold_answer": "The user would prefer responses that take into account their current home network storage capacity issues and recent reliance on external hard drives, highlighting the potential benefits of a NAS device in addressing these specific needs. They might not prefer responses that ignore their current storage challenges or fail to consider their recent tech upgrades and priorities. Preferred responses would utilize the user's previous mentions of storage capacity issues and tech investments to inform their decision.",
+      "reply": "Buy now if you need centralized backups or more storage; choose a 2-bay model for a small household, or 4-bay if you expect growth and want stronger RAID options.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "2318644b",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "$270",
+      "reply": "Relevant evidence: Tokyo hostel cost was about $30 per night. No Hawaii accommodation cost is provided, so the per-night difference cannot be calculated.\n\nCannot determine without the Hawaii nightly cost.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "29f2956b",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "30 minutes",
+      "reply": "Evidence item 1 states that you practice guitar for 30 minutes daily. Therefore, your daily guitar-practice time is 30 minutes.\n\n30 minutes per day",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "2c63a862",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "14 days. 15 days (including the last day) is also acceptable.",
+      "reply": "Relevant evidence: you started working with Rachel on February 15, and saw a house you loved on March 1.\n\nCalculation: February 15 to February 28 = 13 days; February 28 to March 1 = 1 day; 13 + 1 = 14 days.\n\n14 days",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "2ce6a0f2",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": 4,
+      "reply": "Relevant attended art-related events:\n1. \u201cWomen in Art\u201d exhibition \u2014 February 10  \n2. Children\u2019s Museum \u201cArt Afternoon\u201d \u2014 February 17  \n3. History Museum guided tour \u2014 February 24  \n4. \u201cThe Evolution of Street Art\u201d lecture \u2014 March 3  \n\nCalculation: 4 distinct events.\n\n4 events",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "2ebe6c90",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "21 days. 22 days (including the last day) is also acceptable.",
+      "reply": "Evidence: you started *The Nightingale* on January 10 and finished it on January 31.  \nCalculation: January 31 \u2212 January 10 = 21 days.\n\n21 days",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "3249768e",
+      "question_type": "single-session-assistant",
+      "is_abstention": false,
+      "gold_answer": "Absinthe",
+      "reply": "Absinthe.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "36580ce8",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "bronchitis",
+      "reply": "Bronchitis.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "38146c39",
+      "question_type": "single-session-preference",
+      "is_abstention": false,
+      "gold_answer": "The user would prefer responses that build upon their previous experimentation with turbinado sugar, suggesting ingredients or techniques that complement its richer flavor. They might not prefer generic cookie-making advice or suggestions that don't take into account their existing use of turbinado sugar.",
+      "reply": "Try a pinch of cinnamon or nutmeg, or add chopped nuts for extra flavor and texture.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "3c1045c8",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "2.5 years",
+      "reply": "Relevant evidence: your department\u2019s average age is 29.5, and you indicated interest in programs for professionals in their 30s, but no exact age was provided. If you are 30\u201339, you would be 0.5\u20139.5 years older than the average.\n\n0.5\u20139.5 years older",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "3f1e9474",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "Sarah",
+      "reply": "David Lynch",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "41275add",
+      "question_type": "single-session-assistant",
+      "is_abstention": false,
+      "gold_answer": "The video is 'How to Sit Properly at a Desk to Avoid Back Pain' and the link is https://www.youtube.com/watch?v=UfOvNlX9Hh0.",
+      "reply": "\u201cHow to Sit Properly at a Desk to Avoid Back Pain\u201d by Mayo Clinic: https://www.youtube.com/watch?v=UfOvNlX9Hh0",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "41698283",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "a 70-200mm zoom lens",
+      "reply": "A 70\u2013200mm zoom lens.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "42ec0761",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "Yes",
+      "reply": "Yes\u2014you said you have a spare screwdriver from organizing your computer desk.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "46a3abf7",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": 3,
+      "reply": "I don't know",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "4c36ccef",
+      "question_type": "single-session-assistant",
+      "is_abstention": false,
+      "gold_answer": "Roscioli",
+      "reply": "Roscioli.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "58470ed2",
+      "question_type": "single-session-assistant",
+      "is_abstention": false,
+      "gold_answer": "According to Borges, 'The Library is a sphere whose exact center is any one of its hexagons and whose circumference is inaccessible.'",
+      "reply": "\u201cThe Library\u2019s center is any hexagon, and its circumference is unattainable.\u201d",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "5a4f22c0",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "TechCorp",
+      "reply": "TechCorp",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "60036106",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "12,000",
+      "reply": "Relevant evidence:\n- The Facebook ad campaign reached around 2,000 people.\n- The Instagram influencer promoted the product to 10,000 followers.\n\nCalculation: 2,000 + 10,000 = 12,000 people.\n\n12,000 people",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "603deb26",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "10",
+      "reply": "Relevant evidence: you reported 5 attempts in August, then later reported 10 attempts in November. The later report is the best-supported current count.\n\n10 times",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "60bf93ed_abs",
+      "question_type": "multi-session",
+      "is_abstention": true,
+      "gold_answer": "The information provided is not enough. You did not mention buying an iPad case.",
+      "reply": "Relevant evidence: the only delivery-related detail says a laptop backpack arrived on January 20; it gives neither an iPad-case purchase date nor an iPad-case arrival date. Therefore, no day difference can be calculated.\n\nInsufficient dates to calculate.",
+      "judge_method": "abstention_exact",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "61f8c8f8",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "10 minutes",
+      "reply": "Relevant evidence:\n- You recently finished a 5K in 35 minutes.\n- Your previous year\u2019s 5K time was 45 minutes.\n\nCalculation: 45 minutes \u2212 35 minutes = 10 minutes.\n\n10 minutes faster",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "65240037",
+      "question_type": "single-session-assistant",
+      "is_abstention": false,
+      "gold_answer": "The recommended ratio is 1:10, meaning one part tea tree oil to ten parts carrier oil.",
+      "reply": "1 part tea tree oil to 10 parts carrier oil (1:10).",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "69fee5aa",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "38",
+      "reply": "Evidence: you stated that your pre-1920 American coin collection has \u201ca total of 37 coins.\u201d Therefore, the count is 37.\n\n37 coins",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "6b7dfb22",
+      "question_type": "single-session-preference",
+      "is_abstention": false,
+      "gold_answer": "The user would prefer responses that build upon their existing sources of inspiration, such as revisiting Instagram art accounts or exploring new techniques from online tutorials. They might also appreciate suggestions that revisit previous themes they found enjoyable, like painting flowers. The user would not prefer generic or vague suggestions for finding inspiration, and would likely appreciate responses that utilize their recent 30-day painting challenge experience.",
+      "reply": "Try a new subject, palette, or medium; visit art, nature, or online galleries; and join a local art group for fresh perspectives.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "6e984302",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "I got my own set of sculpting tools.",
+      "reply": "Relevant evidence: the February 18 discussion mentions possible climbing purchases\u2014climbing shoes, a jump rope, and later a fingerboard/hangboard\u2014but it does not say you bought any of them or that they were for a competition. The March 1 conversation concerns music and concerts, not an investment or competition.\n\nFour weeks before April 1 is approximately March 4. No provided evidence from then identifies a competition-related purchase.  \nNo competition-related purchase is recorded.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "7161e7e2",
+      "question_type": "single-session-assistant",
+      "is_abstention": false,
+      "gold_answer": "Admon was assigned to the 8 am - 4 pm (Day Shift) on Sundays.",
+      "reply": "Admon: 8 am\u20134 pm (Day Shift).",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "720133ac",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "$75",
+      "reply": "Evidence: Lola\u2019s flea and tick medication cost $25 for a 3-month supply. No cost for a vet visit is provided. Therefore, the total cannot be calculated from the evidence.\n\nCannot calculate; flea medication was $25.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "830ce83f",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "the suburbs",
+      "reply": "I don't know",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "853b0a1d",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "18",
+      "reply": "18 years old.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "8550ddae",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "lavender gin fizz",
+      "reply": "A lavender gin fizz.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "85fa3a3f",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "$50",
+      "reply": "Relevant costs: food bowl $15; measuring cup $5; dental chews $10; flea and tick collar $20.\n\nCalculation: $15 + $5 + $10 + $20 = $50.\n\n$50",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "88432d0a_abs",
+      "question_type": "multi-session",
+      "is_abstention": true,
+      "gold_answer": "The information provided is not enough. You did not mention baking egg tarts.",
+      "reply": "Relevant evidence: the baking-related records mention a chocolate cake, whole-wheat baguette, sourdough bread, and a planned strawberry tart. None mentions baking egg tarts. Therefore, the recorded number of times you baked egg tarts in the past two weeks is 0.\n\n0",
+      "judge_method": "abstention_exact",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "89527b6b",
+      "question_type": "single-session-assistant",
+      "is_abstention": false,
+      "gold_answer": "The Plesiosaur had a blue scaly body.",
+      "reply": "Blue.",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "89941a94",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "Yes. (You have a road bike too.)",
+      "reply": "Yes\u2014your road bike.",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "8aef76bc",
+      "question_type": "single-session-assistant",
+      "is_abstention": false,
+      "gold_answer": "Mod Podge or another sealant",
+      "reply": "No sealant was mentioned.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "8e91e7d9",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "4",
+      "reply": "Evidence: you referred to going to a Manchester United match \u201cwith my brother.\u201d No other siblings are mentioned. Therefore, the supported count is 1 sibling.\n\n1 sibling",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "8e9d538c",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "17",
+      "reply": "Evidence item 1 states that you found a stash of **17 skeins** of worsted weight yarn. No calculation is needed.\n\n17 skeins",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "8ebdbe50",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "Data Science",
+      "reply": "Data Science certification.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "95228167",
+      "question_type": "single-session-preference",
+      "is_abstention": false,
+      "gold_answer": "The user would prefer responses that highlight the differences between Fender Stratocaster and Gibson Les Paul electric guitars, such as the feel of the neck, weight, and sound profile. They might not prefer general tips on buying an electric guitar or suggestions that do not take into account their current guitar and desired upgrade.",
+      "reply": "I don't know",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "9aaed6a3",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "$0.75",
+      "reply": "Relevant evidence:\n- You spent **$75 at SaveMart last Thursday**.\n- Your SaveMart membership earns **1% cashback on all purchases**.\n\nCalculation: $75 \u00d7 0.01 = **$0.75** cashback.\n\n$0.75",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "9ea5eabc",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "Paris",
+      "reply": "Hawaii",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "a4996e51",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "50",
+      "reply": "Relevant evidence:\n- You stated that during peak campaign seasons, you increase your work hours by 10 hours weekly.\n- You usually work 40 hours per week.\n- The resume phrasing examples describe peak-season work as up to 50 hours per week.\n\nCalculation: 40 typical weekly hours + 10 additional peak-season hours = 50 hours per week.\n\n50 hours per week",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "aae3761f",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "15 hours for getting to the three destinations (or 30 hours for the round trip)",
+      "reply": "Relevant driving-time evidence:\n- Outer Banks: 4 hours.\n- Washington, D.C.: 6 hours.\n- Tybee Island: approximately 7\u20138 hours.\n\nCalculation: 4 + 6 + 7\u20138 = 17\u201318 hours total.\n\n17\u201318 hours",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "b3c15d39",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "5 days. 6 days (including the last day) is also acceptable.",
+      "reply": "Relevant evidence: you ordered the replacement remote shutter release on February 5, and it arrived on February 10.  \nCalculation: February 10 \u2212 February 5 = 5 days.\n\n5 days",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "b46e15ed",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": 2,
+      "reply": "Evidence bearing on the question: the March 19 entry says you participated in the \u201cWalk for Hunger\u201d that day. No evidence item identifies two charity events occurring on consecutive days.\n\nFrom March 19 to April 18 is 30 days, which is about 1 month.\n\nAbout 1 month",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "b86304ba",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "The painting is worth triple what I paid for it.",
+      "reply": "I don't know",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "ba61f0b9",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "6",
+      "reply": "Relevant evidence:\n- A July 20 record states that Rachel\u2019s 10-person team has **6 women**.\n- An earlier January 18 record describes the team as having 5 women, but the later record provides the more recent count.\n\nTherefore, the best-supported answer is 6.\n\n6",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "bcbe585f",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": 4,
+      "reply": "Evidence: You said you attended the bird-watching workshop \u201ctoday\u201d on April 1, 2023. From April 1 to May 1 is 30 days: 30 \u00f7 7 = 4 weeks and 2 days.\n\n4 weeks and 2 days ago",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "c19f7a0b",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "6:30 pm",
+      "reply": "Around 6:30 pm.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "c4ea545c",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "Yes",
+      "reply": "You go to the gym four times a week; no earlier frequency is given.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "c960da58",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "20",
+      "reply": "Evidence item 1 states that you have 20 playlists on Spotify.  \n20 playlists",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "caf03d32",
+      "question_type": "single-session-preference",
+      "is_abstention": false,
+      "gold_answer": "The user would prefer responses that provide tips and advice specifically tailored to their slow cooker experiences, utilizing their recent success with beef stew and interest in making yogurt in the slow cooker. They might not prefer general slow cooker recipes or advice unrelated to their specific experiences and interests.",
+      "reply": "Use a thermometer, avoid overheating, use low heat, and follow recipe times closely; adjust seasoning and liquid to taste.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "d01c6aa8",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "27",
+      "reply": "Relevant evidence: you are described as 32 and as having a master\u2019s degree from NYU, but no item states when you moved to the United States or your age at that time. Therefore, your age when you moved cannot be determined from the evidence.\n\nNot stated in the evidence.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "d6233ab6",
+      "question_type": "single-session-preference",
+      "is_abstention": false,
+      "gold_answer": "The user would prefer responses that draw upon their personal experiences and memories, specifically their positive high school experiences such as being part of the debate team and taking advanced placement courses. They would prefer suggestions that highlight the potential benefits of attending the reunion, such as reconnecting with old friends and revisiting favorite subjects like history and economics. The user might not prefer generic or vague responses that do not take into account their individual experiences and interests.",
+      "reply": "It could be a nice chance to reconnect, catch up, and share memories.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "e3038f8c",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": 99,
+      "reply": "Relevant evidence: 57 rare records and 5 rare books.  \nCalculation: 57 + 5 = 62.  \n62 rare items",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "e61a7584",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "9 months",
+      "reply": "About 9 months.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "ec81a493",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "500",
+      "reply": "Evidence item 1 states that the signed poster associated with the debut album was a limited edition of 500 copies worldwide.  \n\n500 copies",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "ed4ddc30",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "20",
+      "reply": "Relevant evidence: 30 dozen eggs were mentioned on January 11; 20 dozen were mentioned later, on March 15. Since the question is dated March 16, the latest stated refrigerator stock is 20 dozen.\n\n20 dozen eggs",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "edced276",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "15 days",
+      "reply": "Relevant evidence:\n- Hawaii family trip: 10 days.\n- New York City solo trip: five days.\n\nCalculation: 10 + 5 = 15 days.\n\n15 days",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "ef66a6e5",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "two",
+      "reply": "Relevant evidence: you said you \u201cused to swim competitively in college.\u201d No other competitively played sports are mentioned.\n\nCount: swimming = 1 sport.\n\n1",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "f35224e0",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "27",
+      "reply": "Relevant evidence: \u201cHow I Built This\u201d is listed once as a podcast recommendation. \u201cMy Favorite Murder\u201d is not mentioned. No evidence states how many episodes you listened to from either podcast, so a total cannot be calculated.\n\nNot specified",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "faba32e5",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "24 hours",
+      "reply": "24 hours.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "fea54f57",
+      "question_type": "single-session-assistant",
+      "is_abstention": false,
+      "gold_answer": "Evolution",
+      "reply": "\u201cEvolution.\u201d",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_0a05b494",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "the woman selling jam at the farmer's market",
+      "reply": "Evidence: You met the tourist from Australia \u201clast Thursday.\u201d No evidence gives a date for meeting the woman selling jam at the farmer\u2019s market. Based on the available timing, the tourist is the best-supported answer.\n\nThe tourist from Australia",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_1916e0ea",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "54 days. 55 days (including the last day) is also acceptable.",
+      "reply": "- The Instacart grocery order was made on February 28, 2023.\n- No evidence gives a date for cancelling the FarmFresh subscription.\n- Without that cancellation date, the number of days between the two events cannot be calculated.\n\nCannot be calculated",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_194be4b3",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "I currently own 4 musical instruments. I've had the Fender Stratocaster electric guitar for 5 years, the Yamaha FG800 acoustic guitar for 8 years, the 5-piece Pearl Export drum set for an unspecified amount of time, and the Korg B1 piano for 3 years.",
+      "reply": "Relevant instruments: a Pearl Export drum set, Korg B1 piano, and guitar. The ukulele is only being considered, and the violin belongs to the niece. Total: 3.\n\n3",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_1d4ab0c9",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "24 days. 25 days (including the last day) is also acceptable.",
+      "reply": "Relevant evidence:\n- On 2023/03/22, you said you started watering your herb garden every morning \u201ctoday.\u201d\n- On 2023/04/15, you said you harvested your first batch of fresh herbs \u201ctoday.\u201d\n\nCalculation: March 22 to March 31 = 9 days; April 1 to April 15 = 15 days; 9 + 15 = 24 days.\n\n24 days",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_1d80365e",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "2 days. 3 days (including the last day) is also acceptable.",
+      "reply": "Relevant evidence: you said you started the solo Yosemite camping trip on May 15 and got back on May 17.\n\nMay 17 \u2212 May 15 = 2 days.\n\n2 days",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_1e4a8aeb",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "6 days. 7 days (including the last day) is also acceptable.",
+      "reply": "Evidence: the gardening workshop was attended on April 15, 2023; the 12 tomato saplings were planted on April 21, 2023.  \nApril 21 \u2212 April 15 = 6 days.\n\n6 days",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_2f56ae70",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "Disney+",
+      "reply": "Relevant evidence:\n- You had used Netflix, Hulu, and Amazon Prime for the past six months.\n- You had used Apple TV+ for a few months.\n- You started a Disney+ free trial last month.\n\nBecause \u201clast month\u201d is more recent than \u201ca few months,\u201d the most recently started service was Disney+.\n\nDisney+",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_45189cb4",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "First, I attended a NBA game at the Staples Center, then I watched the College Football National Championship game, and finally, I watched the NFL playoffs.",
+      "reply": "Relevant evidence:\n1. On January 5, you said you watched Georgia defeat Alabama 33\u201318 in the College Football National Championship \u201cyesterday,\u201d placing that event first.\n2. Also on January 5, you said you went to a Lakers vs. Chicago Bulls NBA game \u201ctoday,\u201d placing it after the championship game.\n3. On January 22, you said you watched the Kansas City Chiefs defeat the Buffalo Bills in the Divisional Round \u201clast weekend\u201d at Mike\u2019s place, placing it last.\n\nOrder: Georgia\u2013Alabama College Football National Championship \u2192 Lakers\u2013Bulls NBA game \u2192 Chiefs\u2013Bills NFL Divisional Round game.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_70e84552_abs",
+      "question_type": "temporal-reasoning",
+      "is_abstention": true,
+      "gold_answer": "The information provided is not enough. You mentioned fixing the fence but did not mention purchasing cows from Peter.",
+      "reply": "Evidence item 1 says you fixed the east-side fence three weeks before May 21. No evidence item states when you purchased three cows from Peter, so the ordering cannot be established.\n\nCannot determine from the evidence.",
+      "judge_method": "abstention_exact",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_78cf46a3",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "Receiving the new phone case",
+      "reply": "Evidence: the narrator said they lost their phone charger \u201cabout two weeks ago.\u201d No evidence states when they received a new phone case. Therefore, the order cannot be established.\n\nCannot determine",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_7a0daae1",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "1 week",
+      "reply": "Relevant evidence:\n- You bought the new tennis racket on March 10, 2023.\n- You received it on March 17, 2023.\n\nCalculation: March 17 \u2212 March 10 = 7 days; 7 days = 1 week.\n\n1 week",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_93159ced",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "4 years and 9 months",
+      "reply": "Evidence: You reported 9 years of professional work and 4 years 3 months at NovaTech.  \nCalculation: 9 years \u2212 4 years 3 months = 4 years 9 months.\n\n4 years 9 months",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_93159ced_abs",
+      "question_type": "temporal-reasoning",
+      "is_abstention": true,
+      "gold_answer": "The information provided is not enough. From the information provided, You haven't started working at Google yet.",
+      "reply": "Evidence: You said you had been working professionally for 9 years. Therefore, the best-supported duration before your current job at Google is 9 years.\n\n9 years",
+      "judge_method": "abstention_exact",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_a56e767c",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "I attended four movie festivals.",
+      "reply": "Relevant evidence:\n- You volunteered at the **Portland Film Festival**, indicating you attended it.\n- You said you had just returned from **AFI Fest in LA**, indicating you attended it.\n- Sundance, TIFF, and SXSW were recommendations, not festivals you said you attended.\n\nCount: Portland Film Festival (1) + AFI Fest (1) = 2.\n\n2",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_af6db32f",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "17 days ago. 18 days (including the last day) is also acceptable.",
+      "reply": "Relevant evidence: On 2023/02/12, you said you had watched the Super Bowl \u201ctoday.\u201d\n\nFrom February 12 to March 1: \\(28 - 12 + 1 = 17\\) days.\n\n17 days ago",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_b0863698",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "7 days ago. 8 days (including the last day) is also acceptable.",
+      "reply": "Relevant evidence: On March 19, you said you did a 5K charity run \u201ctoday.\u201d The question is dated March 26.\n\nCalculation: March 26 \u2212 March 19 = 7 days.\n\n7 days",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_b5700ca9",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "4 days.",
+      "reply": "Relevant evidence: session f5fa0637_1 is dated April 6, 2023, which was Maundy Thursday. The question date is April 10, 2023.\n\nApril 10 \u2212 April 6 = 4 days.\n\n4 days ago",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_c27434e8",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "Japanese Zero fighter plane model",
+      "reply": "Relevant evidence: the Japanese Zero was started \u201cabout a month ago,\u201d while the Ferrari was started \u201cabout three weeks ago.\u201d Since about one month is earlier than three weeks, the Zero came first.\n\nJapanese Zero fighter plane model",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_c27434e8_abs",
+      "question_type": "temporal-reasoning",
+      "is_abstention": true,
+      "gold_answer": "The information provided is not enough. You did not mention starting the Porsche 991 Turbo S model.",
+      "reply": "Evidence: the Ferrari 288 GTO model was started about three weeks earlier, on a Sunday afternoon. No evidence gives a start date for a Porsche 991 Turbo S model, so the ordering cannot be established.\n\nCannot determine from the evidence.",
+      "judge_method": "abstention_exact",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_cd90e484",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "Two weeks",
+      "reply": "The evidence notes American goldfinches returning a week ago, but gives no information about new binoculars or how long they were used beforehand.  \nNot specified",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_d31cdae3",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "The family road trip across the American Southwest",
+      "reply": "Relevant evidence:\n- The Arizona discussion says the narrator visited the Grand Canyon with family on a road trip across the American Southwest \u201ca few years ago.\u201d\n- The Munich discussion says the narrator took a solo trip to Europe \u201clast summer.\u201d\n\nBecause \u201ca few years ago\u201d predates \u201clast summer,\u201d the family road trip occurred first.\n\nFamily road trip across the American Southwest",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_d84a3211",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "$185",
+      "reply": "Relevant expenses recorded this year:\n- Chain replacement: $25\n- Bike lights: $40\n- Bell Zephyr helmet: $120\n\nCalculation: $25 + $40 + $120 = $185\n\n$185",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_e05b82a6",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "10 times",
+      "reply": "Relevant rollercoaster rides:\n- July, SeaWorld San Diego: Mako, Kraken, and Manta \u2014 3 rides.\n- September 24, Mickey\u2019s Halloween Party: Space Mountain: Ghost Galaxy \u2014 3 rides.\n- October 8, Knott\u2019s Berry Farm: Xcelerator \u2014 1 ride.\n- October 15, Universal Studios Hollywood: Revenge of the Mummy \u2014 3 rides.\n\nCalculation: 3 + 3 + 1 + 3 = 10.\n\n10 times",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_fe651585",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "Alex",
+      "reply": "Evidence considered: item 1 states that Alex adopted a baby girl in January. No evidence gives any timing for Rachel becoming a parent.\n\nBecause only Alex\u2019s parenthood timing is provided, the best-supported answer is Alex.\n\nAlex",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    }
+  ],
+  "paired_vs_baseline": {
+    "baseline_path": "docs/build-log/artifacts/wave-20260711/reader-ho-base-v1.json",
+    "baseline_label": "wave-ho-base-v1",
+    "n_paired": 100,
+    "delta_qa_accuracy": {
+      "mean": 0.05,
+      "ci95_low": -0.04,
+      "ci95_high": 0.14,
+      "ci_excludes_zero": false
+    },
+    "bootstrap_resamples": 1000,
+    "bootstrap_seed": 20260710
+  }
+}

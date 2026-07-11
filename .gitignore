@@ -51,3 +51,4 @@ docs/build-log/artifacts/*/reader-cache/
 # cache embeds full corpus sections; scored reports + compare verdict are committed.
 docs/build-log/artifacts/syndai-gate/*_evidence.jsonl
 docs/build-log/artifacts/syndai-gate/miner-cache/
+docs/build-log/artifacts/*/ev-*.jsonl

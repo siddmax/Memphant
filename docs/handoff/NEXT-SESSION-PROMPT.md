@@ -110,3 +110,11 @@ RESULTS_PLACEHOLDER if scoring didn't finish), docs/superpowers/specs/memphant/S
   code in the dependency tree (adapters = distribution only).
 - Full local gate (AGENTS.md) + spec-drift green before any "done" claim;
   commits small with Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>.
+
+> Update 2026-07-11: the ACCURACY WAVE completed — 10 flagged levers + cleanups landed
+> and measured on two seeds; NO promotions (all CIs include zero; see
+> docs/build-log/2026-07-11-accuracy-wave.md). Syndai doc gate = HOLD (Syndai wins
+> 0.217 vs 0.050; docs/build-log/2026-07-11-syndai-gate.md). Resume at that build-log's
+> "evidence-ranked next levers": (1) pack-policy-aware fact admission, (2) reader-side
+> multi-pass for adequate-pack failures, (3) doc-lane embed/context work, and run the
+> next measurement round at n≥300.
