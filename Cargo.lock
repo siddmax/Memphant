@@ -2169,6 +2169,9 @@ dependencies = [
  "memphant-core",
  "memphant-store-postgres",
  "memphant-types",
+ "serde",
+ "serde_json",
+ "ureq",
  "uuid",
 ]
 

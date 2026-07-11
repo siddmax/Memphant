@@ -623,46 +623,16 @@ pub fn session_bodies(
         .collect()
 }
 
-#[cfg(feature = "fastembed")]
-fn build_fastembed(embed_model: &str) -> Result<Arc<dyn EmbeddingProvider>, String> {
-    // R0-T1b: qwen3 is a separate provider type (`Qwen3TextEmbedding` is not
-    // a `FastEmbedModel`/`EmbeddingModel` arm), so it dispatches to its own
-    // builder rather than through `FastEmbedModel::parse`.
-    if embed_model == "qwen3" {
-        return build_qwen3();
-    }
-    let model =
-        memphant_runtime::embeddings::FastEmbedModel::parse(embed_model).ok_or_else(|| {
-            format!(
-                "unknown --embed-model: {embed_model} (known: small, base, modernbert, gemma, qwen3)"
-            )
-        })?;
-    memphant_runtime::embeddings::FastEmbedProvider::with_model(model)
-        .map(|provider| Arc::new(provider) as Arc<dyn EmbeddingProvider>)
-        .map_err(|error| format!("fastembed initialization failed: {error}"))
-}
-
-#[cfg(not(feature = "fastembed"))]
-fn build_fastembed(_embed_model: &str) -> Result<Arc<dyn EmbeddingProvider>, String> {
-    Err("bench-lme requires a binary built with --features fastembed (real embeddings are part of the benchmark contract)".to_string())
-}
-
-/// R0-T1b: `--embed-model qwen3` selects Qwen3-Embedding-0.6B, which lives
-/// behind the separate `qwen3` cargo feature (candle backend, ~1.2 GB
-/// safetensors download) rather than the ort/ONNX `fastembed` arms above.
-/// Compiled in only when both `fastembed` and `qwen3` are enabled; when
-/// `fastembed` is on but `qwen3` is off, this names the missing feature
-/// instead of silently falling back to another arm.
-#[cfg(all(feature = "fastembed", feature = "qwen3"))]
-fn build_qwen3() -> Result<Arc<dyn EmbeddingProvider>, String> {
-    memphant_runtime::embeddings::Qwen3Provider::new()
-        .map(|provider| Arc::new(provider) as Arc<dyn EmbeddingProvider>)
-        .map_err(|error| format!("qwen3 initialization failed: {error}"))
-}
-
-#[cfg(all(feature = "fastembed", not(feature = "qwen3")))]
-fn build_qwen3() -> Result<Arc<dyn EmbeddingProvider>, String> {
-    Err("--embed-model qwen3 requires a binary built with --features qwen3 (Qwen3-Embedding-0.6B via fastembed's candle backend)".to_string())
+/// Builds the `--embed-model` arm through the shared
+/// [`memphant_runtime::embedder_from_id`] grammar — the SAME single source of
+/// truth the runtime `MEMPHANT_EMBEDDINGS` env var resolves through, so a bench
+/// arm and a served arm are byte-identical for a given id (no longer
+/// fastembed-only, hence the rename from `build_fastembed`). It covers the local
+/// fastembed/qwen3 arms (cargo-feature gated: a clear build-instruction error
+/// when absent) and the R0-T2 hosted-API arms (always compiled: a clear
+/// missing-key error when the provider's env var is unset).
+fn build_embedder_arm(embed_model: &str) -> Result<Arc<dyn EmbeddingProvider>, String> {
+    memphant_runtime::embedder_from_id(embed_model)
 }
 
 /// Builds the real cross-encoder reranker (bge-reranker-base), wrapped so each
@@ -751,7 +721,7 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
     // W8: derive the embedding arm ONCE and share it — ingest and recall must
     // embed under the same profile (id+dims), else the vector channel compares
     // incompatible spaces.
-    let embedder = build_fastembed(&options.embed_model)?;
+    let embedder = build_embedder_arm(&options.embed_model)?;
     // Effective runtime contextual-chunk state: default-on (the product path)
     // unless the control arm explicitly disables it. `--disable runtime_chunks`
     // forces the builder off; `--runtime-chunks` is redundant with the default
@@ -1124,7 +1094,7 @@ mod tests {
     fn embed_model_qwen3_without_qwen3_feature_names_the_missing_feature() {
         // `Arc<dyn EmbeddingProvider>` isn't `Debug`, so `expect_err` (which
         // needs `T: Debug` to format the Ok case) doesn't apply here.
-        let error = match build_fastembed("qwen3") {
+        let error = match build_embedder_arm("qwen3") {
             Err(error) => error,
             Ok(_) => panic!("qwen3 feature is not compiled in — expected an error"),
         };
@@ -1144,7 +1114,7 @@ mod tests {
     #[cfg(feature = "fastembed")]
     #[test]
     fn embed_model_unknown_selector_lists_qwen3_as_known() {
-        let error = match build_fastembed("nope") {
+        let error = match build_embedder_arm("nope") {
             Err(error) => error,
             Ok(_) => panic!("nope is not a known arm — expected an error"),
         };
