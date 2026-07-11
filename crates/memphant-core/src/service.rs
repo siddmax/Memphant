@@ -18,9 +18,10 @@ use memphant_types::{
 };
 
 use crate::{
-    Clock, CoreError, EmbeddingProvider, JobFilter, MemoryStore, ReflectJobRow, ScopePage,
-    StoreError, VectorQuery, correct_memory, embedding_profile_for, forget_memory, recall,
-    record_mark, reflect_recorded, retain_episode, retain_resource, tokenize,
+    Clock, CoreError, DEFAULT_CANDIDATE_POOL_SIZE, EmbeddingProvider, JobFilter, MemoryStore,
+    ReflectJobRow, ScopePage, StoreError, VectorQuery, correct_memory, embedding_profile_for,
+    forget_memory, recall_with_pool, record_mark, reflect_recorded, retain_episode,
+    retain_resource, tokenize,
 };
 
 /// Errors surfaced by the application layer. Transport layers map these onto
@@ -81,6 +82,12 @@ pub struct MemoryService<S: MemoryStore> {
     /// `with_contextual_chunks_write_enabled(false)` builder stays so ablations
     /// can force the chunks-off control arm.
     contextual_chunks_write_enabled: bool,
+    /// W3 candidate-pool knob: the recall vector-channel KNN fan-out. DEFAULT
+    /// `DEFAULT_CANDIDATE_POOL_SIZE` (32), which reproduces today's ranking
+    /// exactly. Raised via `with_candidate_pool_size` so the W8 cross-encoder
+    /// rerank arm can rerank a widened 64–128 vector pool — no wire change. See
+    /// the pool-mapping note on `DEFAULT_CANDIDATE_POOL_SIZE`.
+    candidate_pool_size: usize,
 }
 
 impl<S: MemoryStore> Clone for MemoryService<S> {
@@ -90,6 +97,7 @@ impl<S: MemoryStore> Clone for MemoryService<S> {
             clock: Arc::clone(&self.clock),
             embedder: Arc::clone(&self.embedder),
             contextual_chunks_write_enabled: self.contextual_chunks_write_enabled,
+            candidate_pool_size: self.candidate_pool_size,
         }
     }
 }
@@ -101,6 +109,7 @@ impl<S: MemoryStore> MemoryService<S> {
             clock,
             embedder,
             contextual_chunks_write_enabled: true,
+            candidate_pool_size: DEFAULT_CANDIDATE_POOL_SIZE,
         }
     }
 
@@ -110,6 +119,17 @@ impl<S: MemoryStore> MemoryService<S> {
     /// here to run the chunk-free baseline (old behavior).
     pub fn with_contextual_chunks_write_enabled(mut self, enabled: bool) -> Self {
         self.contextual_chunks_write_enabled = enabled;
+        self
+    }
+
+    /// Overrides the recall candidate-pool size (default
+    /// `DEFAULT_CANDIDATE_POOL_SIZE`). This directly sets the vector-channel KNN
+    /// fan-out for recall — the widen-able per-family limit the W8 rerank arm
+    /// needs at 64–128; the bench lane's `--pool <n>` threads its value here.
+    /// Construction-time only, mirroring `with_contextual_chunks_write_enabled`:
+    /// no recall-request/wire field changes.
+    pub fn with_candidate_pool_size(mut self, size: usize) -> Self {
+        self.candidate_pool_size = size;
         self
     }
 
@@ -297,7 +317,7 @@ impl<S: MemoryStore> MemoryService<S> {
             vec,
             profile_id: embedding_profile_for(self.embedder()).id,
         });
-        let response = recall(
+        let response = recall_with_pool(
             self.store.as_ref(),
             RecallRequest {
                 tenant_id: tenant,
@@ -328,6 +348,7 @@ impl<S: MemoryStore> MemoryService<S> {
             },
             vector_query,
             self.clock.as_ref(),
+            self.candidate_pool_size,
         )
         .await?;
 

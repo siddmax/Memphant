@@ -185,6 +185,20 @@ pub fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
 /// pgvector `<=>` top-K.
 pub const VECTOR_CANDIDATE_LIMIT: usize = 32;
 
+/// Default candidate-pool size for the recall vector channel — the historical
+/// vector KNN fan-out.
+///
+/// THE POOL MAPPING (W3): the single `candidate_pool_size` construction-time
+/// service knob (see [`crate::service::MemoryService::with_candidate_pool_size`])
+/// sets the vector-channel KNN fetch limit DIRECTLY; this default reproduces
+/// today's ranking exactly. The lexical/recent/subject families are fetched via
+/// `fetch_recall_candidates` with no core-side cap (the store applies its own
+/// internal per-family caps — 200 FTS / 100 recent / 200 subject — already far
+/// wider than any cross-encoder rerank pool), so they are NOT the pool that
+/// gates rerank; the knob widens the one historically-narrow family — vector —
+/// that the W8 rerank arm needs at 64–128. Measured-tunable, not sacred.
+pub const DEFAULT_CANDIDATE_POOL_SIZE: usize = VECTOR_CANDIDATE_LIMIT;
+
 /// The active vector query for recall: the embedded query plus the embedding
 /// profile id its stored counterparts must match. The profile predicate is
 /// mandatory (spec 03 — the `<=>` path filters `embedding_profile_id = $pid`,
@@ -1879,6 +1893,34 @@ pub async fn recall<S>(
 where
     S: MemoryStore,
 {
+    recall_with_pool(
+        store,
+        request,
+        vector_query,
+        clock,
+        DEFAULT_CANDIDATE_POOL_SIZE,
+    )
+    .await
+}
+
+/// `recall` with the candidate-pool knob exposed. `candidate_pool_size` sets the
+/// vector-channel KNN fan-out — the one historically-narrow per-family fetch
+/// limit (`VECTOR_CANDIDATE_LIMIT`, 32) — so the W8 cross-encoder rerank arm can
+/// widen its rerank pool to 64–128 WITHOUT any wire change. The construction-time
+/// [`crate::service::MemoryService`] candidate-pool option threads its value
+/// here; the plain [`recall`] above delegates with [`DEFAULT_CANDIDATE_POOL_SIZE`]
+/// so every existing call site keeps today's behavior. See the pool-mapping note
+/// on [`DEFAULT_CANDIDATE_POOL_SIZE`].
+pub async fn recall_with_pool<S>(
+    store: &S,
+    request: RecallRequest,
+    vector_query: Option<VectorQuery<'_>>,
+    clock: &dyn Clock,
+    candidate_pool_size: usize,
+) -> Result<RecallResponse, CoreError>
+where
+    S: MemoryStore,
+{
     validate_learned_rerank_profile(request.learned_rerank_profile.as_ref())?;
 
     let now = clock.now_rfc3339();
@@ -1959,7 +2001,9 @@ where
                     &[],
                     query.vec,
                     query.profile_id,
-                    VECTOR_CANDIDATE_LIMIT,
+                    // W3 pool knob: the vector KNN fan-out is the widen-able
+                    // per-family limit (default `VECTOR_CANDIDATE_LIMIT`).
+                    candidate_pool_size,
                 )
                 .await?;
             let mut seen: HashSet<UnitId> = tenant_units.iter().map(|unit| unit.id).collect();
@@ -3807,27 +3851,44 @@ fn temporal_score(unit: &StoredMemoryUnit, query: &str) -> f32 {
     }
 }
 
+// Per-channel fusion weights for the weighted-RRF combiner
+// (`weight / (RRF_K + rank)`). MEASURED-TUNABLE, NOT SACRED: these are the
+// pre-W3 base weights, carried over verbatim so that dropping the
+// query-substring hacks is the ONLY change to default ranking. Retune them from
+// benchmark evidence, never from query-shape intuition.
+const EXACT_CHANNEL_WEIGHT: f32 = 1.0;
+const LEXICAL_CHANNEL_WEIGHT: f32 = 1.0;
+const SEMANTIC_CHANNEL_WEIGHT: f32 = 2.0;
+/// Baseline temporal-channel weight, and its boosted value when the query
+/// carries an explicit recency token. This is a whole-token recency-INTENT
+/// signal (the same one `temporal_score` keys on) — NOT a query-substring hack —
+/// so it survives the W3 fusion cleanup.
+const TEMPORAL_CHANNEL_WEIGHT: f32 = 0.5;
+const TEMPORAL_RECENCY_CHANNEL_WEIGHT: f32 = 2.5;
+const EDGE_CHANNEL_WEIGHT: f32 = 0.5;
+const VECTOR_CHANNEL_WEIGHT: f32 = 2.0;
+
 fn channel_weight(pass: ChannelPass, query: &str) -> f32 {
-    let query = normalize_component(query);
-    let query_tokens = tokenize(&query);
     match pass {
-        ChannelPass::Exact if query.contains("how") => 2.5,
-        ChannelPass::Exact => 1.0,
-        ChannelPass::Lexical if query.contains("error") => 3.0,
-        ChannelPass::Lexical if query.contains("how") => 2.0,
-        ChannelPass::Lexical => 1.0,
-        ChannelPass::Semantic => 2.0,
-        ChannelPass::Temporal
-            if query_tokens
-                .iter()
-                .any(|token| matches!(token.as_str(), "current" | "latest" | "now")) =>
-        {
-            2.5
-        }
-        ChannelPass::Temporal => 0.5,
-        ChannelPass::Edge => 0.5,
-        ChannelPass::Vector => 2.0,
+        ChannelPass::Exact => EXACT_CHANNEL_WEIGHT,
+        ChannelPass::Lexical => LEXICAL_CHANNEL_WEIGHT,
+        ChannelPass::Semantic => SEMANTIC_CHANNEL_WEIGHT,
+        ChannelPass::Temporal if query_has_recency_intent(query) => TEMPORAL_RECENCY_CHANNEL_WEIGHT,
+        ChannelPass::Temporal => TEMPORAL_CHANNEL_WEIGHT,
+        ChannelPass::Edge => EDGE_CHANNEL_WEIGHT,
+        ChannelPass::Vector => VECTOR_CHANNEL_WEIGHT,
     }
+}
+
+/// Whole-token recency intent: the (normalized, tokenized) query mentions
+/// `current`, `latest`, or `now`. This mirrors the pre-W3 temporal-weight guard
+/// exactly — a substring like "however" or "download" never trips it, unlike the
+/// deleted `query.contains("how")` / `query.contains("error")` fusion hacks that
+/// this W3 cleanup removed.
+fn query_has_recency_intent(query: &str) -> bool {
+    tokenize(&normalize_component(query))
+        .iter()
+        .any(|token| matches!(token.as_str(), "current" | "latest" | "now"))
 }
 
 fn decay_model_id(request: &RecallRequest) -> &'static str {
@@ -4685,6 +4746,71 @@ fn composed_dependent_ids(
             }
             ids
         })
+}
+
+#[cfg(test)]
+mod fusion_weight_tests {
+    use super::*;
+
+    /// W3: channel weights carry NO query-substring special cases. A query
+    /// containing "how"/"error" (anywhere, including inside other words) yields
+    /// the SAME weight as an equivalent query without them — the deleted hacks
+    /// were `query.contains("how")` (Exact→2.5, Lexical→2.0) and
+    /// `query.contains("error")` (Lexical→3.0).
+    #[test]
+    fn channel_weight_has_no_query_substring_special_cases() {
+        let with_substrings = "how do I fix this error in the pipeline";
+        let without = "do I fix this in the pipeline";
+        for pass in [
+            ChannelPass::Exact,
+            ChannelPass::Lexical,
+            ChannelPass::Semantic,
+            ChannelPass::Edge,
+            ChannelPass::Vector,
+        ] {
+            assert_eq!(
+                channel_weight(pass, with_substrings),
+                channel_weight(pass, without),
+                "{pass:?} weight must not depend on 'how'/'error' substrings"
+            );
+        }
+        // The two channels the hacks used to boost now hold their plain base
+        // weight regardless of the query.
+        assert_eq!(
+            channel_weight(ChannelPass::Exact, with_substrings),
+            EXACT_CHANNEL_WEIGHT
+        );
+        assert_eq!(
+            channel_weight(ChannelPass::Lexical, with_substrings),
+            LEXICAL_CHANNEL_WEIGHT
+        );
+        // Substrings buried inside other words ("however" ⊃ "how", "terror" ⊃
+        // "error") never trip anything either.
+        assert_eq!(
+            channel_weight(ChannelPass::Lexical, "however the terror subsided"),
+            LEXICAL_CHANNEL_WEIGHT
+        );
+    }
+
+    /// The whole-token temporal recency signal is NOT a substring hack and
+    /// survives the cleanup: an explicit recency TOKEN still boosts the temporal
+    /// channel, a non-recency query keeps the base weight, and a mere substring
+    /// ("nowhere" ⊃ "now") does NOT boost.
+    #[test]
+    fn temporal_recency_intent_is_token_based_and_survives() {
+        assert_eq!(
+            channel_weight(ChannelPass::Temporal, "what is the latest status"),
+            TEMPORAL_RECENCY_CHANNEL_WEIGHT
+        );
+        assert_eq!(
+            channel_weight(ChannelPass::Temporal, "what is the status"),
+            TEMPORAL_CHANNEL_WEIGHT
+        );
+        assert_eq!(
+            channel_weight(ChannelPass::Temporal, "we are getting nowhere"),
+            TEMPORAL_CHANNEL_WEIGHT
+        );
+    }
 }
 
 #[cfg(test)]

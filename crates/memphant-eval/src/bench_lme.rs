@@ -33,7 +33,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use memphant_core::service::MemoryService;
-use memphant_core::{EmbeddingProvider, NoopEmbedding, SystemClock};
+use memphant_core::{DEFAULT_CANDIDATE_POOL_SIZE, EmbeddingProvider, NoopEmbedding, SystemClock};
 use memphant_store_postgres::PgStore;
 use memphant_types::{
     ActorId, RecallHttpRequest, RecallMode, RetainEpisodeHttpRequest, ScopeId, TenantId, TrustLevel,
@@ -103,6 +103,10 @@ pub struct BenchLmeOptions {
     pub turns_window: usize,
     /// Packing token budget threaded to the recall call.
     pub budget_tokens: usize,
+    /// Vector-channel candidate-pool size (`--pool`) threaded to the recall
+    /// service via `with_candidate_pool_size`. Default
+    /// `DEFAULT_CANDIDATE_POOL_SIZE` (32) reproduces today's ranking.
+    pub pool: usize,
     /// Rung 4 runtime contextual-chunk write path opt-in flag
     /// (`--runtime-chunks`, default true = the product path). The EFFECTIVE
     /// state also depends on `--disable runtime_chunks`, which forces the
@@ -212,6 +216,11 @@ pub struct BenchLmeReport {
     /// for pre-flag reports — see `default_budget_tokens`).
     #[serde(default = "default_budget_tokens")]
     pub budget_tokens: usize,
+    /// Vector-channel candidate-pool size (`--pool`) used for this run. Defaults
+    /// to `DEFAULT_CANDIDATE_POOL_SIZE` (32) — the historical vector KNN fan-out
+    /// — for pre-flag reports, via `default_candidate_pool_size`.
+    #[serde(default = "default_candidate_pool_size")]
+    pub candidate_pool_size: usize,
     /// Whether the rung 4 runtime contextual-chunk write path was enabled for
     /// this run — records the EFFECTIVE state (default-on since the 2026-07-10
     /// promotion; `--disable runtime_chunks` records false). The serde default
@@ -248,6 +257,14 @@ fn default_turns_window() -> usize {
 /// existed actually used budget 8192.
 fn default_budget_tokens() -> usize {
     DEFAULT_BUDGET_TOKENS
+}
+
+/// Parsing default for pre-flag reports (no `candidate_pool_size` field). As
+/// with `default_budget_tokens`, this coincides with the historical value every
+/// such report used: the vector KNN fan-out of `DEFAULT_CANDIDATE_POOL_SIZE`
+/// (32).
+fn default_candidate_pool_size() -> usize {
+    DEFAULT_CANDIDATE_POOL_SIZE
 }
 
 /// Deterministic splitmix64 PRNG — no external randomness anywhere in the
@@ -609,7 +626,10 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
         )
     } else {
         ingest_service.clone()
-    };
+    }
+    // W3 candidate-pool knob (`--pool`): widens the recall vector-channel KNN
+    // fan-out for the rerank pool. Recall-time only; ingestion is unaffected.
+    .with_candidate_pool_size(options.pool);
 
     if options.granularity != "session" && options.granularity != "turns" {
         return Err(format!(
@@ -886,6 +906,7 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
         granularity: options.granularity.clone(),
         turns_window: options.turns_window,
         budget_tokens: options.budget_tokens,
+        candidate_pool_size: options.pool,
         runtime_chunks: runtime_chunks_enabled,
         mode: match options.mode {
             RecallMode::Fast => "fast",
@@ -1117,6 +1138,8 @@ mod tests {
     fn turn_window_and_budget_tokens_defaults_are_pinned() {
         assert_eq!(DEFAULT_TURNS_WINDOW, 4);
         assert_eq!(DEFAULT_BUDGET_TOKENS, 8192);
+        // W3: the candidate-pool default is the historical vector KNN fan-out.
+        assert_eq!(DEFAULT_CANDIDATE_POOL_SIZE, 32);
     }
 
     #[test]
@@ -1161,6 +1184,11 @@ mod tests {
         assert_eq!(report.budget_tokens, 8192);
         assert_eq!(report.turns_window, DEFAULT_TURNS_WINDOW);
         assert_eq!(report.budget_tokens, DEFAULT_BUDGET_TOKENS);
+        // W3: a report written before `candidate_pool_size` existed must parse
+        // with the field defaulting to the vector KNN fan-out (32) every such
+        // report actually ran.
+        assert_eq!(report.candidate_pool_size, 32);
+        assert_eq!(report.candidate_pool_size, DEFAULT_CANDIDATE_POOL_SIZE);
         // The runtime_chunks report field serde default STAYS false even after
         // the write path was promoted to default-on: every pre-promotion report
         // was a chunks-off run, so an absent field must parse chunks-OFF and
