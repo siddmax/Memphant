@@ -434,6 +434,10 @@ fn bench_lme_command(args: Vec<String>) -> ExitCode {
     let mut turns_window = memphant_eval::bench_lme::DEFAULT_TURNS_WINDOW;
     let mut budget_tokens = memphant_eval::bench_lme::DEFAULT_BUDGET_TOKENS;
     let mut pool = memphant_core::DEFAULT_CANDIDATE_POOL_SIZE;
+    // W4 packing levers: both default off (the campaign toggles each). See
+    // `MemoryService::with_sibling_gather_enabled` / `with_session_quota`.
+    let mut sibling_gather = false;
+    let mut session_quota: Option<usize> = None;
     // Default-on: the lane measures the product path (service-side runtime
     // contextual chunks). `--disable runtime_chunks` runs the chunks-off
     // control arm; `--runtime-chunks` is a now-redundant explicit opt-in.
@@ -544,6 +548,26 @@ fn bench_lme_command(args: Vec<String>) -> ExitCode {
                 }
                 index += 2;
             }
+            "--sibling-gather" => {
+                sibling_gather = true;
+                index += 1;
+            }
+            "--session-quota" => {
+                match take(index).and_then(|value| value.parse::<usize>().ok()) {
+                    Some(0) => {
+                        eprintln!(
+                            "bench_lme=error\n--session-quota must be > 0 (omit the flag to leave the quota off)"
+                        );
+                        return ExitCode::from(2);
+                    }
+                    Some(value) => session_quota = Some(value),
+                    None => {
+                        usage();
+                        return ExitCode::from(2);
+                    }
+                }
+                index += 2;
+            }
             "--runtime-chunks" => {
                 runtime_chunks = true;
                 index += 1;
@@ -583,6 +607,8 @@ fn bench_lme_command(args: Vec<String>) -> ExitCode {
         turns_window,
         budget_tokens,
         pool,
+        sibling_gather,
+        session_quota,
         runtime_chunks,
         emit_qa,
         command,
@@ -627,6 +653,6 @@ fn bench_lme_command(args: Vec<String>) -> ExitCode {
 
 fn usage() {
     eprintln!(
-        "usage: memphant-eval bench-lme --database-url <url> --data <longmemeval.json> --sample <n> --seed <s> [--k 10] [--disable vector|edge_expansion|rerank|query_decomposition|procedure_recall|decay|packing|runtime_chunks] [--mode fast|balanced|exhaustive] [--granularity turns|session (default: session)] [--turns-window <n> (default: 4)] [--budget-tokens <n> (default: 8192)] [--pool <n> (default: 32; vector-channel candidate-pool size)] [--runtime-chunks (default: on; --disable runtime_chunks for the control arm)] [--emit-qa <evidence.jsonl>] [--baseline <report.json>] [--out <report.json>] | memphant-eval run <suite.yaml> [--archive-traces] [--archive-dir <dir>] [--disable-contextual-chunks] [--disable-temporal-validity] [--disable-edge-expansion] [--disable-context-packing-abstention] [--disable-rerank] [--disable-learned-rerank] [--disable-query-decomposition] [--disable-procedure-recall] [--disable-decay] [--disable-l4-exhaustive] [--filesystem-control] | memphant-eval verify-golden <suite.yaml> | memphant-eval security <suite.yaml> | memphant-eval ops <suite.yaml> | memphant-eval syndai-trace-compare <fixture.yaml> [--archive-traces] [--archive-dir <dir>] | memphant-eval profile <profile.yaml> --compare-to <baseline> [--archive <path>] | memphant-eval schema trace"
+        "usage: memphant-eval bench-lme --database-url <url> --data <longmemeval.json> --sample <n> --seed <s> [--k 10] [--disable vector|edge_expansion|rerank|query_decomposition|procedure_recall|decay|packing|runtime_chunks] [--mode fast|balanced|exhaustive] [--granularity turns|session (default: session)] [--turns-window <n> (default: 4)] [--budget-tokens <n> (default: 8192)] [--pool <n> (default: 32; vector-channel candidate-pool size)] [--sibling-gather (default: off; W4 sibling-gather packing lever)] [--session-quota <n> (default: off; W4 per-session diversity cap)] [--runtime-chunks (default: on; --disable runtime_chunks for the control arm)] [--emit-qa <evidence.jsonl>] [--baseline <report.json>] [--out <report.json>] | memphant-eval run <suite.yaml> [--archive-traces] [--archive-dir <dir>] [--disable-contextual-chunks] [--disable-temporal-validity] [--disable-edge-expansion] [--disable-context-packing-abstention] [--disable-rerank] [--disable-learned-rerank] [--disable-query-decomposition] [--disable-procedure-recall] [--disable-decay] [--disable-l4-exhaustive] [--filesystem-control] | memphant-eval verify-golden <suite.yaml> | memphant-eval security <suite.yaml> | memphant-eval ops <suite.yaml> | memphant-eval syndai-trace-compare <fixture.yaml> [--archive-traces] [--archive-dir <dir>] | memphant-eval profile <profile.yaml> --compare-to <baseline> [--archive <path>] | memphant-eval schema trace"
     );
 }

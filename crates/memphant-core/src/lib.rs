@@ -199,6 +199,40 @@ pub const VECTOR_CANDIDATE_LIMIT: usize = 32;
 /// that the W8 rerank arm needs at 64–128. Measured-tunable, not sacred.
 pub const DEFAULT_CANDIDATE_POOL_SIZE: usize = VECTOR_CANDIDATE_LIMIT;
 
+/// Recommended per-`source_episode_id` diversity cap (W4 session-quota lever).
+///
+/// Chosen so a default-sized pack surfaces at least four distinct episodes when
+/// the candidate set can supply them: with a cap of 2, `ceil(k / 2) >= 4` for the
+/// default output limits (`k = 8` service default, `k = 10` bench default). The
+/// SERVICE default is OFF (`None`): the lever ships default-on only after the
+/// accuracy-wave measurement campaign, so this names the value the campaign runs
+/// and the recommended production setting once promoted — not an always-on knob.
+pub const DEFAULT_SESSION_DIVERSITY_QUOTA: usize = 2;
+
+/// W4 packing levers, threaded construction-time exactly like
+/// `candidate_pool_size` — no `RecallRequest`/wire/OpenAPI field (item 4). BOTH
+/// default OFF ([`PackLevers::default`]); with both off the packer is
+/// byte-identical to today. The service builders
+/// [`crate::service::MemoryService::with_sibling_gather_enabled`] and
+/// [`crate::service::MemoryService::with_session_quota`] set these, and the
+/// bench lane's `--sibling-gather` / `--session-quota <n>` flags thread them so
+/// the measurement campaign can toggle each independently.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PackLevers {
+    /// Sibling-gather post-pass: after the greedy fill, spend the pack's leftover
+    /// budget expanding already chunk-rendered items with their own UNSELECTED
+    /// sibling chunks (same parent episode). Never evicts a packed item, never
+    /// exceeds budget, preserves document order. Off ⇒ the post-pass is skipped.
+    pub sibling_gather_enabled: bool,
+    /// Per-`source_episode_id` admission cap during the greedy fill. `Some(cap)`
+    /// admits at most `cap` items per episode until every distinct-episode
+    /// candidate has had an admission opportunity, then fills the remaining
+    /// budget UNRESTRICTED from the deferred candidates (work-conserving — the
+    /// quota never leaves admissible budget unused). Replacement honours the cap
+    /// too. `None` disables the quota (today's unrestricted greedy fill).
+    pub session_quota: Option<usize>,
+}
+
 /// The active vector query for recall: the embedded query plus the embedding
 /// profile id its stored counterparts must match. The profile predicate is
 /// mandatory (spec 03 — the `<=>` path filters `embedding_profile_id = $pid`,
@@ -1899,6 +1933,7 @@ where
         vector_query,
         clock,
         DEFAULT_CANDIDATE_POOL_SIZE,
+        PackLevers::default(),
     )
     .await
 }
@@ -1911,12 +1946,17 @@ where
 /// here; the plain [`recall`] above delegates with [`DEFAULT_CANDIDATE_POOL_SIZE`]
 /// so every existing call site keeps today's behavior. See the pool-mapping note
 /// on [`DEFAULT_CANDIDATE_POOL_SIZE`].
+///
+/// `pack_levers` threads the W4 packing levers (sibling-gather + session
+/// diversity quota) construction-time, mirroring `candidate_pool_size`; the
+/// plain [`recall`] delegates with [`PackLevers::default`] (both off).
 pub async fn recall_with_pool<S>(
     store: &S,
     request: RecallRequest,
     vector_query: Option<VectorQuery<'_>>,
     clock: &dyn Clock,
     candidate_pool_size: usize,
+    pack_levers: PackLevers,
 ) -> Result<RecallResponse, CoreError>
 where
     S: MemoryStore,
@@ -2304,6 +2344,7 @@ where
         &query_tokens,
         dropped_items,
         iterative_scan_depth,
+        pack_levers,
     );
     let token_estimate = packed.token_estimate;
     let items = packed.items;
@@ -2903,6 +2944,69 @@ struct PackedRecallContext {
     abstention: bool,
 }
 
+/// A chunk-rendered packed item's sibling-gather state: the parent unit's full
+/// chunk vector and the mask of chunks the greedy fill already selected. Only
+/// stored (Some) for chunk-rendered items when the sibling-gather lever is on;
+/// whole-body items and every item when the lever is off carry `None`.
+struct ChunkSiblings {
+    chunks: Vec<ContextualChunk>,
+    selected: Vec<bool>,
+}
+
+/// Read-only per-pack context shared by every candidate admission — bundled so
+/// the admission helpers stay under the argument-count limit.
+struct PackCtx<'a> {
+    request: &'a RecallRequest,
+    tenant_edges: &'a [StoredMemoryEdge],
+    query_tokens: &'a [String],
+    output_limit: usize,
+    sibling_gather_enabled: bool,
+}
+
+/// Everything computed once per candidate before the admit/drop decision.
+struct Admission {
+    candidate: CandidateAccumulator,
+    rendered_body: Option<String>,
+    unit_tokens: usize,
+    candidate_score: f32,
+    chunk_mask: Option<Vec<bool>>,
+    episode_id: Option<EpisodeId>,
+}
+
+/// The growing pack: `items` and its parallel bookkeeping vectors (token cost,
+/// relevance score, source episode, sibling-gather state) plus the per-episode
+/// admission counts the session-diversity quota reads.
+#[derive(Default)]
+struct PackAccumulator {
+    items: Vec<RecallContextItem>,
+    token_counts: Vec<usize>,
+    relevance_scores: Vec<f32>,
+    episode_ids: Vec<Option<EpisodeId>>,
+    sibling_masks: Vec<Option<ChunkSiblings>>,
+    token_estimate: usize,
+    episode_counts: HashMap<EpisodeId, usize>,
+}
+
+impl PackAccumulator {
+    /// Evicts the item at `index` from every parallel vector, decrements its
+    /// episode's admission count (so the quota stays exact under replacement),
+    /// reclaims its budget, and returns the evicted unit id for the drop record.
+    fn evict(&mut self, index: usize) -> UnitId {
+        let item = self.items.remove(index);
+        let tokens = self.token_counts.remove(index);
+        self.relevance_scores.remove(index);
+        let episode = self.episode_ids.remove(index);
+        self.sibling_masks.remove(index);
+        if let Some(episode_id) = episode
+            && let Some(count) = self.episode_counts.get_mut(&episode_id)
+        {
+            *count = count.saturating_sub(1);
+        }
+        self.token_estimate -= tokens;
+        item.unit_id
+    }
+}
+
 fn pack_recall_context(
     mut fused: Vec<CandidateAccumulator>,
     request: &RecallRequest,
@@ -2910,11 +3014,9 @@ fn pack_recall_context(
     query_tokens: &[String],
     mut dropped_items: Vec<RecallDroppedItem>,
     scan_limit: usize,
+    pack_levers: PackLevers,
 ) -> PackedRecallContext {
-    let mut token_estimate = 0;
-    let mut items: Vec<RecallContextItem> = Vec::new();
-    let mut packed_token_counts = Vec::new();
-    let mut packed_relevance_scores = Vec::new();
+    let mut acc = PackAccumulator::default();
     let mut seen_subjects: HashMap<String, Vec<UnitId>> = HashMap::new();
 
     if request.context_packing_abstention_enabled {
@@ -2963,121 +3065,230 @@ fn pack_recall_context(
         });
     }
 
-    let output_limit = request.k.max(1);
-    for candidate in fused.into_iter().take(scan_limit) {
-        if request.context_packing_abstention_enabled
-            && let Some(subject_key) = candidate.unit.subject_key.as_deref()
-        {
-            let dedup_key = normalize_component(subject_key);
-            if !dedup_key.is_empty() {
-                let seen_ids = seen_subjects.entry(dedup_key).or_default();
-                if !seen_ids.is_empty()
-                    && !has_contradiction_with_any(candidate.unit.id, seen_ids, tenant_edges)
-                {
-                    dropped_items.push(RecallDroppedItem {
-                        unit_id: candidate.unit.id,
-                        reason: RecallDropReason::Duplicate,
-                    });
-                    continue;
-                }
-                seen_ids.push(candidate.unit.id);
-            }
-        }
+    let ctx = PackCtx {
+        request,
+        tenant_edges,
+        query_tokens,
+        output_limit: request.k.max(1),
+        sibling_gather_enabled: pack_levers.sibling_gather_enabled,
+    };
 
-        let (rendered_body, unit_tokens) = packed_body_and_cost(&candidate.unit, query_tokens);
-        let candidate_score = packing_relevance_score(&candidate, query_tokens);
-        if items.len() >= output_limit {
-            if let Some(replace_index) = replacement_index(
-                &packed_token_counts,
-                &packed_relevance_scores,
-                token_estimate,
-                unit_tokens,
-                candidate_score,
-                request.budget_tokens,
-            ) {
-                let replaced = items.remove(replace_index);
-                let replaced_tokens = packed_token_counts.remove(replace_index);
-                packed_relevance_scores.remove(replace_index);
-                token_estimate = token_estimate - replaced_tokens + unit_tokens;
-                dropped_items.push(RecallDroppedItem {
-                    unit_id: replaced.unit_id,
-                    reason: RecallDropReason::Rerank,
-                });
-                packed_token_counts.push(unit_tokens);
-                packed_relevance_scores.push(candidate_score);
-                items.push(context_item_for(
-                    candidate,
-                    tenant_edges,
-                    query_tokens,
-                    rendered_body,
-                ));
-                continue;
-            }
-            dropped_items.push(RecallDroppedItem {
-                unit_id: candidate.unit.id,
-                reason: RecallDropReason::Rerank,
-            });
+    // Greedy fill. With the session-diversity quota on, a candidate whose episode
+    // is already at its cap is DEFERRED (never dropped) so every distinct episode
+    // gets an admission opportunity first; the deferred candidates then fill any
+    // remaining budget UNRESTRICTED in a second pass (work-conserving). With the
+    // quota off `deferred` stays empty and this is today's single-pass fill.
+    let mut deferred: Vec<CandidateAccumulator> = Vec::new();
+    for candidate in fused.into_iter().take(scan_limit) {
+        if let Some(cap) = pack_levers.session_quota
+            && let Some(episode_id) = candidate.unit.source_episode_id
+            && acc.episode_counts.get(&episode_id).copied().unwrap_or(0) >= cap
+        {
+            deferred.push(candidate);
             continue;
         }
-        if token_estimate + unit_tokens > request.budget_tokens {
-            if request.context_packing_abstention_enabled
-                && let Some(replace_index) = replacement_index(
-                    &packed_token_counts,
-                    &packed_relevance_scores,
-                    token_estimate,
-                    unit_tokens,
-                    candidate_score,
-                    request.budget_tokens,
-                )
-            {
-                let replaced = items.remove(replace_index);
-                let replaced_tokens = packed_token_counts.remove(replace_index);
-                packed_relevance_scores.remove(replace_index);
-                token_estimate = token_estimate - replaced_tokens + unit_tokens;
-                dropped_items.push(RecallDroppedItem {
-                    unit_id: replaced.unit_id,
-                    reason: RecallDropReason::Budget,
-                });
-                packed_token_counts.push(unit_tokens);
-                packed_relevance_scores.push(candidate_score);
-                items.push(context_item_for(
-                    candidate,
-                    tenant_edges,
-                    query_tokens,
-                    rendered_body,
-                ));
-                continue;
-            }
-            dropped_items.push(RecallDroppedItem {
-                unit_id: candidate.unit.id,
-                reason: RecallDropReason::Budget,
-            });
-            continue;
-        }
-        token_estimate += unit_tokens;
-        packed_token_counts.push(unit_tokens);
-        packed_relevance_scores.push(candidate_score);
-        items.push(context_item_for(
+        admit_or_drop(
+            &mut acc,
+            &ctx,
             candidate,
-            tenant_edges,
-            query_tokens,
-            rendered_body,
-        ));
+            &mut seen_subjects,
+            &mut dropped_items,
+        );
+    }
+    for candidate in deferred {
+        admit_or_drop(
+            &mut acc,
+            &ctx,
+            candidate,
+            &mut seen_subjects,
+            &mut dropped_items,
+        );
     }
 
-    let abstention = items.is_empty()
+    // Sibling-gather post-pass: expand already chunk-rendered items with their
+    // own unselected siblings while budget remains (skipped when the lever off).
+    if pack_levers.sibling_gather_enabled {
+        sibling_gather_pass(&mut acc, request.budget_tokens);
+    }
+
+    let abstention = acc.items.is_empty()
         || (request.context_packing_abstention_enabled
-            && items.iter().any(|item| {
+            && acc.items.iter().any(|item| {
                 item.suppression_labels
                     .iter()
                     .any(|label| label == "unresolved_contradiction")
             }));
 
     PackedRecallContext {
-        items,
+        items: acc.items,
         dropped_items,
-        token_estimate,
+        token_estimate: acc.token_estimate,
         abstention,
+    }
+}
+
+/// Runs today's subject-dedup + budget/replacement admission for one candidate,
+/// pushing the outcome into `acc` (or a drop into `dropped_items`). Extracted
+/// verbatim from the old inline loop so the greedy fill and the quota's
+/// work-conserving second pass share exactly one admission path — with the
+/// levers off the decisions are byte-identical to before.
+fn admit_or_drop(
+    acc: &mut PackAccumulator,
+    ctx: &PackCtx,
+    candidate: CandidateAccumulator,
+    seen_subjects: &mut HashMap<String, Vec<UnitId>>,
+    dropped_items: &mut Vec<RecallDroppedItem>,
+) {
+    let request = ctx.request;
+    if request.context_packing_abstention_enabled
+        && let Some(subject_key) = candidate.unit.subject_key.as_deref()
+    {
+        let dedup_key = normalize_component(subject_key);
+        if !dedup_key.is_empty() {
+            let seen_ids = seen_subjects.entry(dedup_key).or_default();
+            if !seen_ids.is_empty()
+                && !has_contradiction_with_any(candidate.unit.id, seen_ids, ctx.tenant_edges)
+            {
+                dropped_items.push(RecallDroppedItem {
+                    unit_id: candidate.unit.id,
+                    reason: RecallDropReason::Duplicate,
+                });
+                return;
+            }
+            seen_ids.push(candidate.unit.id);
+        }
+    }
+
+    let (rendered_body, unit_tokens, chunk_mask) = packed_render(&candidate.unit, ctx.query_tokens);
+    let candidate_score = packing_relevance_score(&candidate, ctx.query_tokens);
+    let candidate_id = candidate.unit.id;
+    let admission = Admission {
+        episode_id: candidate.unit.source_episode_id,
+        candidate,
+        rendered_body,
+        unit_tokens,
+        candidate_score,
+        chunk_mask,
+    };
+
+    if acc.items.len() >= ctx.output_limit {
+        if let Some(replace_index) = replacement_index(
+            &acc.token_counts,
+            &acc.relevance_scores,
+            acc.token_estimate,
+            unit_tokens,
+            candidate_score,
+            request.budget_tokens,
+        ) {
+            let replaced_id = acc.evict(replace_index);
+            dropped_items.push(RecallDroppedItem {
+                unit_id: replaced_id,
+                reason: RecallDropReason::Rerank,
+            });
+            admit_new(acc, ctx, admission);
+        } else {
+            dropped_items.push(RecallDroppedItem {
+                unit_id: candidate_id,
+                reason: RecallDropReason::Rerank,
+            });
+        }
+        return;
+    }
+    if acc.token_estimate + unit_tokens > request.budget_tokens {
+        if request.context_packing_abstention_enabled
+            && let Some(replace_index) = replacement_index(
+                &acc.token_counts,
+                &acc.relevance_scores,
+                acc.token_estimate,
+                unit_tokens,
+                candidate_score,
+                request.budget_tokens,
+            )
+        {
+            let replaced_id = acc.evict(replace_index);
+            dropped_items.push(RecallDroppedItem {
+                unit_id: replaced_id,
+                reason: RecallDropReason::Budget,
+            });
+            admit_new(acc, ctx, admission);
+            return;
+        }
+        dropped_items.push(RecallDroppedItem {
+            unit_id: candidate_id,
+            reason: RecallDropReason::Budget,
+        });
+        return;
+    }
+    admit_new(acc, ctx, admission);
+}
+
+/// Appends a newly admitted candidate to `acc`, capturing its sibling-gather
+/// state (only when the lever is on and the item was chunk-rendered) before the
+/// candidate is consumed into the context item.
+fn admit_new(acc: &mut PackAccumulator, ctx: &PackCtx, admission: Admission) {
+    let Admission {
+        candidate,
+        rendered_body,
+        unit_tokens,
+        candidate_score,
+        chunk_mask,
+        episode_id,
+    } = admission;
+    let sibling = if ctx.sibling_gather_enabled {
+        chunk_mask.map(|selected| ChunkSiblings {
+            chunks: candidate.unit.contextual_chunks.clone(),
+            selected,
+        })
+    } else {
+        None
+    };
+    let item = context_item_for(candidate, ctx.tenant_edges, ctx.query_tokens, rendered_body);
+    if let Some(episode_id) = episode_id {
+        *acc.episode_counts.entry(episode_id).or_default() += 1;
+    }
+    acc.token_estimate += unit_tokens;
+    acc.token_counts.push(unit_tokens);
+    acc.relevance_scores.push(candidate_score);
+    acc.episode_ids.push(episode_id);
+    acc.sibling_masks.push(sibling);
+    acc.items.push(item);
+}
+
+/// Sibling-gather post-pass: for each already chunk-rendered item, spend the
+/// pack's leftover budget expanding it with its OWN unselected sibling chunks
+/// (same parent episode), preferring document-adjacent windows around the chunks
+/// the greedy fill already picked. Grows an item's selection only — never evicts
+/// another item and never pushes `token_estimate` past `budget_tokens` — and
+/// re-emits the body in document order via the shared chunk-block helpers.
+fn sibling_gather_pass(acc: &mut PackAccumulator, budget_tokens: usize) {
+    let masks = std::mem::take(&mut acc.sibling_masks);
+    for (index, slot) in masks.iter().enumerate() {
+        let Some(sibling) = slot else { continue };
+        let remaining = budget_tokens.saturating_sub(acc.token_estimate);
+        if remaining == 0 {
+            continue;
+        }
+        let anchors: Vec<usize> = (0..sibling.chunks.len())
+            .filter(|&i| sibling.selected[i])
+            .collect();
+        if anchors.is_empty() {
+            continue;
+        }
+        let current_cost = acc.token_counts[index];
+        let mut selected = sibling.selected.clone();
+        let mut used = current_cost;
+        expand_siblings(
+            &sibling.chunks,
+            &mut selected,
+            &anchors,
+            &mut used,
+            current_cost + remaining,
+        );
+        if used > current_cost {
+            acc.items[index].body = emit_selected_chunks(&sibling.chunks, &selected);
+            acc.token_estimate += used - current_cost;
+            acc.token_counts[index] = used;
+        }
     }
 }
 
@@ -3137,18 +3348,35 @@ fn replacement_index(
 /// reclaimed difference frees budget for finer-grained items to fit.
 /// `None` (no chunks, or no chunk matched) keeps today's byte-identical
 /// whole-body rendering and charges the exact whole-body count.
+///
+/// Now a thin `packed_render` wrapper retained for the cost-accounting tests;
+/// the production path calls `packed_render` directly for the sibling mask.
+#[cfg(test)]
 fn packed_body_and_cost(
     unit: &StoredMemoryUnit,
     query_tokens: &[String],
 ) -> (Option<String>, usize) {
-    let whole_body_tokens = unit.body.split_whitespace().count();
-    let rendered_body =
-        render_chunked_item_body(&unit.contextual_chunks, query_tokens, whole_body_tokens);
-    let charged_tokens = match &rendered_body {
-        Some(rendered) => rendered.split_whitespace().count(),
-        None => whole_body_tokens,
-    };
+    let (rendered_body, charged_tokens, _mask) = packed_render(unit, query_tokens);
     (rendered_body, charged_tokens)
+}
+
+/// [`packed_body_and_cost`] plus the chunk-selection mask the sibling-gather
+/// post-pass reuses. The mask is `Some` exactly when the item was chunk-rendered
+/// (so its still-unselected siblings can be gathered later); `None` for the
+/// whole-body path. Cost accounting is unchanged from `packed_body_and_cost`.
+fn packed_render(
+    unit: &StoredMemoryUnit,
+    query_tokens: &[String],
+) -> (Option<String>, usize, Option<Vec<bool>>) {
+    let whole_body_tokens = unit.body.split_whitespace().count();
+    match select_chunk_mask(&unit.contextual_chunks, query_tokens, whole_body_tokens) {
+        Some(selected) => {
+            let rendered = emit_selected_chunks(&unit.contextual_chunks, &selected);
+            let charged_tokens = rendered.split_whitespace().count();
+            (Some(rendered), charged_tokens, Some(selected))
+        }
+        None => (None, whole_body_tokens, None),
+    }
 }
 
 fn context_item_for(
@@ -3200,11 +3428,31 @@ fn context_item_for(
 /// more budget than before. Emission is document order (chunk vector index ==
 /// window index), each chunk prefixed by its provenance header so the reader
 /// sees positional gaps. No chunk is emitted twice.
+///
+/// Retained as a `select_chunk_mask` + `emit_selected_chunks` wrapper for the
+/// chunk-render tests; production callers use those two directly (the mask feeds
+/// the sibling-gather post-pass).
+#[cfg(test)]
 fn render_chunked_item_body(
     chunks: &[ContextualChunk],
     query_tokens: &[String],
     budget_tokens: usize,
 ) -> Option<String> {
+    select_chunk_mask(chunks, query_tokens, budget_tokens)
+        .map(|selected| emit_selected_chunks(chunks, &selected))
+}
+
+/// The chunk-selection mask behind chunk-aware rendering: `Some(selected)` marks
+/// which chunks to emit (matched chunks first, then adjacent-sibling expansion,
+/// all gated by `budget_tokens`); `None` signals the whole-body fallback (no
+/// chunks, no chunk matched the query, or nothing fit the budget). Splitting the
+/// mask out from emission lets both the admission cost path and the sibling-
+/// gather post-pass share one selection algorithm.
+fn select_chunk_mask(
+    chunks: &[ContextualChunk],
+    query_tokens: &[String],
+    budget_tokens: usize,
+) -> Option<Vec<bool>> {
     if chunks.is_empty() {
         return None;
     }
@@ -3248,31 +3496,58 @@ fn render_chunked_item_body(
 
     // Phase B — expand to adjacent siblings (±1, then ±2, …) around each matched
     // anchor while the item's budget share allows.
+    expand_siblings(
+        chunks,
+        &mut selected,
+        &anchors,
+        &mut used_tokens,
+        budget_tokens,
+    );
+
+    if selected.iter().any(|&picked| picked) {
+        Some(selected)
+    } else {
+        None
+    }
+}
+
+/// Expands `selected` outward from `anchors` to adjacent-sibling chunks (±1, then
+/// ±2, …), charging `chunk_block_token_cost` and stopping each step at
+/// `budget_tokens`. Only ever sets more chunks to selected (a superset), so the
+/// caller's already-chosen chunks are never dropped. Shared by the admission
+/// render (`select_chunk_mask`) and the sibling-gather post-pass.
+fn expand_siblings(
+    chunks: &[ContextualChunk],
+    selected: &mut [bool],
+    anchors: &[usize],
+    used_tokens: &mut usize,
+    budget_tokens: usize,
+) {
     for radius in 1..chunks.len() {
-        for &anchor in &anchors {
+        for &anchor in anchors {
             for candidate in [anchor.checked_sub(radius), anchor.checked_add(radius)] {
                 let Some(index) = candidate else { continue };
                 if index >= chunks.len() || selected[index] {
                     continue;
                 }
                 let cost = chunk_block_token_cost(&chunks[index]);
-                if used_tokens + cost <= budget_tokens {
+                if *used_tokens + cost <= budget_tokens {
                     selected[index] = true;
-                    used_tokens += cost;
+                    *used_tokens += cost;
                 }
             }
         }
     }
+}
 
-    // Emission — selected chunks in document order, each header-prefixed.
-    let rendered: Vec<String> = (0..chunks.len())
+/// Emits the selected chunks in document order (chunk vector index == window
+/// index), each prefixed by its provenance header, blocks joined by a blank line.
+fn emit_selected_chunks(chunks: &[ContextualChunk], selected: &[bool]) -> String {
+    (0..chunks.len())
         .filter(|&index| selected[index])
         .map(|index| chunk_block(&chunks[index]))
-        .collect();
-    if rendered.is_empty() {
-        return None;
-    }
-    Some(rendered.join("\n\n"))
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// The rendered block for one chunk: its provenance header line, then its body.
@@ -5113,6 +5388,7 @@ mod pack_cost_tests {
             &query_tokens,
             Vec::new(),
             2,
+            PackLevers::default(),
         );
         assert_eq!(
             whole.items.len(),
@@ -5130,6 +5406,7 @@ mod pack_cost_tests {
             &query_tokens,
             Vec::new(),
             2,
+            PackLevers::default(),
         );
         assert_eq!(
             rendered.items.len(),
@@ -5247,6 +5524,7 @@ mod pack_cost_tests {
             &query_tokens,
             Vec::new(),
             3,
+            PackLevers::default(),
         );
         assert_eq!(
             packed.items.iter().map(|i| i.unit_id).collect::<Vec<_>>(),
@@ -5274,6 +5552,332 @@ mod pack_cost_tests {
                 .any(|d| d.unit_id == UnitId::from_u128(3) && d.reason == RecallDropReason::Budget),
             "third item dropped for budget: {:?}",
             packed.dropped_items
+        );
+    }
+
+    /// A unit stamped with an explicit `source_episode_id` so the packing tests
+    /// can exercise the per-session diversity quota and sibling-gather.
+    fn unit_ep(
+        id: u128,
+        episode: u128,
+        body: &str,
+        chunks: Vec<ContextualChunk>,
+    ) -> StoredMemoryUnit {
+        let mut unit = unit(id, body, chunks);
+        unit.source_episode_id = Some(EpisodeId::from_u128(episode));
+        unit
+    }
+
+    fn distinct_episodes(packed: &PackedRecallContext) -> std::collections::HashSet<EpisodeId> {
+        packed
+            .items
+            .iter()
+            .filter_map(|item| item.citation_episode_id)
+            .collect()
+    }
+
+    /// §5 sibling-gather: after the greedy fill, an already chunk-rendered item
+    /// spends the pack's leftover budget on its OWN unselected sibling chunks.
+    /// At admission the per-item cap (the 20-token whole-body count) admits the
+    /// matched chunk plus one neighbour; the trailing sibling is left out until
+    /// the post-pass pulls it in. It must never evict the co-packed plain item
+    /// nor push token_estimate past the budget.
+    #[test]
+    fn sibling_gather_expands_item_without_eviction_or_overbudget() {
+        let query_tokens = tokenize("quantum");
+        // Three 8-token blocks (6-token header + 2-token body). Whole body is 20
+        // tokens, so admission fits chunk[0] (matched, 8) + chunk[1] (neighbour,
+        // 8) = 16; chunk[2] (24 > 20) is deferred to the sibling pass.
+        let chunks = || {
+            vec![
+                chunk("1-2", "quantum alpha"), // matches the query
+                chunk("3-4", "beta gamma"),    // neighbour pulled at admission
+                chunk("5-6", "delta epsilon"), // trailing sibling, gathered later
+            ]
+        };
+        let candidates = || {
+            vec![
+                candidate(unit(1, &body_of(20), chunks()), 5.0),
+                candidate(unit(2, &body_of(5), Vec::new()), 4.0),
+            ]
+        };
+        let budget = 100;
+
+        // Off: today's behaviour — A keeps only the two admission-time chunks.
+        let off = pack_recall_context(
+            candidates(),
+            &request(budget),
+            &[],
+            &query_tokens,
+            Vec::new(),
+            2,
+            PackLevers::default(),
+        );
+        assert_eq!(off.items.len(), 2, "both items packed");
+        assert_eq!(off.token_estimate, 16 + 5, "A charged 16, B charged 5");
+        assert!(
+            !off.items[0].body.contains("delta epsilon"),
+            "trailing sibling absent without the lever: {}",
+            off.items[0].body
+        );
+
+        // On: the post-pass pulls chunk[2] into A with leftover budget; B is
+        // untouched, and token_estimate stays within budget.
+        let on = pack_recall_context(
+            candidates(),
+            &request(budget),
+            &[],
+            &query_tokens,
+            Vec::new(),
+            2,
+            PackLevers {
+                sibling_gather_enabled: true,
+                session_quota: None,
+            },
+        );
+        assert_eq!(
+            on.items.len(),
+            2,
+            "sibling-gather never evicts a packed item"
+        );
+        assert_eq!(
+            on.items[1].unit_id,
+            UnitId::from_u128(2),
+            "the co-packed plain item survives"
+        );
+        assert_eq!(on.items[1].body, body_of(5), "plain item body unchanged");
+        assert!(
+            on.items[0].body.contains("[turns 5-6]") && on.items[0].body.contains("delta epsilon"),
+            "the trailing sibling is gathered: {}",
+            on.items[0].body
+        );
+        assert!(
+            on.items[0].body.contains("quantum alpha") && on.items[0].body.contains("beta gamma"),
+            "the admission chunks are preserved in document order: {}",
+            on.items[0].body
+        );
+        assert_eq!(
+            on.token_estimate,
+            24 + 5,
+            "A now charged 24 (three 8-token blocks) + B 5"
+        );
+        assert!(on.token_estimate <= budget, "never exceeds budget");
+    }
+
+    /// §5 quota: an unquota'd greedy fill (candidate order) lets episode 1's eight
+    /// leading candidates monopolise a `k = 8` pack (one distinct episode). The
+    /// quota caps admissions per episode at 2 until every session has had a
+    /// look-in, so ≥4 distinct episodes surface. Bodies are query-disjoint and
+    /// equally scored, so no replacement fires — the quota alone drives the change.
+    #[test]
+    fn session_quota_admits_distinct_episodes_over_monopoly() {
+        let query_tokens = tokenize("quantum");
+        let candidates = || {
+            let mut v = Vec::new();
+            for i in 0..8u128 {
+                v.push(candidate(
+                    unit_ep(100 + i, 1, "alpha beta", Vec::new()),
+                    1.0,
+                ));
+            }
+            for episode in 2..=5u128 {
+                for j in 0..2u128 {
+                    v.push(candidate(
+                        unit_ep(episode * 10 + j, episode, "alpha beta", Vec::new()),
+                        1.0,
+                    ));
+                }
+            }
+            v
+        };
+        let mut req = request(10_000);
+        req.k = 8;
+
+        let off = pack_recall_context(
+            candidates(),
+            &req,
+            &[],
+            &query_tokens,
+            Vec::new(),
+            16,
+            PackLevers::default(),
+        );
+        assert_eq!(
+            distinct_episodes(&off).len(),
+            1,
+            "unquota'd greedy is monopolised by episode 1"
+        );
+
+        let on = pack_recall_context(
+            candidates(),
+            &req,
+            &[],
+            &query_tokens,
+            Vec::new(),
+            16,
+            PackLevers {
+                sibling_gather_enabled: false,
+                session_quota: Some(DEFAULT_SESSION_DIVERSITY_QUOTA),
+            },
+        );
+        assert!(
+            distinct_episodes(&on).len() >= 4,
+            "the quota surfaces >=4 distinct episodes, got {:?}",
+            distinct_episodes(&on)
+        );
+        assert_eq!(on.items.len(), 8, "the pack is still filled to k");
+    }
+
+    /// §5 work-conserving: the quota must never leave admissible budget unused.
+    /// With one dominant session (four candidates) plus one other, the capped
+    /// pass admits only two of the big session; the second, unrestricted pass
+    /// then fills the rest, so the quota packs exactly the same units as the
+    /// unquota'd fill.
+    #[test]
+    fn session_quota_is_work_conserving() {
+        let query_tokens = tokenize("quantum");
+        let candidates = || {
+            let mut v = Vec::new();
+            for i in 0..4u128 {
+                v.push(candidate(
+                    unit_ep(100 + i, 1, "alpha beta", Vec::new()),
+                    1.0,
+                ));
+            }
+            v.push(candidate(unit_ep(200, 2, "alpha beta", Vec::new()), 1.0));
+            v
+        };
+        let mut req = request(10_000);
+        req.k = 10;
+
+        let off = pack_recall_context(
+            candidates(),
+            &req,
+            &[],
+            &query_tokens,
+            Vec::new(),
+            5,
+            PackLevers::default(),
+        );
+        let on = pack_recall_context(
+            candidates(),
+            &req,
+            &[],
+            &query_tokens,
+            Vec::new(),
+            5,
+            PackLevers {
+                sibling_gather_enabled: false,
+                session_quota: Some(2),
+            },
+        );
+        let off_ids: std::collections::HashSet<UnitId> =
+            off.items.iter().map(|item| item.unit_id).collect();
+        let on_ids: std::collections::HashSet<UnitId> =
+            on.items.iter().map(|item| item.unit_id).collect();
+        assert_eq!(
+            on_ids, off_ids,
+            "the quota leaves no admissible candidate unpacked"
+        );
+        assert_eq!(on.items.len(), 5, "all five candidates packed");
+        assert_eq!(
+            on.token_estimate, off.token_estimate,
+            "no budget left unused vs the unrestricted fill"
+        );
+    }
+
+    /// §5 off-flags byte-identical: with both levers OFF the packer matches a
+    /// reference default run bit-for-bit (composition, bodies, cost, drops) and
+    /// the hand-computed golden of today's packer.
+    #[test]
+    fn levers_off_pack_is_byte_identical() {
+        let query_tokens = tokenize("quantum");
+        let scenario = || {
+            vec![
+                candidate(unit_ep(1, 1, &body_of(10), Vec::new()), 5.0),
+                candidate(
+                    unit_ep(
+                        2,
+                        1,
+                        &body_of(40),
+                        vec![
+                            chunk("1-4", "quantum harmonica"),
+                            chunk("5-8", "berlin note"),
+                        ],
+                    ),
+                    4.0,
+                ),
+                candidate(unit_ep(3, 2, &body_of(10), Vec::new()), 3.0),
+            ]
+        };
+        let budget = 30;
+        let reference = pack_recall_context(
+            scenario(),
+            &request(budget),
+            &[],
+            &query_tokens,
+            Vec::new(),
+            3,
+            PackLevers::default(),
+        );
+        let again = pack_recall_context(
+            scenario(),
+            &request(budget),
+            &[],
+            &query_tokens,
+            Vec::new(),
+            3,
+            PackLevers::default(),
+        );
+        assert_eq!(
+            reference
+                .items
+                .iter()
+                .map(|item| (item.unit_id, item.body.clone()))
+                .collect::<Vec<_>>(),
+            again
+                .items
+                .iter()
+                .map(|item| (item.unit_id, item.body.clone()))
+                .collect::<Vec<_>>(),
+            "composition + bodies identical across default runs",
+        );
+        assert_eq!(reference.token_estimate, again.token_estimate);
+        assert_eq!(
+            reference
+                .dropped_items
+                .iter()
+                .map(|drop| (drop.unit_id, format!("{:?}", drop.reason)))
+                .collect::<Vec<_>>(),
+            again
+                .dropped_items
+                .iter()
+                .map(|drop| (drop.unit_id, format!("{:?}", drop.reason)))
+                .collect::<Vec<_>>(),
+            "drops identical across default runs",
+        );
+        // Hand-computed golden of today's packer: A (whole body, 10) then B (chunk
+        // render, 16) fit budget 30; C (10) overflows and drops for budget.
+        assert_eq!(
+            reference
+                .items
+                .iter()
+                .map(|item| item.unit_id)
+                .collect::<Vec<_>>(),
+            vec![UnitId::from_u128(1), UnitId::from_u128(2)],
+        );
+        assert_eq!(
+            reference.token_estimate, 26,
+            "10 (plain) + 16 (chunk render)"
+        );
+        assert!(
+            reference
+                .dropped_items
+                .iter()
+                .any(|drop| drop.unit_id == UnitId::from_u128(3)
+                    && drop.reason == RecallDropReason::Budget),
+            "the third item drops for budget: {:?}",
+            reference.dropped_items
         );
     }
 }

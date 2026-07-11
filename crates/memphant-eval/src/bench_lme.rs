@@ -107,6 +107,13 @@ pub struct BenchLmeOptions {
     /// service via `with_candidate_pool_size`. Default
     /// `DEFAULT_CANDIDATE_POOL_SIZE` (32) reproduces today's ranking.
     pub pool: usize,
+    /// W4 sibling-gather packing lever (`--sibling-gather`, default off) threaded
+    /// via `with_sibling_gather_enabled`. The measurement-campaign flag; off
+    /// reproduces today's packing.
+    pub sibling_gather: bool,
+    /// W4 per-session diversity quota (`--session-quota <n>`, default off =
+    /// `None`) threaded via `with_session_quota`.
+    pub session_quota: Option<usize>,
     /// Rung 4 runtime contextual-chunk write path opt-in flag
     /// (`--runtime-chunks`, default true = the product path). The EFFECTIVE
     /// state also depends on `--disable runtime_chunks`, which forces the
@@ -221,6 +228,15 @@ pub struct BenchLmeReport {
     /// — for pre-flag reports, via `default_candidate_pool_size`.
     #[serde(default = "default_candidate_pool_size")]
     pub candidate_pool_size: usize,
+    /// Whether the W4 sibling-gather packing lever was on for this run. The serde
+    /// default is `false`: every report written before the lever existed was a
+    /// sibling-gather-off run, so an absent field ⇒ off.
+    #[serde(default)]
+    pub sibling_gather: bool,
+    /// The W4 per-session diversity quota used for this run (`--session-quota`),
+    /// or `None` when off. Serde default `None` for pre-flag reports.
+    #[serde(default)]
+    pub session_quota: Option<usize>,
     /// Whether the rung 4 runtime contextual-chunk write path was enabled for
     /// this run — records the EFFECTIVE state (default-on since the 2026-07-10
     /// promotion; `--disable runtime_chunks` records false). The serde default
@@ -629,7 +645,11 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
     }
     // W3 candidate-pool knob (`--pool`): widens the recall vector-channel KNN
     // fan-out for the rerank pool. Recall-time only; ingestion is unaffected.
-    .with_candidate_pool_size(options.pool);
+    .with_candidate_pool_size(options.pool)
+    // W4 packing levers (`--sibling-gather` / `--session-quota`): recall-time
+    // only; both default off so the campaign measures each independently.
+    .with_sibling_gather_enabled(options.sibling_gather)
+    .with_session_quota(options.session_quota);
 
     if options.granularity != "session" && options.granularity != "turns" {
         return Err(format!(
@@ -907,6 +927,8 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
         turns_window: options.turns_window,
         budget_tokens: options.budget_tokens,
         candidate_pool_size: options.pool,
+        sibling_gather: options.sibling_gather,
+        session_quota: options.session_quota,
         runtime_chunks: runtime_chunks_enabled,
         mode: match options.mode {
             RecallMode::Fast => "fast",
@@ -1196,6 +1218,17 @@ mod tests {
         assert!(
             !report.runtime_chunks,
             "absent runtime_chunks must parse false (pre-promotion runs were chunks-off)"
+        );
+        // W4: a report written before the packing levers existed must parse with
+        // both off — sibling_gather false, session_quota absent (None) — since
+        // every such report ran today's unrestricted packing.
+        assert!(
+            !report.sibling_gather,
+            "absent sibling_gather must parse false (pre-lever runs were sibling-gather-off)"
+        );
+        assert_eq!(
+            report.session_quota, None,
+            "absent session_quota must parse None (pre-lever runs had no quota)"
         );
     }
 

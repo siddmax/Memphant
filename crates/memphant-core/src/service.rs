@@ -19,9 +19,9 @@ use memphant_types::{
 
 use crate::{
     Clock, CoreError, DEFAULT_CANDIDATE_POOL_SIZE, EmbeddingProvider, JobFilter, MemoryStore,
-    ReflectJobRow, ScopePage, StoreError, VectorQuery, correct_memory, embedding_profile_for,
-    forget_memory, recall_with_pool, record_mark, reflect_recorded, retain_episode,
-    retain_resource, tokenize,
+    PackLevers, ReflectJobRow, ScopePage, StoreError, VectorQuery, correct_memory,
+    embedding_profile_for, forget_memory, recall_with_pool, record_mark, reflect_recorded,
+    retain_episode, retain_resource, tokenize,
 };
 
 /// Errors surfaced by the application layer. Transport layers map these onto
@@ -88,6 +88,11 @@ pub struct MemoryService<S: MemoryStore> {
     /// rerank arm can rerank a widened 64–128 vector pool — no wire change. See
     /// the pool-mapping note on `DEFAULT_CANDIDATE_POOL_SIZE`.
     candidate_pool_size: usize,
+    /// W4 packing levers (sibling-gather + session-diversity quota), threaded
+    /// construction-time like `candidate_pool_size`. BOTH DEFAULT OFF: they ship
+    /// default-on only after the accuracy-wave measurement campaign, so the bench
+    /// needs the flags. Set via `with_sibling_gather_enabled` / `with_session_quota`.
+    pack_levers: PackLevers,
 }
 
 impl<S: MemoryStore> Clone for MemoryService<S> {
@@ -98,6 +103,7 @@ impl<S: MemoryStore> Clone for MemoryService<S> {
             embedder: Arc::clone(&self.embedder),
             contextual_chunks_write_enabled: self.contextual_chunks_write_enabled,
             candidate_pool_size: self.candidate_pool_size,
+            pack_levers: self.pack_levers,
         }
     }
 }
@@ -110,6 +116,7 @@ impl<S: MemoryStore> MemoryService<S> {
             embedder,
             contextual_chunks_write_enabled: true,
             candidate_pool_size: DEFAULT_CANDIDATE_POOL_SIZE,
+            pack_levers: PackLevers::default(),
         }
     }
 
@@ -130,6 +137,28 @@ impl<S: MemoryStore> MemoryService<S> {
     /// no recall-request/wire field changes.
     pub fn with_candidate_pool_size(mut self, size: usize) -> Self {
         self.candidate_pool_size = size;
+        self
+    }
+
+    /// Enables the W4 sibling-gather packing post-pass (default OFF). When on,
+    /// after the greedy fill the packer spends leftover budget expanding already
+    /// chunk-rendered items with their own unselected sibling chunks — never
+    /// evicting a packed item nor exceeding budget. Construction-time only,
+    /// mirroring `with_candidate_pool_size`: no recall-request/wire change. The
+    /// bench lane's `--sibling-gather` threads its value here.
+    pub fn with_sibling_gather_enabled(mut self, enabled: bool) -> Self {
+        self.pack_levers.sibling_gather_enabled = enabled;
+        self
+    }
+
+    /// Sets the W4 per-`source_episode_id` diversity quota (default OFF = `None`).
+    /// `Some(cap)` caps admissions per session during the greedy fill until every
+    /// distinct episode has had a look-in, then fills remaining budget
+    /// unrestricted (work-conserving). `DEFAULT_SESSION_DIVERSITY_QUOTA` (2) is
+    /// the recommended value. Construction-time only; the bench lane's
+    /// `--session-quota <n>` threads its value here.
+    pub fn with_session_quota(mut self, quota: Option<usize>) -> Self {
+        self.pack_levers.session_quota = quota;
         self
     }
 
@@ -349,6 +378,7 @@ impl<S: MemoryStore> MemoryService<S> {
             vector_query,
             self.clock.as_ref(),
             self.candidate_pool_size,
+            self.pack_levers,
         )
         .await?;
 
