@@ -119,26 +119,114 @@ def provision_tenant(cli_bin: str, database_url: str) -> tuple[str, str]:
     return tenant_id, api_key
 
 
+def check_port_free(port: int) -> None:
+    """Refuse to spawn a server on `port` if something is already LISTENing
+    there. A prior run that leaked its server child (e.g. died mid health-wait
+    without being killed) can otherwise sit on the port forever, silently
+    dropping every subsequent arm's server on an instant bind failure. Best
+    effort: if ``lsof`` is unavailable, proceed without the check."""
+    try:
+        check = sh(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"])
+    except OSError:
+        return
+    if check.returncode != 0 or not check.stdout.strip():
+        return
+    lines = [line for line in check.stdout.strip().splitlines() if line.strip()]
+    pid = None
+    for line in lines[1:]:
+        parts = line.split()
+        if len(parts) > 1:
+            pid = parts[1]
+            break
+    pid_msg = f" held by PID {pid}" if pid else " (PID undiscoverable)"
+    raise RuntimeError(
+        f"port {port} is already in LISTEN state{pid_msg} — refusing to start "
+        f"a new server; a leaked process from a prior run may still be bound "
+        f"here. lsof output:\n{chr(10).join(lines)}"
+    )
+
+
+HEALTH_WAIT_TIMEOUT_S = 600.0  # first boot may download embedding model weights (up to 1.5GB)
+HEALTH_POLL_INTERVAL_S = 0.5
+LOG_TAIL_LINES = 15
+
+
 class Server:
-    def __init__(self, server_bin: str, database_url: str, port: int, embed_model: str | None = None) -> None:
+    def __init__(
+        self,
+        server_bin: str,
+        database_url: str,
+        port: int,
+        embed_model: str | None = None,
+        log_path: Path | None = None,
+    ) -> None:
         self.server_bin = server_bin
         self.database_url = database_url
         self.port = port
         self.embed_model = embed_model
+        self.log_path = log_path
         self.proc: subprocess.Popen | None = None
+        self._log_file = None
+
+    def _tail_log(self, n: int = LOG_TAIL_LINES) -> str:
+        if self.log_path is None or not self.log_path.exists():
+            return ""
+        try:
+            lines = self.log_path.read_text(errors="replace").splitlines()
+        except OSError:
+            return ""
+        tail = lines[-n:]
+        if not tail:
+            return ""
+        return f"--- last {len(tail)} lines of {self.log_path} ---\n" + "\n".join(tail)
+
+    def _terminate(self) -> None:
+        if self.proc is not None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait()
+            self.proc = None
+        if self._log_file is not None:
+            try:
+                self._log_file.close()
+            except OSError:
+                pass
+            self._log_file = None
 
     def start(self) -> None:
+        check_port_free(self.port)
         env = dict(os.environ)
         env["DATABASE_URL"] = self.database_url
         env["MEMPHANT_BIND"] = f"127.0.0.1:{self.port}"
         env.setdefault("RUST_LOG", "warn")
         if self.embed_model:
             env["MEMPHANT_EMBEDDINGS"] = self.embed_model
+        if self.log_path is not None:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            self._log_file = open(self.log_path, "w")
+            stdout_target: object = self._log_file
+            stderr_target: object = self._log_file
+        else:
+            stdout_target = subprocess.DEVNULL
+            stderr_target = subprocess.DEVNULL
         self.proc = subprocess.Popen(
             [self.server_bin], env=env,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdout=stdout_target, stderr=stderr_target,
         )
-        for _ in range(80):
+        deadline = time.time() + HEALTH_WAIT_TIMEOUT_S
+        while time.time() < deadline:
+            if self.proc.poll() is not None:
+                code = self.proc.returncode
+                tail = self._tail_log()
+                self._terminate()
+                msg = (
+                    f"memphant-server child exited (code={code}) before "
+                    f"becoming healthy on :{self.port}"
+                )
+                raise RuntimeError(f"{msg}\n{tail}" if tail else msg)
             try:
                 conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=2)
                 conn.request("GET", "/v1/health")
@@ -147,17 +235,17 @@ class Server:
                     return
             except OSError:
                 pass
-            time.sleep(0.25)
-        raise RuntimeError(f"server did not become healthy on :{self.port}")
+            time.sleep(HEALTH_POLL_INTERVAL_S)
+        tail = self._tail_log()
+        self._terminate()
+        msg = (
+            f"server did not become healthy on :{self.port} within "
+            f"{HEALTH_WAIT_TIMEOUT_S:.0f}s (timed out waiting for /v1/health)"
+        )
+        raise RuntimeError(f"{msg}\n{tail}" if tail else msg)
 
     def stop(self) -> None:
-        if self.proc is not None:
-            self.proc.terminate()
-            try:
-                self.proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-            self.proc = None
+        self._terminate()
 
 
 class ApiClient:
@@ -353,9 +441,18 @@ def main() -> int:
     tenant_id, api_key = provision_tenant(args.cli_bin, args.database_url)
     print(f"{label_prefix}tenant={tenant_id}", file=sys.stderr)
 
-    server = Server(args.server_bin, args.database_url, args.port, args.embed_model)
-    server.start()
+    log_name = f"server-{args.label}.log" if args.label else "server.log"
+    server_log_path = Path(args.out_provenance[0]).resolve().parent / log_name
+    server = Server(
+        args.server_bin, args.database_url, args.port, args.embed_model,
+        log_path=server_log_path,
+    )
+    # Symmetric cleanup: start() and the ingest/recall body are both inside
+    # this try so the server child is always killed on any exception path,
+    # not just after a successful start (a failed start() already
+    # self-terminates before raising; stop() here is then a safe no-op).
     try:
+        server.start()
         client = ApiClient(args.port, api_key, tenant_id)
         t0 = time.time()
         for i, section in enumerate(haystack):
