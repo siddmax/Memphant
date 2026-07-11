@@ -87,8 +87,9 @@ pub mod api_embeddings;
 /// - `fastembed` → the legacy default local arm (bge-small-en-v1.5)
 /// - `small` | `base` | `modernbert` | `gemma` → the T1 fastembed arms
 /// - `qwen3` → the T1b Qwen3-Embedding-0.6B arm
-/// - `voyage-4` | `voyage-4-lite` | `voyage-code-3` | `voyage-context-4`
-///   | `gemini-embedding-001` | `openai-text-embedding-3-small` → the T2 API arms
+/// - `voyage-4` | `voyage-4-lite` | `voyage-4-large` | `voyage-code-3`
+///   | `voyage-context-4` | `gemini-embedding-001`
+///   | `openai-text-embedding-3-small` → the T2 API arms
 pub fn embedder_from_id(id: &str) -> Result<Arc<dyn EmbeddingProvider>, String> {
     use api_embeddings::{
         GeminiEmbedding, OpenAiEmbedding, VoyageContextualizedEmbedding, VoyageEmbedding,
@@ -100,13 +101,14 @@ pub fn embedder_from_id(id: &str) -> Result<Arc<dyn EmbeddingProvider>, String> 
         "qwen3" => qwen3_arm(),
         "voyage-4" => api(VoyageEmbedding::new(VoyageModel::Voyage4)),
         "voyage-4-lite" => api(VoyageEmbedding::new(VoyageModel::Voyage4Lite)),
+        "voyage-4-large" => api(VoyageEmbedding::new(VoyageModel::Voyage4Large)),
         "voyage-code-3" => api(VoyageEmbedding::new(VoyageModel::VoyageCode3)),
         "voyage-context-4" => api(VoyageContextualizedEmbedding::new()),
         "gemini-embedding-001" => api(GeminiEmbedding::new()),
         "openai-text-embedding-3-small" => api(OpenAiEmbedding::new()),
         other => Err(format!(
             "unknown embedder id: {other} (accepted: off, noop, fastembed, small, base, \
-             modernbert, gemma, qwen3, voyage-4, voyage-4-lite, voyage-code-3, \
+             modernbert, gemma, qwen3, voyage-4, voyage-4-lite, voyage-4-large, voyage-code-3, \
              voyage-context-4, gemini-embedding-001, openai-text-embedding-3-small)"
         )),
     }
@@ -526,16 +528,17 @@ mod tests {
     fn grammar_recognizes_the_network_free_ids() {
         // Recognition = maps to a real branch, never the unknown-id error. Only
         // ids whose construction is network-free are exercised here: `off`/`noop`
-        // (Noop) and the six API arms (which only read a key + build a pooled
+        // (Noop) and the seven API arms (which only read a key + build a pooled
         // agent — no round-trip). The local fastembed/qwen3 arms are DELIBERATELY
         // excluded: constructing them downloads model weights, so their
         // recognition is asserted in `local_arm_ids_recognized_without_the_feature`
         // under a feature-off build instead.
-        const NETWORK_FREE_IDS: [&str; 8] = [
+        const NETWORK_FREE_IDS: [&str; 9] = [
             "off",
             "noop",
             "voyage-4",
             "voyage-4-lite",
+            "voyage-4-large",
             "voyage-code-3",
             "voyage-context-4",
             "gemini-embedding-001",
@@ -620,7 +623,7 @@ mod tests {
 
     #[test]
     fn every_arm_derives_a_distinct_embedding_profile() {
-        // The whole "coexist cleanly" claim, extended over the six T2 API arms:
+        // The whole "coexist cleanly" claim, extended over the seven T2 API arms:
         // every arm keys a different profile id (hash of id+dims), so their
         // stored vectors never mix under `<=>` — even where dims coincide
         // (voyage arms + modernbert + qwen3 all 1024), the id disambiguates.
@@ -629,9 +632,10 @@ mod tests {
             VoyageModel,
         };
         let arms = [
-            // Six API arms (id + live-pinned dims).
+            // Seven API arms (id + live-pinned dims).
             IdDims(VoyageModel::Voyage4.id(), VOYAGE_DIMS),
             IdDims(VoyageModel::Voyage4Lite.id(), VOYAGE_DIMS),
+            IdDims(VoyageModel::Voyage4Large.id(), VOYAGE_DIMS),
             IdDims(VoyageModel::VoyageCode3.id(), VOYAGE_DIMS),
             IdDims(VOYAGE_CONTEXT_ID, VOYAGE_DIMS),
             IdDims(GEMINI_ID, GEMINI_DIMS),

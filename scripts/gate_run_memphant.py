@@ -63,6 +63,7 @@ ACTOR_ID = "7c000000-0000-4000-8000-0000000000a2"
 API_KEY_ENV_BY_ARM = {
     "voyage-4": "VOYAGE_API_KEY",
     "voyage-4-lite": "VOYAGE_API_KEY",
+    "voyage-4-large": "VOYAGE_API_KEY",
     "voyage-code-3": "VOYAGE_API_KEY",
     "voyage-context-4": "VOYAGE_API_KEY",
     "gemini-embedding-001": "GEMINI_API_KEY",

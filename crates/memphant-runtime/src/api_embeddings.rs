@@ -5,9 +5,10 @@
 //! [`memphant_core::EmbeddingProvider`]: `embed` = document side, `embed_query`
 //! = query side.
 //!
-//! Six arms across four provider shapes:
-//! - [`VoyageEmbedding`] — `voyage-4` / `voyage-4-lite` / `voyage-code-3`
-//!   (`/v1/embeddings`, asymmetric `input_type: document|query`, 1024d default).
+//! Seven arms across four provider shapes:
+//! - [`VoyageEmbedding`] — `voyage-4` / `voyage-4-lite` / `voyage-4-large` /
+//!   `voyage-code-3` (`/v1/embeddings`, asymmetric `input_type: document|query`,
+//!   1024d default).
 //! - [`VoyageContextualizedEmbedding`] — `voyage-context-4`
 //!   (`/v1/contextualizedembeddings`, one document = a list of chunks that share
 //!   context, 1024d default).
@@ -21,7 +22,7 @@
 //! Dims are DECLARED per model and asserted against every live response (a
 //! mismatch fails fast — the embedding profile is keyed on id+dims and a silent
 //! width change would corrupt the vector channel). Every declared default was
-//! pinned by a live probe on 2026-07-11 (see the crate's R0-T2 report): all four
+//! pinned by a live probe on 2026-07-11 (see the crate's R0-T2 report): all five
 //! voyage models default to 1024, gemini to 3072, openai to 1536.
 //!
 //! Keys are read from the environment at CONSTRUCTION (never logged); a missing
@@ -46,8 +47,9 @@ const OPENAI_EMBED_URL: &str = "https://api.openai.com/v1/embeddings";
 
 // ---- Declared dims (pinned via live probe 2026-07-11) ----------------------
 
-/// Every voyage arm (`voyage-4`, `voyage-4-lite`, `voyage-code-3`,
-/// `voyage-context-4`) defaults to 1024 when `output_dimension` is omitted.
+/// Every voyage arm (`voyage-4`, `voyage-4-lite`, `voyage-4-large`,
+/// `voyage-code-3`, `voyage-context-4`) defaults to 1024 when
+/// `output_dimension` is omitted.
 pub const VOYAGE_DIMS: usize = 1024;
 /// `gemini-embedding-001` native output width (no MRL truncation requested).
 pub const GEMINI_DIMS: usize = 3072;
@@ -381,11 +383,12 @@ struct GeminiPart {
 
 // ---- Voyage (standard) -----------------------------------------------------
 
-/// The three standard voyage arms. `id()` == the wire model name for these.
+/// The four standard voyage arms. `id()` == the wire model name for these.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VoyageModel {
     Voyage4,
     Voyage4Lite,
+    Voyage4Large,
     VoyageCode3,
 }
 
@@ -396,6 +399,7 @@ impl VoyageModel {
         match self {
             Self::Voyage4 => "voyage-4",
             Self::Voyage4Lite => "voyage-4-lite",
+            Self::Voyage4Large => "voyage-4-large",
             Self::VoyageCode3 => "voyage-code-3",
         }
     }
