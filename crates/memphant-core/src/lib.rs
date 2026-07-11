@@ -1934,6 +1934,7 @@ where
         clock,
         DEFAULT_CANDIDATE_POOL_SIZE,
         PackLevers::default(),
+        false,
     )
     .await
 }
@@ -1950,6 +1951,14 @@ where
 /// `pack_levers` threads the W4 packing levers (sibling-gather + session
 /// diversity quota) construction-time, mirroring `candidate_pool_size`; the
 /// plain [`recall`] delegates with [`PackLevers::default`] (both off).
+///
+/// `temporal_grounding_enabled` (W5, default off via the plain [`recall`]) gates
+/// query-date windowing and dated packs: on, the query's parsed date (if any)
+/// becomes a soft temporal-channel window preference and packed item bodies
+/// carry a `[date YYYY-MM-DD]` prefix resolved from each unit's grounded
+/// `valid_from`. Off, the parsed window is `None` and every downstream path is
+/// byte-identical to today.
+#[allow(clippy::too_many_arguments)]
 pub async fn recall_with_pool<S>(
     store: &S,
     request: RecallRequest,
@@ -1957,6 +1966,7 @@ pub async fn recall_with_pool<S>(
     clock: &dyn Clock,
     candidate_pool_size: usize,
     pack_levers: PackLevers,
+    temporal_grounding_enabled: bool,
 ) -> Result<RecallResponse, CoreError>
 where
     S: MemoryStore,
@@ -1964,6 +1974,12 @@ where
     validate_learned_rerank_profile(request.learned_rerank_profile.as_ref())?;
 
     let now = clock.now_rfc3339();
+    // W5: parse the query's date ONCE (clock-free). `None` whenever the flag is
+    // off or the query carries no date — the whole windowing/pack path is then
+    // inert. Bound to the full query; subquery passes intentionally see `None`.
+    let temporal_window = temporal_grounding_enabled
+        .then(|| extract_query_date(&request.query))
+        .flatten();
     let allowed = request.allowed_scope_ids.contains(&request.scope_id);
 
     if !allowed {
@@ -2111,6 +2127,7 @@ where
             &query_tokens,
             vector_scores.as_ref(),
             &now,
+            temporal_window.as_ref(),
         );
         ranked.sort_by(|left, right| {
             right
@@ -2122,7 +2139,8 @@ where
         for (rank, (unit, score)) in ranked.into_iter().enumerate() {
             let channel_rank = rank + 1;
             let decay = decay_score_for(&unit, &tenant_review_events, request.decay_enabled);
-            let contribution = channel_weight(pass, &request.query) / (60.0 + channel_rank as f32);
+            let contribution = channel_weight(pass, &request.query, temporal_window.as_ref())
+                / (60.0 + channel_rank as f32);
             candidates_by_unit
                 .entry(unit.id)
                 .and_modify(|candidate| {
@@ -2178,6 +2196,7 @@ where
                     &subquery_tokens,
                     None,
                     &now,
+                    None,
                 );
                 ranked.sort_by(|left, right| {
                     right
@@ -2191,7 +2210,7 @@ where
                     let decay =
                         decay_score_for(&unit, &tenant_review_events, request.decay_enabled);
                     let contribution =
-                        channel_weight(pass, &subquery.query) / (55.0 + channel_rank as f32);
+                        channel_weight(pass, &subquery.query, None) / (55.0 + channel_rank as f32);
                     candidates_by_unit
                         .entry(unit.id)
                         .and_modify(|candidate| {
@@ -2345,6 +2364,7 @@ where
         dropped_items,
         iterative_scan_depth,
         pack_levers,
+        temporal_grounding_enabled,
     );
     let token_estimate = packed.token_estimate;
     let items = packed.items;
@@ -2961,6 +2981,9 @@ struct PackCtx<'a> {
     query_tokens: &'a [String],
     output_limit: usize,
     sibling_gather_enabled: bool,
+    /// W5: when on, each admitted item records its grounded date so the post-fill
+    /// pass can prefix `[date YYYY-MM-DD]`. Off ⇒ no prefixes recorded or applied.
+    temporal_grounding_enabled: bool,
 }
 
 /// Everything computed once per candidate before the admit/drop decision.
@@ -2983,6 +3006,10 @@ struct PackAccumulator {
     relevance_scores: Vec<f32>,
     episode_ids: Vec<Option<EpisodeId>>,
     sibling_masks: Vec<Option<ChunkSiblings>>,
+    /// W5: parallel to `items` — the `YYYY-MM-DD` a dated pack prefixes onto each
+    /// item body, or `None` (item's unit had no grounded `valid_from`, or the
+    /// temporal-grounding flag is off). Applied in one pass after the fill.
+    date_prefixes: Vec<Option<String>>,
     token_estimate: usize,
     episode_counts: HashMap<EpisodeId, usize>,
 }
@@ -2997,6 +3024,7 @@ impl PackAccumulator {
         self.relevance_scores.remove(index);
         let episode = self.episode_ids.remove(index);
         self.sibling_masks.remove(index);
+        self.date_prefixes.remove(index);
         if let Some(episode_id) = episode
             && let Some(count) = self.episode_counts.get_mut(&episode_id)
         {
@@ -3007,6 +3035,7 @@ impl PackAccumulator {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pack_recall_context(
     mut fused: Vec<CandidateAccumulator>,
     request: &RecallRequest,
@@ -3015,6 +3044,7 @@ fn pack_recall_context(
     mut dropped_items: Vec<RecallDroppedItem>,
     scan_limit: usize,
     pack_levers: PackLevers,
+    temporal_grounding_enabled: bool,
 ) -> PackedRecallContext {
     let mut acc = PackAccumulator::default();
     let mut seen_subjects: HashMap<String, Vec<UnitId>> = HashMap::new();
@@ -3071,6 +3101,7 @@ fn pack_recall_context(
         query_tokens,
         output_limit: request.k.max(1),
         sibling_gather_enabled: pack_levers.sibling_gather_enabled,
+        temporal_grounding_enabled,
     };
 
     // Greedy fill. With the session-diversity quota on, a candidate whose episode
@@ -3109,6 +3140,19 @@ fn pack_recall_context(
     // own unselected siblings while budget remains (skipped when the lever off).
     if pack_levers.sibling_gather_enabled {
         sibling_gather_pass(&mut acc, request.budget_tokens);
+    }
+
+    // W5 dated packs: prefix each item body with `[date YYYY-MM-DD]` from the
+    // unit's grounded `valid_from`. Applied AFTER sibling-gather (which rewrites
+    // chunk-rendered bodies) so the prefix survives, and only for units that
+    // carry a grounded date (never invented). Off ⇒ `date_prefixes` is all
+    // `None` and this loop is a no-op, keeping the pack bytes identical.
+    if temporal_grounding_enabled {
+        for (item, prefix) in acc.items.iter_mut().zip(acc.date_prefixes.iter()) {
+            if let Some(date) = prefix {
+                item.body = format!("[date {date}]\n{}", item.body);
+            }
+        }
     }
 
     let abstention = acc.items.is_empty()
@@ -3242,6 +3286,17 @@ fn admit_new(acc: &mut PackAccumulator, ctx: &PackCtx, admission: Admission) {
     } else {
         None
     };
+    // W5: capture the item's grounded date BEFORE `candidate` is consumed. `None`
+    // when the flag is off or the unit has no date-leading `valid_from`.
+    let date_prefix = if ctx.temporal_grounding_enabled {
+        candidate
+            .unit
+            .valid_from
+            .as_deref()
+            .and_then(date_prefix_from_valid_from)
+    } else {
+        None
+    };
     let item = context_item_for(candidate, ctx.tenant_edges, ctx.query_tokens, rendered_body);
     if let Some(episode_id) = episode_id {
         *acc.episode_counts.entry(episode_id).or_default() += 1;
@@ -3251,6 +3306,7 @@ fn admit_new(acc: &mut PackAccumulator, ctx: &PackCtx, admission: Admission) {
     acc.relevance_scores.push(candidate_score);
     acc.episode_ids.push(episode_id);
     acc.sibling_masks.push(sibling);
+    acc.date_prefixes.push(date_prefix);
     acc.items.push(item);
 }
 
@@ -3659,6 +3715,7 @@ impl ChannelPass {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn channel_candidates(
     pass: ChannelPass,
     units: &[StoredMemoryUnit],
@@ -3667,6 +3724,7 @@ fn channel_candidates(
     query_tokens: &[String],
     vector_scores: Option<&HashMap<UnitId, f32>>,
     now: &str,
+    temporal_window: Option<&DateWindow>,
 ) -> Vec<(StoredMemoryUnit, f32)> {
     units
         .iter()
@@ -3686,7 +3744,7 @@ fn channel_candidates(
                 ChannelPass::Exact => exact_score(unit, query_tokens),
                 ChannelPass::Lexical => lexical_score(unit, query_tokens),
                 ChannelPass::Semantic => token_set_overlap_score(unit, query_tokens),
-                ChannelPass::Temporal => temporal_score(unit, &request.query),
+                ChannelPass::Temporal => temporal_score(unit, &request.query, temporal_window),
                 ChannelPass::Edge => edge_score(
                     unit,
                     units,
@@ -3732,7 +3790,7 @@ fn l4_exhaustive_candidates(
             let direct_score = exact_score(unit, query_tokens)
                 .max(lexical_score(unit, query_tokens))
                 .max(token_set_overlap_score(unit, query_tokens))
-                .max(temporal_score(unit, &request.query));
+                .max(temporal_score(unit, &request.query, None));
             let score = raw_score - direct_score;
             (score > 0.0).then(|| {
                 (
@@ -3995,6 +4053,304 @@ fn contains_any_phrase(value: &str, phrases: &[&str]) -> bool {
     phrases.iter().any(|phrase| value.contains(phrase))
 }
 
+// ============================================================================
+// W5 temporal grounding: deterministic content-date parsing, query-date
+// windowing, and dated packs. Every helper here is CLOCK-FREE — dates come from
+// the text under scan, jiff validates/normalizes the (year, month, day) triple,
+// and the system clock is never consulted. All of it is inert unless the
+// `with_temporal_grounding_enabled` service flag is on (recall threads the
+// parsed `Option<DateWindow>`, which stays `None` when the flag is off, keeping
+// the flag-off scoring and pack bytes identical to today).
+// ============================================================================
+
+/// A half-open instant window `[start, end)` in RFC 3339 UTC, derived from a
+/// parsed query date. Bounds are day-aligned midnights so a unit's grounded
+/// `valid_from` (also a midnight instant) can be compared with [`cmp_rfc3339`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DateWindow {
+    start: String,
+    end: String,
+}
+
+/// `jiff`-validated civil date constructor: rejects impossible triples
+/// (`2023-13-40`, `2023-02-30`) so a malformed date is never grounded.
+fn civil_date(year: i32, month: u8, day: u8) -> Option<jiff::civil::Date> {
+    let year = i16::try_from(year).ok()?;
+    let month = i8::try_from(month).ok()?;
+    let day = i8::try_from(day).ok()?;
+    jiff::civil::Date::new(year, month, day).ok()
+}
+
+/// The canonical midnight-UTC instant for a civil date, e.g. `2023-05-30` →
+/// `2023-05-30T00:00:00Z`. This is the grounded `valid_from` form and the
+/// `DateWindow` bound form, both RFC 3339 so [`cmp_rfc3339`] parses them.
+fn midnight_utc(date: jiff::civil::Date) -> String {
+    format!("{date}T00:00:00Z")
+}
+
+/// English month name → `1..=12`, case-insensitive. Accepts full names, the
+/// three-letter abbreviations, and `sept`.
+fn month_from_name(word: &str) -> Option<u8> {
+    let word = word.to_ascii_lowercase();
+    const MONTHS: [(&str, &str, u8); 12] = [
+        ("january", "jan", 1),
+        ("february", "feb", 2),
+        ("march", "mar", 3),
+        ("april", "apr", 4),
+        ("may", "may", 5),
+        ("june", "jun", 6),
+        ("july", "jul", 7),
+        ("august", "aug", 8),
+        ("september", "sep", 9),
+        ("october", "oct", 10),
+        ("november", "nov", 11),
+        ("december", "dec", 12),
+    ];
+    MONTHS.iter().find_map(|(full, abbr, number)| {
+        (word == *full || word == *abbr || (*number == 9 && word == "sept")).then_some(*number)
+    })
+}
+
+/// Reads `min..=max` ASCII digits at `start`, returning the value and how many
+/// digits were consumed. `None` when fewer than `min` digits are present.
+fn ascii_digits(bytes: &[u8], start: usize, min: usize, max: usize) -> Option<(u32, usize)> {
+    let mut value = 0u32;
+    let mut count = 0usize;
+    while count < max {
+        match bytes.get(start + count) {
+            Some(byte) if byte.is_ascii_digit() => {
+                value = value * 10 + u32::from(byte - b'0');
+                count += 1;
+            }
+            _ => break,
+        }
+    }
+    (count >= min).then_some((value, count))
+}
+
+/// Skips one-or-more ASCII whitespace bytes; `None` when none were present (used
+/// where at least one separator is required).
+fn skip_required_spaces(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut pos = start;
+    while bytes.get(pos).is_some_and(u8::is_ascii_whitespace) {
+        pos += 1;
+    }
+    (pos > start).then_some(pos)
+}
+
+/// A byte position is not preceded by an ASCII digit (so a numeric run we match
+/// is not the tail of a longer number).
+fn no_leading_digit(bytes: &[u8], at: usize) -> bool {
+    at == 0 || !bytes[at - 1].is_ascii_digit()
+}
+
+/// A byte position is not the start of another ASCII digit (so a numeric run we
+/// match is not the head of a longer number).
+fn no_trailing_digit(bytes: &[u8], at: usize) -> bool {
+    !bytes.get(at).is_some_and(u8::is_ascii_digit)
+}
+
+/// Parses a numeric `YYYY-MM-DD` / `YYYY/MM/DD` date anchored exactly at byte
+/// `i`. Returns the validated date and the byte index just past the day, or
+/// `None` if the anchor is not such a date. Guards both ends against digit
+/// bleed so `12023/05/30` and `2023/05/301` do not spuriously match.
+fn numeric_date_at(bytes: &[u8], i: usize) -> Option<(jiff::civil::Date, usize)> {
+    if !no_leading_digit(bytes, i) {
+        return None;
+    }
+    let (year, ylen) = ascii_digits(bytes, i, 4, 4)?;
+    let mut pos = i + ylen;
+    let separator = *bytes.get(pos)?;
+    if separator != b'-' && separator != b'/' {
+        return None;
+    }
+    pos += 1;
+    let (month, mlen) = ascii_digits(bytes, pos, 1, 2)?;
+    pos += mlen;
+    if *bytes.get(pos)? != separator {
+        return None;
+    }
+    pos += 1;
+    let (day, dlen) = ascii_digits(bytes, pos, 1, 2)?;
+    pos += dlen;
+    if !no_trailing_digit(bytes, pos) {
+        return None;
+    }
+    let date = civil_date(year as i32, month as u8, day as u8)?;
+    Some((date, pos))
+}
+
+/// Parses an English `Month D, YYYY` (comma optional) date anchored at byte `i`
+/// on a word boundary. Returns the validated date and the byte index past the
+/// year.
+fn month_name_date_at(text: &str, i: usize) -> Option<(jiff::civil::Date, usize)> {
+    let bytes = text.as_bytes();
+    if i > 0 && bytes[i - 1].is_ascii_alphabetic() {
+        return None;
+    }
+    let rest = text.get(i..)?;
+    let word_len = rest
+        .find(|c: char| !c.is_ascii_alphabetic())
+        .unwrap_or(rest.len());
+    let month = month_from_name(rest.get(..word_len)?)?;
+    let mut pos = skip_required_spaces(bytes, i + word_len)?;
+    let (day, dlen) = ascii_digits(bytes, pos, 1, 2)?;
+    pos += dlen;
+    if bytes.get(pos) == Some(&b',') {
+        pos += 1;
+    }
+    pos = skip_required_spaces(bytes, pos)?;
+    let (year, ylen) = ascii_digits(bytes, pos, 4, 4)?;
+    let end = pos + ylen;
+    if !no_trailing_digit(bytes, end) {
+        return None;
+    }
+    let date = civil_date(year as i32, month, day as u8)?;
+    Some((date, end))
+}
+
+/// Parses a bare `Month YYYY` (no day) anchored at byte `i` on a word boundary.
+/// Returns `(year, month, end_index)`. Feeds the month-window branch of query
+/// date extraction ("in May 2023").
+fn month_year_at(text: &str, i: usize) -> Option<(i32, u8, usize)> {
+    let bytes = text.as_bytes();
+    if i > 0 && bytes[i - 1].is_ascii_alphabetic() {
+        return None;
+    }
+    let rest = text.get(i..)?;
+    let word_len = rest
+        .find(|c: char| !c.is_ascii_alphabetic())
+        .unwrap_or(rest.len());
+    let month = month_from_name(rest.get(..word_len)?)?;
+    let pos = skip_required_spaces(bytes, i + word_len)?;
+    let (year, ylen) = ascii_digits(bytes, pos, 4, 4)?;
+    let end = pos + ylen;
+    if !no_trailing_digit(bytes, end) {
+        return None;
+    }
+    civil_date(year as i32, month, 1)?;
+    Some((year as i32, month, end))
+}
+
+/// Parses a bare four-digit calendar year (1000–2999) anchored at byte `i`. It
+/// must be a standalone token — not glued to an adjacent alphanumeric on either
+/// side — so `project2023` and `20230` do not read as a bare year. Feeds the
+/// year-window branch of query extraction.
+fn year_only_at(bytes: &[u8], i: usize) -> Option<(i32, usize)> {
+    if i > 0 && bytes[i - 1].is_ascii_alphanumeric() {
+        return None;
+    }
+    let (year, ylen) = ascii_digits(bytes, i, 4, 4)?;
+    let end = i + ylen;
+    if bytes.get(end).is_some_and(u8::is_ascii_alphanumeric) {
+        return None;
+    }
+    if !(1000..=2999).contains(&year) {
+        return None;
+    }
+    civil_date(year as i32, 1, 1)?;
+    Some((year as i32, end))
+}
+
+/// Deterministic content-date extraction (§1): scans `text` left-to-right and
+/// returns the FIRST full calendar date, normalized to `YYYY-MM-DD`. Recognizes
+/// numeric `YYYY-MM-DD` / `YYYY/MM/DD` (the bench `[date ...]` prefix) and
+/// `Month D, YYYY`. Bare month-year and bare year are NOT content dates (a
+/// grounded `valid_from` names a specific day). No clock, no LLM.
+pub(crate) fn parse_content_date(text: &str) -> Option<jiff::civil::Date> {
+    let bytes = text.as_bytes();
+    for i in 0..text.len() {
+        if !text.is_char_boundary(i) {
+            continue;
+        }
+        if let Some((date, _)) = numeric_date_at(bytes, i) {
+            return Some(date);
+        }
+        if let Some((date, _)) = month_name_date_at(text, i) {
+            return Some(date);
+        }
+    }
+    None
+}
+
+/// Query-date extraction (§2): the FIRST full date wins as a single-day window;
+/// failing that the first bare `Month YYYY` yields a whole-month window; failing
+/// that the first bare year yields a whole-year window. `None` when the query
+/// carries no date. Soft signal only — never a hard filter.
+fn extract_query_date(query: &str) -> Option<DateWindow> {
+    let bytes = query.as_bytes();
+    for i in 0..query.len() {
+        if !query.is_char_boundary(i) {
+            continue;
+        }
+        let full = numeric_date_at(bytes, i)
+            .map(|(date, _)| date)
+            .or_else(|| month_name_date_at(query, i).map(|(date, _)| date));
+        if let Some(date) = full {
+            let end = date.tomorrow().ok()?;
+            return Some(DateWindow {
+                start: midnight_utc(date),
+                end: midnight_utc(end),
+            });
+        }
+    }
+    for i in 0..query.len() {
+        if !query.is_char_boundary(i) {
+            continue;
+        }
+        if let Some((year, month, _)) = month_year_at(query, i) {
+            return month_window(year, month);
+        }
+    }
+    for i in 0..query.len() {
+        if let Some((year, _)) = year_only_at(bytes, i) {
+            return year_window(year);
+        }
+    }
+    None
+}
+
+/// `[first-of-month, first-of-next-month)`.
+fn month_window(year: i32, month: u8) -> Option<DateWindow> {
+    let start = civil_date(year, month, 1)?;
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    let end = civil_date(next_year, next_month, 1)?;
+    Some(DateWindow {
+        start: midnight_utc(start),
+        end: midnight_utc(end),
+    })
+}
+
+/// `[Jan 1, next Jan 1)`.
+fn year_window(year: i32) -> Option<DateWindow> {
+    let start = civil_date(year, 1, 1)?;
+    let end = civil_date(year + 1, 1, 1)?;
+    Some(DateWindow {
+        start: midnight_utc(start),
+        end: midnight_utc(end),
+    })
+}
+
+/// A grounded `valid_from` instant falls inside the half-open window: parsed
+/// timestamp comparison, never lexical.
+fn valid_from_in_window(valid_from: &str, window: &DateWindow) -> bool {
+    cmp_rfc3339(valid_from, &window.start) != std::cmp::Ordering::Less
+        && cmp_rfc3339(valid_from, &window.end) == std::cmp::Ordering::Less
+}
+
+/// The `[date YYYY-MM-DD]` pack-prefix source (§3): the leading `YYYY-MM-DD` of
+/// a grounded `valid_from`, or `None` when it is absent or not date-leading (so
+/// a date is never invented).
+fn date_prefix_from_valid_from(valid_from: &str) -> Option<String> {
+    let head = valid_from.get(..10)?;
+    let date: jiff::civil::Date = head.parse().ok()?;
+    Some(date.to_string())
+}
+
 fn valid_for_query(unit: &StoredMemoryUnit, query: &str, now: &str) -> bool {
     if unit.kind != MemoryKind::Semantic || is_historical_query(query) {
         return true;
@@ -4114,16 +4470,32 @@ fn tokens_related(left: &str, right: &str) -> bool {
                 .all(|(left, right)| left == right))
 }
 
-fn temporal_score(unit: &StoredMemoryUnit, query: &str) -> f32 {
+/// Temporal-channel score. The existing recency-INTENT signal (an explicit
+/// `current`/`latest`/`now` token favouring active semantic units) is unchanged.
+/// W5 adds a SOFT date-window boost: when `temporal_window` is `Some` (the query
+/// carried a date AND the temporal-grounding flag is on) a recallable unit whose
+/// grounded `valid_from` falls inside the queried period also scores `1.0`.
+/// `temporal_window == None` (flag off, or no query date) reproduces today's
+/// behaviour exactly — the boost never fires and no clock is read.
+fn temporal_score(
+    unit: &StoredMemoryUnit,
+    query: &str,
+    temporal_window: Option<&DateWindow>,
+) -> f32 {
     let query_tokens = tokenize(query);
     let recency_query = query_tokens
         .iter()
         .any(|token| matches!(token.as_str(), "current" | "latest" | "now"));
     if recency_query && unit.kind == MemoryKind::Semantic && unit.state == UnitState::Active {
-        1.0
-    } else {
-        0.0
+        return 1.0;
     }
+    if let Some(window) = temporal_window
+        && let Some(valid_from) = unit.valid_from.as_deref()
+        && valid_from_in_window(valid_from, window)
+    {
+        return 1.0;
+    }
+    0.0
 }
 
 // Per-channel fusion weights for the weighted-RRF combiner
@@ -4143,12 +4515,18 @@ const TEMPORAL_RECENCY_CHANNEL_WEIGHT: f32 = 2.5;
 const EDGE_CHANNEL_WEIGHT: f32 = 0.5;
 const VECTOR_CHANNEL_WEIGHT: f32 = 2.0;
 
-fn channel_weight(pass: ChannelPass, query: &str) -> f32 {
+fn channel_weight(pass: ChannelPass, query: &str, temporal_window: Option<&DateWindow>) -> f32 {
     match pass {
         ChannelPass::Exact => EXACT_CHANNEL_WEIGHT,
         ChannelPass::Lexical => LEXICAL_CHANNEL_WEIGHT,
         ChannelPass::Semantic => SEMANTIC_CHANNEL_WEIGHT,
-        ChannelPass::Temporal if query_has_recency_intent(query) => TEMPORAL_RECENCY_CHANNEL_WEIGHT,
+        // A dated query is explicit temporal intent, weighted like a recency
+        // query. `temporal_window` is `Some` only when the flag is on AND the
+        // query carried a date; when it is `None` this branch is unreachable and
+        // the weight is unchanged from today.
+        ChannelPass::Temporal if query_has_recency_intent(query) || temporal_window.is_some() => {
+            TEMPORAL_RECENCY_CHANNEL_WEIGHT
+        }
         ChannelPass::Temporal => TEMPORAL_CHANNEL_WEIGHT,
         ChannelPass::Edge => EDGE_CHANNEL_WEIGHT,
         ChannelPass::Vector => VECTOR_CHANNEL_WEIGHT,
@@ -5024,6 +5402,127 @@ fn composed_dependent_ids(
 }
 
 #[cfg(test)]
+mod temporal_grounding_tests {
+    use super::*;
+
+    /// §6 date-parser table: every supported content-date shape parses to the
+    /// same normalized `YYYY-MM-DD`, and non-dates / impossible dates are
+    /// rejected. Clock-free and deterministic.
+    #[test]
+    fn parse_content_date_covers_formats_and_rejects_garbage() {
+        // (input, expected normalized date or None).
+        let cases: &[(&str, Option<&str>)] = &[
+            // The bench provenance prefix (slash-separated, zero-padded).
+            (
+                "[session s1] [date 2023/05/30]\nuser: hi",
+                Some("2023-05-30"),
+            ),
+            // ISO hyphen form.
+            ("logged on 2023-05-30 at noon", Some("2023-05-30")),
+            // English month name, comma form and no-comma form.
+            ("met on May 30, 2023 downtown", Some("2023-05-30")),
+            ("due December 1 2024 sharp", Some("2024-12-01")),
+            ("shipped Sept 9, 2021", Some("2021-09-09")),
+            // Single-digit month/day still normalize with zero padding.
+            ("2023-5-3", Some("2023-05-03")),
+            // FIRST date wins when several appear.
+            ("2020-01-02 then 2021-03-04", Some("2020-01-02")),
+            // Garbage / impossible dates → None.
+            ("no dates here at all", None),
+            ("month 13: 2023-13-01", None),
+            ("2023-02-30 is not real", None),
+            ("version 12023/05/30 has a 5-digit lead", None),
+            ("bare year 2023 alone is not a content date", None),
+            ("May 2023 without a day is not a content date", None),
+        ];
+        for (input, expected) in cases {
+            let got = parse_content_date(input).map(|date| date.to_string());
+            assert_eq!(
+                got.as_deref(),
+                *expected,
+                "parse_content_date({input:?}) mismatch"
+            );
+        }
+    }
+
+    /// §6 query-date table: full date → single-day window, `Month YYYY` (with or
+    /// without a leading "in") → whole-month window, bare year → whole-year
+    /// window, no date → `None`. Windows are half-open `[start, end)` midnights.
+    #[test]
+    fn extract_query_date_covers_day_month_year_and_none() {
+        let day = extract_query_date("what happened on 2023-05-30 exactly").expect("day window");
+        assert_eq!(day.start, "2023-05-30T00:00:00Z");
+        assert_eq!(day.end, "2023-05-31T00:00:00Z");
+
+        let month = extract_query_date("what did I do in May 2023").expect("month window");
+        assert_eq!(month.start, "2023-05-01T00:00:00Z");
+        assert_eq!(month.end, "2023-06-01T00:00:00Z");
+
+        // No leading "in" still parses as a month window.
+        let bare_month = extract_query_date("March 2024 status").expect("month window");
+        assert_eq!(bare_month.start, "2024-03-01T00:00:00Z");
+        assert_eq!(bare_month.end, "2024-04-01T00:00:00Z");
+
+        // December rolls the month window into the next year.
+        let december = extract_query_date("in December 2023").expect("month window");
+        assert_eq!(december.start, "2023-12-01T00:00:00Z");
+        assert_eq!(december.end, "2024-01-01T00:00:00Z");
+
+        let year = extract_query_date("everything from 2022 please").expect("year window");
+        assert_eq!(year.start, "2022-01-01T00:00:00Z");
+        assert_eq!(year.end, "2023-01-01T00:00:00Z");
+
+        // A full date takes precedence over the bare year inside it.
+        let precedence = extract_query_date("around 2023-07-04 fireworks").expect("day window");
+        assert_eq!(precedence.start, "2023-07-04T00:00:00Z");
+        assert_eq!(precedence.end, "2023-07-05T00:00:00Z");
+
+        assert!(extract_query_date("no temporal signal here").is_none());
+        // A year glued to a token is not a bare-year signal.
+        assert!(
+            extract_query_date("deploy to project2023 cluster").is_none(),
+            "an alphanumeric-glued year is not a bare-year window"
+        );
+    }
+
+    /// The window membership check is a real half-open interval on parsed
+    /// instants: `start <= valid_from < end`, never lexical.
+    #[test]
+    fn valid_from_window_membership_is_half_open() {
+        let window = extract_query_date("in May 2023").expect("month window");
+        assert!(
+            valid_from_in_window("2023-05-01T00:00:00Z", &window),
+            "start is inclusive"
+        );
+        assert!(
+            valid_from_in_window("2023-05-30T00:00:00Z", &window),
+            "mid-month is inside"
+        );
+        assert!(
+            !valid_from_in_window("2023-06-01T00:00:00Z", &window),
+            "end is exclusive"
+        );
+        assert!(
+            !valid_from_in_window("2023-04-30T00:00:00Z", &window),
+            "before start is outside"
+        );
+    }
+
+    /// The pack-prefix source reads the leading `YYYY-MM-DD` of a grounded
+    /// `valid_from`, and yields nothing for a non-date-leading string (a date is
+    /// never invented).
+    #[test]
+    fn date_prefix_reads_valid_from_head() {
+        assert_eq!(
+            date_prefix_from_valid_from("2023-05-30T00:00:00Z").as_deref(),
+            Some("2023-05-30")
+        );
+        assert_eq!(date_prefix_from_valid_from("not-a-date").as_deref(), None);
+        assert_eq!(date_prefix_from_valid_from("").as_deref(), None);
+    }
+}
+
+#[cfg(test)]
 mod fusion_weight_tests {
     use super::*;
 
@@ -5044,25 +5543,25 @@ mod fusion_weight_tests {
             ChannelPass::Vector,
         ] {
             assert_eq!(
-                channel_weight(pass, with_substrings),
-                channel_weight(pass, without),
+                channel_weight(pass, with_substrings, None),
+                channel_weight(pass, without, None),
                 "{pass:?} weight must not depend on 'how'/'error' substrings"
             );
         }
         // The two channels the hacks used to boost now hold their plain base
         // weight regardless of the query.
         assert_eq!(
-            channel_weight(ChannelPass::Exact, with_substrings),
+            channel_weight(ChannelPass::Exact, with_substrings, None),
             EXACT_CHANNEL_WEIGHT
         );
         assert_eq!(
-            channel_weight(ChannelPass::Lexical, with_substrings),
+            channel_weight(ChannelPass::Lexical, with_substrings, None),
             LEXICAL_CHANNEL_WEIGHT
         );
         // Substrings buried inside other words ("however" ⊃ "how", "terror" ⊃
         // "error") never trip anything either.
         assert_eq!(
-            channel_weight(ChannelPass::Lexical, "however the terror subsided"),
+            channel_weight(ChannelPass::Lexical, "however the terror subsided", None),
             LEXICAL_CHANNEL_WEIGHT
         );
     }
@@ -5074,15 +5573,15 @@ mod fusion_weight_tests {
     #[test]
     fn temporal_recency_intent_is_token_based_and_survives() {
         assert_eq!(
-            channel_weight(ChannelPass::Temporal, "what is the latest status"),
+            channel_weight(ChannelPass::Temporal, "what is the latest status", None),
             TEMPORAL_RECENCY_CHANNEL_WEIGHT
         );
         assert_eq!(
-            channel_weight(ChannelPass::Temporal, "what is the status"),
+            channel_weight(ChannelPass::Temporal, "what is the status", None),
             TEMPORAL_CHANNEL_WEIGHT
         );
         assert_eq!(
-            channel_weight(ChannelPass::Temporal, "we are getting nowhere"),
+            channel_weight(ChannelPass::Temporal, "we are getting nowhere", None),
             TEMPORAL_CHANNEL_WEIGHT
         );
     }
@@ -5389,6 +5888,7 @@ mod pack_cost_tests {
             Vec::new(),
             2,
             PackLevers::default(),
+            false,
         );
         assert_eq!(
             whole.items.len(),
@@ -5407,6 +5907,7 @@ mod pack_cost_tests {
             Vec::new(),
             2,
             PackLevers::default(),
+            false,
         );
         assert_eq!(
             rendered.items.len(),
@@ -5525,6 +6026,7 @@ mod pack_cost_tests {
             Vec::new(),
             3,
             PackLevers::default(),
+            false,
         );
         assert_eq!(
             packed.items.iter().map(|i| i.unit_id).collect::<Vec<_>>(),
@@ -5612,6 +6114,7 @@ mod pack_cost_tests {
             Vec::new(),
             2,
             PackLevers::default(),
+            false,
         );
         assert_eq!(off.items.len(), 2, "both items packed");
         assert_eq!(off.token_estimate, 16 + 5, "A charged 16, B charged 5");
@@ -5634,6 +6137,7 @@ mod pack_cost_tests {
                 sibling_gather_enabled: true,
                 session_quota: None,
             },
+            false,
         );
         assert_eq!(
             on.items.len(),
@@ -5701,6 +6205,7 @@ mod pack_cost_tests {
             Vec::new(),
             16,
             PackLevers::default(),
+            false,
         );
         assert_eq!(
             distinct_episodes(&off).len(),
@@ -5719,6 +6224,7 @@ mod pack_cost_tests {
                 sibling_gather_enabled: false,
                 session_quota: Some(DEFAULT_SESSION_DIVERSITY_QUOTA),
             },
+            false,
         );
         assert!(
             distinct_episodes(&on).len() >= 4,
@@ -5758,6 +6264,7 @@ mod pack_cost_tests {
             Vec::new(),
             5,
             PackLevers::default(),
+            false,
         );
         let on = pack_recall_context(
             candidates(),
@@ -5770,6 +6277,7 @@ mod pack_cost_tests {
                 sibling_gather_enabled: false,
                 session_quota: Some(2),
             },
+            false,
         );
         let off_ids: std::collections::HashSet<UnitId> =
             off.items.iter().map(|item| item.unit_id).collect();
@@ -5819,6 +6327,7 @@ mod pack_cost_tests {
             Vec::new(),
             3,
             PackLevers::default(),
+            false,
         );
         let again = pack_recall_context(
             scenario(),
@@ -5828,6 +6337,7 @@ mod pack_cost_tests {
             Vec::new(),
             3,
             PackLevers::default(),
+            false,
         );
         assert_eq!(
             reference
@@ -5878,6 +6388,74 @@ mod pack_cost_tests {
                     && drop.reason == RecallDropReason::Budget),
             "the third item drops for budget: {:?}",
             reference.dropped_items
+        );
+    }
+
+    /// A unit with a grounded `valid_from`, for the dated-pack tests.
+    fn unit_dated(id: u128, body: &str, valid_from: &str) -> StoredMemoryUnit {
+        let mut unit = unit(id, body, Vec::new());
+        unit.valid_from = Some(valid_from.to_string());
+        unit
+    }
+
+    /// §6 dated packs: with the flag on, each item whose unit carries a grounded
+    /// `valid_from` gets a leading `[date YYYY-MM-DD]` line resolved from it; a
+    /// unit without a grounded date is left unprefixed (a date is never invented).
+    #[test]
+    fn temporal_grounding_prefixes_dated_items_only() {
+        let query_tokens = tokenize("filler");
+        let candidates = vec![
+            candidate(unit_dated(1, &body_of(6), "2023-05-30T00:00:00Z"), 5.0),
+            candidate(unit(2, &body_of(6), Vec::new()), 4.0),
+        ];
+        let packed = pack_recall_context(
+            candidates,
+            &request(10_000),
+            &[],
+            &query_tokens,
+            Vec::new(),
+            2,
+            PackLevers::default(),
+            true,
+        );
+        assert_eq!(packed.items.len(), 2);
+        assert_eq!(
+            packed.items[0].body,
+            format!("[date 2023-05-30]\n{}", body_of(6)),
+            "grounded item is date-prefixed"
+        );
+        assert_eq!(
+            packed.items[1].body,
+            body_of(6),
+            "ungrounded item is not prefixed — a date is never invented"
+        );
+    }
+
+    /// §6 flag-off byte-identity: the same pack with the flag OFF carries no
+    /// prefix on any item — bit-identical to today regardless of grounded dates.
+    #[test]
+    fn temporal_grounding_off_is_byte_identical() {
+        let query_tokens = tokenize("filler");
+        let candidates = || {
+            vec![
+                candidate(unit_dated(1, &body_of(6), "2023-05-30T00:00:00Z"), 5.0),
+                candidate(unit(2, &body_of(6), Vec::new()), 4.0),
+            ]
+        };
+        let off = pack_recall_context(
+            candidates(),
+            &request(10_000),
+            &[],
+            &query_tokens,
+            Vec::new(),
+            2,
+            PackLevers::default(),
+            false,
+        );
+        assert!(
+            off.items.iter().all(|item| item.body == body_of(6)),
+            "flag off ⇒ no item is date-prefixed: {:?}",
+            off.items.iter().map(|i| i.body.clone()).collect::<Vec<_>>()
         );
     }
 }

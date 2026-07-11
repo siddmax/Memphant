@@ -114,6 +114,11 @@ pub struct BenchLmeOptions {
     /// W4 per-session diversity quota (`--session-quota <n>`, default off =
     /// `None`) threaded via `with_session_quota`.
     pub session_quota: Option<usize>,
+    /// W5 temporal-grounding flag (`--temporal-grounding`, default off) threaded
+    /// via `with_temporal_grounding_enabled` to BOTH the ingest service (so
+    /// `valid_from` and chunk headers are date-grounded at reflect) and the
+    /// recall service (query-date windowing + dated packs).
+    pub temporal_grounding: bool,
     /// Rung 4 runtime contextual-chunk write path opt-in flag
     /// (`--runtime-chunks`, default true = the product path). The EFFECTIVE
     /// state also depends on `--disable runtime_chunks`, which forces the
@@ -237,6 +242,11 @@ pub struct BenchLmeReport {
     /// or `None` when off. Serde default `None` for pre-flag reports.
     #[serde(default)]
     pub session_quota: Option<usize>,
+    /// Whether W5 temporal grounding (`--temporal-grounding`) was on for this
+    /// run. Serde default `false`: every report written before the flag existed
+    /// was a temporal-grounding-off run, so an absent field ⇒ off.
+    #[serde(default)]
+    pub temporal_grounding: bool,
     /// Whether the rung 4 runtime contextual-chunk write path was enabled for
     /// this run — records the EFFECTIVE state (default-on since the 2026-07-10
     /// promotion; `--disable runtime_chunks` records false). The serde default
@@ -630,7 +640,10 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
         Arc::new(SystemClock),
         Arc::clone(&embedder),
     )
-    .with_contextual_chunks_write_enabled(runtime_chunks_enabled);
+    .with_contextual_chunks_write_enabled(runtime_chunks_enabled)
+    // W5: the ingest path grounds `valid_from` + dates chunk headers at reflect,
+    // so the flag must be set here as well as on the recall service.
+    .with_temporal_grounding_enabled(options.temporal_grounding);
     let vector_disabled = options.disable.as_deref() == Some("vector");
     // Vector ablation: same store/units, but the recall-side service embeds
     // with Noop so `query_vec` is None and the vector channel is honestly off.
@@ -649,7 +662,11 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
     // W4 packing levers (`--sibling-gather` / `--session-quota`): recall-time
     // only; both default off so the campaign measures each independently.
     .with_sibling_gather_enabled(options.sibling_gather)
-    .with_session_quota(options.session_quota);
+    .with_session_quota(options.session_quota)
+    // W5 temporal grounding: query-date windowing + dated packs at recall. Set
+    // explicitly here too so the vector-disabled fresh recall service (which is
+    // not a clone of `ingest_service`) also carries the flag.
+    .with_temporal_grounding_enabled(options.temporal_grounding);
 
     if options.granularity != "session" && options.granularity != "turns" {
         return Err(format!(
@@ -929,6 +946,7 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
         candidate_pool_size: options.pool,
         sibling_gather: options.sibling_gather,
         session_quota: options.session_quota,
+        temporal_grounding: options.temporal_grounding,
         runtime_chunks: runtime_chunks_enabled,
         mode: match options.mode {
             RecallMode::Fast => "fast",
@@ -1229,6 +1247,13 @@ mod tests {
         assert_eq!(
             report.session_quota, None,
             "absent session_quota must parse None (pre-lever runs had no quota)"
+        );
+        // W5: a report written before the temporal-grounding flag existed must
+        // parse with it off — every such report ran without content-date
+        // grounding, windowing, or dated packs.
+        assert!(
+            !report.temporal_grounding,
+            "absent temporal_grounding must parse false (pre-flag runs were grounding-off)"
         );
     }
 

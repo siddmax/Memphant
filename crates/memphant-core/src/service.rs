@@ -20,8 +20,8 @@ use memphant_types::{
 use crate::{
     Clock, CoreError, DEFAULT_CANDIDATE_POOL_SIZE, EmbeddingProvider, JobFilter, MemoryStore,
     PackLevers, ReflectJobRow, ScopePage, StoreError, VectorQuery, correct_memory,
-    embedding_profile_for, forget_memory, recall_with_pool, record_mark, reflect_recorded,
-    retain_episode, retain_resource, tokenize,
+    embedding_profile_for, forget_memory, parse_content_date, recall_with_pool, record_mark,
+    reflect_recorded, retain_episode, retain_resource, tokenize,
 };
 
 /// Errors surfaced by the application layer. Transport layers map these onto
@@ -93,6 +93,13 @@ pub struct MemoryService<S: MemoryStore> {
     /// default-on only after the accuracy-wave measurement campaign, so the bench
     /// needs the flags. Set via `with_sibling_gather_enabled` / `with_session_quota`.
     pack_levers: PackLevers,
+    /// W5 temporal-grounding toggle (DEFAULT OFF). Gates all three temporal
+    /// behaviours together: reflect-stage content-date grounding of `valid_from`
+    /// and dated contextual-chunk headers (`compile_job`), query-date windowing
+    /// at recall, and date-prefixed packed items (recall). Off means every one of
+    /// those paths is byte-identical to today. Promotion is measurement-only, so
+    /// it ships off and the bench threads it via `with_temporal_grounding_enabled`.
+    temporal_grounding_enabled: bool,
 }
 
 impl<S: MemoryStore> Clone for MemoryService<S> {
@@ -104,6 +111,7 @@ impl<S: MemoryStore> Clone for MemoryService<S> {
             contextual_chunks_write_enabled: self.contextual_chunks_write_enabled,
             candidate_pool_size: self.candidate_pool_size,
             pack_levers: self.pack_levers,
+            temporal_grounding_enabled: self.temporal_grounding_enabled,
         }
     }
 }
@@ -117,6 +125,7 @@ impl<S: MemoryStore> MemoryService<S> {
             contextual_chunks_write_enabled: true,
             candidate_pool_size: DEFAULT_CANDIDATE_POOL_SIZE,
             pack_levers: PackLevers::default(),
+            temporal_grounding_enabled: false,
         }
     }
 
@@ -159,6 +168,16 @@ impl<S: MemoryStore> MemoryService<S> {
     /// `--session-quota <n>` threads its value here.
     pub fn with_session_quota(mut self, quota: Option<usize>) -> Self {
         self.pack_levers.session_quota = quota;
+        self
+    }
+
+    /// Enables W5 temporal grounding (default OFF): reflect-stage content-date
+    /// grounding of `valid_from` + dated chunk headers, query-date windowing at
+    /// recall, and `[date ...]`-prefixed packed items. Construction-time only,
+    /// mirroring the W3/W4 knobs; the bench lane's `--temporal-grounding` threads
+    /// its value here. Off ⇒ all three paths behave exactly as today.
+    pub fn with_temporal_grounding_enabled(mut self, enabled: bool) -> Self {
+        self.temporal_grounding_enabled = enabled;
         self
     }
 
@@ -379,6 +398,7 @@ impl<S: MemoryStore> MemoryService<S> {
             self.clock.as_ref(),
             self.candidate_pool_size,
             self.pack_levers,
+            self.temporal_grounding_enabled,
         )
         .await?;
 
@@ -564,12 +584,34 @@ impl<S: MemoryStore> MemoryService<S> {
                     // Episode gone (e.g. forgotten before compile): nothing to do.
                     return Ok(CompileOutcome::default());
                 };
+                // W5 temporal grounding: extract the episode's primary content
+                // date (deterministic, clock-free) once. Fallback order is
+                // parsed content date → episode first_observed_at → none; the
+                // store carries no first_observed_at column today, so the middle
+                // rung is NOT-YET-WIRED and we go straight to `None` when parsing
+                // fails (the bench corpus always carries the `[date ...]` prefix,
+                // so measurement is unaffected). Gated: off ⇒ no date at all.
+                let content_date = if self.temporal_grounding_enabled {
+                    parse_content_date(&episode.body)
+                } else {
+                    None
+                };
+                // `YYYY-MM-DD` for the chunk header slot; midnight-UTC RFC 3339
+                // for the grounded `valid_from`. Both derive from the SAME parsed
+                // date so the header and the window agree.
+                let content_date_header = content_date.map(|date| date.to_string());
+                let valid_from = content_date.map(|date| format!("{date}T00:00:00Z"));
                 // Rung 4: mint contextual chunks tied to this raw episode when
                 // the write path is enabled (default on since 2026-07-10).
                 // Every other candidate construction (resource jobs,
                 // direct-unit retains) stays chunk-free — episodes only.
                 let contextual_chunks = if self.contextual_chunks_write_enabled {
-                    episode_contextual_chunks(episode.id, &episode.source_kind, &episode.body)
+                    episode_contextual_chunks(
+                        episode.id,
+                        &episode.source_kind,
+                        &episode.body,
+                        content_date_header.as_deref(),
+                    )
                 } else {
                     Vec::new()
                 };
@@ -587,7 +629,7 @@ impl<S: MemoryStore> MemoryService<S> {
                         churn_class: None,
                         admission_hint: None,
                         contextual_chunks,
-                        valid_from: None,
+                        valid_from,
                         valid_to: None,
                     },
                 )
@@ -736,12 +778,19 @@ fn episode_contextual_chunks(
     episode_id: EpisodeId,
     source_kind: &str,
     body: &str,
+    content_date: Option<&str>,
 ) -> Vec<ContextualChunk> {
     let (spans, turn_structured) = segment_episode_body(body);
     if spans.len() <= CONTEXTUAL_CHUNK_WINDOW {
         return Vec::new();
     }
     let span_label = if turn_structured { "turns" } else { "segments" };
+    // W5: reinstates the header date slot with the TRUE parsed content date
+    // (never the compile clock). `None` ⇒ the header stays dateless, exactly as
+    // before this change.
+    let date_slot = content_date
+        .map(|date| format!(" [date {date}]"))
+        .unwrap_or_default();
     spans
         .chunks(CONTEXTUAL_CHUNK_WINDOW)
         .take(MAX_CONTEXTUAL_CHUNKS)
@@ -758,7 +807,7 @@ fn episode_contextual_chunks(
             Some(ContextualChunk {
                 id: format!("chunk-{}-{window_index}", episode_id.as_uuid()),
                 header: format!(
-                    "[episode {}] [kind {source_kind}] [{span_label} {first}-{last}]",
+                    "[episode {}] [kind {source_kind}]{date_slot} [{span_label} {first}-{last}]",
                     episode_id.as_uuid()
                 ),
                 body: text.to_string(),
@@ -863,7 +912,7 @@ assistant: d e f.\n\
 user: g h i.\n\
 assistant: j k l.\n\
 user: m n o.\n";
-        let chunks = episode_contextual_chunks(episode_id, "user", body);
+        let chunks = episode_contextual_chunks(episode_id, "user", body, None);
         assert_eq!(chunks.len(), 2, "five turns / window 4 → two windows");
 
         let uuid = episode_id.as_uuid();
@@ -890,6 +939,32 @@ user: m n o.\n";
         assert!(chunks[0].body.ends_with("assistant: j k l."));
     }
 
+    /// W5 §1: a parsed content date is stamped into the chunk header `[date ...]`
+    /// slot (between kind and the span label), using the TRUE date, never the
+    /// clock. `None` (the default and the flag-off path) keeps the header
+    /// dateless — every existing header assertion above exercises that case.
+    #[test]
+    fn dated_header_stamps_content_date_between_kind_and_span() {
+        let episode_id = EpisodeId::new();
+        let body = "[session s1] [date 2023/05/30]\n\
+user: a b c.\n\
+assistant: d e f.\n\
+user: g h i.\n\
+assistant: j k l.\n\
+user: m n o.\n";
+        let uuid = episode_id.as_uuid();
+        let chunks = episode_contextual_chunks(episode_id, "user", body, Some("2023-05-30"));
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(
+            chunks[0].header,
+            format!("[episode {uuid}] [kind user] [date 2023-05-30] [turns 1-4]")
+        );
+        assert_eq!(
+            chunks[1].header,
+            format!("[episode {uuid}] [kind user] [date 2023-05-30] [turns 5-5]")
+        );
+    }
+
     /// Non-turn prose falls back to line segments with a `[segments a-b]` label.
     #[test]
     fn non_turn_body_falls_back_to_line_segments() {
@@ -899,7 +974,7 @@ Line two about oranges.\n\
 Line three about pears.\n\
 Line four about grapes.\n\
 Line five about kiwis.\n";
-        let chunks = episode_contextual_chunks(episode_id, "doc", body);
+        let chunks = episode_contextual_chunks(episode_id, "doc", body, None);
         assert_eq!(chunks.len(), 2, "five lines / window 4 → two windows");
         assert!(
             chunks[0].header.contains("[segments 1-4]"),
@@ -920,11 +995,11 @@ user: a b c.\n\
 assistant: d e f.\n\
 user: g h i.\n\
 assistant: j k l.\n";
-        assert!(episode_contextual_chunks(episode_id, "user", four_turns).is_empty());
+        assert!(episode_contextual_chunks(episode_id, "user", four_turns, None).is_empty());
         // A lone prose line is also a single window.
-        assert!(episode_contextual_chunks(episode_id, "doc", "one solitary line").is_empty());
+        assert!(episode_contextual_chunks(episode_id, "doc", "one solitary line", None).is_empty());
         // And an empty body yields nothing.
-        assert!(episode_contextual_chunks(episode_id, "doc", "").is_empty());
+        assert!(episode_contextual_chunks(episode_id, "doc", "", None).is_empty());
     }
 
     /// Never mint more than `MAX_CONTEXTUAL_CHUNKS` per episode.
@@ -936,7 +1011,7 @@ assistant: j k l.\n";
         for turn in 0..turns {
             body.push_str(&format!("user: turn number {turn} here.\n"));
         }
-        let chunks = episode_contextual_chunks(episode_id, "user", &body);
+        let chunks = episode_contextual_chunks(episode_id, "user", &body, None);
         assert_eq!(chunks.len(), MAX_CONTEXTUAL_CHUNKS, "cap holds");
         assert!(chunks.iter().all(|chunk| !chunk.body.trim().is_empty()));
     }
@@ -952,8 +1027,8 @@ user: g h i.\n\
 assistant: j k l.\n\
 user: m n o.\n";
         let uuid = episode_id.as_uuid();
-        let first = episode_contextual_chunks(episode_id, "user", body);
-        let second = episode_contextual_chunks(episode_id, "user", body);
+        let first = episode_contextual_chunks(episode_id, "user", body, None);
+        let second = episode_contextual_chunks(episode_id, "user", body, None);
         let ids: Vec<_> = first.iter().map(|chunk| chunk.id.clone()).collect();
         assert_eq!(
             ids,
@@ -983,7 +1058,7 @@ assistant: 世界 reply here.\n\
 user: third turn 🎉 emoji.\n\
 assistant: fourth turn plain.\n\
 user: fifth turn plain.\n";
-        let chunks = episode_contextual_chunks(episode_id, "conversation", body);
+        let chunks = episode_contextual_chunks(episode_id, "conversation", body, None);
         assert_eq!(chunks.len(), 2, "five turns / window 4 → two windows");
 
         let chunk = &chunks[1];
