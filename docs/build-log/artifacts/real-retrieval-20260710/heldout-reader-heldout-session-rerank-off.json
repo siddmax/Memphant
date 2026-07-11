@@ -1,0 +1,1059 @@
+{
+  "benchmark": "longmemeval_reader_qa",
+  "engine": "openrouter",
+  "reader": "openai/gpt-5.6-terra (openrouter chat/completions API)",
+  "judge": "containment+anthropic/claude-sonnet-5 (normalized containment first; one LLM judge call on non-match; abstention = exact 'I don't know' containment)",
+  "reader_model_id": "openai/gpt-5.6-terra",
+  "judge_model_id": "anthropic/claude-sonnet-5",
+  "prompt_version": 1,
+  "reasoning_effort": "medium",
+  "runtime": "postgres",
+  "label": "heldout-heldout-session-rerank-off",
+  "evidence_path": "docs/build-log/artifacts/real-retrieval-20260710/reader-evidence-heldout-session-rerank-off.jsonl",
+  "retrieval_report": "docs/build-log/artifacts/real-retrieval-20260710/heldout-lme-s-session-rerank-off.json",
+  "command": "scripts/run_reader.py --evidence docs/build-log/artifacts/real-retrieval-20260710/reader-evidence-heldout-session-rerank-off.jsonl --out docs/build-log/artifacts/real-retrieval-20260710/heldout-reader-heldout-session-rerank-off.json --label heldout-heldout-session-rerank-off --engine openrouter --model openai/gpt-5.6-terra --judge-model anthropic/claude-sonnet-5 --reasoning-effort medium --retrieval-report docs/build-log/artifacts/real-retrieval-20260710/heldout-lme-s-session-rerank-off.json --max-calls 170",
+  "generated_at_unix": 1783725967,
+  "aborted": null,
+  "fresh_calls": 119,
+  "cached_calls": 5,
+  "overall": {
+    "n": 100,
+    "n_scored": 100,
+    "qa_accuracy": 0.4
+  },
+  "strata": {
+    "knowledge-update": {
+      "n": 15,
+      "n_scored": 15,
+      "qa_accuracy": 0.4666666666666667
+    },
+    "multi-session": {
+      "n": 27,
+      "n_scored": 27,
+      "qa_accuracy": 0.2962962962962963
+    },
+    "single-session-assistant": {
+      "n": 11,
+      "n_scored": 11,
+      "qa_accuracy": 0.8181818181818182
+    },
+    "single-session-preference": {
+      "n": 6,
+      "n_scored": 6,
+      "qa_accuracy": 0.0
+    },
+    "single-session-user": {
+      "n": 14,
+      "n_scored": 14,
+      "qa_accuracy": 0.5
+    },
+    "temporal-reasoning": {
+      "n": 27,
+      "n_scored": 27,
+      "qa_accuracy": 0.3333333333333333
+    }
+  },
+  "per_question": [
+    {
+      "question_id": "06db6396",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "5",
+      "reply": "4 projects",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "08e075c7",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "9 months",
+      "reply": "9 months",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "09ba9854",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "$50",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "09ba9854_abs",
+      "question_type": "multi-session",
+      "is_abstention": true,
+      "gold_answer": "The information provided is not enough. You did not mention how much will the bus take.",
+      "reply": "I don't know.",
+      "judge_method": "abstention_exact",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "0bc8ad93",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "No, you did not visit with a friend.",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "0ddfec37",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "15",
+      "reply": "I don't know",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "0ea62687",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "2",
+      "reply": "2 miles per gallon.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "118b2229",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "45 minutes each way",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "1568498a",
+      "question_type": "single-session-assistant",
+      "is_abstention": false,
+      "gold_answer": "28. Kg3",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "1903aded",
+      "question_type": "single-session-assistant",
+      "is_abstention": false,
+      "gold_answer": "Transcriptionist.",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "19b5f2b3",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "two weeks",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "1c549ce4",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "$140",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "1da05512",
+      "question_type": "single-session-preference",
+      "is_abstention": false,
+      "gold_answer": "The user would prefer responses that take into account their current home network storage capacity issues and recent reliance on external hard drives, highlighting the potential benefits of a NAS device in addressing these specific needs. They might not prefer responses that ignore their current storage challenges or fail to consider their recent tech upgrades and priorities. Preferred responses would utilize the user's previous mentions of storage capacity issues and tech investments to inform their decision.",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "2318644b",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "$270",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "29f2956b",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "30 minutes",
+      "reply": "30 minutes daily.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "2c63a862",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "14 days. 15 days (including the last day) is also acceptable.",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "2ce6a0f2",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": 4,
+      "reply": "2",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "2ebe6c90",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "21 days. 22 days (including the last day) is also acceptable.",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "3249768e",
+      "question_type": "single-session-assistant",
+      "is_abstention": false,
+      "gold_answer": "Absinthe",
+      "reply": "Absinthe.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "36580ce8",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "bronchitis",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "38146c39",
+      "question_type": "single-session-preference",
+      "is_abstention": false,
+      "gold_answer": "The user would prefer responses that build upon their previous experimentation with turbinado sugar, suggesting ingredients or techniques that complement its richer flavor. They might not prefer generic cookie-making advice or suggestions that don't take into account their existing use of turbinado sugar.",
+      "reply": "Try adding chopped nuts, flaky sea salt, or a pinch of cinnamon.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "3c1045c8",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "2.5 years",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "3f1e9474",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "Sarah",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "41275add",
+      "question_type": "single-session-assistant",
+      "is_abstention": false,
+      "gold_answer": "The video is 'How to Sit Properly at a Desk to Avoid Back Pain' and the link is https://www.youtube.com/watch?v=UfOvNlX9Hh0.",
+      "reply": "\u201cHow to Sit Properly at a Desk to Avoid Back Pain\u201d by Mayo Clinic: https://www.youtube.com/watch?v=UfOvNlX9Hh0",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "41698283",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "a 70-200mm zoom lens",
+      "reply": "70-200mm zoom lens",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "42ec0761",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "Yes",
+      "reply": "Yes, you have a spare screwdriver.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "46a3abf7",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": 3,
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "4c36ccef",
+      "question_type": "single-session-assistant",
+      "is_abstention": false,
+      "gold_answer": "Roscioli",
+      "reply": "Roscioli",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "58470ed2",
+      "question_type": "single-session-assistant",
+      "is_abstention": false,
+      "gold_answer": "According to Borges, 'The Library is a sphere whose exact center is any one of its hexagons and whose circumference is inaccessible.'",
+      "reply": "\u201cThe Library is a sphere whose exact center is any one of its hexagons and whose circumference is inaccessible.\u201d",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "5a4f22c0",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "TechCorp",
+      "reply": "TechCorp",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "60036106",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "12,000",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "603deb26",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "10",
+      "reply": "10 times",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "60bf93ed_abs",
+      "question_type": "multi-session",
+      "is_abstention": true,
+      "gold_answer": "The information provided is not enough. You did not mention buying an iPad case.",
+      "reply": "I don't know.",
+      "judge_method": "abstention_exact",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "61f8c8f8",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "10 minutes",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "65240037",
+      "question_type": "single-session-assistant",
+      "is_abstention": false,
+      "gold_answer": "The recommended ratio is 1:10, meaning one part tea tree oil to ten parts carrier oil.",
+      "reply": "1:10 tea tree oil to carrier oil.",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "69fee5aa",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "38",
+      "reply": "37 coins.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "6b7dfb22",
+      "question_type": "single-session-preference",
+      "is_abstention": false,
+      "gold_answer": "The user would prefer responses that build upon their existing sources of inspiration, such as revisiting Instagram art accounts or exploring new techniques from online tutorials. They might also appreciate suggestions that revisit previous themes they found enjoyable, like painting flowers. The user would not prefer generic or vague suggestions for finding inspiration, and would likely appreciate responses that utilize their recent 30-day painting challenge experience.",
+      "reply": "Try a new environment, visit art exhibits, or explore a different medium or subject.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "6e984302",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "I got my own set of sculpting tools.",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "7161e7e2",
+      "question_type": "single-session-assistant",
+      "is_abstention": false,
+      "gold_answer": "Admon was assigned to the 8 am - 4 pm (Day Shift) on Sundays.",
+      "reply": "8 am\u20134 pm (Day Shift)",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "720133ac",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "$75",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "830ce83f",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "the suburbs",
+      "reply": "Chicago.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "853b0a1d",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "18",
+      "reply": "18 years old.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "8550ddae",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "lavender gin fizz",
+      "reply": "Lavender gin fizz.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "85fa3a3f",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "$50",
+      "reply": "$50",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "88432d0a_abs",
+      "question_type": "multi-session",
+      "is_abstention": true,
+      "gold_answer": "The information provided is not enough. You did not mention baking egg tarts.",
+      "reply": "I don't know.",
+      "judge_method": "abstention_exact",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "89527b6b",
+      "question_type": "single-session-assistant",
+      "is_abstention": false,
+      "gold_answer": "The Plesiosaur had a blue scaly body.",
+      "reply": "Blue.",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "89941a94",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "Yes. (You have a road bike too.)",
+      "reply": "A road bike.",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "8aef76bc",
+      "question_type": "single-session-assistant",
+      "is_abstention": false,
+      "gold_answer": "Mod Podge or another sealant",
+      "reply": "Mod Podge or another water-resistant sealant.",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "8e91e7d9",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "4",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "8e9d538c",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "17",
+      "reply": "17 skeins",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "8ebdbe50",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "Data Science",
+      "reply": "Data Science certification.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "95228167",
+      "question_type": "single-session-preference",
+      "is_abstention": false,
+      "gold_answer": "The user would prefer responses that highlight the differences between Fender Stratocaster and Gibson Les Paul electric guitars, such as the feel of the neck, weight, and sound profile. They might not prefer general tips on buying an electric guitar or suggestions that do not take into account their current guitar and desired upgrade.",
+      "reply": "Consider the guitar\u2019s sound, comfort, build quality, style, budget, and whether it suits the music you want to play.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "9aaed6a3",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "$0.75",
+      "reply": "$0.75",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "9ea5eabc",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "Paris",
+      "reply": "Hawaii",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "a4996e51",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "50",
+      "reply": "Up to 50 hours per week.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "aae3761f",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "15 hours for getting to the three destinations (or 30 hours for the round trip)",
+      "reply": "I don't know",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "b3c15d39",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "5 days. 6 days (including the last day) is also acceptable.",
+      "reply": "5 days",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "b46e15ed",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": 2,
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "b86304ba",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "The painting is worth triple what I paid for it.",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "ba61f0b9",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "6",
+      "reply": "5",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "bcbe585f",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": 4,
+      "reply": "4 weeks ago",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "c19f7a0b",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "6:30 pm",
+      "reply": "Around 6:30 pm.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "c4ea545c",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "Yes",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "c960da58",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "20",
+      "reply": "20",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "caf03d32",
+      "question_type": "single-session-preference",
+      "is_abstention": false,
+      "gold_answer": "The user would prefer responses that provide tips and advice specifically tailored to their slow cooker experiences, utilizing their recent success with beef stew and interest in making yogurt in the slow cooker. They might not prefer general slow cooker recipes or advice unrelated to their specific experiences and interests.",
+      "reply": "Use low heat, avoid overfilling, follow liquid amounts, and use a thermometer for temperature-sensitive recipes like yogurt.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "d01c6aa8",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "27",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "d6233ab6",
+      "question_type": "single-session-preference",
+      "is_abstention": false,
+      "gold_answer": "The user would prefer responses that draw upon their personal experiences and memories, specifically their positive high school experiences such as being part of the debate team and taking advanced placement courses. They would prefer suggestions that highlight the potential benefits of attending the reunion, such as reconnecting with old friends and revisiting favorite subjects like history and economics. The user might not prefer generic or vague responses that do not take into account their individual experiences and interests.",
+      "reply": "Consider whether reconnecting with old classmates would feel meaningful and positive for you; if it may cause stress, set boundaries or skip it.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "e3038f8c",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": 99,
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "e61a7584",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "9 months",
+      "reply": "About 9 months.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "ec81a493",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "500",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "ed4ddc30",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "gold_answer": "20",
+      "reply": "30 dozen eggs",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "edced276",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "15 days",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "ef66a6e5",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "two",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "f35224e0",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "27",
+      "reply": "I don't know",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "faba32e5",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "gold_answer": "24 hours",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "fea54f57",
+      "question_type": "single-session-assistant",
+      "is_abstention": false,
+      "gold_answer": "Evolution",
+      "reply": "\u201cEvolution\u201d",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_0a05b494",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "the woman selling jam at the farmer's market",
+      "reply": "I don't know",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_1916e0ea",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "54 days. 55 days (including the last day) is also acceptable.",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_194be4b3",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "I currently own 4 musical instruments. I've had the Fender Stratocaster electric guitar for 5 years, the Yamaha FG800 acoustic guitar for 8 years, the 5-piece Pearl Export drum set for an unspecified amount of time, and the Korg B1 piano for 3 years.",
+      "reply": "2",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_1d4ab0c9",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "24 days. 25 days (including the last day) is also acceptable.",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_1d80365e",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "2 days. 3 days (including the last day) is also acceptable.",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_1e4a8aeb",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "6 days. 7 days (including the last day) is also acceptable.",
+      "reply": "6 days",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_2f56ae70",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "Disney+",
+      "reply": "Disney+",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_45189cb4",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "First, I attended a NBA game at the Staples Center, then I watched the College Football National Championship game, and finally, I watched the NFL playoffs.",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_70e84552_abs",
+      "question_type": "temporal-reasoning",
+      "is_abstention": true,
+      "gold_answer": "The information provided is not enough. You mentioned fixing the fence but did not mention purchasing cows from Peter.",
+      "reply": "I don't know.",
+      "judge_method": "abstention_exact",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_78cf46a3",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "Receiving the new phone case",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_7a0daae1",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "1 week",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_93159ced",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "4 years and 9 months",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_93159ced_abs",
+      "question_type": "temporal-reasoning",
+      "is_abstention": true,
+      "gold_answer": "The information provided is not enough. From the information provided, You haven't started working at Google yet.",
+      "reply": "I don't know.",
+      "judge_method": "abstention_exact",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_a56e767c",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "I attended four movie festivals.",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_af6db32f",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "17 days ago. 18 days (including the last day) is also acceptable.",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_b0863698",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "7 days ago. 8 days (including the last day) is also acceptable.",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_b5700ca9",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "4 days.",
+      "reply": "4 days ago.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_c27434e8",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "Japanese Zero fighter plane model",
+      "reply": "The Japanese Zero fighter plane model.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_c27434e8_abs",
+      "question_type": "temporal-reasoning",
+      "is_abstention": true,
+      "gold_answer": "The information provided is not enough. You did not mention starting the Porsche 991 Turbo S model.",
+      "reply": "I don't know.",
+      "judge_method": "abstention_exact",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_cd90e484",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "Two weeks",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_d31cdae3",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "The family road trip across the American Southwest",
+      "reply": "The family road trip across the American Southwest.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_d84a3211",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "$185",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_e05b82a6",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "gold_answer": "10 times",
+      "reply": "4 times",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "gpt4_fe651585",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "gold_answer": "Alex",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    }
+  ],
+  "paired_vs_baseline": null
+}

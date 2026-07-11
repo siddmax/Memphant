@@ -81,6 +81,25 @@ ns-harmful (replicates −0.070); b16384 +0.020 [0.000, +0.050] ns (OR lattice
 promotion delta is reader/judge-robust (artifacts
 `scaled-reader-{turns-w8,turns-b16384,session-chunks}-rerank-off.json`).
 
+## Held-out + cross-lattice confirmation (added same day, post-promotion)
+
+The devil's-advocate review demanded out-of-sample validation of the shipped arm.
+Both runs completed:
+
+- **Held-out seed 20260711** (never used for any decision; n=100 stratified;
+  chunks-off control vs shipped chunks-on default, OR lattice): control QA 0.400,
+  chunks QA 0.530 — **ΔQA +0.130 [+0.040, +0.220]**, ΔR@5 +0.255 [+0.170, +0.340],
+  ΔR@10 +0.213 [+0.138, +0.298] — every CI excludes zero, effect LARGER than dev
+  seed (artifacts `heldout-*.json`).
+- **Codex-lattice B2 replication** (dev seed): shipped arm QA 0.54 ≈ +0.11 vs that
+  lattice's session baseline 0.43; B2 vs B1 −0.020 [−0.080, +0.040] ns — same
+  no-difference verdict as the OR lattice
+  (`scaled-reader-cli-session-chunkpack-rerank-off.json`).
+
+The rung-4 promotion now rests on two seeds × two reader/judge lattices, all four
+paired deltas positive with CIs excluding zero. **Binding rule going forward
+(canonical plan addendum): promotions require confirmation on a second seed.**
+
 ## Verdicts applied (promotions and falsifications)
 
 1. **RUNG 4 CLOSED — first rung closure under the promotion-provenance rule.**
