@@ -778,10 +778,25 @@ struct CompileOutcome {
 const CONTEXTUAL_CHUNK_WINDOW: usize = 4;
 
 /// Per-episode chunk cap — the rung 4 bloat guard (disable-when: chunk fan-out
-/// hurts recall latency/cost once it stops adding coverage). An episode long
-/// enough to mint more windows keeps only its first `MAX_CONTEXTUAL_CHUNKS`
-/// (covering up to `MAX_CONTEXTUAL_CHUNKS * CONTEXTUAL_CHUNK_WINDOW` turns).
+/// hurts recall latency/cost once it stops adding coverage). W9: the window
+/// (see `adaptive_chunk_window`) grows past `CONTEXTUAL_CHUNK_WINDOW` for
+/// bodies long enough to otherwise mint more than this many windows, so the
+/// cap bounds fan-out WITHOUT truncating the body — bodies of ≤128 segments
+/// (`MAX_CONTEXTUAL_CHUNKS * CONTEXTUAL_CHUNK_WINDOW`) never trigger growth
+/// and chunk exactly as before this change.
 const MAX_CONTEXTUAL_CHUNKS: usize = 32;
+
+/// W9: the window size that keeps `MAX_CONTEXTUAL_CHUNKS` windows ALWAYS
+/// covering the full body, instead of the fixed `CONTEXTUAL_CHUNK_WINDOW`
+/// silently truncating the tail once a body outgrows
+/// `MAX_CONTEXTUAL_CHUNKS * CONTEXTUAL_CHUNK_WINDOW` segments (128 today).
+/// Grows only when needed: `ceil(segment_count / MAX_CONTEXTUAL_CHUNKS)` is
+/// the smallest window that fits the whole body in the cap, and taking the
+/// max with `CONTEXTUAL_CHUNK_WINDOW` means short bodies are completely
+/// unaffected (byte-identical to pre-W9 behavior for ≤128 segments).
+fn adaptive_chunk_window(segment_count: usize) -> usize {
+    CONTEXTUAL_CHUNK_WINDOW.max(segment_count.div_ceil(MAX_CONTEXTUAL_CHUNKS))
+}
 
 /// Parses a body line's `role: content` turn shape: a short leading role token,
 /// then `": "`, then non-empty content. Returns `(role, content)` or `None` for
@@ -832,11 +847,14 @@ fn segment_episode_body(body: &str) -> (Vec<(usize, usize)>, bool) {
     (spans, turn_structured)
 }
 
-/// Splits `body` into windows of up to `CONTEXTUAL_CHUNK_WINDOW` turns/segments
-/// and mints one `ContextualChunk` per window, each tied back to its parent
-/// episode. Emits nothing when the body fits a single window (a lone chunk
-/// would just duplicate the unit body) and never emits empty-body chunks — the
-/// rung 4 bloat guards.
+/// Splits `body` into up to `MAX_CONTEXTUAL_CHUNKS` windows and mints one
+/// `ContextualChunk` per window, each tied back to its parent episode. The
+/// window is `CONTEXTUAL_CHUNK_WINDOW` turns/segments for bodies that fit
+/// within the cap at that size, and grows (`adaptive_chunk_window`)
+/// otherwise so the windows ALWAYS cover the full body — no silently dropped
+/// tail (W9). Emits nothing when the body fits a single window (a lone chunk
+/// would just duplicate the unit body) and never emits empty-body chunks —
+/// the rung 4 bloat guards.
 fn episode_contextual_chunks(
     episode_id: EpisodeId,
     source_kind: &str,
@@ -847,6 +865,7 @@ fn episode_contextual_chunks(
     if spans.len() <= CONTEXTUAL_CHUNK_WINDOW {
         return Vec::new();
     }
+    let window_size = adaptive_chunk_window(spans.len());
     let span_label = if turn_structured { "turns" } else { "segments" };
     // W5: reinstates the header date slot with the TRUE parsed content date
     // (never the compile clock). `None` ⇒ the header stays dateless, exactly as
@@ -855,7 +874,10 @@ fn episode_contextual_chunks(
         .map(|date| format!(" [date {date}]"))
         .unwrap_or_default();
     spans
-        .chunks(CONTEXTUAL_CHUNK_WINDOW)
+        .chunks(window_size)
+        // W9: `window_size` already guarantees ≤`MAX_CONTEXTUAL_CHUNKS`
+        // windows for the whole body — this `take` is a defensive backstop,
+        // not the active truncation it used to be.
         .take(MAX_CONTEXTUAL_CHUNKS)
         .enumerate()
         .filter_map(|(window_index, window)| {
@@ -865,8 +887,8 @@ fn episode_contextual_chunks(
             if text.is_empty() {
                 return None;
             }
-            let first = window_index * CONTEXTUAL_CHUNK_WINDOW + 1;
-            let last = window_index * CONTEXTUAL_CHUNK_WINDOW + window.len();
+            let first = window_index * window_size + 1;
+            let last = window_index * window_size + window.len();
             Some(ContextualChunk {
                 id: format!("chunk-{}-{window_index}", episode_id.as_uuid()),
                 header: format!(
@@ -1510,6 +1532,34 @@ impl<F: Future> Future for CatchUnwind<F> {
 mod chunk_tests {
     use super::*;
 
+    /// Builds a turn-structured body of `turn_count` `user: ...` turns, for
+    /// the W9 window-growth tests below (a leading provenance line, exactly
+    /// like every other body in this module, so it exercises the same
+    /// turn-structured segmentation path).
+    fn turn_body(turn_count: usize) -> String {
+        let mut body = String::from("[session s1] [date 2023/05/30]\n");
+        for turn in 0..turn_count {
+            body.push_str(&format!("user: turn number {turn} here.\n"));
+        }
+        body
+    }
+
+    /// Extracts the `a-b` range out of a chunk header's trailing
+    /// `[label a-b]` slot (`label` is `"turns"` or `"segments"`) — no regex
+    /// dependency, matching the hand-rolled-parsing rationale used elsewhere
+    /// in this module.
+    fn parse_span_range(header: &str, label: &str) -> (usize, usize) {
+        let marker = format!("[{label} ");
+        let start = header.rfind(&marker).expect("span slot present") + marker.len();
+        let rest = &header[start..];
+        let end = rest.find(']').expect("span slot closes");
+        let (first, last) = rest[..end].split_once('-').expect("span is a-b");
+        (
+            first.parse().expect("first is numeric"),
+            last.parse().expect("last is numeric"),
+        )
+    }
+
     /// `role: content` bodies window over turns with a `[turns a-b]` header
     /// and exact byte-offset spans over the parent body.
     #[test]
@@ -1611,18 +1661,139 @@ assistant: j k l.\n";
         assert!(episode_contextual_chunks(episode_id, "doc", "", None).is_empty());
     }
 
-    /// Never mint more than `MAX_CONTEXTUAL_CHUNKS` per episode.
+    /// Never mint more than `MAX_CONTEXTUAL_CHUNKS` per episode. W9: this cap
+    /// now holds by construction (the window grows to fit), so the same body
+    /// that used to have its tail silently dropped once the fixed 4-turn
+    /// window hit the 32-chunk cap is now fully covered too.
     #[test]
     fn per_episode_chunk_cap_is_enforced() {
         let episode_id = EpisodeId::new();
         let turns = (MAX_CONTEXTUAL_CHUNKS + 2) * CONTEXTUAL_CHUNK_WINDOW;
-        let mut body = String::from("[session s1] [date 2023/05/30]\n");
-        for turn in 0..turns {
-            body.push_str(&format!("user: turn number {turn} here.\n"));
-        }
+        let body = turn_body(turns);
         let chunks = episode_contextual_chunks(episode_id, "user", &body, None);
-        assert_eq!(chunks.len(), MAX_CONTEXTUAL_CHUNKS, "cap holds");
+        assert!(
+            chunks.len() <= MAX_CONTEXTUAL_CHUNKS,
+            "cap holds: {} chunks for {turns} turns",
+            chunks.len()
+        );
         assert!(chunks.iter().all(|chunk| !chunk.body.trim().is_empty()));
+
+        let (_, last) = parse_span_range(&chunks.last().unwrap().header, "turns");
+        assert_eq!(
+            last, turns,
+            "last chunk must reach the final turn, not truncate the tail"
+        );
+    }
+
+    /// W9 property: for any body length, either it fits a single window (no
+    /// chunks minted — the pre-existing bloat guard, unaffected by W9) or the
+    /// windows are contiguous, start at turn 1, and the last window's `last`
+    /// equals the turn count exactly — the whole body is covered, remainder
+    /// included, no matter how far past the cap-at-fixed-window threshold
+    /// (128 segments) the body runs.
+    #[test]
+    fn full_body_coverage_property_for_growing_bodies() {
+        for &turn_count in &[1usize, 129, 500, 10_000] {
+            let episode_id = EpisodeId::new();
+            let body = turn_body(turn_count);
+            let chunks = episode_contextual_chunks(episode_id, "user", &body, None);
+
+            if turn_count <= CONTEXTUAL_CHUNK_WINDOW {
+                assert!(
+                    chunks.is_empty(),
+                    "n={turn_count}: single-window body mints no chunks"
+                );
+                continue;
+            }
+
+            assert!(
+                !chunks.is_empty(),
+                "n={turn_count}: multi-window body must mint chunks"
+            );
+            assert!(
+                chunks.len() <= MAX_CONTEXTUAL_CHUNKS,
+                "n={turn_count}: cap must hold, got {} chunks",
+                chunks.len()
+            );
+
+            let mut expected_start = 1usize;
+            for (idx, chunk) in chunks.iter().enumerate() {
+                let (first, last) = parse_span_range(&chunk.header, "turns");
+                assert_eq!(
+                    first, expected_start,
+                    "n={turn_count}: window {idx} must start where the previous one left off"
+                );
+                assert!(
+                    last >= first,
+                    "n={turn_count}: window {idx} range must be non-empty"
+                );
+                expected_start = last + 1;
+            }
+
+            let (_, last) = parse_span_range(&chunks.last().unwrap().header, "turns");
+            assert_eq!(
+                last, turn_count,
+                "n={turn_count}: last window must reach the final turn — no dropped tail"
+            );
+        }
+    }
+
+    /// §2: bodies of ≤128 segments (`MAX_CONTEXTUAL_CHUNKS * CONTEXTUAL_CHUNK_WINDOW`)
+    /// must be byte-identical to pre-W9 behavior — the window stays fixed at
+    /// `CONTEXTUAL_CHUNK_WINDOW` and every window is exactly that size except
+    /// a possible final remainder.
+    #[test]
+    fn bodies_at_or_under_128_segments_use_fixed_window() {
+        for &turn_count in &[5usize, 32, 100, 128] {
+            let episode_id = EpisodeId::new();
+            let body = turn_body(turn_count);
+            let chunks = episode_contextual_chunks(episode_id, "user", &body, None);
+
+            let expected_windows = turn_count.div_ceil(CONTEXTUAL_CHUNK_WINDOW);
+            assert_eq!(
+                chunks.len(),
+                expected_windows,
+                "n={turn_count}: window must stay fixed at {CONTEXTUAL_CHUNK_WINDOW} up to 128 segments"
+            );
+            for (idx, chunk) in chunks.iter().enumerate() {
+                let (first, last) = parse_span_range(&chunk.header, "turns");
+                let expected_first = idx * CONTEXTUAL_CHUNK_WINDOW + 1;
+                let expected_last = (expected_first + CONTEXTUAL_CHUNK_WINDOW - 1).min(turn_count);
+                assert_eq!(first, expected_first, "n={turn_count}: window {idx} start");
+                assert_eq!(last, expected_last, "n={turn_count}: window {idx} end");
+            }
+        }
+    }
+
+    /// §1: header ranges stay truthful under window growth — a small,
+    /// fully-worked example (rather than the property sweep above) so a
+    /// failure here points straight at the arithmetic.
+    #[test]
+    fn header_ranges_truthful_under_growth() {
+        let episode_id = EpisodeId::new();
+        let turn_count = 129;
+        let body = turn_body(turn_count);
+        let chunks = episode_contextual_chunks(episode_id, "user", &body, None);
+
+        // window_size = max(4, ceil(129 / 32)) = 5; ceil(129 / 5) = 26 windows.
+        assert_eq!(chunks.len(), 26, "129 turns / grown window 5 → 26 windows");
+        assert!(chunks.len() <= MAX_CONTEXTUAL_CHUNKS);
+
+        let uuid = episode_id.as_uuid();
+        assert_eq!(
+            chunks[0].header,
+            format!("[episode {uuid}] [kind user] [turns 1-5]")
+        );
+        assert_eq!(
+            chunks[1].header,
+            format!("[episode {uuid}] [kind user] [turns 6-10]")
+        );
+        // Last window carries the 4-turn remainder (129 == 25 * 5 + 4)
+        // instead of being dropped.
+        assert_eq!(
+            chunks[25].header,
+            format!("[episode {uuid}] [kind user] [turns 126-129]")
+        );
     }
 
     /// Ids are deterministic in episode id + window index across calls.
