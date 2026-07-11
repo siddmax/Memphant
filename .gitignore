@@ -44,6 +44,15 @@ benchmarks/data/*
 !benchmarks/data/syndai_docs_golden.lock.json
 !benchmarks/data/syndai_docs_golden_v2.jsonl
 !benchmarks/data/syndai_docs_golden_v2.lock.json
+# R0-T6 code lane: the corpus + golden JSONL are the user's PRIVATE coding
+# content (extracted from the Syndai coding_execution_attempt_events table)
+# and must never be committed — only the lock (sha256/counts/stats/seed/
+# extraction params, no content) is. Already covered by the blanket
+# `benchmarks/data/*` above; listed explicitly for the binding privacy note.
+benchmarks/data/coding_events_corpus.jsonl
+benchmarks/data/coding_events_corpus.stats.json
+benchmarks/data/coding_events_golden.jsonl
+!benchmarks/data/coding_events_golden.lock.json
 .fastembed_cache/
 # Reader-lane evidence packs embed raw LongMemEval session text (the raw
 # dataset stays out of the repo); the scored reader-*.json reports are committed.
@@ -60,3 +69,6 @@ docs/build-log/artifacts/*/ev-*.jsonl
 docs/build-log/artifacts/r0-embedder/**/evidence.jsonl
 docs/build-log/artifacts/r0-embedder/**/ev-*.jsonl
 docs/build-log/artifacts/r0-embedder/reader-cache/
+# R0-T6 code-lane miner cache: caches raw LLM replies generated FROM the
+# private corpus text (regenerable from the pinned corpus + seed).
+docs/build-log/artifacts/code-lane/miner-cache/
