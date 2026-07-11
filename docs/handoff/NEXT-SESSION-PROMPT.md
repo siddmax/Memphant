@@ -111,10 +111,18 @@ RESULTS_PLACEHOLDER if scoring didn't finish), docs/superpowers/specs/memphant/S
 - Full local gate (AGENTS.md) + spec-drift green before any "done" claim;
   commits small with Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>.
 
-> Update 2026-07-11: the ACCURACY WAVE completed — 10 flagged levers + cleanups landed
-> and measured on two seeds; NO promotions (all CIs include zero; see
-> docs/build-log/2026-07-11-accuracy-wave.md). Syndai doc gate = HOLD (Syndai wins
-> 0.217 vs 0.050; docs/build-log/2026-07-11-syndai-gate.md). Resume at that build-log's
-> "evidence-ranked next levers": (1) pack-policy-aware fact admission, (2) reader-side
-> multi-pass for adequate-pack failures, (3) doc-lane embed/context work, and run the
-> next measurement round at n≥300.
+> Update 2026-07-11 (FINAL — supersedes the resume order above): the accuracy wave
+> completed with NO promotions (docs/build-log/2026-07-11-accuracy-wave.md); the
+> Syndai doc gate is HOLD (Syndai 0.217 vs MemPhant 0.050 —
+> docs/build-log/2026-07-11-syndai-gate.md). THE authoritative next plan is
+> docs/reports/2026-07-11-prosumer-memory-campaign-report.md §6 + §8 (prosumer
+> reframe; ordered execution R0→R5): R0 stack bench (gte-modernbert drop-in vs
+> bge-small in our harness first), R1 doc lane (new embedder + late-chunking +
+> voyage-context-3 arm → re-run the Syndai gate until MemPhant WINS), R2 chat round
+> at n=300 seed 20260712 confirmed on the full 500 (Chain-of-Note v4, profile
+> block, temporal re-measure, HyDE), R3 coding-continuity lane over the 63.6k
+> events, R4 additive consolidation framework gated by MemoryStress+FAMA, R5
+> replacement wiring only after R1 flips. Self-hosted stack: gte-modernbert-base /
+> bge-reranker-v2-m3 / Qwen3-8B-2507 offline consolidator; voyage-context-3 is the
+> one API buy. Binding: verbatim-is-the-memory; deterministic writes; full-500 +
+> virgin-200 promotion bar; SOTA language locked until R2's protocol run.

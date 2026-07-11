@@ -149,3 +149,63 @@ gate), ANN/scale machinery, graph engines, LLM-at-ingest.
 Promotion-provenance + two-seed/virgin-subset confirmation; same-lattice pairing;
 "SOTA" banned until the full-500 protocol run; accuracy/UX > cost > perf/latency;
 verbatim is the memory, extraction is metadata; deterministic writes stay.
+
+## 8. Round-2 execution order, model stack, and the consolidation framework (addendum)
+
+**Model stack (self-hosted-first; researched 2026-07-11, `selfhosted-stack` +
+`consolidation-research` briefs):**
+- **Embedder:** `gte-modernbert-base` (149M/768d/8192ctx, Apache-2.0, already in the
+  fastembed-rs ORT zoo — drop-in enum change). Fallbacks: EmbeddingGemma-308M,
+  granite-english-r2. qwen3-embedding is the accuracy ceiling but sits on the candle
+  backend (bigger change — later).
+- **Reranker:** `bge-reranker-v2-m3` (one line in fastembed-rs; ~1-1.5s/64-doc pool on
+  CPU — async only, and only if the eval seam proves it earns its keep).
+- **Consolidation LLM (offline only, never write-path):** Qwen3-8B-Instruct-2507
+  Q4/Q5 — 4.8% hallucination at 99.9% answer rate (Phi-4 silently refuses ~19%,
+  fatal unattended). Fallback Qwen3-4B for CPU-only.
+- **The ONE API buy:** voyage-context-3 contextualized chunk embeddings — no open
+  equivalent exists; local approximation = late chunking on gte-modernbert (measure
+  the gap, buy only if it pays).
+- Load-bearing unknown: all latency figures are foreign hardware — finalists get
+  bench-tested in OUR fastembed/ort harness first.
+
+**Consolidation ("sleep") framework — adopted design:** additive, citation-anchored
+reflection nodes on the existing bitemporal substrate. Verbatim originals are never
+rewritten (in-place LLM updating is the documented store-rotter); rollups/profile
+syntheses are NEW units citing their sources, superseded like anything else.
+Triggers: idle windows + store-pressure signals (contradiction density, subject-key
+fan-out, superseded-version count) — pressure spikes land at sessions 200-500 in
+MemoryStress. Offline Qwen3-8B consolidator gated by an HHEM/NLI
+grounding check before any rollup touches profile memory. **Gate: MemoryStress
+(1000 sessions / 10 simulated months, degradation curve) scored with FAMA's
+stale-penalizing metric — LongMemEval-class benches provably miss this failure mode
+(95.4% LME vs 38.3% MemoryStress for the same system). Decay rung 11 promotes or
+retires on the same run.**
+
+**Execution order (dependencies + information value; goal state: better RAG and
+better codebase memory than Syndai, magic for prosumers, months-scale durability):**
+
+1. **R0 — Stack bench (unblocks everything):** gte-modernbert drop-in vs bge-small
+   in our harness: CPU latency + paired retrieval on both lanes' fixtures. Pick the
+   embedder before any lane work.
+2. **R1 — Win the doc/RAG lane:** new embedder + late-chunking A/B + voyage-context-3
+   API arm; re-run the Syndai docs gate. This is the "better RAG than Syndai" claim —
+   it is currently FALSE (0.050 vs 0.217) and must flip on the same golden set.
+3. **R2 — Chat round at n=300 (seed 20260712), confirm on full 500:** Chain-of-Note
+   reader v4; preference profile block (W6 keys → one injected profile item);
+   temporal re-measure (redundancy fixed); HyDE A/B. Singles → pre-registered combo
+   → full-500 confirmation (virgin-200 subset) → promotions. The full-500 run is
+   also the external-claim protocol run.
+4. **R3 — Coding-continuity lane (better codebase memory than Syndai — first-mover,
+   they have no retrieval over it):** golden set mined from the 63.6k
+   coding_execution_attempt_events (order by sequence+created_at; exclude the 24%
+   event-gap attempts); MemPhant tri-domain ingest + recall; measure.
+5. **R4 — Consolidation framework + longitudinal gate:** reflection-node write path
+   (deterministic core), MemoryStress+FAMA harness, offline consolidator behind the
+   grounding check; decay rung adjudicated here.
+6. **R5 — Replacement wiring:** only after R1 flips the gate; dogfood flag path
+   already exists (Syndai calls /v1/recall with fallback today).
+
+Standing rules apply throughout: verbatim is the memory; deterministic writes;
+pre-registration + full-500/virgin-subset confirmation for promotions; accuracy/UX
+> cost > perf/latency; "SOTA" language unlocked only by R2's protocol run.
