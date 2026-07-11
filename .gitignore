@@ -42,6 +42,8 @@ temp/
 benchmarks/data/*
 !benchmarks/data/syndai_docs_golden.jsonl
 !benchmarks/data/syndai_docs_golden.lock.json
+!benchmarks/data/syndai_docs_golden_v2.jsonl
+!benchmarks/data/syndai_docs_golden_v2.lock.json
 .fastembed_cache/
 # Reader-lane evidence packs embed raw LongMemEval session text (the raw
 # dataset stays out of the repo); the scored reader-*.json reports are committed.
@@ -52,3 +54,9 @@ docs/build-log/artifacts/*/reader-cache/
 docs/build-log/artifacts/syndai-gate/*_evidence.jsonl
 docs/build-log/artifacts/syndai-gate/miner-cache/
 docs/build-log/artifacts/*/ev-*.jsonl
+# R0 embedder bakeoff (docs + chat lanes): evidence packs embed raw retrieved
+# doc bodies / raw corpus text; the shared reader cache is regenerable.
+# provenance.json / lme-*.json / reader-*.json score reports are committed.
+docs/build-log/artifacts/r0-embedder/**/evidence.jsonl
+docs/build-log/artifacts/r0-embedder/**/ev-*.jsonl
+docs/build-log/artifacts/r0-embedder/reader-cache/

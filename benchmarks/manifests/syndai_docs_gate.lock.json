@@ -1,7 +1,7 @@
 {
   "corpus": "syndai_product_docs",
   "syndai_root": "/Users/sidsharma/Syndai",
-  "git_commit": "6945f429a81d66440751840f7368b3358186ecb1",
+  "git_commit": "7d3036ff993723a149dc7d0449a3351d33227f46",
   "globs": [
     "docs/*.md",
     "docs/**/*.md"

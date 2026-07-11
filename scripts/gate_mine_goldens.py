@@ -64,7 +64,6 @@ WORD_RE = re.compile(r"[a-z0-9]+")
 
 MANIFEST_PATH = gc.MEMPHANT_ROOT / "benchmarks" / "manifests" / "syndai_docs_gate.lock.json"
 GOLDEN_PATH = gc.MEMPHANT_ROOT / "benchmarks" / "data" / "syndai_docs_golden.jsonl"
-GOLDEN_LOCK_PATH = gc.MEMPHANT_ROOT / "benchmarks" / "data" / "syndai_docs_golden.lock.json"
 
 
 def content_words(text: str) -> set[str]:
@@ -105,6 +104,86 @@ def parse_reply(reply: str, required_keys: tuple[str, ...]) -> dict | None:
         if not isinstance(value, str) or not value.strip():
             return None
     return obj
+
+
+def load_excluded_keys(path: Path) -> set[str]:
+    """Flattened `source_section_key` values from an existing golden JSONL —
+    single-hop rows contribute one key, multi-hop rows split on ``||`` so BOTH
+    of their sections are excluded. Used by ``--exclude-golden`` so a second
+    mining pass (v2) draws a fresh sample of the SAME pinned corpus with zero
+    section overlap against the first (v1)."""
+    keys: set[str] = set()
+    for row in gc.load_goldens(path):
+        keys.update(row["source_section_key"].split("||"))
+    return keys
+
+
+def filter_excluded(
+    per_file: dict[str, list[gc.Section]],
+    all_candidates: list[gc.Section],
+    excluded_keys: set[str],
+) -> tuple[dict[str, list[gc.Section]], list[gc.Section]]:
+    """Drops sections whose ``.key()`` is in ``excluded_keys`` from both the
+    per-file map (feeds multi-hop pairing) and the flat candidate list (feeds
+    single-hop sampling), so an excluded section can never be drawn by either
+    path. A no-op (returns the inputs unchanged) when ``excluded_keys`` is
+    empty."""
+    if not excluded_keys:
+        return per_file, all_candidates
+    filtered_per_file = {
+        rel: [s for s in secs if s.key() not in excluded_keys]
+        for rel, secs in per_file.items()
+    }
+    filtered_candidates = [s for s in all_candidates if s.key() not in excluded_keys]
+    return filtered_per_file, filtered_candidates
+
+
+def assert_no_overlap(goldens: list[dict], excluded_goldens: list[dict]) -> None:
+    """Sanity check for an exclusion-mined golden set: zero `question_id`
+    collisions and zero `source_section_key` overlap against the golden set it
+    was mined to exclude. Raises loudly (never silently drops rows) since
+    either would mean the exclusion filtering failed to do its job."""
+    excluded_qids = {g["question_id"] for g in excluded_goldens}
+    excluded_keys: set[str] = set()
+    for g in excluded_goldens:
+        excluded_keys.update(g["source_section_key"].split("||"))
+    new_qids = {g["question_id"] for g in goldens}
+    new_keys: set[str] = set()
+    for g in goldens:
+        new_keys.update(g["source_section_key"].split("||"))
+    qid_overlap = sorted(excluded_qids & new_qids)
+    if qid_overlap:
+        raise RuntimeError(f"question_id collision with excluded golden set: {qid_overlap}")
+    key_overlap = excluded_keys & new_keys
+    if key_overlap:
+        raise RuntimeError(
+            f"source_section_key overlap with excluded golden set: {len(key_overlap)} keys"
+        )
+
+
+def verify_corpus_pin(manifest_path: Path, root: Path, files: list[str]) -> list[str]:
+    """Corpus-pin integrity check: recomputes sha256 for every file the
+    CURRENTLY-COMMITTED manifest at ``manifest_path`` pins and diffs against
+    the current corpus. Returns a list of human-readable drift descriptions
+    (empty = the pin holds). Run BEFORE the manifest is rebuilt/overwritten —
+    otherwise this would always compare a file against itself."""
+    old = json.loads(manifest_path.read_text())
+    old_files: dict = old.get("files", {})
+    pinned = set(old_files)
+    current = set(files)
+    problems: list[str] = []
+    for rel in sorted(pinned - current):
+        problems.append(f"{rel}: MISSING (file no longer present at pinned path)")
+    for rel in sorted(current - pinned):
+        problems.append(f"{rel}: NEW file not in lock (corpus changed since pin)")
+    for rel in sorted(pinned & current):
+        actual_sha = gc.sha256_hex((root / rel).read_bytes())
+        expected_sha = old_files[rel]["sha256"]
+        if actual_sha != expected_sha:
+            problems.append(
+                f"{rel}: sha256 mismatch lock={expected_sha[:12]} current={actual_sha[:12]}"
+            )
+    return problems
 
 
 def locate_span(section: gc.Section, span: str) -> tuple[int, int, str] | None:
@@ -274,7 +353,7 @@ def multi_prompt(a: gc.Section, b: gc.Section) -> str:
     )
 
 
-def mine(cli, single_sections, multi_pairs, n_single, n_multi) -> list[dict]:
+def mine(cli, single_sections, multi_pairs, n_single, n_multi, id_prefix: str = "syndai_docs") -> list[dict]:
     goldens: list[dict] = []
     for section in single_sections:
         if len(goldens) >= n_single:
@@ -290,7 +369,7 @@ def mine(cli, single_sections, multi_pairs, n_single, n_multi) -> list[dict]:
         question = obj["question"].strip()
         goldens.append(
             {
-                "question_id": f"syndai_docs_s{len(goldens) + 1:03d}_{section.bucket}",
+                "question_id": f"{id_prefix}_s{len(goldens) + 1:03d}_{section.bucket}",
                 "question_type": section.bucket,
                 "is_abstention": False,
                 "question": question,
@@ -320,7 +399,7 @@ def mine(cli, single_sections, multi_pairs, n_single, n_multi) -> list[dict]:
         multi_count += 1
         goldens.append(
             {
-                "question_id": f"syndai_docs_m{multi_count:03d}",
+                "question_id": f"{id_prefix}_m{multi_count:03d}",
                 "question_type": "multi-hop",
                 "is_abstention": False,
                 "question": question,
@@ -359,6 +438,16 @@ def build_manifest(root: Path, files: list[str]) -> dict:
     }
 
 
+def rel_to_root(path_str: str) -> str:
+    """POSIX path relative to MEMPHANT_ROOT when possible (for lock-file
+    fields), else the input unchanged (e.g. an already-relative path)."""
+    resolved = Path(path_str).resolve()
+    try:
+        return resolved.relative_to(gc.MEMPHANT_ROOT).as_posix()
+    except ValueError:
+        return path_str
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--syndai-root", default=str(DEFAULT_SYNDAI_ROOT))
@@ -372,13 +461,54 @@ def main() -> int:
     parser.add_argument("--max-calls", type=int, default=400)
     parser.add_argument("--seed", type=int, default=SAMPLE_SEED)
     parser.add_argument("--manifest-only", action="store_true")
+    parser.add_argument(
+        "--exclude-golden",
+        default=None,
+        help=(
+            "existing golden JSONL whose source_section_key values (both "
+            "single- and multi-hop, split on '||') are excluded from the "
+            "candidate pool — mines a fresh sample of the SAME pinned corpus "
+            "with zero section overlap against it (e.g. v2 vs v1)"
+        ),
+    )
+    parser.add_argument(
+        "--out-golden",
+        default=str(GOLDEN_PATH),
+        help="golden JSONL output path (default: the v1 path)",
+    )
+    parser.add_argument(
+        "--out-lock",
+        default=None,
+        help="golden lock JSON output path (default: derived from --out-golden's stem, e.g. foo.jsonl -> foo.lock.json)",
+    )
+    parser.add_argument(
+        "--id-prefix",
+        default="syndai_docs",
+        help=(
+            "question_id prefix (default: syndai_docs); set distinctly for an "
+            "--exclude-golden run (e.g. syndai_docs_v2) so question_ids can "
+            "never collide with the excluded set even before the sanity check runs"
+        ),
+    )
     args = parser.parse_args()
+
+    out_golden = Path(args.out_golden)
+    out_lock = Path(args.out_lock) if args.out_lock else out_golden.with_name(out_golden.stem + ".lock.json")
 
     root = Path(args.syndai_root)
     files = gc.list_corpus_files(root)
     if not files:
         print("no corpus files found", file=sys.stderr)
         return 1
+
+    if MANIFEST_PATH.exists() and not args.manifest_only:
+        drift = verify_corpus_pin(MANIFEST_PATH, root, files)
+        if drift:
+            print(f"BLOCKED: corpus-pin drift detected against {MANIFEST_PATH}", file=sys.stderr)
+            for line in drift:
+                print(f"  {line}", file=sys.stderr)
+            return 1
+        print(f"corpus-pin verified: {len(files)} files match {MANIFEST_PATH}", file=sys.stderr)
 
     manifest = build_manifest(root, files)
     MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -398,6 +528,18 @@ def main() -> int:
         sections = gc.candidate_sections(gc.parse_sections(rel, text))
         per_file[rel] = sections
         all_candidates.extend(sections)
+
+    excluded_goldens: list[dict] = []
+    excluded_keys: set[str] = set()
+    if args.exclude_golden:
+        excluded_goldens = gc.load_goldens(Path(args.exclude_golden))
+        excluded_keys = load_excluded_keys(Path(args.exclude_golden))
+        per_file, all_candidates = filter_excluded(per_file, all_candidates, excluded_keys)
+        print(
+            f"exclude_golden={args.exclude_golden} excluded_sections={len(excluded_keys)} "
+            f"remaining_candidates={len(all_candidates)}",
+            file=sys.stderr,
+        )
 
     n_multi = round(args.target * MULTI_HOP_FRACTION)
     n_single = args.target - n_multi
@@ -438,16 +580,24 @@ def main() -> int:
     cli = MinerCli(
         args.engine, args.model, args.model, Path(args.cache_dir), args.max_calls
     )
-    goldens = mine(cli, single_candidates, multi_pairs, n_single, n_multi)
+    goldens = mine(cli, single_candidates, multi_pairs, n_single, n_multi, args.id_prefix)
 
-    gc.write_jsonl(GOLDEN_PATH, goldens)
-    golden_bytes = GOLDEN_PATH.read_bytes()
+    if args.exclude_golden:
+        assert_no_overlap(goldens, excluded_goldens)
+        print(
+            f"overlap check vs {args.exclude_golden}: question_id_overlap=0 "
+            f"source_section_key_overlap=0 (excluded_sections={len(excluded_keys)})",
+            file=sys.stderr,
+        )
+
+    gc.write_jsonl(out_golden, goldens)
+    golden_bytes = out_golden.read_bytes()
     n_multi_out = sum(1 for row in goldens if row["multi_hop"])
     strata: dict[str, int] = {}
     for row in goldens:
         strata[row["question_type"]] = strata.get(row["question_type"], 0) + 1
     lock = {
-        "golden_path": "benchmarks/data/syndai_docs_golden.jsonl",
+        "golden_path": rel_to_root(str(out_golden)),
         "sha256": gc.sha256_hex(golden_bytes),
         "bytes": len(golden_bytes),
         "count": len(goldens),
@@ -458,14 +608,16 @@ def main() -> int:
         "sample_seed": args.seed,
         "corpus_manifest": "benchmarks/manifests/syndai_docs_gate.lock.json",
         "corpus_git_commit": manifest["git_commit"],
+        "exclude_golden": rel_to_root(args.exclude_golden) if args.exclude_golden else None,
+        "excluded_section_count": len(excluded_keys),
     }
-    GOLDEN_LOCK_PATH.write_text(json.dumps(lock, indent=2) + "\n")
+    out_lock.write_text(json.dumps(lock, indent=2) + "\n")
 
     print(
         f"mined={len(goldens)} (single={len(goldens) - n_multi_out} "
         f"multi={n_multi_out}) target={args.target} "
         f"fresh_calls={cli.fresh_calls} cached_calls={cli.cached_calls} "
-        f"sha256={lock['sha256'][:12]} out={GOLDEN_PATH}",
+        f"sha256={lock['sha256'][:12]} out={out_golden}",
         file=sys.stderr,
     )
     if len(goldens) < args.target:

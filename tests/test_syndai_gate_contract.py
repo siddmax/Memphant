@@ -12,10 +12,34 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 GOLDEN = ROOT / "benchmarks" / "data" / "syndai_docs_golden.jsonl"
 GOLDEN_LOCK = ROOT / "benchmarks" / "data" / "syndai_docs_golden.lock.json"
 MANIFEST = ROOT / "benchmarks" / "manifests" / "syndai_docs_gate.lock.json"
+
+# v2 (R0-T3): a second, disjoint sample of the SAME pinned corpus (mined with
+# --exclude-golden against v1). Tests below are parameterized over both golden
+# files; a v2 case skips if the file is absent, same pattern as the existing
+# Syndai-root skip in test_answer_spans_are_verbatim_in_the_pinned_corpus.
+GOLDEN_V2 = ROOT / "benchmarks" / "data" / "syndai_docs_golden_v2.jsonl"
+GOLDEN_V2_LOCK = ROOT / "benchmarks" / "data" / "syndai_docs_golden_v2.lock.json"
+
+GOLDEN_SETS = [
+    pytest.param(GOLDEN, GOLDEN_LOCK, id="v1"),
+    pytest.param(GOLDEN_V2, GOLDEN_V2_LOCK, id="v2"),
+]
+
+
+def _skip_if_absent(path: Path) -> None:
+    if not path.exists():
+        pytest.skip(f"{path} not present")
+
+
+def _rows(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text().split("\n") if line.strip()]
+
 
 REQUIRED_GOLDEN_KEYS = {
     "question_id",
@@ -55,19 +79,23 @@ def _goldens() -> list[dict]:
     return [json.loads(line) for line in GOLDEN.read_text().split("\n") if line.strip()]
 
 
-def test_golden_lock_sha256_and_counts_match() -> None:
-    lock = json.loads(GOLDEN_LOCK.read_text())
-    raw = GOLDEN.read_bytes()
+@pytest.mark.parametrize("golden_path,lock_path", GOLDEN_SETS)
+def test_golden_lock_sha256_and_counts_match(golden_path: Path, lock_path: Path) -> None:
+    _skip_if_absent(golden_path)
+    lock = json.loads(lock_path.read_text())
+    raw = golden_path.read_bytes()
     import hashlib
 
     assert hashlib.sha256(raw).hexdigest() == lock["sha256"], "golden JSONL drifted from its lock"
-    goldens = _goldens()
+    goldens = _rows(golden_path)
     assert len(goldens) == lock["count"]
     assert sum(1 for g in goldens if g["multi_hop"]) == lock["multi_hop_count"]
 
 
-def test_golden_rows_are_well_formed() -> None:
-    goldens = _goldens()
+@pytest.mark.parametrize("golden_path,lock_path", GOLDEN_SETS)
+def test_golden_rows_are_well_formed(golden_path: Path, lock_path: Path) -> None:
+    _skip_if_absent(golden_path)
+    goldens = _rows(golden_path)
     assert goldens, "golden set is empty"
     ids = set()
     for g in goldens:
@@ -137,19 +165,44 @@ def test_corpus_manifest_is_well_formed() -> None:
         assert entry["bytes"] >= 0
 
 
-def test_answer_spans_are_verbatim_in_the_pinned_corpus() -> None:
+@pytest.mark.parametrize("golden_path,lock_path", GOLDEN_SETS)
+def test_answer_spans_are_verbatim_in_the_pinned_corpus(golden_path: Path, lock_path: Path) -> None:
     """The strongest pin: every recorded span is present at its char offsets in
-    the real corpus file (skipped when the Syndai corpus is not on disk)."""
+    the real corpus file (skipped when the golden file or the Syndai corpus is
+    not on disk). v1 and v2 share the identical pinned corpus (MANIFEST)."""
+    _skip_if_absent(golden_path)
     manifest = json.loads(MANIFEST.read_text())
     root = Path(manifest["syndai_root"])
     if not root.exists():
-        import pytest
-
         pytest.skip(f"Syndai corpus not present at {root}")
-    for g in _goldens():
+    for g in _rows(golden_path):
         for entry in g["provenance"]:
             text = (root / entry["file"]).read_text(encoding="utf-8", errors="replace")
             excerpt = text[entry["char_start"] : entry["char_end"]]
             assert excerpt == entry["span"], (
                 f"{g['question_id']} {entry['role']} span not verbatim at offsets in {entry['file']}"
             )
+
+
+def test_v2_has_no_question_id_or_section_key_overlap_with_v1() -> None:
+    """The R0-T3 mining sanity check, pinned permanently as a contract test:
+    v2 was mined with --exclude-golden against v1, so the two sets must share
+    zero question_ids and zero source_section_key values (skips if v2 absent,
+    same pattern as the other v2-parameterized cases above)."""
+    _skip_if_absent(GOLDEN_V2)
+    v1_rows = _rows(GOLDEN)
+    v2_rows = _rows(GOLDEN_V2)
+
+    v1_ids = {g["question_id"] for g in v1_rows}
+    v2_ids = {g["question_id"] for g in v2_rows}
+    assert not (v1_ids & v2_ids), "v2 question_id collides with v1"
+
+    def section_keys(rows: list[dict]) -> set[str]:
+        keys: set[str] = set()
+        for g in rows:
+            keys.update(g["source_section_key"].split("||"))
+        return keys
+
+    v1_keys = section_keys(v1_rows)
+    v2_keys = section_keys(v2_rows)
+    assert not (v1_keys & v2_keys), "v2 source_section_key overlaps with v1"
