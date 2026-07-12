@@ -412,6 +412,13 @@
       "minimum": 0,
       "type": "integer"
     },
+    "cross_rerank_ms": {
+      "default": 0,
+      "description": "R1.5-T1: per-recall wall-clock (ms) spent inside the W8 cross-encoder\nrerank stage ([`crate::CrossReranker`], distinct from the retired\nheuristic `reranker_id`/`rerank_input_count`/`rerank_overfetch_ratio`\nfields below). `0` when no cross-reranker is installed on the service\n(the default) or the candidate pool was empty — a legitimate \"not\nrun\" value, not a sentinel. `#[serde(default)]` so traces recorded\nbefore this field existed still deserialize.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
     "decay_model_id": {
       "default": "",
       "type": "string"

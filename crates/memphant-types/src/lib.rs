@@ -261,6 +261,15 @@ pub struct RetrievalTrace {
     /// recorded" sentinel — pool depth is never legitimately 0).
     #[serde(default)]
     pub recall_pool_depth: u32,
+    /// R1.5-T1: per-recall wall-clock (ms) spent inside the W8 cross-encoder
+    /// rerank stage ([`crate::CrossReranker`], distinct from the retired
+    /// heuristic `reranker_id`/`rerank_input_count`/`rerank_overfetch_ratio`
+    /// fields below). `0` when no cross-reranker is installed on the service
+    /// (the default) or the candidate pool was empty — a legitimate "not
+    /// run" value, not a sentinel. `#[serde(default)]` so traces recorded
+    /// before this field existed still deserialize.
+    #[serde(default)]
+    pub cross_rerank_ms: u64,
     pub consolidation_lag_ms: u64,
     pub weight_vector_id: String,
     pub mode_requested: RecallMode,

@@ -22,11 +22,13 @@ yaml_serde.workspace = true
 [features]
 fastembed = ["memphant-runtime/fastembed"]
 # Self-implies `fastembed` (not just `memphant-runtime/qwen3`): bench_lme.rs
-# has its OWN `#[cfg(feature = "fastembed")]` gates around `build_fastembed`/
-# `build_cross_reranker`, a separate cargo-feature namespace from
-# memphant-runtime's. Without this, `--features qwen3` alone would leave
-# those gates off and every --embed-model arm (not just qwen3) would report
-# "not compiled in".
+# has its OWN `#[cfg(feature = "fastembed")]` gate (e.g.
+# `embed_model_unknown_selector_lists_qwen3_as_known`), a separate cargo-feature
+# namespace from memphant-runtime's. Without this, `--features qwen3` alone
+# would leave that gate off. `build_embedder_arm`/`memphant_runtime::
+# build_cross_reranker` (R1.5-T1: moved from a bench-local duplicate) route
+# through memphant-runtime's OWN internal cfg instead, so they always resolve
+# correctly regardless of this crate's feature flags.
 qwen3 = ["fastembed", "memphant-runtime/qwen3"]
 
 [dev-dependencies]

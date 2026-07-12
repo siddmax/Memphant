@@ -43,6 +43,17 @@ impl CrossReranker for DecliningReranker {
     }
 }
 
+/// Sleeps a fixed, small-but-measurable amount before scoring — so the
+/// R1.5-T1 `cross_rerank_ms` trace field is provably nonzero without relying
+/// on a real model's (variable, possibly sub-millisecond-rounding) timing.
+struct SlowReranker;
+impl CrossReranker for SlowReranker {
+    fn rerank(&self, _query: &str, docs: &[&str]) -> Vec<f32> {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        vec![0.5; docs.len()]
+    }
+}
+
 fn stub_service(store: InMemoryStore) -> MemoryService<InMemoryStore> {
     MemoryService::new(
         Arc::new(store),
@@ -225,5 +236,60 @@ async fn cross_rerank_is_deterministic() {
     assert!(
         first[0].contains("charlie"),
         "the boosted candidate leads: {first:?}"
+    );
+}
+
+/// R1.5-T1: `RetrievalTrace::cross_rerank_ms` is `0` (and `feature_flags`
+/// carries no `cross_rerank_enabled` entry) when no reranker is installed —
+/// the flag-off byte-identity case — and is a real, nonzero measurement (with
+/// the flag present) when one runs.
+#[tokio::test]
+async fn cross_rerank_ms_is_recorded_on_the_trace_only_when_a_reranker_runs() {
+    let store = InMemoryStore::default();
+    let (tenant, scope, actor) = seed(&store).await;
+
+    let absent_service = stub_service(store.clone());
+    let absent = absent_service
+        .recall(tenant, recall_request(tenant, scope, actor, "widget"))
+        .await
+        .expect("recall");
+    let absent_trace = absent_service
+        .store()
+        .trace_by_id_any_tenant(absent.trace_id)
+        .expect("trace exists");
+    assert_eq!(
+        absent_trace.cross_rerank_ms, 0,
+        "no reranker installed ⇒ cross_rerank_ms stays the legitimate 0 (not run)"
+    );
+    assert!(
+        !absent_trace
+            .feature_flags
+            .iter()
+            .any(|flag| flag == "cross_rerank_enabled"),
+        "no reranker installed ⇒ no cross_rerank_enabled feature flag: {:?}",
+        absent_trace.feature_flags
+    );
+
+    let slow_service = stub_service(store.clone()).with_cross_reranker(Arc::new(SlowReranker));
+    let present = slow_service
+        .recall(tenant, recall_request(tenant, scope, actor, "widget"))
+        .await
+        .expect("recall");
+    let present_trace = slow_service
+        .store()
+        .trace_by_id_any_tenant(present.trace_id)
+        .expect("trace exists");
+    assert!(
+        present_trace.cross_rerank_ms >= 5,
+        "the reranker's 5ms sleep must be reflected in the trace: {}",
+        present_trace.cross_rerank_ms
+    );
+    assert!(
+        present_trace
+            .feature_flags
+            .iter()
+            .any(|flag| flag == "cross_rerank_enabled"),
+        "a reranker installed ⇒ cross_rerank_enabled feature flag present: {:?}",
+        present_trace.feature_flags
     );
 }

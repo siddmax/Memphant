@@ -2114,7 +2114,11 @@ where
 /// by prior fused rank via a stable sort). `None` leaves the fused order
 /// untouched — byte-identical to today. This is independent of, and never
 /// entangled with, the retired deterministic heuristic [`rerank_candidates`]
-/// stage (gated by `request.rerank_enabled`, off by default).
+/// stage (gated by `request.rerank_enabled`, off by default). R1.5-T1: the
+/// wall-clock spent in `cross_rerank_candidates` (0 when `None` or the pool is
+/// empty) is recorded on the trace as `RetrievalTrace::cross_rerank_ms` and
+/// `eprintln!`-logged, and `"cross_rerank_enabled"` is added to
+/// `feature_flags` when a reranker is installed.
 #[allow(clippy::too_many_arguments)]
 pub async fn recall_with_pool<S>(
     store: &S,
@@ -2165,6 +2169,7 @@ where
             filter_selectivity: None,
             iterative_scan_depth: None,
             recall_pool_depth: recall_pool_depth as u32,
+            cross_rerank_ms: 0,
             consolidation_lag_ms: 0,
             weight_vector_id: "none".to_string(),
             mode_requested: request.mode,
@@ -2539,13 +2544,27 @@ where
     // W8 cross-encoder rerank: reorder the top `recall_pool_depth` fused
     // candidates by a real (query, body) cross-encoder before packing. A no-op
     // when no reranker is wired (the default) or the pool is empty — the fused
-    // order then flows unchanged into packing.
+    // order then flows unchanged into packing. R1.5-T1: the wall-clock is
+    // measured HERE (not by a decorator around `reranker`) so the same number
+    // lands in the trace for every caller — server, worker/mcp (via
+    // `MemoryService`) and the eval bench alike — rather than each call site
+    // having to wrap its own reranker to get visibility. `eprintln!` is this
+    // crate's existing convention for opt-in-path diagnostics (see the
+    // mutex-poisoned warning in `FastEmbedCrossReranker::rerank`); there is no
+    // tracing/log dependency in this crate to hook a real "debug" level into.
+    let mut cross_rerank_ms: u64 = 0;
     if let Some(reranker) = cross_reranker {
+        let cross_rerank_started = std::time::Instant::now();
         cross_rerank_candidates(
             fused.as_mut_slice(),
             &request.query,
             reranker,
             recall_pool_depth,
+        );
+        cross_rerank_ms = cross_rerank_started.elapsed().as_millis() as u64;
+        eprintln!(
+            "memphant: cross_rerank_ms={cross_rerank_ms} pool={}",
+            recall_pool_depth.min(fused.len())
         );
     }
 
@@ -2600,6 +2619,15 @@ where
     {
         feature_flags.push("inferred_belief_composition_enabled".to_string());
     }
+    if cross_reranker.is_some() {
+        // R1.5-T1: construction-time flag (the `MemoryService`/runtime
+        // `MEMPHANT_CROSS_RERANK` seam), not a `RecallRequest` field — mirrors
+        // how `contextual_chunks_enabled` is unconditional-per-service rather
+        // than request-derived. Distinct from the retired heuristic
+        // `rerank_enabled` flag above (already pushed by
+        // `recall_feature_flags` when `request.rerank_enabled`).
+        feature_flags.push("cross_rerank_enabled".to_string());
+    }
     let trace = RetrievalTrace {
         id: trace_id,
         tenant_id: request.tenant_id,
@@ -2617,6 +2645,7 @@ where
         filter_selectivity,
         iterative_scan_depth: Some(iterative_scan_depth as u32),
         recall_pool_depth: recall_pool_depth as u32,
+        cross_rerank_ms,
         consolidation_lag_ms: 0,
         weight_vector_id: rerank.weight_vector_id,
         mode_requested: request.mode,

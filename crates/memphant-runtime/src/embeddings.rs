@@ -758,4 +758,53 @@ mod tests {
             "the relevant doc scores above the irrelevant one: {scores:?}"
         );
     }
+
+    /// R1.5-T1 live smoke: a SINGLE `rerank` call over
+    /// `DEFAULT_RECALL_POOL_DEPTH` (64) docs — the exact shape
+    /// `cross_rerank_candidates` issues in production (one batched call per
+    /// recall, not one call per doc). Same `MEMPHANT_RERANK_SMOKE=1` gate and
+    /// `#[ignore]` as `rerank_smoke_real_model`; run once, record the
+    /// printed ms against the R1.5 plan's 1.5s p95 viability ceiling (a
+    /// single-run number here is reported, not gated — T2 owns the real p95).
+    #[test]
+    #[ignore = "downloads bge-reranker-base (~1.1 GB); run with MEMPHANT_RERANK_SMOKE=1"]
+    fn rerank_smoke_64_docs_pool_depth_latency() {
+        if std::env::var("MEMPHANT_RERANK_SMOKE").as_deref() != Ok("1") {
+            eprintln!("rerank smoke skipped (set MEMPHANT_RERANK_SMOKE=1 to run)");
+            return;
+        }
+        let reranker = FastEmbedCrossReranker::new().expect("load bge-reranker-base");
+        let query = "What is the capital of France?";
+        let pool_depth = memphant_core::DEFAULT_RECALL_POOL_DEPTH;
+        let docs: Vec<String> = (0..pool_depth)
+            .map(|index| {
+                if index == 0 {
+                    "Paris is the capital and most populous city of France.".to_string()
+                } else {
+                    format!(
+                        "Distractor document number {index} discusses an unrelated topic \
+                         at some length to approximate a real candidate body."
+                    )
+                }
+            })
+            .collect();
+        let doc_refs: Vec<&str> = docs.iter().map(String::as_str).collect();
+        let started = std::time::Instant::now();
+        let scores = reranker.rerank(query, &doc_refs);
+        let elapsed = started.elapsed();
+        eprintln!(
+            "rerank smoke (pool_depth={pool_depth}): {} docs in {} ms",
+            doc_refs.len(),
+            elapsed.as_millis()
+        );
+        assert_eq!(
+            scores.len(),
+            doc_refs.len(),
+            "one score per doc in input order"
+        );
+        assert!(
+            scores[0] > scores[1],
+            "the relevant doc scores above a distractor: {scores:?}"
+        );
+    }
 }

@@ -33,7 +33,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use memphant_core::service::MemoryService;
-use memphant_core::{CrossReranker, EmbeddingProvider, NoopEmbedding, SystemClock};
+use memphant_core::{EmbeddingProvider, NoopEmbedding, SystemClock};
 use memphant_store_postgres::PgStore;
 use memphant_types::{
     ActorId, RecallHttpRequest, RecallMode, RetainEpisodeHttpRequest, ScopeId, TenantId, TrustLevel,
@@ -647,50 +647,6 @@ fn build_embedder_arm(embed_model: &str) -> Result<Arc<dyn EmbeddingProvider>, S
     memphant_runtime::embedder_from_id(embed_model)
 }
 
-/// Builds the real cross-encoder reranker (bge-reranker-base), wrapped so each
-/// call reports its latency to stderr — the W8 `--cross-rerank` arm. A clear
-/// error when the fastembed feature is absent.
-#[cfg(feature = "fastembed")]
-fn build_cross_reranker() -> Result<Arc<dyn CrossReranker>, String> {
-    memphant_runtime::embeddings::FastEmbedCrossReranker::new()
-        .map(|reranker| {
-            Arc::new(TimedCrossReranker::new(Arc::new(reranker))) as Arc<dyn CrossReranker>
-        })
-        .map_err(|error| format!("cross-reranker initialization failed: {error}"))
-}
-
-#[cfg(not(feature = "fastembed"))]
-fn build_cross_reranker() -> Result<Arc<dyn CrossReranker>, String> {
-    Err("--cross-rerank requires a binary built with --features fastembed (the cross-encoder is a fastembed model)".to_string())
-}
-
-/// Wraps a cross-reranker so every `rerank` call prints its wall time and doc
-/// count to stderr — the campaign-cost visibility the W8 arm needs. Timing lives
-/// in the eval layer (a decorator), keeping the core stage and runtime provider
-/// free of measurement I/O.
-struct TimedCrossReranker {
-    inner: Arc<dyn CrossReranker>,
-}
-
-impl TimedCrossReranker {
-    fn new(inner: Arc<dyn CrossReranker>) -> Self {
-        Self { inner }
-    }
-}
-
-impl CrossReranker for TimedCrossReranker {
-    fn rerank(&self, query: &str, docs: &[&str]) -> Vec<f32> {
-        let started = std::time::Instant::now();
-        let scores = self.inner.rerank(query, docs);
-        eprintln!(
-            "bench-lme rerank ms={} docs={}",
-            started.elapsed().as_millis(),
-            docs.len()
-        );
-        scores
-    }
-}
-
 fn sha256_file(path: &Path) -> Result<String, String> {
     let bytes = std::fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
     let mut hasher = Sha256::new();
@@ -779,9 +735,17 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
     .with_temporal_grounding_enabled(options.temporal_grounding);
 
     // W8 cross-encoder rerank: recall-time only. When on, install the real
-    // fastembed reranker (timed) so it reorders the widened pool before packing.
+    // fastembed reranker so it reorders the widened pool before packing.
+    // R1.5-T1: routed through the SAME `memphant_runtime::build_cross_reranker`
+    // factory `build_service`'s `MEMPHANT_CROSS_RERANK` env wiring uses, so
+    // this bench arm and a served recall install byte-identical reranker
+    // construction (unified — this bench previously had its own private
+    // `build_cross_reranker`/`TimedCrossReranker`, and the server had NO
+    // wiring at all; per-call latency is now measured once, in
+    // `recall_with_pool` itself, landing in `RetrievalTrace::cross_rerank_ms`
+    // for both instead of only printing to bench's stderr).
     let recall_service = if options.cross_rerank {
-        recall_service.with_cross_reranker(build_cross_reranker()?)
+        recall_service.with_cross_reranker(memphant_runtime::build_cross_reranker()?)
     } else {
         recall_service
     };

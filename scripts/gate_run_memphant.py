@@ -141,6 +141,7 @@ class Server:
         embed_model: str | None = None,
         log_path: Path | None = None,
         resource_chunks: bool = False,
+        cross_rerank: bool = False,
     ) -> None:
         self.server_bin = server_bin
         self.database_url = database_url
@@ -148,6 +149,7 @@ class Server:
         self.embed_model = embed_model
         self.log_path = log_path
         self.resource_chunks = resource_chunks
+        self.cross_rerank = cross_rerank
         self.proc: subprocess.Popen | None = None
         self._log_file = None
 
@@ -189,6 +191,8 @@ class Server:
             env["MEMPHANT_EMBEDDINGS"] = self.embed_model
         if self.resource_chunks:
             env["MEMPHANT_RESOURCE_CHUNKS"] = "1"
+        if self.cross_rerank:
+            env["MEMPHANT_CROSS_RERANK"] = "1"
         if self.log_path is not None:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             self._log_file = open(self.log_path, "w")
@@ -296,6 +300,7 @@ def drain_worker(
     embed_model: str | None = None,
     max_ticks: int = 4000,
     resource_chunks: bool = False,
+    cross_rerank: bool = False,
 ) -> int:
     env = dict(os.environ)
     env["DATABASE_URL"] = database_url
@@ -305,6 +310,8 @@ def drain_worker(
         env["MEMPHANT_EMBEDDINGS"] = embed_model
     if resource_chunks:
         env["MEMPHANT_RESOURCE_CHUNKS"] = "1"
+    if cross_rerank:
+        env["MEMPHANT_CROSS_RERANK"] = "1"
     total = 0
     for tick in range(max_ticks):
         out = sh([worker_bin], env=env)
@@ -343,6 +350,7 @@ def build_provenance_report(
     breadcrumb: bool,
     golden_path: Path,
     resource_chunks: bool = False,
+    cross_rerank: bool = False,
     database_url: str,
     k: int,
     mode: str,
@@ -354,8 +362,10 @@ def build_provenance_report(
     """Assembles the self-describing provenance-report header + per-question
     rows. ``breadcrumb`` records whether ``--breadcrumb`` was set for this
     run (R1-T1); ``resource_chunks`` records whether ``--resource-chunks``
-    was set (R1-T3) so artifacts are self-describing without re-deriving
-    either from the label string."""
+    was set (R1-T3); ``cross_rerank`` records whether ``--cross-rerank`` was
+    set (R1.5-T1, the W8 cross-encoder rerank of the deep pool — distinct
+    from the retired heuristic rerank) so artifacts are self-describing
+    without re-deriving any of them from the label string."""
     n = len(provenance_rows)
     r5 = sum(r["hit_at_5"] for r in provenance_rows) / n if n else 0.0
     r10 = sum(r["hit_at_10"] for r in provenance_rows) / n if n else 0.0
@@ -366,6 +376,7 @@ def build_provenance_report(
         "label": label,
         "breadcrumb": breadcrumb,
         "resource_chunks": resource_chunks,
+        "cross_rerank": cross_rerank,
         "golden_path": str(golden_path),
         "database_url_db": database_url.rsplit("/", 1)[-1],
         "k": k,
@@ -447,6 +458,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "for kind=document sections (the flag-gated, default-off twin of "
             "the promoted episode chunks). Recorded as 'resource_chunks' in the "
             "provenance header."
+        ),
+    )
+    parser.add_argument(
+        "--cross-rerank",
+        action="store_true",
+        help=(
+            "enable the R1.5-T1 W8 cross-encoder rerank of the deep recall "
+            "pool by setting MEMPHANT_CROSS_RERANK=1 for BOTH the server and "
+            "worker subprocess env, so the top recall_pool_depth fused "
+            "candidates are reordered by a real (query, body) cross-encoder "
+            "(bge-reranker-base) before packing — requires a server/worker "
+            "built with --features fastembed. Distinct from the retired, "
+            "measured-harmful heuristic rerank (never exposed by this "
+            "script). Recorded as 'cross_rerank' in the provenance header."
         ),
     )
     parser.add_argument("--port", type=int, default=39412)
@@ -532,6 +557,7 @@ def main() -> int:
         args.server_bin, args.database_url, args.port, args.embed_model,
         log_path=server_log_path,
         resource_chunks=args.resource_chunks,
+        cross_rerank=args.cross_rerank,
     )
     # Symmetric cleanup: start() and the ingest/recall body are both inside
     # this try so the server child is always killed on any exception path,
@@ -549,6 +575,7 @@ def main() -> int:
         compiled = drain_worker(
             args.worker_bin, args.database_url, args.embed_model,
             resource_chunks=args.resource_chunks,
+            cross_rerank=args.cross_rerank,
         )
         print(f"{label_prefix}worker drained: compiled={compiled} jobs", file=sys.stderr)
 
@@ -585,6 +612,7 @@ def main() -> int:
                 label=args.label,
                 breadcrumb=args.breadcrumb,
                 resource_chunks=args.resource_chunks,
+                cross_rerank=args.cross_rerank,
                 golden_path=golden_path,
                 database_url=args.database_url,
                 k=args.k,

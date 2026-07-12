@@ -9,10 +9,10 @@ use std::sync::Arc;
 
 use memphant_core::service::MemoryService;
 use memphant_core::{
-    ApiKeyRow, CompiledWrite, CorrectOutcome, CorrectionWrite, DEFAULT_RECALL_POOL_DEPTH,
-    EmbedError, EmbeddingProfileRow, EmbeddingProvider, EmbeddingRow, ForgetOutcome, ForgetWrite,
-    InMemoryStore, InMemoryTxn, JobFilter, MemoryStore, NoopEmbedding, ReflectJobRow,
-    ReviewEventRow, ScopePage, StoreError, SystemClock,
+    ApiKeyRow, CompiledWrite, CorrectOutcome, CorrectionWrite, CrossReranker,
+    DEFAULT_RECALL_POOL_DEPTH, EmbedError, EmbeddingProfileRow, EmbeddingProvider, EmbeddingRow,
+    ForgetOutcome, ForgetWrite, InMemoryStore, InMemoryTxn, JobFilter, MemoryStore, NoopEmbedding,
+    ReflectJobRow, ReviewEventRow, ScopePage, StoreError, SystemClock,
 };
 use memphant_store_postgres::{PgStore, PgTxn};
 use memphant_types::{
@@ -165,6 +165,31 @@ fn qwen3_arm() -> Result<Arc<dyn EmbeddingProvider>, String> {
     )
 }
 
+/// Builds the real W8 cross-encoder reranker (`BAAI/bge-reranker-base`, ~1.1
+/// GB ONNX download on first use). R1.5-T1's shared runtime factory: BOTH
+/// `build_service`'s `MEMPHANT_CROSS_RERANK` env wiring and the eval bench's
+/// `--cross-rerank` arm (`memphant-eval::bench_lme`) call this SAME function,
+/// so a served recall and a bench recall install byte-identical reranker
+/// construction — no separate bench-side factory to drift from the server's.
+/// A clear build-instruction error when the `fastembed` feature is absent
+/// (the cross-encoder is a fastembed model), mirroring `fastembed_arm`/
+/// `qwen3_arm`.
+#[cfg(feature = "fastembed")]
+pub fn build_cross_reranker() -> Result<Arc<dyn CrossReranker>, String> {
+    embeddings::FastEmbedCrossReranker::new()
+        .map(|reranker| Arc::new(reranker) as Arc<dyn CrossReranker>)
+        .map_err(|error| format!("cross-reranker initialization failed: {error}"))
+}
+
+#[cfg(not(feature = "fastembed"))]
+pub fn build_cross_reranker() -> Result<Arc<dyn CrossReranker>, String> {
+    Err(
+        "cross-reranker requires a binary built with --features fastembed \
+         (the cross-encoder is a fastembed model)"
+            .to_string(),
+    )
+}
+
 /// The embedding provider seam, selected by `MEMPHANT_EMBEDDINGS`:
 /// - unset/empty (DEFAULT) → local bge-small-en-v1.5 when built with the
 ///   `fastembed` feature (the shipped server/worker default); a binary built
@@ -222,11 +247,24 @@ fn fastembed_or(
 /// `MEMPHANT_EMBEDDINGS` reaches both via [`build_embedder`]. R1.5-T0's
 /// `MEMPHANT_RECALL_POOL_DEPTH` (default `DEFAULT_RECALL_POOL_DEPTH`, 64) is
 /// threaded the same way, so the recall-pool-depth knob reaches both binaries
-/// from ONE env var.
+/// from ONE env var. R1.5-T1's `MEMPHANT_CROSS_RERANK` (default OFF) is the
+/// same pattern again: only when truthy does this construct the W8
+/// cross-encoder reranker (via [`build_cross_reranker`], a real ~1.1 GB model
+/// load) and install it with `with_cross_reranker` — unset/off costs nothing,
+/// so server/worker/mcp (all three share this one function) never pay the
+/// load unless the flag is on.
 pub fn build_service(store: AnyStore) -> MemoryService<AnyStore> {
-    MemoryService::new(Arc::new(store), Arc::new(SystemClock), build_embedder())
+    let service = MemoryService::new(Arc::new(store), Arc::new(SystemClock), build_embedder())
         .with_resource_chunks_write_enabled(resource_chunks_write_from_env())
-        .with_recall_pool_depth(recall_pool_depth_from_env())
+        .with_recall_pool_depth(recall_pool_depth_from_env());
+    if cross_rerank_enabled_from_env() {
+        let reranker = build_cross_reranker().unwrap_or_else(|error| {
+            panic!("MEMPHANT_CROSS_RERANK=1: {error}");
+        });
+        service.with_cross_reranker(reranker)
+    } else {
+        service
+    }
 }
 
 /// `MEMPHANT_RESOURCE_CHUNKS` → bool. Truthy (`1`/`true`/`on`, case-insensitive)
@@ -235,6 +273,26 @@ pub fn build_service(store: AnyStore) -> MemoryService<AnyStore> {
 fn resource_chunks_write_from_env() -> bool {
     matches!(
         std::env::var("MEMPHANT_RESOURCE_CHUNKS")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1") | Some("true") | Some("on")
+    )
+}
+
+/// `MEMPHANT_CROSS_RERANK` → bool. Truthy (`1`/`true`/`on`, case-insensitive)
+/// enables the R1.5-T1 W8 cross-encoder rerank seam (the flag [`build_service`]
+/// gates [`build_cross_reranker`] construction behind); unset/empty/anything
+/// else keeps it OFF (the shipped default — recall stays byte-identical to
+/// today, no reranker constructed, no model-load cost). Mirrors
+/// `resource_chunks_write_from_env`/`recall_pool_depth_from_env`. Named
+/// distinctly from the retired heuristic rerank's request-level
+/// `rerank_enabled` — a different, unrelated mechanism.
+fn cross_rerank_enabled_from_env() -> bool {
+    matches!(
+        std::env::var("MEMPHANT_CROSS_RERANK")
             .ok()
             .as_deref()
             .map(str::trim)
@@ -778,5 +836,76 @@ mod tests {
                 None => std::env::remove_var(VAR),
             }
         }
+    }
+
+    /// R1.5-T1: `MEMPHANT_CROSS_RERANK` env plumbing — mirrors
+    /// `recall_pool_depth_env_override_parses_and_falls_back_to_default`'s
+    /// structure. No other test in this binary reads this var, so mutating it
+    /// here is safe against parallel test execution; restored before
+    /// returning.
+    #[test]
+    fn cross_rerank_enabled_from_env_parses_truthy_values_and_defaults_false() {
+        use super::cross_rerank_enabled_from_env;
+
+        const VAR: &str = "MEMPHANT_CROSS_RERANK";
+        let saved = std::env::var(VAR).ok();
+
+        // SAFETY: test-only mutation of a var no other test in this binary
+        // reads; restored below before returning.
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+        assert!(
+            !cross_rerank_enabled_from_env(),
+            "unset defaults to OFF (byte-identical-to-today shipped default)"
+        );
+
+        for off_value in ["", "0", "false", "off", "no", "garbage"] {
+            unsafe {
+                std::env::set_var(VAR, off_value);
+            }
+            assert!(
+                !cross_rerank_enabled_from_env(),
+                "{off_value:?} must not enable cross-rerank"
+            );
+        }
+
+        for truthy in ["1", "true", "on", "TRUE", "On", "  1  "] {
+            unsafe {
+                std::env::set_var(VAR, truthy);
+            }
+            assert!(
+                cross_rerank_enabled_from_env(),
+                "{truthy:?} must enable cross-rerank (truthy, case/whitespace-insensitive)"
+            );
+        }
+
+        unsafe {
+            match &saved {
+                Some(value) => std::env::set_var(VAR, value),
+                None => std::env::remove_var(VAR),
+            }
+        }
+    }
+
+    /// R1.5-T1 feature-off error path: without the `fastembed` feature,
+    /// `build_cross_reranker` must fail with a clear, build-instruction error
+    /// rather than a confusing panic — mirrors
+    /// `local_arm_ids_recognized_without_the_feature` for the embedder arms.
+    /// Cfg'd out under `--all-features` (where the feature is on and the real
+    /// constructor WOULD attempt a model download).
+    #[cfg(not(feature = "fastembed"))]
+    #[test]
+    fn build_cross_reranker_feature_off_error_path() {
+        use super::build_cross_reranker;
+
+        let error = match build_cross_reranker() {
+            Err(error) => error,
+            Ok(_) => panic!("expected an error without the fastembed feature"),
+        };
+        assert!(
+            error.contains("--features fastembed"),
+            "recognized-but-uncompiled reranker must name the missing feature: {error}"
+        );
     }
 }
