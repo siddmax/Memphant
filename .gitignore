@@ -72,3 +72,5 @@ docs/build-log/artifacts/r0-embedder/reader-cache/
 # R0-T6 code-lane miner cache: caches raw LLM replies generated FROM the
 # private corpus text (regenerable from the pinned corpus + seed).
 docs/build-log/artifacts/code-lane/miner-cache/
+docs/build-log/artifacts/r1-docs/**/evidence.jsonl
+docs/build-log/artifacts/r1-docs/**/server-*.log

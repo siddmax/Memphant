@@ -97,10 +97,65 @@ RESULTS_PLACEHOLDER if scoring didn't finish), docs/superpowers/specs/memphant/S
   silently duplicated. Fix: new write-seam store method `fetch_scope_open_units`
   (all `transaction_to is null` units in a scope, both stores identical);
   `reflect_recorded` uses it instead of the ranked recall pool. Recall keeps its
-  bounded pool. Guard: `pg_store_contract::semantic_update_supersedes_a_unit_aged_past_the_recall_window`
-  (verified RED → GREEN). Open structural gap this exposed: InMemoryStore and
-  PgStore are separate mirrored test files, not one contract suite run against
-  both — that's what let the divergence hide. Worth parametrizing later.
+  bounded pool. Guard: the shared contract scenario
+  `semantic_update_supersedes_unit_aged_past_recall_window` (verified RED → GREEN).
+  Structural gap CLOSED 2026-07-12: the InMemoryStore and PgStore contract
+  scenarios are now ONE generic-over-`MemoryStore` suite in the
+  `memphant-store-testkit` dev crate, run against both backends (in-memory by
+  default in `memphant-core`, PgStore `#[ignore]`+DB-gated in
+  `pg_store_contract`) via a tiny `StoreHarness`. Extracting it immediately
+  surfaced a second, benign divergence the mirrored files had hidden: a deduped
+  retain leaves 2 pending reflect jobs on InMemoryStore vs 1 on PgStore (PgStore
+  dedups the reflect job). Both guarantee `>= 1` (recompilation happens either
+  way), so the shared assertion is the invariant, not the incidental count — no
+  product change. Any future trait-method divergence now fails on at least one
+  store.
+
+- RESOLVED 2026-07-12 (shared-suite audit, same divergence class): InMemoryStore's
+  `apply_forget` under-mirrored PgStore — it marked units `Deleted` WITHOUT setting
+  `transaction_to`, so a forgotten unit leaked back through `fetch_scope_open_units`
+  (the reflect write seam) on the in-memory store only; and it never deleted the
+  unit's embedding, so a forgotten unit stayed vector-visible in-memory. Both are
+  the exact InMemory/Pg divergence class. Fix: `ForgetWrite` gained a `now` field
+  (threaded from the clock, like `CorrectionWrite.now`); InMemory `apply_forget` +
+  `delete_composed_dependents` now close `transaction_to` and purge embeddings;
+  PgStore binds `forget.now` for `transaction_to` instead of SQL `now()` (matches
+  the correction path, deterministic under a test clock). Guard: shared scenario
+  `forget_by_unit_closes_and_purges` (RED on pre-fix InMemory, GREEN on both).
+
+- RESOLVED 2026-07-12 (recall-completeness divergence, MEDIUM): `RecallMode::
+  Exhaustive` calls `fetch_episodes_for_scope(.., usize::MAX)` (lib.rs ~2233)
+  intending the whole scope; PgStore silently capped at `limit.min(1_000)` while
+  InMemoryStore honored `usize::MAX`. The consumer `l4_exhaustive_candidates`
+  re-ranks the FULL episode set and looks up each unit's source episode in that
+  slice — so on Postgres a relevant-but-not-recent unit (episode past the 1000
+  recency cut) silently got no L4 score, and "Exhaustive" wasn't exhaustive. A
+  prior note deemed the cap "acceptable"; that predated tracing the consumer. Fix
+  (chosen: honor the limit): PgStore `fetch_episodes_for_scope` now binds
+  `i64::try_from(limit).unwrap_or(i64::MAX)` — the caller's limit is authoritative,
+  `usize::MAX` → effectively `LIMIT ALL` (avoids the `-1` wrap). Guard: shared
+  scenario `fetch_episodes_honors_large_limit` (seeds 1001 episodes, asserts the
+  whole scope returns; RED on pre-fix Pg's 1000 cap, GREEN on both).
+
+- RESOLVED 2026-07-12 (DRY): the reflect dead-letter threshold `5` was a bare SQL
+  literal in TWO PgStore sites (`claim_reflect_jobs` sweep `attempts >= 5` +
+  eligibility `attempts < 5`) while core single-sources it as
+  `JOB_DEAD_LETTER_ATTEMPTS`. Both now bind the const — one source of truth, no
+  drift. Behavior-identical; existing `exhausted_jobs_dead_letter` /
+  `dead_letter_sweep_stays_within_the_claim_filter` tests guard it.
+
+- AUDIT CONCLUSION 2026-07-12 (store-divergence sweep, 3 rounds): the
+  `MemoryStore` trait pair was the ONLY "two implementations that must agree"
+  surface — a method-by-method sweep of all 33 trait methods plus a check for
+  core-logic reimplementation found NO other divergence pairs (memphant-eval /
+  -runtime / -mcp are thin adapters over the single core; they do not reimplement
+  reflect / write-compiler / recall logic). The single-core / thin-adapter
+  architecture holds. The shared contract suite (`memphant-store-testkit`, 12
+  in-mem / 25 pg scenarios) is now the durable guard for this class. Remaining
+  per-store differences are by-design (recall ranked-pool cap; `claim_reflect_jobs`
+  queue fairness/visibility-timeout), unreachable (vector 1000-cap — callers pass
+  32), or production-masked/misuse-only (`scope_memory_page` clamp,
+  `complete_reflect_job` tenant laxity, edge dedup) — not worth converging.
 
 - ~~bench-lme shares the runtime Postgres and leaves reflect-job debris that
   starves fresh jobs on the worker's global oldest-first tick (bit the e2e
@@ -267,3 +322,20 @@ RESULTS_PLACEHOLDER if scoring didn't finish), docs/superpowers/specs/memphant/S
 > follow-up open); R@5==R@10 pack-budget censoring; run scripts take GATE_PORT.
 > R0's 5 SDD incidents/fixes and open minors are ledgered in
 > `.superpowers/sdd/progress.md`.
+
+> Update 2026-07-12 (FINAL v4 — R1 DONE, supersedes v3's "R1 next"): **the Syndai docs
+> gate FLIPPED** (`docs/build-log/2026-07-12-r1-docs-gate.md`): modernbert @ k=50/b8192
+> beats Syndai .367/.400 vs .217/.267, pooled +0.142 [+0.058,+0.225], both sets excl0 —
+> with the honest asterisk that this operating point feeds the reader ~14× Syndai's
+> evidence volume; at k=10 we still lose. Falsified: breadcrumb/heading-path lever.
+> Built + flag-gated (not promoted): resource contextual chunks (43b8702,
+> `MEMPHANT_RESOURCE_CHUNKS`/`--resource-chunks`; attr +0.042 ns at depth). Landed
+> hygiene: recall body-tiebreak determinism; with_scratch_db.sh isolation everywhere.
+> **Next per §9 order: R2 chat round** (n=300 seed 20260712 → full-500 confirm:
+> Chain-of-Note v4, hot-plane profile block, temporal re-measure, HyDE) — BUT the R1
+> asterisk names a docs-lane fast-follow worth slotting first if owner agrees:
+> **rank compression** (W8 cross-encoder seam server-side, or fusion re-ordering) to
+> get k50 quality into k10 budgets — flips the gate at comparable volume, cuts reader
+> cost ~5×, and is the same lever the R2 chat lane's pack-displacement failures point
+> at. R6 replacement stays gated on that or explicit cost acceptance. Docs-lane recall
+> recommendation for Syndai integration TODAY: k=50, budget_tokens=8192, modernbert.
