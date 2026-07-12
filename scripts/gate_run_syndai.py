@@ -77,7 +77,6 @@ from tests.fixtures.factories import ProjectFactory, UserFactory  # noqa: E402
 
 DEFAULT_SYNDAI_ROOT = Path("/Users/sidsharma/Syndai")
 GOLDEN_PATH = gc.MEMPHANT_ROOT / "benchmarks" / "data" / "syndai_docs_golden.jsonl"
-GOLDEN_LOCK_PATH = gc.MEMPHANT_ROOT / "benchmarks" / "data" / "syndai_docs_golden.lock.json"
 
 
 async def _ingest_one(
@@ -216,9 +215,13 @@ async def ingest_corpus(
 async def run(args) -> int:
     import uuid as _uuid
 
-    goldens = gc.load_goldens(Path(args.golden))
-    lock = json.loads(GOLDEN_LOCK_PATH.read_text())
-    actual_sha = gc.sha256_hex(Path(args.golden).read_bytes())
+    golden_path = Path(args.golden)
+    goldens = gc.load_goldens(golden_path)
+    # Lock path is derived FROM --golden (gc.golden_lock_path), not a
+    # hardcoded v1-only constant, so a v2 (or future vN) --golden run
+    # verifies against ITS OWN lock file instead of silently checking v1's.
+    lock = json.loads(gc.golden_lock_path(golden_path).read_text())
+    actual_sha = gc.sha256_hex(golden_path.read_bytes())
     if actual_sha != lock["sha256"]:
         raise RuntimeError(
             f"golden sha256 mismatch: file={actual_sha[:12]} lock={lock['sha256'][:12]}"

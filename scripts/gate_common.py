@@ -64,6 +64,53 @@ def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def golden_lock_path(golden_path: Path) -> Path:
+    """The lock JSON for a golden JSONL, by the miner's naming convention:
+    ``<stem>.jsonl`` -> ``<stem>.lock.json`` (holds for every golden set —
+    v1 ``syndai_docs_golden.jsonl``, v2 ``syndai_docs_golden_v2.jsonl``, and
+    any future vN). SINGLE SOURCE OF TRUTH for both engine runners
+    (``gate_run_memphant.py``, ``gate_run_syndai.py``) so the lock path is
+    derived identically instead of drifting into a per-script hardcoded
+    constant — which is exactly how ``gate_run_syndai.py``'s old
+    ``GOLDEN_LOCK_PATH`` module constant went stale: it stayed pinned to v1's
+    lock file even when ``--golden`` was pointed at v2, so a v2 run would
+    "verify" against the wrong lock and silently accept a drifted golden
+    set."""
+    return golden_path.with_name(golden_path.stem + ".lock.json")
+
+
+def breadcrumb_prefix(heading_path: list[str]) -> str:
+    """Syndai's deterministic context-prefix convention, byte-identical to
+    ``processing_chunks.py:84``'s ``_deterministic_context_prefix``
+    (Syndai backend, not vendored here):
+
+        if not chunk.heading_hierarchy:
+            return None
+        return "Section path: " + " > ".join(chunk.heading_hierarchy)
+
+    ``_build_embedding_texts`` then joins a non-None prefix to the chunk
+    content with a blank line (``f"{prefix}\\n\\n{chunk.content}"``); this
+    helper returns that already-joined prefix (including the trailing blank
+    line) so callers can simply prepend it to a body verbatim, or ``""`` when
+    ``heading_path`` is empty — mirroring Syndai's plain truthiness check on
+    the list, NOT a check against any particular sentinel string.
+
+    NOTE (R1-T1 empty-heading-path finding): ``gate_common``'s own
+    ``parse_sections`` never actually produces an empty ``heading_path``.
+    Headerless content before a file's first heading (or a headingless file
+    entirely) gets the placeholder ``["(preamble)"]`` instead, so no corpus
+    text is ever dropped from the haystack. That makes this function's
+    ``not heading_path`` branch unreachable from a real ``Section`` in this
+    harness today — every ``Section``, including preamble ones, gets a
+    "Section path: (preamble)" breadcrumb under ``--breadcrumb``. The branch
+    is still implemented (rather than assuming non-empty) for byte-identical
+    parity with Syndai's own check and for any future caller that CAN pass
+    an empty list."""
+    if not heading_path:
+        return ""
+    return "Section path: " + " > ".join(heading_path) + "\n\n"
+
+
 def git_commit(root: Path) -> str:
     result = subprocess.run(
         ["git", "-C", str(root), "rev-parse", "HEAD"],

@@ -75,13 +75,6 @@ SCOPE_ID = "7c000000-0000-4000-8000-0000000000a1"
 ACTOR_ID = "7c000000-0000-4000-8000-0000000000a2"
 
 
-def golden_lock_path(golden_path: Path) -> Path:
-    """The lock JSON for a golden JSONL, by the miner's naming convention:
-    ``<stem>.jsonl`` -> ``<stem>.lock.json`` (holds for both
-    ``syndai_docs_golden.jsonl`` and ``syndai_docs_golden_v2.jsonl``)."""
-    return golden_path.with_name(golden_path.stem + ".lock.json")
-
-
 def sh(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
 
@@ -264,8 +257,16 @@ class ApiClient:
         raise AssertionError("unreachable")
 
 
-def ingest_section(client: ApiClient, section: gc.Section) -> str:
+def ingest_section(client: ApiClient, section: gc.Section, breadcrumb: bool = False) -> str:
+    """POSTs one section as a resource. ``breadcrumb=True`` prefixes the body
+    with Syndai's "Section path: a > b" convention (``gate_common.
+    breadcrumb_prefix`` — byte-identical to ``processing_chunks.py:84``)
+    before hashing/posting it; the rest of the payload (uri, mime_type, kind,
+    revision) is unaffected — only ``body`` (and the ``content_hash`` derived
+    from it) changes."""
     body = section.body
+    if breadcrumb:
+        body = gc.breadcrumb_prefix(section.heading_path) + body
     payload = {
         "tenant_id": client.tenant_id,
         "scope_id": SCOPE_ID,
@@ -323,7 +324,48 @@ def recall(client: ApiClient, question: str, k: int, budget_tokens: int, mode: s
     return bodies, bool(response.get("degraded", False))
 
 
-def main() -> int:
+def build_provenance_report(
+    *,
+    embed_model: str | None,
+    label: str | None,
+    breadcrumb: bool,
+    golden_path: Path,
+    database_url: str,
+    k: int,
+    mode: str,
+    budget_tokens: int,
+    haystack_len: int,
+    golden_sha: str,
+    provenance_rows: list[dict],
+) -> dict:
+    """Assembles the self-describing provenance-report header + per-question
+    rows. ``breadcrumb`` records whether ``--breadcrumb`` was set for this
+    run (R1-T1) so artifacts are self-describing without re-deriving it from
+    the label string."""
+    n = len(provenance_rows)
+    r5 = sum(r["hit_at_5"] for r in provenance_rows) / n if n else 0.0
+    r10 = sum(r["hit_at_10"] for r in provenance_rows) / n if n else 0.0
+    return {
+        "engine": "memphant",
+        "runtime": "memphant-server resource ingest + /v1/recall",
+        "embed_model": embed_model,
+        "label": label,
+        "breadcrumb": breadcrumb,
+        "golden_path": str(golden_path),
+        "database_url_db": database_url.rsplit("/", 1)[-1],
+        "k": k,
+        "recall_mode": mode,
+        "budget_tokens": budget_tokens,
+        "haystack_sections": haystack_len,
+        "golden_sha256": golden_sha,
+        "golden_count": n,
+        "recall_at_5": r5,
+        "recall_at_10": r10,
+        "per_question": provenance_rows,
+    }
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--database-url", default=DEFAULT_BASE_DATABASE_URL,
@@ -367,6 +409,19 @@ def main() -> int:
         default=None,
         help="arm label prefixed on stderr progress lines and recorded in the provenance header",
     )
+    parser.add_argument(
+        "--breadcrumb",
+        action="store_true",
+        help=(
+            "prefix each ingested section body with Syndai's deterministic "
+            "context-prefix convention (processing_chunks.py:84): "
+            "'Section path: ' + ' > '.join(heading_path) + a blank line, "
+            "byte-identical to Syndai's own embedding-input prefix. Sections "
+            "with an empty heading_path get no prefix, mirroring Syndai's "
+            "own check exactly. Recorded as 'breadcrumb' in the provenance "
+            "header."
+        ),
+    )
     parser.add_argument("--port", type=int, default=39412)
     parser.add_argument("--k", type=int, default=10)
     parser.add_argument("--budget-tokens", type=int, default=8192)
@@ -375,6 +430,11 @@ def main() -> int:
     parser.add_argument("--server-bin", default=str(gc.MEMPHANT_ROOT / "target/debug/memphant-server"))
     parser.add_argument("--worker-bin", default=str(gc.MEMPHANT_ROOT / "target/debug/memphant-worker"))
     parser.add_argument("--cli-bin", default=str(gc.MEMPHANT_ROOT / "target/debug/memphant-cli"))
+    return parser
+
+
+def main() -> int:
+    parser = build_arg_parser()
     args = parser.parse_args()
 
     # Re-exec through with_scratch_db.sh (unless already inside one): mints a
@@ -397,7 +457,7 @@ def main() -> int:
     golden_sets: list[tuple[Path, list[dict], str]] = []
     for golden_path in golden_paths:
         goldens = gc.load_goldens(golden_path)
-        lock = json.loads(golden_lock_path(golden_path).read_text())
+        lock = json.loads(gc.golden_lock_path(golden_path).read_text())
         actual_sha = gc.sha256_hex(golden_path.read_bytes())
         if actual_sha != lock["sha256"]:
             raise RuntimeError(
@@ -454,7 +514,7 @@ def main() -> int:
         client = ApiClient(args.port, api_key, tenant_id)
         t0 = time.time()
         for i, section in enumerate(haystack):
-            ingest_section(client, section)
+            ingest_section(client, section, breadcrumb=args.breadcrumb)
             if (i + 1) % 500 == 0:
                 print(f"{label_prefix}  ingested {i + 1}/{len(haystack)}", file=sys.stderr)
         print(f"{label_prefix}ingest done in {time.time() - t0:.1f}s; draining worker...", file=sys.stderr)
@@ -489,29 +549,23 @@ def main() -> int:
                     )
 
             gc.write_jsonl(Path(out_evidence), evidence_rows)
-            n = len(provenance_rows)
-            r5 = sum(r["hit_at_5"] for r in provenance_rows) / n if n else 0.0
-            r10 = sum(r["hit_at_10"] for r in provenance_rows) / n if n else 0.0
-            report = {
-                "engine": "memphant",
-                "runtime": "memphant-server resource ingest + /v1/recall",
-                "embed_model": args.embed_model,
-                "label": args.label,
-                "golden_path": str(golden_path),
-                "database_url_db": args.database_url.rsplit("/", 1)[-1],
-                "k": args.k,
-                "recall_mode": args.mode,
-                "budget_tokens": args.budget_tokens,
-                "haystack_sections": len(haystack),
-                "golden_sha256": golden_sha,
-                "golden_count": n,
-                "recall_at_5": r5,
-                "recall_at_10": r10,
-                "per_question": provenance_rows,
-            }
+            report = build_provenance_report(
+                embed_model=args.embed_model,
+                label=args.label,
+                breadcrumb=args.breadcrumb,
+                golden_path=golden_path,
+                database_url=args.database_url,
+                k=args.k,
+                mode=args.mode,
+                budget_tokens=args.budget_tokens,
+                haystack_len=len(haystack),
+                golden_sha=golden_sha,
+                provenance_rows=provenance_rows,
+            )
             Path(out_provenance).write_text(json.dumps(report, indent=2) + "\n")
             print(
-                f"{label_prefix}{golden_path.name} done: R@5={r5:.3f} R@10={r10:.3f} n={n} "
+                f"{label_prefix}{golden_path.name} done: R@5={report['recall_at_5']:.3f} "
+                f"R@10={report['recall_at_10']:.3f} n={report['golden_count']} "
                 f"evidence={out_evidence} provenance={out_provenance}",
                 file=sys.stderr,
             )
