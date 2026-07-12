@@ -140,12 +140,14 @@ class Server:
         port: int,
         embed_model: str | None = None,
         log_path: Path | None = None,
+        resource_chunks: bool = False,
     ) -> None:
         self.server_bin = server_bin
         self.database_url = database_url
         self.port = port
         self.embed_model = embed_model
         self.log_path = log_path
+        self.resource_chunks = resource_chunks
         self.proc: subprocess.Popen | None = None
         self._log_file = None
 
@@ -185,6 +187,8 @@ class Server:
         env.setdefault("RUST_LOG", "warn")
         if self.embed_model:
             env["MEMPHANT_EMBEDDINGS"] = self.embed_model
+        if self.resource_chunks:
+            env["MEMPHANT_RESOURCE_CHUNKS"] = "1"
         if self.log_path is not None:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             self._log_file = open(self.log_path, "w")
@@ -286,13 +290,21 @@ def ingest_section(client: ApiClient, section: gc.Section, breadcrumb: bool = Fa
     return response.get("resource_id") or ""
 
 
-def drain_worker(worker_bin: str, database_url: str, embed_model: str | None = None, max_ticks: int = 4000) -> int:
+def drain_worker(
+    worker_bin: str,
+    database_url: str,
+    embed_model: str | None = None,
+    max_ticks: int = 4000,
+    resource_chunks: bool = False,
+) -> int:
     env = dict(os.environ)
     env["DATABASE_URL"] = database_url
     env["MEMPHANT_WORKER_ONCE"] = "1"
     env.setdefault("RUST_LOG", "warn")
     if embed_model:
         env["MEMPHANT_EMBEDDINGS"] = embed_model
+    if resource_chunks:
+        env["MEMPHANT_RESOURCE_CHUNKS"] = "1"
     total = 0
     for tick in range(max_ticks):
         out = sh([worker_bin], env=env)
@@ -330,6 +342,7 @@ def build_provenance_report(
     label: str | None,
     breadcrumb: bool,
     golden_path: Path,
+    resource_chunks: bool = False,
     database_url: str,
     k: int,
     mode: str,
@@ -340,8 +353,9 @@ def build_provenance_report(
 ) -> dict:
     """Assembles the self-describing provenance-report header + per-question
     rows. ``breadcrumb`` records whether ``--breadcrumb`` was set for this
-    run (R1-T1) so artifacts are self-describing without re-deriving it from
-    the label string."""
+    run (R1-T1); ``resource_chunks`` records whether ``--resource-chunks``
+    was set (R1-T3) so artifacts are self-describing without re-deriving
+    either from the label string."""
     n = len(provenance_rows)
     r5 = sum(r["hit_at_5"] for r in provenance_rows) / n if n else 0.0
     r10 = sum(r["hit_at_10"] for r in provenance_rows) / n if n else 0.0
@@ -351,6 +365,7 @@ def build_provenance_report(
         "embed_model": embed_model,
         "label": label,
         "breadcrumb": breadcrumb,
+        "resource_chunks": resource_chunks,
         "golden_path": str(golden_path),
         "database_url_db": database_url.rsplit("/", 1)[-1],
         "k": k,
@@ -420,6 +435,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "with an empty heading_path get no prefix, mirroring Syndai's "
             "own check exactly. Recorded as 'breadcrumb' in the provenance "
             "header."
+        ),
+    )
+    parser.add_argument(
+        "--resource-chunks",
+        action="store_true",
+        help=(
+            "enable the R1 docs-domain resource-chunk write path by setting "
+            "MEMPHANT_RESOURCE_CHUNKS=1 for BOTH the server and worker "
+            "subprocess env, so reflect mints per-resource contextual chunks "
+            "for kind=document sections (the flag-gated, default-off twin of "
+            "the promoted episode chunks). Recorded as 'resource_chunks' in the "
+            "provenance header."
         ),
     )
     parser.add_argument("--port", type=int, default=39412)
@@ -504,6 +531,7 @@ def main() -> int:
     server = Server(
         args.server_bin, args.database_url, args.port, args.embed_model,
         log_path=server_log_path,
+        resource_chunks=args.resource_chunks,
     )
     # Symmetric cleanup: start() and the ingest/recall body are both inside
     # this try so the server child is always killed on any exception path,
@@ -518,7 +546,10 @@ def main() -> int:
             if (i + 1) % 500 == 0:
                 print(f"{label_prefix}  ingested {i + 1}/{len(haystack)}", file=sys.stderr)
         print(f"{label_prefix}ingest done in {time.time() - t0:.1f}s; draining worker...", file=sys.stderr)
-        compiled = drain_worker(args.worker_bin, args.database_url, args.embed_model)
+        compiled = drain_worker(
+            args.worker_bin, args.database_url, args.embed_model,
+            resource_chunks=args.resource_chunks,
+        )
         print(f"{label_prefix}worker drained: compiled={compiled} jobs", file=sys.stderr)
 
         for (golden_path, goldens, golden_sha), out_evidence, out_provenance in zip(
@@ -553,6 +584,7 @@ def main() -> int:
                 embed_model=args.embed_model,
                 label=args.label,
                 breadcrumb=args.breadcrumb,
+                resource_chunks=args.resource_chunks,
                 golden_path=golden_path,
                 database_url=args.database_url,
                 k=args.k,

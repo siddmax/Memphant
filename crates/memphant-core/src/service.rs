@@ -12,9 +12,9 @@ use memphant_types::{
     COMPILER_VERSION, ContextualChunk, CorrectRequest, CorrectResult, ENGINE_VERSION, EpisodeId,
     ForgetRequest, ForgetResult, MarkRequest, MarkResult, MemoryKind, RecallContextItem,
     RecallHttpRequest, RecallMode, RecallRequest, RecallResponse, ReflectCandidate, ReflectInput,
-    ReflectJobKind, ReflectResult, RetainEpisodeHttpRequest, RetainEpisodeHttpResponse,
-    RetainRequest, RetainResourceRequest, RetrievalTrace, ScopeId, StoredEpisode, TenantId,
-    TraceId, TrustLevel, UnitId,
+    ReflectJobKind, ReflectResult, ResourceId, ResourceKind, RetainEpisodeHttpRequest,
+    RetainEpisodeHttpResponse, RetainRequest, RetainResourceRequest, RetrievalTrace, ScopeId,
+    StoredEpisode, TenantId, TraceId, TrustLevel, UnitId,
 };
 
 use crate::{
@@ -82,6 +82,16 @@ pub struct MemoryService<S: MemoryStore> {
     /// `with_contextual_chunks_write_enabled(false)` builder stays so ablations
     /// can force the chunks-off control arm.
     contextual_chunks_write_enabled: bool,
+    /// R1 docs-domain twin of `contextual_chunks_write_enabled`: when set, the
+    /// reflect-stage compile of a `kind=document` resource mints per-resource
+    /// contextual chunks (§`compile_job` `ReflectResource` arm) via
+    /// `resource_contextual_chunks` — the SAME rung-4 machinery episodes use,
+    /// extended to the docs domain. DEFAULT FALSE (flag-gated until an R1-T4
+    /// promotion): shipped behavior is byte-identical to today (whole-section
+    /// units, no chunks). Non-document resource kinds are never chunked. Set via
+    /// `with_resource_chunks_write_enabled` (the gate's `--resource-chunks` /
+    /// `MEMPHANT_RESOURCE_CHUNKS` thread it through the runtime).
+    resource_chunks_write_enabled: bool,
     /// W3 candidate-pool knob: the recall vector-channel KNN fan-out. DEFAULT
     /// `DEFAULT_CANDIDATE_POOL_SIZE` (32), which reproduces today's ranking
     /// exactly. Raised via `with_candidate_pool_size` so the W8 cross-encoder
@@ -126,6 +136,7 @@ impl<S: MemoryStore> Clone for MemoryService<S> {
             clock: Arc::clone(&self.clock),
             embedder: Arc::clone(&self.embedder),
             contextual_chunks_write_enabled: self.contextual_chunks_write_enabled,
+            resource_chunks_write_enabled: self.resource_chunks_write_enabled,
             candidate_pool_size: self.candidate_pool_size,
             pack_levers: self.pack_levers,
             temporal_grounding_enabled: self.temporal_grounding_enabled,
@@ -142,6 +153,7 @@ impl<S: MemoryStore> MemoryService<S> {
             clock,
             embedder,
             contextual_chunks_write_enabled: true,
+            resource_chunks_write_enabled: false,
             candidate_pool_size: DEFAULT_CANDIDATE_POOL_SIZE,
             pack_levers: PackLevers::default(),
             temporal_grounding_enabled: false,
@@ -156,6 +168,18 @@ impl<S: MemoryStore> MemoryService<S> {
     /// here to run the chunk-free baseline (old behavior).
     pub fn with_contextual_chunks_write_enabled(mut self, enabled: bool) -> Self {
         self.contextual_chunks_write_enabled = enabled;
+        self
+    }
+
+    /// Overrides the R1 docs-domain resource-chunk write path (default OFF).
+    /// When enabled, the reflect-stage compile of a `kind=document` resource
+    /// mints per-resource contextual chunks (the docs twin of the episode
+    /// chunk path). Construction-time only, mirroring
+    /// `with_contextual_chunks_write_enabled`: no recall-request/wire change.
+    /// The runtime threads `MEMPHANT_RESOURCE_CHUNKS` here so the gate's
+    /// `--resource-chunks` reaches both the server and worker.
+    pub fn with_resource_chunks_write_enabled(mut self, enabled: bool) -> Self {
+        self.resource_chunks_write_enabled = enabled;
         self
     }
 
@@ -706,6 +730,19 @@ impl<S: MemoryStore> MemoryService<S> {
                         // Pointer-only resource: nothing durable to compile yet.
                         return Ok(CompileOutcome::default());
                     };
+                    // R1: rung-4 machinery extended to the docs domain. Mint
+                    // per-resource contextual chunks for DOCUMENT resources when
+                    // the (default-off) resource-chunk write path is enabled;
+                    // non-document kinds and the disabled path stay chunk-free —
+                    // byte-identical to today. Episodes get theirs in the
+                    // ReflectEpisode arm above; this is the resource twin.
+                    let contextual_chunks = if self.resource_chunks_write_enabled
+                        && resource.kind == ResourceKind::Document
+                    {
+                        resource_contextual_chunks(resource.id, &resource.uri, &body)
+                    } else {
+                        Vec::new()
+                    };
                     (
                         None,
                         Some(resource.id),
@@ -719,7 +756,7 @@ impl<S: MemoryStore> MemoryService<S> {
                             body,
                             churn_class: None,
                             admission_hint: None,
-                            contextual_chunks: Vec::new(),
+                            contextual_chunks,
                             valid_from: None,
                             valid_to: None,
                         }],
@@ -904,6 +941,199 @@ fn episode_contextual_chunks(
                 // Byte offsets (matching the `body.get(start..end)` slice
                 // above) — NOT char counts, so `body[start..end]` reproduces
                 // the chunk body directly even over multi-byte text.
+                source_span: Some(format!("{start}-{end}")),
+            })
+        })
+        .collect()
+}
+
+// ===========================================================================
+// R1 docs-domain contextual chunks: the resource twin of the episode chunker
+// above. `episode_contextual_chunks` windows a conversation over its TURNS; the
+// gate ingests docs as `kind=document` resources (one markdown section each,
+// 240–3200 chars, first line usually a `#`-heading, fenced code blocks common),
+// so this variant windows a resource body over its PARAGRAPHS under a char
+// budget. Everything that recall packing + citation touch — the `ContextualChunk`
+// fields, the `chunk-{parent}-{index}` id shape, byte-offset `source_span`, and
+// the "emit nothing for a single window" bloat guard — is copied verbatim from
+// the episode chunker so resource and episode chunks flow through the read path
+// identically. The parent whole-section unit stays stored verbatim; chunks are
+// additive retrieval keys + pack content.
+//
+// DEVIATION FROM BRIEF (recorded in the task report): the brief asked for a
+// 1-paragraph window overlap, but the PROMOTED episode twin partitions
+// NON-overlapping (`spans.chunks(window_size)`). Per the mirror-the-twin rule
+// (consistency with the promoted machinery wins) these windows are
+// non-overlapping too: disjoint `source_span`s and the same ±1 sibling-adjacency
+// semantics the read path's sibling-gather assumes.
+// ===========================================================================
+
+/// Resource-chunk char budget. Windows aim for `TARGET_MIN..=TARGET_MAX` chars of
+/// markdown, may stretch to `HARD_MAX` to avoid splitting a paragraph, and never
+/// split a paragraph/fenced block (an oversized single paragraph becomes its own
+/// window). Char budgets (not the episode chunker's fixed turn count) because doc
+/// paragraphs vary far more in length than conversational turns.
+const RESOURCE_CHUNK_TARGET_MIN_CHARS: usize = 700;
+const RESOURCE_CHUNK_TARGET_MAX_CHARS: usize = 1100;
+const RESOURCE_CHUNK_HARD_MAX_CHARS: usize = 1600;
+
+/// Byte spans of `body`'s paragraphs, split on blank-line boundaries but NEVER
+/// inside a fenced code block (```` ``` ````/`~~~`): a blank line inside an open
+/// fence stays part of the current paragraph. Mirrors `segment_episode_body`'s
+/// offset bookkeeping (byte offsets via `split_inclusive('\n')`; a span's content
+/// bounds exclude the trailing newline) so the downstream span math is identical.
+fn segment_resource_paragraphs(body: &str) -> Vec<(usize, usize)> {
+    let mut paras: Vec<(usize, usize)> = Vec::new();
+    let mut current: Option<(usize, usize)> = None;
+    let mut in_fence = false;
+    let mut offset = 0usize;
+    for raw in body.split_inclusive('\n') {
+        let line_start = offset;
+        offset += raw.len();
+        let content = raw.trim_end_matches(['\n', '\r']);
+        let is_fence = {
+            let trimmed = content.trim_start();
+            trimmed.starts_with("```") || trimmed.starts_with("~~~")
+        };
+        // A blank line OUTSIDE a fence closes the current paragraph. Inside an
+        // open fence a blank line is ordinary fence content (never a boundary).
+        if content.trim().is_empty() && !in_fence {
+            if let Some(span) = current.take() {
+                paras.push(span);
+            }
+            continue;
+        }
+        let content_end = line_start + content.len();
+        match current.as_mut() {
+            Some(span) => span.1 = content_end,
+            None => current = Some((line_start, content_end)),
+        }
+        if is_fence {
+            in_fence = !in_fence;
+        }
+    }
+    if let Some(span) = current.take() {
+        paras.push(span);
+    }
+    paras
+}
+
+/// Groups paragraph spans into non-overlapping char-budget windows (inclusive
+/// `(first_para, last_para)` index pairs). Greedily grows a window until adding
+/// the next paragraph would exceed `TARGET_MAX` (stretching only while the window
+/// is still under `TARGET_MIN`, and never past `HARD_MAX`), then a tiny trailing
+/// window is merged back into its predecessor when the merge fits `HARD_MAX`.
+fn window_resource_paragraphs(body: &str, paras: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    let char_len = |start: usize, end: usize| {
+        body.get(start..end)
+            .map_or(0, |slice| slice.chars().count())
+    };
+    let mut windows: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0usize;
+    while i < paras.len() {
+        let start_byte = paras[i].0;
+        let mut end_idx = i;
+        while end_idx + 1 < paras.len() {
+            let current = char_len(start_byte, paras[end_idx].1);
+            if current >= RESOURCE_CHUNK_TARGET_MAX_CHARS {
+                break;
+            }
+            let with_next = char_len(start_byte, paras[end_idx + 1].1);
+            if with_next > RESOURCE_CHUNK_HARD_MAX_CHARS {
+                break;
+            }
+            // Add the next paragraph when it keeps us within target, or when the
+            // window is still below the minimum (merge-small, bounded by HARD_MAX
+            // above).
+            if with_next <= RESOURCE_CHUNK_TARGET_MAX_CHARS
+                || current < RESOURCE_CHUNK_TARGET_MIN_CHARS
+            {
+                end_idx += 1;
+            } else {
+                break;
+            }
+        }
+        windows.push((i, end_idx));
+        i = end_idx + 1;
+    }
+    // Merge a tiny trailing window into its predecessor (brief: "merge tiny
+    // trailing paragraphs") when the merged span stays within the hard cap.
+    if windows.len() >= 2 {
+        let last = windows[windows.len() - 1];
+        let prev = windows[windows.len() - 2];
+        let last_chars = char_len(paras[last.0].0, paras[last.1].1);
+        let merged_chars = char_len(paras[prev.0].0, paras[last.1].1);
+        if last_chars < RESOURCE_CHUNK_TARGET_MIN_CHARS
+            && merged_chars <= RESOURCE_CHUNK_HARD_MAX_CHARS
+        {
+            let n = windows.len();
+            windows[n - 2] = (prev.0, last.1);
+            windows.pop();
+        }
+    }
+    windows
+}
+
+/// The chunk provenance header for a document resource: the section's own first
+/// markdown heading line (the gate ingests each section starting with its `###`
+/// heading), falling back to the uri stem when there is no heading. The
+/// docs-domain analog of the episode chunk's `[session ...]` context header — it
+/// gives every retrieval-key chunk its section identity.
+fn resource_chunk_header(body: &str, uri: &str) -> String {
+    if let Some(heading) = body
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with('#'))
+    {
+        return heading.to_string();
+    }
+    let stem = uri.rsplit(['/', '\\']).next().unwrap_or(uri);
+    let stem = stem.split(['?', '#']).next().unwrap_or(stem);
+    let stem = stem.rsplit_once('.').map_or(stem, |(base, _)| base);
+    if stem.is_empty() {
+        "resource".to_string()
+    } else {
+        stem.to_string()
+    }
+}
+
+/// Splits a `kind=document` resource `body` into non-overlapping char-budget
+/// windows and mints one `ContextualChunk` per window, each tied back to its
+/// parent resource — the docs-domain twin of `episode_contextual_chunks`. Emits
+/// nothing when the body fits a single window (a lone chunk would just duplicate
+/// the unit body) and never emits empty-body chunks. The `take(MAX_CONTEXTUAL_
+/// CHUNKS)` is a defensive backstop shared with the episode chunker: real corpus
+/// sections (≤~3.2k chars) produce 1–4 windows, far under the cap.
+fn resource_contextual_chunks(
+    resource_id: ResourceId,
+    uri: &str,
+    body: &str,
+) -> Vec<ContextualChunk> {
+    let paras = segment_resource_paragraphs(body);
+    let windows = window_resource_paragraphs(body, &paras);
+    if windows.len() <= 1 {
+        return Vec::new();
+    }
+    let header = resource_chunk_header(body, uri);
+    windows
+        .into_iter()
+        .take(MAX_CONTEXTUAL_CHUNKS)
+        .enumerate()
+        .filter_map(|(window_index, (first_para, last_para))| {
+            let start = paras[first_para].0;
+            let end = paras[last_para].1;
+            let text = body.get(start..end)?.trim();
+            if text.is_empty() {
+                return None;
+            }
+            Some(ContextualChunk {
+                id: format!("chunk-{}-{window_index}", resource_id.as_uuid()),
+                header: header.clone(),
+                body: text.to_string(),
+                // Byte offsets (matching the `body.get(start..end)` slice) — NOT
+                // char counts — so `body[start..end]` reproduces the chunk body
+                // verbatim, the provenance span-grading invariant (identical to
+                // the episode chunk spans).
                 source_span: Some(format!("{start}-{end}")),
             })
         })
@@ -1863,6 +2093,248 @@ user: fifth turn plain.\n";
             chunk.body,
             "slicing the episode body at the reported byte span reproduces the chunk body exactly"
         );
+    }
+}
+
+#[cfg(test)]
+mod resource_chunk_tests {
+    use super::*;
+
+    const RESOURCE_ID: u128 = 0x0000_0000_0000_4d3d_0000_0000_0000_0007;
+
+    /// A single-line paragraph of at least `chars` ASCII characters, no trailing
+    /// whitespace, tagged so windows/chunks are identifiable.
+    fn para(tag: &str, chars: usize) -> String {
+        let mut body = format!("{tag}:");
+        while body.chars().count() < chars {
+            body.push_str(" lorem ipsum dolor sit amet consectetur");
+        }
+        body
+    }
+
+    /// Parses a chunk's `start-end` byte span.
+    fn span_of(chunk: &ContextualChunk) -> (usize, usize) {
+        let raw = chunk.source_span.as_deref().expect("chunk carries a span");
+        let (start, end) = raw.split_once('-').expect("span is start-end");
+        (
+            start.parse().expect("start is a byte offset"),
+            end.parse().expect("end is a byte offset"),
+        )
+    }
+
+    #[test]
+    fn blank_lines_split_paragraphs_outside_fences() {
+        let body = "# Title\n\nFirst paragraph here.\n\nSecond paragraph here.\n";
+        let paras = segment_resource_paragraphs(body);
+        assert_eq!(paras.len(), 3, "heading + two paragraphs: {paras:?}");
+        assert_eq!(&body[paras[0].0..paras[0].1], "# Title");
+        assert_eq!(&body[paras[1].0..paras[1].1], "First paragraph here.");
+        assert_eq!(&body[paras[2].0..paras[2].1], "Second paragraph here.");
+    }
+
+    #[test]
+    fn fenced_block_is_never_split_on_internal_blank_lines() {
+        let body = "# Heading\n\n\
+Some intro prose before the code block goes here.\n\n\
+```rust\n\
+fn foo() {\n\
+\n\
+    let x = 1;\n\
+\n\
+    x + 1\n\
+}\n\
+```\n\n\
+Trailing prose after the fence.\n";
+        let paras = segment_resource_paragraphs(body);
+        // heading, intro, WHOLE fence (one paragraph despite two internal blank
+        // lines), trailing prose = 4 paragraphs.
+        assert_eq!(paras.len(), 4, "fence stays a single paragraph: {paras:?}");
+        let fence = &body[paras[2].0..paras[2].1];
+        assert!(
+            fence.starts_with("```rust"),
+            "fence span starts at the opening fence: {fence:?}"
+        );
+        assert!(
+            fence.contains("let x = 1;") && fence.contains("x + 1"),
+            "fence interior (across its blank lines) is intact: {fence:?}"
+        );
+        assert!(
+            fence.ends_with("```"),
+            "fence span includes the closing fence: {fence:?}"
+        );
+    }
+
+    #[test]
+    fn windows_are_a_gapless_non_overlapping_partition_within_hard_cap() {
+        let body = [
+            para("a", 500),
+            para("b", 500),
+            para("c", 500),
+            para("d", 500),
+        ]
+        .join("\n\n");
+        let paras = segment_resource_paragraphs(&body);
+        assert_eq!(paras.len(), 4);
+        let windows = window_resource_paragraphs(&body, &paras);
+        assert!(
+            windows.len() >= 2,
+            "a ~2k-char body yields multiple windows: {windows:?}"
+        );
+        // Non-overlapping + gapless: window[k+1] starts exactly one paragraph
+        // past window[k]'s inclusive end (mirrors the episode chunker's
+        // `spans.chunks(window_size)` partition — the mirror-the-twin deviation
+        // from the brief's requested overlap).
+        for pair in windows.windows(2) {
+            assert_eq!(
+                pair[1].0,
+                pair[0].1 + 1,
+                "windows partition paragraphs without overlap or gaps"
+            );
+        }
+        assert_eq!(windows.first().unwrap().0, 0, "coverage starts at para 0");
+        assert_eq!(
+            windows.last().unwrap().1,
+            paras.len() - 1,
+            "coverage reaches the last paragraph (no dropped tail)"
+        );
+        for &(first, last) in &windows {
+            let chars = body[paras[first].0..paras[last].1].chars().count();
+            assert!(
+                chars <= RESOURCE_CHUNK_HARD_MAX_CHARS,
+                "each window stays within the hard cap: {chars} chars"
+            );
+        }
+    }
+
+    #[test]
+    fn tiny_trailing_paragraph_merges_into_predecessor() {
+        // Two ~1000-char paragraphs (each fills its own window) then a tiny tail.
+        // Greedy leaves the tail as a lone sub-min window; the post-pass merges it
+        // into its predecessor (the merged span stays within HARD_MAX).
+        let body = [
+            para("a", 1000),
+            para("b", 1000),
+            "tiny final note.".to_string(),
+        ]
+        .join("\n\n");
+        let paras = segment_resource_paragraphs(&body);
+        assert_eq!(paras.len(), 3);
+        let windows = window_resource_paragraphs(&body, &paras);
+        assert_eq!(
+            windows,
+            vec![(0, 0), (1, 2)],
+            "the tiny trailing paragraph is folded into its predecessor window"
+        );
+    }
+
+    #[test]
+    fn source_span_reproduces_chunk_body_verbatim_over_multibyte_text() {
+        // Leading multi-byte content so later windows sit at byte offsets that
+        // differ from char offsets — proving the span is BYTE-based.
+        let body = [
+            para("café•α", 500),
+            para("β• second", 500),
+            para("γ•δ third", 500),
+            para("δ• fourth", 500),
+        ]
+        .join("\n\n");
+        let chunks =
+            resource_contextual_chunks(ResourceId::from_u128(RESOURCE_ID), "doc.md", &body);
+        assert!(chunks.len() >= 2, "multi-window body: {}", chunks.len());
+        for chunk in &chunks {
+            let (start, end) = span_of(chunk);
+            assert_eq!(
+                &body[start..end],
+                chunk.body,
+                "slicing the resource body at the reported byte span reproduces the chunk body"
+            );
+            assert!(
+                body.contains(chunk.body.as_str()),
+                "chunk body is a verbatim substring of the parent resource body"
+            );
+        }
+        let last = chunks.last().unwrap();
+        let (start, _) = span_of(last);
+        assert_ne!(
+            start,
+            body[..start].chars().count(),
+            "a later window's byte offset must diverge from its char offset (multi-byte proof)"
+        );
+    }
+
+    #[test]
+    fn single_window_or_short_body_emits_no_chunks() {
+        let id = ResourceId::from_u128(RESOURCE_ID);
+        // One short section = a single window = no chunks (the whole-section unit
+        // is the memory; a lone chunk would just duplicate it).
+        assert!(
+            resource_contextual_chunks(id, "doc.md", "# Only\n\nOne short paragraph.").is_empty()
+        );
+        // Empty / whitespace-only body yields nothing.
+        assert!(resource_contextual_chunks(id, "doc.md", "").is_empty());
+        assert!(resource_contextual_chunks(id, "doc.md", "\n\n   \n").is_empty());
+    }
+
+    #[test]
+    fn chunks_are_deterministic() {
+        let id = ResourceId::from_u128(RESOURCE_ID);
+        let body = [
+            para("a", 500),
+            para("b", 500),
+            para("c", 500),
+            para("d", 500),
+        ]
+        .join("\n\n");
+        let first = resource_contextual_chunks(id, "doc.md", &body);
+        let second = resource_contextual_chunks(id, "doc.md", &body);
+        assert_eq!(first, second, "same input yields identical chunks");
+        assert!(first.len() >= 2);
+    }
+
+    #[test]
+    fn header_is_first_heading_then_uri_stem() {
+        // First markdown heading wins, verbatim (the gate ingests sections
+        // starting with their `###` heading).
+        assert_eq!(
+            resource_chunk_header("### Config Reference\n\nBody.", "x/config.md"),
+            "### Config Reference"
+        );
+        // No heading → uri stem (path tail without extension/query/fragment).
+        assert_eq!(
+            resource_chunk_header(
+                "Just prose, no heading.",
+                "https://d.io/guides/setup.md?v=2"
+            ),
+            "setup"
+        );
+        assert_eq!(resource_chunk_header("prose", ""), "resource");
+    }
+
+    #[test]
+    fn chunk_id_and_header_link_to_parent_resource() {
+        let id = ResourceId::from_u128(RESOURCE_ID);
+        let body = format!(
+            "### Deploy Guide\n\n{}\n\n{}\n\n{}\n\n{}",
+            para("a", 500),
+            para("b", 500),
+            para("c", 500),
+            para("d", 500)
+        );
+        let chunks = resource_contextual_chunks(id, "deploy.md", &body);
+        assert!(chunks.len() >= 2);
+        let uuid = id.as_uuid();
+        for (index, chunk) in chunks.iter().enumerate() {
+            assert_eq!(
+                chunk.id,
+                format!("chunk-{uuid}-{index}"),
+                "chunk id derives from the parent resource + window index"
+            );
+            assert_eq!(
+                chunk.header, "### Deploy Guide",
+                "every chunk carries the section heading as its context header"
+            );
+            assert!(!chunk.body.trim().is_empty(), "no empty-body chunks");
+        }
     }
 }
 

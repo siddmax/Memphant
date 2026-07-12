@@ -215,9 +215,29 @@ fn fastembed_or(
     fallback()
 }
 
-/// Standard `MemoryService` wiring: injected system clock + embedder seam.
+/// Standard `MemoryService` wiring: injected system clock + embedder seam. The
+/// R1 docs-domain resource-chunk write path is threaded from
+/// `MEMPHANT_RESOURCE_CHUNKS` (default OFF) so BOTH the server and worker
+/// binaries honor the gate's `--resource-chunks` lever, mirroring how
+/// `MEMPHANT_EMBEDDINGS` reaches both via [`build_embedder`].
 pub fn build_service(store: AnyStore) -> MemoryService<AnyStore> {
     MemoryService::new(Arc::new(store), Arc::new(SystemClock), build_embedder())
+        .with_resource_chunks_write_enabled(resource_chunks_write_from_env())
+}
+
+/// `MEMPHANT_RESOURCE_CHUNKS` → bool. Truthy (`1`/`true`/`on`, case-insensitive)
+/// enables the resource-chunk write path; unset/empty/anything else keeps it OFF
+/// (the shipped default), so no env means byte-identical-to-today behavior.
+fn resource_chunks_write_from_env() -> bool {
+    matches!(
+        std::env::var("MEMPHANT_RESOURCE_CHUNKS")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1") | Some("true") | Some("on")
+    )
 }
 
 fn txn_mismatch<T>() -> Result<T, StoreError> {
