@@ -5,8 +5,8 @@
 //! (dev) — stdio is a per-principal transport; a missing/revoked key refuses
 //! to start rather than serving an unauthenticated session.
 
-use memphant_core::MemoryStore;
-use memphant_core::service::{MemoryService, clamp_trust};
+use memphant_core::service::{MemoryService, ServiceError, clamp_trust};
+use memphant_core::{CoreError, MemoryStore};
 use memphant_runtime::AnyStore;
 use memphant_types::{
     CorrectRequest, CorrectResult, ENGINE_VERSION, ForgetRequest, ForgetResult, MarkRequest,
@@ -31,6 +31,56 @@ pub fn api_key_hash(token: &str) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+/// Client-facing error string for MCP tools, mirroring the REST edge: raw
+/// backend/store errors are hidden behind a generic message; validation,
+/// not-found, and policy errors carry caller-relevant, safe-to-surface text.
+pub fn mcp_error(error: ServiceError) -> String {
+    match error {
+        ServiceError::Core(CoreError::Store(_)) => "backend unavailable".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Constant-time string equality (length may leak). Compares a presented bearer
+/// token to the process key without a timing side channel.
+pub fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Whether an MCP streamable-HTTP request is authorized. Dev mode (auth
+/// explicitly disabled and logged loudly at startup) allows all; otherwise the
+/// `Authorization: Bearer <token>` header must equal the process key. This
+/// gives the HTTP transport the same per-request gate the REST edge has, so a
+/// widened `MEMPHANT_MCP_BIND` never serves the bound tenant unauthenticated.
+pub fn mcp_http_authorized(
+    dev_mode: bool,
+    expected_key: Option<&str>,
+    auth_header: Option<&str>,
+) -> bool {
+    if dev_mode {
+        return true;
+    }
+    let Some(expected) = expected_key else {
+        return false;
+    };
+    let Some(token) = auth_header.and_then(|header| {
+        header
+            .strip_prefix("Bearer ")
+            .or_else(|| header.strip_prefix("bearer "))
+    }) else {
+        return false;
+    };
+    constant_time_eq(token.trim(), expected.trim())
 }
 
 /// The tenant binding resolved at startup. Stdio serves exactly one
@@ -93,6 +143,15 @@ pub struct MemphantMcp {
     tool_router: ToolRouter<Self>,
 }
 
+impl MemphantMcp {
+    /// Whether the process resolved a dev tenant (auth explicitly disabled).
+    /// The HTTP transport uses this to decide whether to enforce per-request
+    /// bearer auth.
+    pub fn dev_mode(&self) -> bool {
+        self.bound.dev_mode
+    }
+}
+
 #[tool_router(router = tool_router)]
 impl MemphantMcp {
     pub fn new(service: MemoryService<AnyStore>, bound: BoundTenant) -> Self {
@@ -133,7 +192,7 @@ impl MemphantMcp {
             .retain(tenant, request)
             .await
             .map(Json)
-            .map_err(|error| error.to_string())
+            .map_err(mcp_error)
     }
 
     #[tool(
@@ -154,7 +213,7 @@ impl MemphantMcp {
             .recall(tenant, request)
             .await
             .map(Json)
-            .map_err(|error| error.to_string())
+            .map_err(mcp_error)
     }
 
     #[tool(
@@ -175,7 +234,7 @@ impl MemphantMcp {
             .reflect(tenant, request.scope_id, request.compiler_version)
             .await
             .map(Json)
-            .map_err(|error| error.to_string())
+            .map_err(mcp_error)
     }
 
     #[tool(
@@ -196,7 +255,7 @@ impl MemphantMcp {
             .correct(tenant, request)
             .await
             .map(Json)
-            .map_err(|error| error.to_string())
+            .map_err(mcp_error)
     }
 
     #[tool(
@@ -217,7 +276,7 @@ impl MemphantMcp {
             .forget(tenant, request)
             .await
             .map(Json)
-            .map_err(|error| error.to_string())
+            .map_err(mcp_error)
     }
 
     #[tool(
@@ -237,7 +296,7 @@ impl MemphantMcp {
         self.service
             .trace(tenant, request.trace_id)
             .await
-            .map_err(|error| error.to_string())?
+            .map_err(mcp_error)?
             .map(Json)
             .ok_or_else(|| "trace not found".to_string())
     }
@@ -260,7 +319,7 @@ impl MemphantMcp {
             .mark(tenant, request)
             .await
             .map(Json)
-            .map_err(|error| error.to_string())
+            .map_err(mcp_error)
     }
 }
 

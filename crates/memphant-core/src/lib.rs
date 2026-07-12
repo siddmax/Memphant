@@ -347,6 +347,9 @@ pub struct CorrectionWrite {
     pub selector: CorrectSelector,
     pub correction: CorrectionPayload,
     pub now: String,
+    /// Embedding for the replacement unit, computed before the correction
+    /// transaction and written inside it so corrected truth is vector-visible.
+    pub embedding: Option<(EmbeddingProfileRow, Vec<f32>)>,
 }
 
 pub type CorrectOutcome = CorrectResult;
@@ -387,6 +390,11 @@ pub struct CompiledWrite {
     pub new_edges: Vec<StoredMemoryEdge>,
     pub unit_updates: Vec<UnitUpdate>,
     pub trace: ReflectTrace,
+    /// Embeddings for `new_units`, computed before the persist transaction and
+    /// written inside it (admitted units only) so the vector channel never
+    /// drifts from the units it describes. `None`/empty for noop providers.
+    pub embedding_profile: Option<EmbeddingProfileRow>,
+    pub embeddings: Vec<EmbeddingRow>,
 }
 
 /// One page of a tenant-bound scope memory export.
@@ -447,7 +455,7 @@ pub trait MemoryStore: Send + Sync {
     type Txn: Send;
 
     // Staged-write API.
-    fn begin(&self) -> impl Future<Output = Self::Txn> + Send;
+    fn begin(&self) -> impl Future<Output = Result<Self::Txn, StoreError>> + Send;
     fn commit(&self, tx: Self::Txn) -> impl Future<Output = Result<(), StoreError>> + Send;
     fn stage_episode(
         &self,
@@ -487,6 +495,16 @@ pub trait MemoryStore: Send + Sync {
         kinds: &[MemoryKind],
         query_terms: &[String],
         limit: usize,
+    ) -> impl Future<Output = Result<Vec<StoredMemoryUnit>, StoreError>> + Send;
+    /// The WRITE seam: every open (`transaction_to is null`) unit in one scope,
+    /// unbounded. The reflect compiler needs the COMPLETE scope to dedup and
+    /// supersede correctly — a ranked/bounded recall pool would silently miss
+    /// units and let duplicate subjects slip in. Distinct from
+    /// `fetch_recall_candidates`, which is deliberately a bounded ranked pool.
+    fn fetch_scope_open_units(
+        &self,
+        tenant: TenantId,
+        scope: ScopeId,
     ) -> impl Future<Output = Result<Vec<StoredMemoryUnit>, StoreError>> + Send;
     /// The recall vector family: the nearest units to `query_vec` under the
     /// ACTIVE embedding profile, each with its cosine DISTANCE (pgvector `<=>`;
@@ -583,6 +601,7 @@ pub trait MemoryStore: Send + Sync {
     ) -> impl Future<Output = Result<Vec<ReflectJobRow>, StoreError>> + Send;
     fn complete_reflect_job(
         &self,
+        tenant: TenantId,
         id: JobId,
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
     /// Persists one reflect compilation. MUST consult forgotten-source
@@ -867,8 +886,8 @@ impl InMemoryStore {
 impl MemoryStore for InMemoryStore {
     type Txn = InMemoryTxn;
 
-    async fn begin(&self) -> Self::Txn {
-        InMemoryTxn::default()
+    async fn begin(&self) -> Result<Self::Txn, StoreError> {
+        Ok(InMemoryTxn::default())
     }
 
     async fn commit(&self, mut tx: Self::Txn) -> Result<(), StoreError> {
@@ -1132,6 +1151,25 @@ impl MemoryStore for InMemoryStore {
         Ok(units)
     }
 
+    async fn fetch_scope_open_units(
+        &self,
+        tenant: TenantId,
+        scope: ScopeId,
+    ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
+        let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+        Ok(state
+            .memory_units
+            .get(&tenant)
+            .map(|units| {
+                units
+                    .iter()
+                    .filter(|unit| unit.scope_id == scope && unit.transaction_to.is_none())
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
     async fn fetch_vector_candidates(
         &self,
         tenant: TenantId,
@@ -1173,6 +1211,9 @@ impl MemoryStore for InMemoryStore {
             left.1
                 .partial_cmp(&right.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                // Content tie-break so the top-`limit` cut is stable across
+                // re-ingests, mirroring the postgres `<=>, unit.body` order-by.
+                .then_with(|| left.0.body.cmp(&right.0.body))
         });
         scored.truncate(limit);
         Ok(scored)
@@ -1326,6 +1367,9 @@ impl MemoryStore for InMemoryStore {
                 unit.id == correction.selector.memory_unit_id
                     && unit.scope_id == correction.scope_id
                     && unit.state != UnitState::Deleted
+                    // Only the OPEN generation is correctable: re-correcting an
+                    // already-superseded id must not mint a second live unit.
+                    && unit.transaction_to.is_none()
             })
             .ok_or(StoreError::NotFound("memory_unit"))?;
         let mut replacement = units[old_index].clone();
@@ -1360,6 +1404,25 @@ impl MemoryStore for InMemoryStore {
                 kind: MemoryEdgeKind::Supersedes,
             });
         expire_composed_dependents(&mut state, tenant, &[old_id], &correction.now);
+
+        // Embed the replacement unit under the same lock as its supersedes edge
+        // so corrected truth is vector-visible — mirrors the Postgres path.
+        if let Some((profile, vec)) = correction.embedding.filter(|(_, vec)| !vec.is_empty()) {
+            let profile_id = profile.id;
+            let profiles = state.embedding_profiles.entry(tenant).or_default();
+            if !profiles.iter().any(|existing| existing.id == profile_id) {
+                profiles.push(profile);
+            }
+            let stored = state.embeddings.entry(tenant).or_default();
+            stored.retain(|existing| {
+                !(existing.memory_unit_id == new_id && existing.embedding_profile_id == profile_id)
+            });
+            stored.push(EmbeddingRow {
+                memory_unit_id: new_id,
+                embedding_profile_id: profile_id,
+                vec,
+            });
+        }
 
         Ok(CorrectResult {
             correction_id: format!("cor_{}", new_id.as_uuid()),
@@ -1529,7 +1592,7 @@ impl MemoryStore for InMemoryStore {
         Ok(claimed)
     }
 
-    async fn complete_reflect_job(&self, id: JobId) -> Result<(), StoreError> {
+    async fn complete_reflect_job(&self, _tenant: TenantId, id: JobId) -> Result<(), StoreError> {
         let mut state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
         let meta = state.job_meta.entry(id).or_default();
         meta.completed = true;
@@ -1602,6 +1665,31 @@ impl MemoryStore for InMemoryStore {
             .entry(tenant)
             .or_default()
             .push(write.trace);
+
+        // Embedding write-through under the same lock as the units, admitted
+        // units only — mirrors the Postgres persist path.
+        if let Some(profile) = write.embedding_profile {
+            let rows: Vec<EmbeddingRow> = write
+                .embeddings
+                .into_iter()
+                .filter(|row| admitted_ids.contains(&row.memory_unit_id) && !row.vec.is_empty())
+                .collect();
+            if !rows.is_empty() {
+                let profile_id = profile.id;
+                let profiles = state.embedding_profiles.entry(tenant).or_default();
+                if !profiles.iter().any(|existing| existing.id == profile_id) {
+                    profiles.push(profile);
+                }
+                let stored = state.embeddings.entry(tenant).or_default();
+                for row in rows {
+                    stored.retain(|existing| {
+                        !(existing.memory_unit_id == row.memory_unit_id
+                            && existing.embedding_profile_id == row.embedding_profile_id)
+                    });
+                    stored.push(row);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1702,7 +1790,7 @@ where
         return Err(CoreError::EmptyBody);
     }
 
-    let mut tx = store.begin().await;
+    let mut tx = store.begin().await?;
     let outcome = store
         .stage_episode(
             &mut tx,
@@ -1748,7 +1836,7 @@ pub async fn retain_resource<S>(
 where
     S: MemoryStore,
 {
-    let mut tx = store.begin().await;
+    let mut tx = store.begin().await?;
     let resource_id = store
         .stage_resource(
             &mut tx,
@@ -1788,6 +1876,7 @@ where
 pub async fn correct_memory<S>(
     store: &S,
     request: CorrectRequest,
+    embedder: &dyn EmbeddingProvider,
     clock: &dyn Clock,
 ) -> Result<CorrectResult, CoreError>
 where
@@ -1799,6 +1888,23 @@ where
         ));
     }
 
+    // Embed the corrected body before the correction transaction (network I/O
+    // outside the DB lock) so the replacement unit is written into the vector
+    // channel atomically with its supersedes edge — mirrors reflect_recorded.
+    let embedding = if embedder.dimensions() > 0 {
+        embedder
+            .embed(std::slice::from_ref(&request.correction.value))
+            .map_err(|error| {
+                CoreError::Store(StoreError::Backend(format!("embedding failed: {error}")))
+            })?
+            .into_iter()
+            .next()
+            .filter(|vec| !vec.is_empty())
+            .map(|vec| (embedding_profile_for(embedder), vec))
+    } else {
+        None
+    };
+
     match store
         .apply_correction(
             request.tenant_id,
@@ -1808,6 +1914,7 @@ where
                 selector: request.selector,
                 correction: request.correction,
                 now: clock.now_rfc3339(),
+                embedding,
             },
         )
         .await
@@ -4881,12 +4988,15 @@ fn recall_feature_flags(request: &RecallRequest, vector_enabled: bool) -> Vec<St
     flags
 }
 
+/// Returns the trace plus the ids of the units this call newly created (in
+/// persistence order). A redelivery short-circuits on the idempotency marker
+/// and creates nothing, so its created-id list is empty.
 pub async fn reflect_recorded<S>(
     store: &S,
     input: ReflectInput,
     embedder: &dyn EmbeddingProvider,
     clock: &dyn Clock,
-) -> Result<ReflectTrace, CoreError>
+) -> Result<(ReflectTrace, Vec<UnitId>), CoreError>
 where
     S: MemoryStore,
 {
@@ -4894,12 +5004,16 @@ where
         .fetch_reflect_trace(input.tenant_id, input.job_id, &input.compiler_version)
         .await?
     {
-        return Ok(existing);
+        return Ok((existing, Vec::new()));
     }
 
     let now = clock.now_rfc3339();
+    // The write compiler dedups/supersedes against the WHOLE open scope — a
+    // bounded recall pool would silently miss aged units and let a duplicate
+    // subject collide with the open-subject unique index (spec: supersedence is
+    // by subject, not recency).
     let mut working = store
-        .fetch_recall_candidates(input.tenant_id, &[input.scope_id], &[], &[], usize::MAX)
+        .fetch_scope_open_units(input.tenant_id, input.scope_id)
         .await?;
     let originals: HashMap<UnitId, (UnitState, Option<String>)> = working
         .iter()
@@ -5114,6 +5228,7 @@ where
         .filter(|unit| new_ids.contains(&unit.id))
         .cloned()
         .collect();
+    let created_unit_ids: Vec<UnitId> = new_units.iter().map(|unit| unit.id).collect();
     let unit_updates: Vec<UnitUpdate> = working
         .iter()
         .filter(|unit| !new_ids.contains(&unit.id))
@@ -5129,25 +5244,14 @@ where
         })
         .collect();
 
-    store
-        .persist_compiled_units(
-            input.tenant_id,
-            CompiledWrite {
-                scope_id: input.scope_id,
-                job_id: input.job_id,
-                compiler_version: input.compiler_version,
-                new_units: new_units.clone(),
-                new_edges,
-                unit_updates,
-                trace: trace.clone(),
-            },
-        )
-        .await?;
-
-    // Embedding write-through: when a real provider is configured, newly
-    // compiled unit bodies are embedded and persisted under the provider's
-    // (idempotently seeded) embedding profile. Noop providers skip entirely.
-    if embedder.dimensions() > 0 && !new_units.is_empty() {
+    // Embedding write-through: embed the new unit bodies BEFORE the persist
+    // transaction (the provider call is network I/O and must not run inside a
+    // DB transaction), then hand the rows to `persist_compiled_units` so units,
+    // embeddings, and the idempotency marker all commit atomically. A failure
+    // here returns before any marker is written, so a retry recomputes cleanly
+    // instead of short-circuiting on a marker whose embeddings never landed.
+    // Noop providers (dimensions() == 0) skip entirely.
+    let (embedding_profile, embeddings) = if embedder.dimensions() > 0 && !new_units.is_empty() {
         let profile = embedding_profile_for(embedder);
         let bodies: Vec<String> = new_units.iter().map(|unit| unit.body.clone()).collect();
         let vectors = embedder
@@ -5163,14 +5267,32 @@ where
                 vec,
             })
             .collect();
-        if !rows.is_empty() {
-            store
-                .upsert_embedding_profile(input.tenant_id, profile)
-                .await?;
-            store.upsert_embeddings(input.tenant_id, rows).await?;
+        if rows.is_empty() {
+            (None, Vec::new())
+        } else {
+            (Some(profile), rows)
         }
-    }
-    Ok(trace)
+    } else {
+        (None, Vec::new())
+    };
+
+    store
+        .persist_compiled_units(
+            input.tenant_id,
+            CompiledWrite {
+                scope_id: input.scope_id,
+                job_id: input.job_id,
+                compiler_version: input.compiler_version,
+                new_units,
+                new_edges,
+                unit_updates,
+                trace: trace.clone(),
+                embedding_profile,
+                embeddings,
+            },
+        )
+        .await?;
+    Ok((trace, created_unit_ids))
 }
 
 fn has_explicit_subject(candidate: &memphant_types::ReflectCandidate) -> bool {

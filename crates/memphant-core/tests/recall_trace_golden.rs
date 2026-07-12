@@ -73,7 +73,7 @@ async fn dsr_decay_fold_promotes_reinforced_memory_over_ignored_stale_candidate(
     let scope_id = scope(71_001);
     let actor_id = actor(71_002);
 
-    let mut tx = store.begin().await;
+    let mut tx = store.begin().await.expect("begin transaction");
     let stale_id = store
         .stage_memory_unit(
             &mut tx,
@@ -226,7 +226,7 @@ async fn exhaustive_mode_gathers_buried_raw_episode_evidence_without_changing_fa
     let scope_id = scope(71_501);
     let actor_id = actor(71_502);
 
-    let mut tx = store.begin().await;
+    let mut tx = store.begin().await.expect("begin transaction");
     let decoy_episode = store
         .stage_episode(
             &mut tx,
@@ -410,7 +410,7 @@ async fn contextual_chunk_recall_finds_source_unit_and_traces_flag() {
     let scope_id = scope(72_001);
     let actor_id = actor(72_002);
 
-    let mut tx = store.begin().await;
+    let mut tx = store.begin().await.expect("begin transaction");
     let episode = store
         .stage_episode(
             &mut tx,
@@ -528,7 +528,7 @@ async fn servicenow_query_does_not_trigger_temporal_recency_match() {
     let scope_id = scope(73_001);
     let actor_id = actor(73_002);
 
-    let mut tx = store.begin().await;
+    let mut tx = store.begin().await.expect("begin transaction");
     let unit_id = store
         .stage_memory_unit(
             &mut tx,
@@ -595,7 +595,7 @@ async fn high_risk_action_query_drops_private_profile_context() {
     let scope_id = scope(73_101);
     let actor_id = actor(73_102);
 
-    let mut tx = store.begin().await;
+    let mut tx = store.begin().await.expect("begin transaction");
     let private_profile_id = store
         .stage_memory_unit(
             &mut tx,
@@ -735,7 +735,7 @@ async fn recall_drops_expired_validity_window_for_current_query() {
     let scope_id = scope(74_001);
     let actor_id = actor(74_002);
 
-    let mut tx = store.begin().await;
+    let mut tx = store.begin().await.expect("begin transaction");
     let stale_id = store
         .stage_memory_unit(
             &mut tx,
@@ -841,7 +841,7 @@ async fn edge_expansion_can_be_disabled_and_traces_related_candidates() {
     let scope_id = scope(75_001);
     let actor_id = actor(75_002);
 
-    let mut tx = store.begin().await;
+    let mut tx = store.begin().await.expect("begin transaction");
     let anchor_id = store
         .stage_memory_unit(
             &mut tx,
@@ -990,7 +990,7 @@ async fn packing_collapses_duplicate_decoys_and_preserves_answer_under_budget() 
     let scope_id = scope(76_001);
     let actor_id = actor(76_002);
 
-    let mut tx = store.begin().await;
+    let mut tx = store.begin().await.expect("begin transaction");
     let mut seeded = Vec::new();
     for index in 1..=4 {
         let unit_id = store
@@ -1112,7 +1112,7 @@ async fn packing_abstains_when_top_evidence_is_unresolved_contradiction() {
     let scope_id = scope(77_001);
     let actor_id = actor(77_002);
 
-    let mut tx = store.begin().await;
+    let mut tx = store.begin().await.expect("begin transaction");
     let old_id = store
         .stage_memory_unit(
             &mut tx,
@@ -1227,7 +1227,7 @@ async fn bounded_rerank_reorders_rank_sensitive_candidate_and_traces_decision() 
     let scope_id = scope(78_001);
     let actor_id = actor(78_002);
 
-    let mut tx = store.begin().await;
+    let mut tx = store.begin().await.expect("begin transaction");
     let decoy_id = store
         .stage_memory_unit(
             &mut tx,
@@ -1387,7 +1387,7 @@ async fn learned_rerank_profile_reorders_protected_topk_and_traces_training_set(
     let scope_id = scope(78_101);
     let actor_id = actor(78_102);
 
-    let mut tx = store.begin().await;
+    let mut tx = store.begin().await.expect("begin transaction");
     let decoy_id = store
         .stage_memory_unit(
             &mut tx,
@@ -1550,7 +1550,7 @@ async fn query_decomposition_recovers_composite_answer_and_traces_subqueries() {
     let scope_id = scope(79_001);
     let actor_id = actor(79_002);
 
-    let mut tx = store.begin().await;
+    let mut tx = store.begin().await.expect("begin transaction");
     let file_id = store
         .stage_memory_unit(
             &mut tx,
@@ -1817,7 +1817,7 @@ async fn procedural_memory_replays_only_validated_safe_procedures_and_traces_gat
     let scope_id = scope(82_001);
     let actor_id = actor(82_002);
 
-    let mut tx = store.begin().await;
+    let mut tx = store.begin().await.expect("begin transaction");
     let safe_id = store
         .stage_memory_unit(
             &mut tx,
@@ -2044,7 +2044,7 @@ async fn recall_golden_fixtures_pass() {
         let actor_id = actor(71_002);
         let mut named_units: HashMap<String, UnitId> = HashMap::new();
 
-        let mut tx = store.begin().await;
+        let mut tx = store.begin().await.expect("begin transaction");
         for unit in &case.seed.units {
             let unit_tenant_id = if unit.tenant == "other" {
                 other_tenant_id

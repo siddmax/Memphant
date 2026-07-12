@@ -27,9 +27,13 @@ transcript, not tool/user/web input per the source_kind taxonomy in spec
 `04`), ``source_trust="trusted_system"`` (an advisory hint, capped at the
 provisioned key's ceiling exactly like the docs runner).
 
-Isolation: a scratch database (default ``memphant_code_r0`` — NEVER the
-shared ``memphant``/``memphant_gate`` campaign DBs) and a freshly-minted
-tenant per run, matching ``gate_run_memphant.py``'s isolation contract.
+Isolation: each run re-execs itself through ``scripts/with_scratch_db.sh``
+(``gate_runtime.reexec_through_scratch_db``) onto a fresh, migrated, per-run
+scratch DB minted from ``--database-url`` (the campaign *base* server) and
+dropped on exit — even if killed — with a freshly-minted tenant inside it.
+No shared named DB, so the worker's global oldest-first job-claim can never
+touch or be starved by foreign ``job_state`` debris. Same isolation contract
+as ``gate_run_memphant.py``, the e2e probe, and the pg contract tests.
 
 Smoke mode (``--limit-attempts``): caps the number of ingested attempts for
 a tiny pass, but ALWAYS keeps every attempt referenced by the golden set's
@@ -40,6 +44,7 @@ never drop the gold" contract as the docs runner's ``--limit-haystack``.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -48,7 +53,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gate_common as gc  # noqa: E402
 import gate_runtime as gr  # noqa: E402
 
-DEFAULT_DATABASE_URL = "postgres://memphant:memphant@localhost:5432/memphant_code_r0"
+# Base campaign *server* url to mint the per-run scratch DB from (see
+# gate_runtime.reexec_through_scratch_db); the named DB in it is never touched.
+DEFAULT_BASE_DATABASE_URL = "postgres://memphant:memphant@localhost:5432/memphant"
 CORPUS_PATH = gc.MEMPHANT_ROOT / "benchmarks" / "data" / "coding_events_corpus.jsonl"
 GOLDEN_PATH = gc.MEMPHANT_ROOT / "benchmarks" / "data" / "coding_events_golden.jsonl"
 SCOPE_ID = "7c000000-0000-4000-8000-0000000000b1"
@@ -128,7 +135,11 @@ def main() -> int:
     import argparse
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--database-url", default=DEFAULT_DATABASE_URL)
+    parser.add_argument(
+        "--database-url", default=DEFAULT_BASE_DATABASE_URL,
+        help="base campaign SERVER url to mint the per-run scratch DB from; the "
+             "run uses a fresh ephemeral DB dropped on exit, never this one",
+    )
     parser.add_argument("--corpus", default=str(CORPUS_PATH))
     parser.add_argument("--golden", default=str(GOLDEN_PATH))
     parser.add_argument("--out-evidence", required=True)
@@ -151,6 +162,12 @@ def main() -> int:
     parser.add_argument("--worker-bin", default=str(gc.MEMPHANT_ROOT / "target/release/memphant-worker"))
     parser.add_argument("--cli-bin", default=str(gc.MEMPHANT_ROOT / "target/release/memphant-cli"))
     args = parser.parse_args()
+
+    # Re-exec through with_scratch_db.sh (unless already inside one): mints a
+    # fresh migrated DB, drops it on exit. args.database_url then points at that
+    # scratch DB for every downstream call (provision/server/worker/report).
+    gr.reexec_through_scratch_db(args.database_url)
+    args.database_url = os.environ["DATABASE_URL"]
 
     gr.check_embed_model_key(args.embed_model)
     label_prefix = f"[{args.label}] " if args.label else ""

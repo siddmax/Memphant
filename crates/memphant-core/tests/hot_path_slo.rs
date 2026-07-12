@@ -97,7 +97,7 @@ async fn seed_reference_corpus(
     scope_id: ScopeId,
     actor_id: ActorId,
 ) {
-    let mut tx = store.begin().await;
+    let mut tx = store.begin().await.expect("begin transaction");
     for index in 0..240 {
         let body = if index == 121 {
             "Atlas rollback release owner is platform on-call; cite runbook RB-77."

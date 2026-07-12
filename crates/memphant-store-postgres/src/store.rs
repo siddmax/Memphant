@@ -404,6 +404,58 @@ impl PgStore {
         Ok(())
     }
 
+    /// Idempotently seed an embedding profile inside a caller-owned tx.
+    async fn upsert_embedding_profile_tx(
+        tx: &mut Transaction<'static, Postgres>,
+        tenant: TenantId,
+        profile: &EmbeddingProfileRow,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "insert into memphant.embedding_profile
+               (id, tenant_id, provider, model, dimensions, distance, version, index_strategy)
+             values ($1, $2, $3, $4, $5, $6, $7, $8)
+             on conflict (tenant_id, id) do nothing",
+        )
+        .bind(profile.id)
+        .bind(tenant.as_uuid())
+        .bind(&profile.provider)
+        .bind(&profile.model)
+        .bind(profile.dimensions as i32)
+        .bind(&profile.distance)
+        .bind(&profile.version)
+        .bind(&profile.index_strategy)
+        .execute(&mut **tx)
+        .await
+        .map_err(backend)?;
+        Ok(())
+    }
+
+    /// Upsert one embedding row inside a caller-owned tx. Empty vectors are a
+    /// no-op so callers can pass unfiltered rows.
+    async fn insert_embedding_tx(
+        tx: &mut Transaction<'static, Postgres>,
+        tenant: TenantId,
+        row: &EmbeddingRow,
+    ) -> Result<(), StoreError> {
+        if row.vec.is_empty() {
+            return Ok(());
+        }
+        sqlx::query(
+            "insert into memphant.embedding (tenant_id, memory_unit_id, embedding_profile_id, vec)
+             values ($1, $2, $3, $4::halfvec)
+             on conflict (tenant_id, memory_unit_id, embedding_profile_id)
+               do update set vec = excluded.vec",
+        )
+        .bind(tenant.as_uuid())
+        .bind(row.memory_unit_id.as_uuid())
+        .bind(row.embedding_profile_id)
+        .bind(vec_literal(&row.vec))
+        .execute(&mut **tx)
+        .await
+        .map_err(backend)?;
+        Ok(())
+    }
+
     async fn fetch_units_where(
         &self,
         where_clause: &str,
@@ -461,10 +513,10 @@ impl PgStore {
 impl MemoryStore for PgStore {
     type Txn = PgTxn;
 
-    async fn begin(&self) -> Self::Txn {
-        PgTxn {
-            tx: self.pool.begin().await.expect("begin postgres transaction"),
-        }
+    async fn begin(&self) -> Result<Self::Txn, StoreError> {
+        Ok(PgTxn {
+            tx: self.pool.begin().await.map_err(backend)?,
+        })
     }
 
     async fn commit(&self, tx: Self::Txn) -> Result<(), StoreError> {
@@ -676,7 +728,10 @@ impl MemoryStore for PgStore {
                     &format!(
                         "{base} and body_tsv @@ websearch_to_tsquery('english', $4)"
                     ),
-                    "order by ts_rank_cd(body_tsv, websearch_to_tsquery('english', $4)) desc limit 200",
+                    // `, body` is a content-derived tie-break: keeps the top-200
+                    // cut deterministic when ts_rank ties, so a re-ingest with
+                    // fresh UUIDs ranks the same corpus identically.
+                    "order by ts_rank_cd(body_tsv, websearch_to_tsquery('english', $4)) desc, body limit 200",
                     vec![
                         Bind::Uuid(tenant.as_uuid()),
                         Bind::UuidVec(scope_uuids.clone()),
@@ -693,7 +748,7 @@ impl MemoryStore for PgStore {
             let fetched = self
                 .fetch_units_where(
                     &base.replace("scope_id = any($2)", "scope_id = $2"),
-                    "order by transaction_from desc limit 100",
+                    "order by transaction_from desc, body limit 100",
                     vec![
                         Bind::Uuid(tenant.as_uuid()),
                         Bind::Uuid(*scope),
@@ -713,7 +768,7 @@ impl MemoryStore for PgStore {
                          and exists (select 1 from unnest($4::text[]) term
                                      where memphant.memory_unit.subject_key ilike '%' || term || '%')"
                     ),
-                    "limit 200",
+                    "order by body limit 200",
                     vec![
                         Bind::Uuid(tenant.as_uuid()),
                         Bind::UuidVec(scope_uuids.clone()),
@@ -731,6 +786,23 @@ impl MemoryStore for PgStore {
 
         units.truncate(limit.min(1_000));
         Ok(units)
+    }
+
+    async fn fetch_scope_open_units(
+        &self,
+        tenant: TenantId,
+        scope: ScopeId,
+    ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
+        // ponytail: full-scope scan — the write compiler needs completeness, and
+        // it's index-backed (tenant_id, scope_id) filtered to open rows. If a
+        // scope ever grows large enough that per-write scans hurt, narrow to the
+        // incoming candidates' subject_keys (dedup/supersede only touch those).
+        self.fetch_units_where(
+            "tenant_id = $1 and scope_id = $2 and transaction_to is null",
+            "order by id",
+            vec![Bind::Uuid(tenant.as_uuid()), Bind::Uuid(scope.as_uuid())],
+        )
+        .await
     }
 
     async fn fetch_vector_candidates(
@@ -761,7 +833,7 @@ impl MemoryStore for PgStore {
                on embedding.tenant_id = $1
               and embedding.memory_unit_id = unit.id
               and embedding.embedding_profile_id = $5
-             order by embedding.vec <=> $4::halfvec limit {limit}",
+             order by embedding.vec <=> $4::halfvec, unit.body limit {limit}",
             inner = Self::unit_select(base, ""),
             limit = limit.min(1_000),
         );
@@ -899,7 +971,11 @@ impl MemoryStore for PgStore {
                     body, observation_count
              from memphant.episode
              where tenant_id = $1 and scope_id = $2 and deletion_generation is null
-             order by last_observed_at desc limit $3",
+             -- `dedup_key` breaks `last_observed_at` ties (identical for every
+             -- episode staged in one transaction, since it is now()) with a
+             -- total, content-derived key — unique per (tenant, scope) — so the
+             -- LIMIT cut selects the same episodes across a fresh-UUID re-ingest.
+             order by last_observed_at desc, dedup_key limit $3",
         )
         .bind(tenant.as_uuid())
         .bind(scope.as_uuid())
@@ -1010,8 +1086,15 @@ impl MemoryStore for PgStore {
     ) -> Result<CorrectOutcome, StoreError> {
         let mut tx = self.pool.begin().await.map_err(backend)?;
         let old_id = correction.selector.memory_unit_id;
+        // Only the OPEN generation is correctable (`transaction_to is null`).
+        // With the `for update` lock this makes a repeated (or concurrent)
+        // correction of the same id re-read the now-superseded row, fail the
+        // predicate, and return NotFound instead of minting a second live unit
+        // — the partial unique scope-subject index only masked this for
+        // `semantic` kinds; resource/belief/procedural had no guard.
         let sql = Self::unit_select(
-            "tenant_id = $1 and id = $2 and scope_id = $3 and state <> 'deleted'",
+            "tenant_id = $1 and id = $2 and scope_id = $3 and state <> 'deleted'
+             and transaction_to is null",
             "for update",
         );
         let row = sqlx::query(AssertSqlSafe(sql.as_str()))
@@ -1077,6 +1160,22 @@ impl MemoryStore for PgStore {
         .execute(&mut *tx)
         .await
         .map_err(backend)?;
+
+        // Embed the replacement unit in the SAME transaction as its supersedes
+        // edge so corrected truth is vector-visible at once (read-your-writes).
+        if let Some((profile, vec)) = &correction.embedding {
+            Self::upsert_embedding_profile_tx(&mut tx, tenant, profile).await?;
+            Self::insert_embedding_tx(
+                &mut tx,
+                tenant,
+                &EmbeddingRow {
+                    memory_unit_id: new_id,
+                    embedding_profile_id: profile.id,
+                    vec: vec.clone(),
+                },
+            )
+            .await?;
+        }
 
         tx.commit().await.map_err(backend)?;
         Ok(CorrectResult {
@@ -1321,29 +1420,66 @@ impl MemoryStore for PgStore {
         filter: JobFilter,
         limit: usize,
     ) -> Result<Vec<ReflectJobRow>, StoreError> {
-        // Dead-letter sweep first: exhausted jobs are never re-claimed.
+        // Dead-letter sweep first: exhausted jobs are never re-claimed. Scoped
+        // to the same filter as the claim below — a tenant-scoped reflect must
+        // not sweep other tenants' rows (only the background worker, which
+        // passes an empty filter, sweeps globally). Carrying tenant_id in the
+        // predicate also lets the scoped path use the tenant-leading index
+        // instead of seq-scanning job_state, and keeps the write inside the
+        // tenant boundary once a non-owner RLS role replaces the owner conn.
         sqlx::query(
             "update memphant.job_state set state = 'dead'
-             where state not in ('done', 'dead') and attempts >= 5",
+             where state not in ('done', 'dead') and attempts >= 5
+               and ($1::uuid is null or tenant_id = $1)
+               and ($2::uuid is null or scope_id = $2)",
         )
+        .bind(filter.tenant.map(|tenant| tenant.as_uuid()))
+        .bind(filter.scope.map(|scope| scope.as_uuid()))
         .execute(&self.pool)
         .await
         .map_err(backend)?;
 
+        // Per-tenant FAIR claiming (W1-b): rank each tenant's eligible jobs by
+        // age, then draw round-robin — every tenant's oldest before any tenant's
+        // second — so a large backlog can't starve a low-volume tenant. The
+        // `eligible` CTE does the `for update skip locked` row-marking (Postgres
+        // forbids a window function at the locking level, so ranking happens in
+        // the next CTE over its output). Disjointness across claims is unchanged:
+        // claimed rows flip to 'running' with a fresh `claimed_at`, excluded from
+        // the next claim's eligibility.
+        // ponytail: the lock scan covers ALL eligible rows per claim — fair
+        // selection needs every tenant's oldest visible, so it can't pre-`limit`
+        // by age (that re-buries the newest low-volume job). Fine for a
+        // background reflect queue; add a fairness-aware bound only if one
+        // tenant's live backlog ever gets pathologically large.
         let rows = sqlx::query(
-            "update memphant.job_state job
-             set state = 'running', claimed_at = now(), attempts = job.attempts + 1
-             where (job.tenant_id, job.id) in (
-               select tenant_id, id from memphant.job_state
+            "with eligible as (
+               select tenant_id, id, created_at
+               from memphant.job_state
                where state in ('queued', 'running') and attempts < 5
                  and run_after <= now()
                  and (claimed_at is null or claimed_at < now() - interval '5 minutes')
                  and ($1::uuid is null or tenant_id = $1)
                  and ($2::uuid is null or scope_id = $2)
                  and scope_id is not null
-               order by created_at
+               order by created_at, id
                for update skip locked
-               limit $3)
+             ),
+             ranked as (
+               select tenant_id, id, created_at,
+                      row_number() over (partition by tenant_id
+                                         order by created_at, id) as rn
+               from eligible
+             ),
+             claimed as (
+               select tenant_id, id from ranked
+               order by rn, created_at, id
+               limit $3
+             )
+             update memphant.job_state job
+             set state = 'running', claimed_at = now(), attempts = job.attempts + 1
+             from claimed
+             where job.tenant_id = claimed.tenant_id and job.id = claimed.id
              returning job.id, job.tenant_id, job.scope_id, job.job_type, job.target_id,
                        job.compiler_version, job.subject, job.predicate, job.attempts",
         )
@@ -1398,12 +1534,15 @@ impl MemoryStore for PgStore {
             .collect()
     }
 
-    async fn complete_reflect_job(&self, id: JobId) -> Result<(), StoreError> {
-        sqlx::query("update memphant.job_state set state = 'done' where id = $1")
-            .bind(id.as_uuid())
-            .execute(&self.pool)
-            .await
-            .map_err(backend)?;
+    async fn complete_reflect_job(&self, tenant: TenantId, id: JobId) -> Result<(), StoreError> {
+        sqlx::query(
+            "update memphant.job_state set state = 'done' where tenant_id = $1 and id = $2",
+        )
+        .bind(tenant.as_uuid())
+        .bind(id.as_uuid())
+        .execute(&self.pool)
+        .await
+        .map_err(backend)?;
         Ok(())
     }
 
@@ -1416,17 +1555,27 @@ impl MemoryStore for PgStore {
         Self::ensure_tenant(&mut tx, tenant).await?;
         Self::ensure_scope(&mut tx, tenant, write.scope_id).await?;
 
-        // Idempotency: one compilation per (job_id, compiler_version).
-        let already: Option<serde_json::Value> = sqlx::query_scalar(
+        // Idempotency: one compilation per (job_id, compiler_version). Lock the
+        // job_state row (`for update`) so a reclaimed re-compile serializes HERE
+        // rather than racing: a second writer blocks until the first commits,
+        // then sees `result` set and no-ops. Without the lock both writers pass
+        // this check at READ COMMITTED and each inserts — semantic units roll
+        // back on the partial unique scope-subject index, but resource-kind
+        // units have no such guard and would double-insert. The row may not
+        // exist yet (direct writes mint it below), so the lock is best-effort;
+        // that path is single-writer per job_id.
+        let already = sqlx::query_scalar::<_, Option<serde_json::Value>>(
             "select result from memphant.job_state
-             where tenant_id = $1 and id = $2 and compiler_version = $3 and result is not null",
+             where tenant_id = $1 and id = $2 and compiler_version = $3
+             for update",
         )
         .bind(tenant.as_uuid())
         .bind(write.job_id.as_uuid())
         .bind(&write.compiler_version)
         .fetch_optional(&mut *tx)
         .await
-        .map_err(backend)?;
+        .map_err(backend)?
+        .flatten();
         if already.is_some() {
             tx.commit().await.map_err(backend)?;
             return Ok(());
@@ -1558,6 +1707,24 @@ impl MemoryStore for PgStore {
             .map_err(backend)?;
         }
 
+        // Embedding write-through in the SAME transaction as the units they
+        // describe, for admitted units only (forgotten-source units were
+        // skipped above), so the vector channel can never reference a unit this
+        // write tombstoned out. Empty for noop providers.
+        if let Some(profile) = &write.embedding_profile {
+            let rows: Vec<&EmbeddingRow> = write
+                .embeddings
+                .iter()
+                .filter(|row| admitted_ids.contains(&row.memory_unit_id))
+                .collect();
+            if !rows.is_empty() {
+                Self::upsert_embedding_profile_tx(&mut tx, tenant, profile).await?;
+                for row in rows {
+                    Self::insert_embedding_tx(&mut tx, tenant, row).await?;
+                }
+            }
+        }
+
         tx.commit().await.map_err(backend)
     }
 
@@ -1592,23 +1759,8 @@ impl MemoryStore for PgStore {
             return Ok(());
         }
         let mut tx = self.pool.begin().await.map_err(backend)?;
-        for row in rows {
-            if row.vec.is_empty() {
-                continue;
-            }
-            sqlx::query(
-                "insert into memphant.embedding (tenant_id, memory_unit_id, embedding_profile_id, vec)
-                 values ($1, $2, $3, $4::halfvec)
-                 on conflict (tenant_id, memory_unit_id, embedding_profile_id)
-                   do update set vec = excluded.vec",
-            )
-            .bind(tenant.as_uuid())
-            .bind(row.memory_unit_id.as_uuid())
-            .bind(row.embedding_profile_id)
-            .bind(vec_literal(&row.vec))
-            .execute(&mut *tx)
-            .await
-            .map_err(backend)?;
+        for row in &rows {
+            Self::insert_embedding_tx(&mut tx, tenant, row).await?;
         }
         tx.commit().await.map_err(backend)
     }
@@ -1618,24 +1770,9 @@ impl MemoryStore for PgStore {
         tenant: TenantId,
         profile: EmbeddingProfileRow,
     ) -> Result<(), StoreError> {
-        sqlx::query(
-            "insert into memphant.embedding_profile
-               (id, tenant_id, provider, model, dimensions, distance, version, index_strategy)
-             values ($1, $2, $3, $4, $5, $6, $7, $8)
-             on conflict (tenant_id, id) do nothing",
-        )
-        .bind(profile.id)
-        .bind(tenant.as_uuid())
-        .bind(&profile.provider)
-        .bind(&profile.model)
-        .bind(profile.dimensions as i32)
-        .bind(&profile.distance)
-        .bind(&profile.version)
-        .bind(&profile.index_strategy)
-        .execute(&self.pool)
-        .await
-        .map_err(backend)?;
-        Ok(())
+        let mut tx = self.pool.begin().await.map_err(backend)?;
+        Self::upsert_embedding_profile_tx(&mut tx, tenant, &profile).await?;
+        tx.commit().await.map_err(backend)
     }
 
     async fn fetch_embeddings(

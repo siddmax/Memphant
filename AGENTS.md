@@ -35,10 +35,14 @@ cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets --all-features
 cargo test --doc
-# Live-Postgres contract + worker-binary smoke tests: #[ignore]d by default,
-# only run with MEMPHANT_TEST_DATABASE_URL set (never point this at a
-# database another process is using — migrate a scratch database first).
-MEMPHANT_TEST_DATABASE_URL=postgres://memphant:memphant@localhost:5432/memphant \
+# Live-Postgres contract + worker-binary smoke tests: #[ignore]d by default.
+# with_scratch_db.sh mints an ephemeral migrated database, points
+# MEMPHANT_TEST_DATABASE_URL at it, and drops it afterward — so these tests
+# never leave job_state/tenant debris in the shared campaign DB (the recurring
+# worker-starvation incident). The base URL is only used to reach the server
+# and create the scratch DB; the tests never touch `memphant` itself.
+bash scripts/with_scratch_db.sh postgres://memphant:memphant@localhost:5432/memphant \
+  MEMPHANT_TEST_DATABASE_URL \
   cargo test -p memphant-store-postgres -p memphant-worker -- --ignored --test-threads=1
 cargo run -p memphant-cli -- db lint --provider plain-postgres
 cargo run -p memphant-cli -- db lint --provider supabase
@@ -46,6 +50,9 @@ cargo run -p memphant-cli -- db lint --provider neon
 python3 scripts/apply_memphant_migrations.py --database-url postgres://memphant.invalid/memphant --dry-run
 # Real binaries + real Postgres end-to-end probe; requires a running
 # memphant-postgres-1 container (compose service `memphant-postgres`) on :5432.
+# The probe self-provisions an ephemeral scratch DB from this base URL and
+# drops it — it never touches the shared `memphant` DB, so foreign job debris
+# cannot starve it.
 DATABASE_URL=postgres://memphant:memphant@localhost:5432/memphant bash scripts/e2e_probe.sh
 ```
 

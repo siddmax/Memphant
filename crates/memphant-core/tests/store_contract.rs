@@ -139,7 +139,7 @@ async fn committed_transaction_publishes_staged_episode_and_unit() {
     let tenant_id = tenant(1);
     let scope_id = scope(2);
 
-    let mut tx = store.begin().await;
+    let mut tx = store.begin().await.expect("begin transaction");
     let episode = store
         .stage_episode(
             &mut tx,
@@ -198,7 +198,7 @@ async fn dropped_transaction_rolls_back_staged_rows() {
     let tenant_id = tenant(10);
 
     {
-        let mut tx = store.begin().await;
+        let mut tx = store.begin().await.expect("begin transaction");
         store
             .stage_episode(
                 &mut tx,
@@ -269,7 +269,7 @@ async fn candidates_fetch_respects_tenant_and_scope() {
         (tenant_a, scope_b, "Tenant A scope B fact."),
         (tenant_b, scope_a, "Tenant B scope A fact."),
     ] {
-        let mut tx = store.begin().await;
+        let mut tx = store.begin().await.expect("begin transaction");
         store
             .stage_memory_unit(
                 &mut tx,

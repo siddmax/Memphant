@@ -8,7 +8,11 @@ the Rust ``embedder_from_id`` grammar — both as an explicit constant and by
 scraping the grammar's match arms out of the Rust source, so the NEXT arm
 added to the grammar fails a test here until the map learns it — and
 (2) that both runner scripts genuinely share the one map object rather than
-carrying copies. No DB, no network, no server process.
+carrying copies. Also pins ``reexec_through_scratch_db`` — the shared scratch-DB
+isolation linchpin both runners call — since a broken recursion guard or a
+reordered helper invocation would silently un-isolate every bench run (or
+infinite-loop) with nothing else catching it. No DB, no network, no server
+process.
 """
 
 from __future__ import annotations
@@ -116,3 +120,45 @@ def test_check_embed_model_key_rejects_whitespace_only_key(grt, monkeypatch):
     monkeypatch.setenv("VOYAGE_API_KEY", "   ")
     with pytest.raises(RuntimeError, match="VOYAGE_API_KEY is not set"):
         grt.check_embed_model_key("voyage-4")
+
+
+def test_reexec_through_scratch_db_is_noop_when_already_active(grt, monkeypatch):
+    """The recursion guard: inside a scratch DB (``MEMPHANT_SCRATCH_ACTIVE``
+    set), the runner must NOT re-exec again — else `with_scratch_db.sh` nests
+    forever, minting a DB per level."""
+    monkeypatch.setenv("MEMPHANT_SCRATCH_ACTIVE", "1")
+    monkeypatch.setattr(grt.os, "execvp", lambda *a: pytest.fail(f"re-exec'd despite guard: {a}"))
+    grt.reexec_through_scratch_db("postgres://memphant:memphant@localhost:5432/memphant")
+
+
+def test_reexec_through_scratch_db_execs_through_helper(grt, monkeypatch):
+    """First entry re-execs the CURRENT argv through with_scratch_db.sh with
+    ENV_VAR=DATABASE_URL and the guard set, so the child mints/migrates/drops a
+    fresh DB and the runner continues against it. Pins the exact argv order the
+    helper's ``<base_url> <ENV_VAR> <cmd...>`` contract requires."""
+    monkeypatch.delenv("MEMPHANT_SCRATCH_ACTIVE", raising=False)
+    monkeypatch.setattr(grt.sys, "argv", ["scripts/gate_run_memphant.py", "--label", "x"])
+    captured = {}
+
+    def fake_execvp(file, argv):
+        captured["file"], captured["argv"] = file, argv
+        raise _Execed  # os.execvp never returns; stop the function here
+
+    monkeypatch.setattr(grt.os, "execvp", fake_execvp)
+    with pytest.raises(_Execed):
+        grt.reexec_through_scratch_db("postgres://memphant:memphant@localhost:5432/memphant")
+
+    assert captured["file"] == "bash"
+    argv = captured["argv"]
+    assert argv[0] == "bash"
+    assert argv[1] == str(ROOT / "scripts" / "with_scratch_db.sh")
+    assert argv[2] == "postgres://memphant:memphant@localhost:5432/memphant"  # base url
+    assert argv[3] == "DATABASE_URL"  # env var the scratch url lands in
+    assert argv[4] == grt.sys.executable
+    assert argv[5:] == ["scripts/gate_run_memphant.py", "--label", "x"]  # current argv, verbatim
+    # Guard set BEFORE exec so the re-exec'd child sees it and doesn't recurse.
+    assert grt.os.environ["MEMPHANT_SCRATCH_ACTIVE"] == "1"
+
+
+class _Execed(Exception):
+    """Sentinel: stands in for os.execvp replacing the process (never returns)."""

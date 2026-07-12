@@ -158,7 +158,7 @@ async fn write_compiler_golden_fixtures_pass() {
                 .cloned()
                 .unwrap_or_else(|| panic!("{} missing reflect job", case.id));
 
-            let trace = reflect_recorded(
+            let (trace, _) = reflect_recorded(
                 &store,
                 ReflectInput {
                     tenant_id,
@@ -312,14 +312,16 @@ async fn reflect_recorded_is_idempotent_for_duplicate_job_delivery() {
         }],
     };
 
-    let first = reflect_recorded(&store, input.clone(), &NoopEmbedding, &CLOCK)
+    let (first, first_ids) = reflect_recorded(&store, input.clone(), &NoopEmbedding, &CLOCK)
         .await
         .expect("first reflect succeeds");
-    let second = reflect_recorded(&store, input, &NoopEmbedding, &CLOCK)
+    let (second, second_ids) = reflect_recorded(&store, input, &NoopEmbedding, &CLOCK)
         .await
         .expect("redelivery reflect succeeds");
 
     assert_eq!(first, second);
+    assert_eq!(first_ids.len(), 1, "first reflect creates the unit");
+    assert!(second_ids.is_empty(), "redelivery creates nothing new");
     assert_eq!(store.memory_units(tenant_id).len(), 1);
     assert_eq!(store.reflect_traces(tenant_id).len(), 1);
 }
@@ -634,6 +636,7 @@ async fn correcting_source_expires_dependent_composed_belief() {
                 valid_to: None,
             },
         },
+        &NoopEmbedding,
         &CLOCK,
     )
     .await

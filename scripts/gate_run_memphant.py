@@ -17,10 +17,14 @@ into markdown sections (``gate_common``) and ingests each section as one
 resource (``kind=document``). Every golden's source section is in the haystack,
 so a perfect engine could hit @1.
 
-Isolation: runs against a FRESH database + a freshly-minted tenant. The default
-DATABASE_URL points at a dedicated ``memphant_gate`` database (NOT the shared
-campaign DB on the default ``memphant`` database) so the worker's global
-job-claim can never touch — or be starved by — campaign job debris.
+Isolation: each run re-execs itself through ``scripts/with_scratch_db.sh``
+(``gate_runtime.reexec_through_scratch_db``), so it operates on a fresh,
+migrated, per-run scratch DB minted from ``--database-url`` (the campaign
+*base* server, NOT a run DB) and dropped on exit — even if the bench is killed.
+A freshly-minted tenant lives in that ephemeral DB. No shared named DB means
+the worker's global oldest-first job-claim can never touch, or be starved by,
+another harness's ``job_state`` debris. Mirrors the e2e probe + pg contract
+tests, which already route through the same helper.
 
 R0 embedder bakeoff (T3): ``--embed-model <id>`` threads ``MEMPHANT_EMBEDDINGS``
 into BOTH the server and worker subprocess env, so one ingest can be scored
@@ -55,9 +59,16 @@ import gate_common as gc  # noqa: E402
 # centralized; pinned against the Rust `embedder_from_id` grammar by
 # tests/test_gate_runtime.py). Names re-exported here unchanged so main()'s
 # call site and any external reference keep working.
-from gate_runtime import API_KEY_ENV_BY_ARM, check_embed_model_key  # noqa: E402, F401
+from gate_runtime import (  # noqa: E402, F401
+    API_KEY_ENV_BY_ARM,
+    check_embed_model_key,
+    reexec_through_scratch_db,
+)
 
-DEFAULT_DATABASE_URL = "postgres://memphant:memphant@localhost:5432/memphant_gate"
+# Base campaign *server* URL to mint the per-run scratch DB from (with_scratch_db.sh
+# only uses it to reach the server + the admin `postgres` DB; the named DB in it is
+# never touched). The run itself uses a fresh ephemeral DB, never this one.
+DEFAULT_BASE_DATABASE_URL = "postgres://memphant:memphant@localhost:5432/memphant"
 DEFAULT_SYNDAI_ROOT = Path("/Users/sidsharma/Syndai")
 GOLDEN_PATH = gc.MEMPHANT_ROOT / "benchmarks" / "data" / "syndai_docs_golden.jsonl"
 SCOPE_ID = "7c000000-0000-4000-8000-0000000000a1"
@@ -314,7 +325,11 @@ def recall(client: ApiClient, question: str, k: int, budget_tokens: int, mode: s
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--database-url", default=DEFAULT_DATABASE_URL)
+    parser.add_argument(
+        "--database-url", default=DEFAULT_BASE_DATABASE_URL,
+        help="base campaign SERVER url to mint the per-run scratch DB from; the "
+             "run uses a fresh ephemeral DB dropped on exit, never this one",
+    )
     parser.add_argument("--syndai-root", default=str(DEFAULT_SYNDAI_ROOT))
     parser.add_argument(
         "--golden",
@@ -361,6 +376,12 @@ def main() -> int:
     parser.add_argument("--worker-bin", default=str(gc.MEMPHANT_ROOT / "target/debug/memphant-worker"))
     parser.add_argument("--cli-bin", default=str(gc.MEMPHANT_ROOT / "target/debug/memphant-cli"))
     args = parser.parse_args()
+
+    # Re-exec through with_scratch_db.sh (unless already inside one): mints a
+    # fresh migrated DB, drops it on exit. args.database_url then points at that
+    # scratch DB for every downstream call (provision/server/worker/report).
+    reexec_through_scratch_db(args.database_url)
+    args.database_url = os.environ["DATABASE_URL"]
 
     golden_paths = [Path(p) for p in (args.golden or [str(GOLDEN_PATH)])]
     if not (len(golden_paths) == len(args.out_evidence) == len(args.out_provenance)):

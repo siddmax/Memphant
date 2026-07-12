@@ -10,8 +10,8 @@ use memphant_core::{
     StubEmbedding, VECTOR_CANDIDATE_LIMIT, cosine_similarity, embedding_profile_for,
 };
 use memphant_types::{
-    ActorId, RecallChannel, RecallHttpRequest, RetainEpisodeHttpRequest, ScopeId, TenantId,
-    TrustLevel,
+    ActorId, CorrectRequest, CorrectSelector, CorrectionPayload, RecallChannel, RecallHttpRequest,
+    RetainEpisodeHttpRequest, ScopeId, TenantId, TrustLevel,
 };
 
 const CLOCK: FixedClock = FixedClock("2026-07-09T00:00:00Z");
@@ -502,5 +502,148 @@ async fn recall_embeds_query_via_embed_query_index_time_via_embed() {
     assert!(
         cosine_similarity(&query_vec_via_embed_query, &query_vec_via_embed) < 0.999,
         "fixture sanity: embed_query must diverge from embed for the test body"
+    );
+}
+
+/// A provider with real dimensions whose `embed` always fails, to exercise the
+/// embed-before-persist ordering.
+#[derive(Clone, Copy, Default)]
+struct FailingEmbedding;
+
+impl EmbeddingProvider for FailingEmbedding {
+    fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
+        Err(EmbedError::Unavailable("embedder down".to_string()))
+    }
+
+    fn dimensions(&self) -> usize {
+        32
+    }
+
+    fn id(&self) -> &str {
+        "test-failing"
+    }
+}
+
+/// #1 regression: the embedding write-through runs BEFORE the persist
+/// transaction, so a provider failure commits NOTHING — no compiled units, no
+/// embeddings, and no job-result idempotency marker. Before the fix, persist
+/// committed the units + marker and the later embed failed, so a retry
+/// short-circuited on the marker and the units stayed permanently unembedded.
+#[tokio::test]
+async fn failed_embedding_commits_nothing_from_reflect() {
+    let store = InMemoryStore::default();
+    let service = MemoryService::new(
+        Arc::new(store.clone()),
+        Arc::new(CLOCK),
+        Arc::new(FailingEmbedding),
+    );
+    let tenant = TenantId::new();
+    let scope = ScopeId::new();
+    let actor = ActorId::new();
+
+    service
+        .retain(
+            tenant,
+            retain_request(tenant, scope, actor, "Release region is Taipei."),
+        )
+        .await
+        .expect("retain");
+    let result = service.reflect(tenant, scope, None).await;
+    assert!(
+        result.is_err(),
+        "reflect surfaces the embedder failure instead of silently dropping the vector"
+    );
+
+    // Nothing from the compile committed: no units, hence no embeddings and no
+    // reflect trace for a retry to short-circuit on.
+    let page = store
+        .scope_memory_page(tenant, scope, None, 100)
+        .await
+        .expect("page");
+    assert!(
+        page.items.is_empty(),
+        "a failed embed leaves no compiled units behind (embed runs before persist)"
+    );
+}
+
+/// #2 regression: a correction embeds its replacement unit in the SAME
+/// transaction as the supersedes edge, so corrected truth is immediately
+/// vector-visible. Before the fix, `correct` wrote no embedding and enqueued no
+/// job, so the corrected unit was absent from the (inner-joined) vector channel.
+#[tokio::test]
+async fn correction_embeds_the_replacement_unit() {
+    let store = InMemoryStore::default();
+    let service = stub_service(store.clone());
+    let tenant = TenantId::new();
+    let scope = ScopeId::new();
+    let actor = ActorId::new();
+
+    service
+        .retain(
+            tenant,
+            retain_request(tenant, scope, actor, "Release region is Taipei."),
+        )
+        .await
+        .expect("retain");
+    service.reflect(tenant, scope, None).await.expect("reflect");
+    let page = store
+        .scope_memory_page(tenant, scope, None, 100)
+        .await
+        .expect("page");
+    let old_id = page.items[0].id;
+
+    let corrected = service
+        .correct(
+            tenant,
+            CorrectRequest {
+                tenant_id: tenant,
+                scope_id: scope,
+                actor_id: actor,
+                selector: CorrectSelector {
+                    memory_unit_id: old_id,
+                },
+                correction: CorrectionPayload {
+                    value: "Release region is Osaka.".to_string(),
+                    reason: "corrected_fact".to_string(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            },
+        )
+        .await
+        .expect("correct");
+    let new_id = corrected.created[0];
+
+    // The replacement carries a persisted embedding under the active profile.
+    let rows = store
+        .fetch_embeddings(tenant, &[new_id])
+        .await
+        .expect("embeddings");
+    assert!(
+        rows.iter().any(|row| row.memory_unit_id == new_id),
+        "the corrected unit is embedded, not left invisible to the vector channel"
+    );
+
+    // And it is genuinely vector-visible: the corrected body's query returns it.
+    let stub = StubEmbedding::default();
+    let profile = embedding_profile_for(&stub);
+    let query_vec = stub
+        .embed(&["Release region is Osaka.".to_string()])
+        .expect("embed query")
+        .remove(0);
+    let pairs = store
+        .fetch_vector_candidates(
+            tenant,
+            &[scope],
+            &[],
+            &query_vec,
+            profile.id,
+            VECTOR_CANDIDATE_LIMIT,
+        )
+        .await
+        .expect("vector candidates");
+    assert!(
+        pairs.iter().any(|(unit, _)| unit.id == new_id),
+        "the corrected unit appears in the vector channel"
     );
 }

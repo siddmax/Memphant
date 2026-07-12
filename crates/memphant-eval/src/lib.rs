@@ -2435,7 +2435,10 @@ async fn seed_store(
     let denied_scope_id = ScopeId::from_u128(90_011);
     let actor_id = ActorId::from_u128(90_020);
     let mut named_units = HashMap::new();
-    let mut tx = store.begin().await;
+    let mut tx = store
+        .begin()
+        .await
+        .map_err(|error| EvalError::Core(error.to_string()))?;
     for unit in &seed.units {
         if masked_units.contains(&unit.name) {
             continue;

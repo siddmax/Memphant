@@ -30,6 +30,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -261,6 +262,24 @@ class ApiClient:
                 if attempt == 2:
                     raise RuntimeError(f"{path} failed after retries: {error}")
         raise AssertionError("unreachable")
+
+
+def reexec_through_scratch_db(base_url: str) -> None:
+    """Re-exec this runner through ``scripts/with_scratch_db.sh`` so the bench
+    operates on a fresh, migrated, auto-dropped scratch DB minted from
+    ``base_url`` — never a shared named DB whose foreign ``job_state`` debris
+    could starve (or be starved by) the run's global oldest-first worker ticks.
+    Mirrors ``scripts/e2e_probe.sh``'s self re-exec: ``MEMPHANT_SCRATCH_ACTIVE``
+    guards the recursion (set it, with ``DATABASE_URL`` already on an isolated
+    DB, to skip). Returns (no-op) in the scratch-active child; in the parent it
+    never returns (``os.execvp`` replaces the process). The scratch URL reaches
+    the child as ``DATABASE_URL``; with_scratch_db.sh drops the DB on its EXIT
+    trap, so even a killed bench leaves no debris behind."""
+    if os.environ.get("MEMPHANT_SCRATCH_ACTIVE"):
+        return
+    helper = str(Path(__file__).resolve().parent / "with_scratch_db.sh")
+    os.environ["MEMPHANT_SCRATCH_ACTIVE"] = "1"
+    os.execvp("bash", ["bash", helper, base_url, "DATABASE_URL", sys.executable, *sys.argv])
 
 
 def drain_worker(worker_bin: str, database_url: str, embed_model: str | None = None, max_ticks: int = 4000) -> int:

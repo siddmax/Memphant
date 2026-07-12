@@ -69,19 +69,22 @@ create unique index memphant_memory_unit_scope_subject_idx
 -- (trace_id, caller_id, used_ids, outcome).
 drop table memphant.review_event;
 create table if not exists memphant.review_event (
-  id uuid primary key default gen_random_uuid(),
+  id uuid not null default gen_random_uuid(),
   tenant_id uuid not null references memphant.tenant(id),
   trace_id uuid not null,
   caller_id text not null,
   outcome text not null check (outcome in ('success','failure','corrected','ignored')),
   created_at timestamptz not null default now(),
+  primary key (tenant_id, id),
   unique (trace_id, caller_id)
 );
 create table if not exists memphant.review_event_unit (
-  review_event_id uuid not null references memphant.review_event(id) on delete cascade,
+  review_event_id uuid not null,
   tenant_id uuid not null,
   memory_unit_id uuid not null,
   primary key (review_event_id, memory_unit_id),
+  foreign key (tenant_id, review_event_id)
+    references memphant.review_event(tenant_id, id) on delete cascade,
   foreign key (tenant_id, memory_unit_id) references memphant.memory_unit(tenant_id, id)
 );
 alter table memphant.review_event enable row level security;

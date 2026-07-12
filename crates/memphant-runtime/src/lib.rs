@@ -238,11 +238,11 @@ macro_rules! delegate {
 impl MemoryStore for AnyStore {
     type Txn = AnyTxn;
 
-    async fn begin(&self) -> Self::Txn {
-        match self {
-            Self::Mem(store) => AnyTxn::Mem(store.begin().await),
-            Self::Pg(store) => AnyTxn::Pg(store.begin().await),
-        }
+    async fn begin(&self) -> Result<Self::Txn, StoreError> {
+        Ok(match self {
+            Self::Mem(store) => AnyTxn::Mem(store.begin().await?),
+            Self::Pg(store) => AnyTxn::Pg(store.begin().await?),
+        })
     }
 
     async fn commit(&self, tx: Self::Txn) -> Result<(), StoreError> {
@@ -324,6 +324,14 @@ impl MemoryStore for AnyStore {
         delegate!(self, store => store
             .fetch_recall_candidates(tenant, scopes, kinds, query_terms, limit)
             .await)
+    }
+
+    async fn fetch_scope_open_units(
+        &self,
+        tenant: TenantId,
+        scope: ScopeId,
+    ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
+        delegate!(self, store => store.fetch_scope_open_units(tenant, scope).await)
     }
 
     async fn fetch_vector_candidates(
@@ -451,8 +459,8 @@ impl MemoryStore for AnyStore {
         delegate!(self, store => store.claim_reflect_jobs(filter, limit).await)
     }
 
-    async fn complete_reflect_job(&self, id: JobId) -> Result<(), StoreError> {
-        delegate!(self, store => store.complete_reflect_job(id).await)
+    async fn complete_reflect_job(&self, tenant: TenantId, id: JobId) -> Result<(), StoreError> {
+        delegate!(self, store => store.complete_reflect_job(tenant, id).await)
     }
 
     async fn persist_compiled_units(

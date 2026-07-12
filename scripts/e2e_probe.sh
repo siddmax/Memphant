@@ -9,10 +9,28 @@
 # Usage: DATABASE_URL=postgres://memphant:memphant@localhost:5432/memphant \
 #          bash scripts/e2e_probe.sh
 # Exits non-zero on the first failed assertion, printing the transcript.
+#
+# DATABASE_URL is the *base* campaign server; the probe runs against an
+# ephemeral scratch database minted from it (created, migrated, and dropped
+# here), NEVER the shared `memphant` DB directly. That isolation is what makes
+# the probe immune to foreign job_state debris: the worker's global claim is
+# oldest-first across all tenants, so debris from the contract tests or a
+# killed bench in a shared DB would starve the probe's fresh job on a single
+# tick. An ephemeral DB has no foreign rows, so it cannot be starved.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DATABASE_URL="${DATABASE_URL:-postgres://memphant:memphant@localhost:5432/memphant}"
+
+# Re-exec once through the scratch-DB helper (which points DATABASE_URL at a
+# fresh migrated DB and drops it on exit). MEMPHANT_SCRATCH_ACTIVE guards the
+# recursion; set it to run the probe against DATABASE_URL as-is (e.g. an
+# already-isolated DB).
+if [ -z "${MEMPHANT_SCRATCH_ACTIVE:-}" ]; then
+  exec env MEMPHANT_SCRATCH_ACTIVE=1 \
+    bash "$ROOT/scripts/with_scratch_db.sh" "$DATABASE_URL" DATABASE_URL \
+    bash "$ROOT/scripts/$(basename "$0")"
+fi
 PORT="${MEMPHANT_PROBE_PORT:-39411}"
 BASE="http://127.0.0.1:${PORT}"
 SERVER="$ROOT/target/debug/memphant-server"

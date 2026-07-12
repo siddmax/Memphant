@@ -10,13 +10,14 @@ use std::sync::Arc;
 
 use memphant_core::service::MemoryService;
 use memphant_core::{
-    FixedClock, JobFilter, MemoryStore, NoopEmbedding, forget_memory, recall, retain_episode,
-    retain_resource,
+    FixedClock, JobFilter, MemoryStore, NoopEmbedding, forget_memory, recall, reflect_recorded,
+    retain_episode, retain_resource,
 };
 use memphant_store_postgres::PgStore;
 use memphant_types::{
-    ActorId, ForgetRequest, ForgetSelector, MemoryKind, RecallHttpRequest, RecallMode,
-    RecallRequest, RetainRequest, RetainResourceRequest, ScopeId, TenantId, TrustLevel,
+    ActorId, ForgetRequest, ForgetSelector, JobId, MemoryKind, RecallHttpRequest, RecallMode,
+    RecallRequest, ReflectCandidate, ReflectInput, RetainEpisodeHttpRequest, RetainRequest,
+    RetainResourceRequest, RetainUnitPayload, ScopeId, TenantId, TrustLevel,
 };
 use uuid::Uuid;
 
@@ -298,6 +299,76 @@ async fn exhausted_jobs_dead_letter_and_surface_in_count() {
     .expect("dead count");
     assert!(dead >= 1);
     assert!(store.dead_letter_count().await.expect("dead letters") >= 1);
+}
+
+/// A tenant-scoped claim must dead-letter only its own exhausted jobs, never
+/// another tenant's. Regression guard for the sweep that used to run globally
+/// on every claim — it crossed the tenant boundary (tenant A's foreground
+/// reflect wrote tenant B's rows) and seq-scanned job_state on the hot path.
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn dead_letter_sweep_stays_within_the_claim_filter() {
+    let store = connect().await;
+    let tenant_a = fresh_tenant(&store).await;
+    let tenant_b = fresh_tenant(&store).await;
+    let scope_a = ScopeId::new();
+    let scope_b = ScopeId::new();
+    let actor = ActorId::new();
+
+    retain_episode(
+        &store,
+        retain_request(tenant_a, scope_a, actor, "A fact.", None),
+    )
+    .await
+    .expect("retain A");
+    retain_episode(
+        &store,
+        retain_request(tenant_b, scope_b, actor, "B fact.", None),
+    )
+    .await
+    .expect("retain B");
+
+    // Exhaust BOTH tenants' jobs, then run a claim scoped to A only.
+    sqlx::query("update memphant.job_state set attempts = 5 where tenant_id = any($1)")
+        .bind(vec![tenant_a.as_uuid(), tenant_b.as_uuid()])
+        .execute(store.pool())
+        .await
+        .expect("exhaust attempts");
+
+    store
+        .claim_reflect_jobs(
+            JobFilter {
+                tenant: Some(tenant_a),
+                scope: Some(scope_a),
+            },
+            10,
+        )
+        .await
+        .expect("claim A");
+
+    let a_dead: i64 = sqlx::query_scalar(
+        "select count(*) from memphant.job_state where tenant_id = $1 and state = 'dead'",
+    )
+    .bind(tenant_a.as_uuid())
+    .fetch_one(store.pool())
+    .await
+    .expect("A dead count");
+    let b_dead: i64 = sqlx::query_scalar(
+        "select count(*) from memphant.job_state where tenant_id = $1 and state = 'dead'",
+    )
+    .bind(tenant_b.as_uuid())
+    .fetch_one(store.pool())
+    .await
+    .expect("B dead count");
+
+    assert!(
+        a_dead >= 1,
+        "A's exhausted job dead-letters on A's own claim"
+    );
+    assert_eq!(
+        b_dead, 0,
+        "B's job must NOT dead-letter from A's tenant-scoped claim"
+    );
 }
 
 #[tokio::test]
@@ -672,29 +743,22 @@ async fn contextual_chunks_round_trip_through_postgres_via_fresh_pool() {
 }
 
 /// Multi-tenant job-claim fairness (plan addendum W1-b): `claim_reflect_jobs`
-/// orders strictly by `created_at` with no per-tenant partitioning
-/// (`crates/memphant-store-postgres/src/store.rs::claim_reflect_jobs`, the
-/// `order by created_at ... limit $3` clause). A tenant with a large backlog
-/// starves out a tenant with a single, more urgent job for as many claim
-/// batches as it takes to drain the backlog. This is the exact gap that
-/// produced the orphaned-backlog e2e failure named in the research audit
-/// (scratchpad/research/tests-audit.md, gap 3).
+/// claims per-tenant round-robin — each tenant's eligible jobs are ranked by
+/// age (`row_number() over (partition by tenant_id order by created_at)`) and
+/// the batch draws every tenant's oldest before any tenant's second
+/// (`crates/memphant-store-postgres/src/store.rs::claim_reflect_jobs`). A tenant
+/// with a large backlog can therefore no longer starve a low-volume tenant's
+/// single, more urgent job — the exact gap that produced the orphaned-backlog
+/// e2e failure named in the research audit (scratchpad/research/tests-audit.md,
+/// gap 3).
 ///
-/// CONFIRMED red baseline, pinned on purpose. Every test in this file is
-/// `#[ignore]`d by the file's own convention (gated on
-/// `MEMPHANT_TEST_DATABASE_URL`, opted into via `cargo test -- --ignored`),
-/// so an ordinary `#[ignore]` on just this test would NOT remove it from
-/// that same `--ignored` sweep — it would still run, and still fail, every
-/// time the documented gate runs. Per the W1 brief this task does NOT
-/// change claim logic, so instead of leaving a permanently-failing test in
-/// the gate, this test asserts TODAY'S observed (buggy) behavior: a single
-/// claim batch of 16 never includes tenant B's job while tenant A has a
-/// 50-job backlog created first. THIS ASSERTION MUST FLIP (to require
-/// tenant B's job IS claimed) the moment a per-tenant fairness fix lands —
-/// a flip to green on that line is the fix's proof.
+/// This is the GREEN assertion that flipped the former `_red_baseline`: tenant A
+/// floods a 50-job backlog created first, tenant B queues one job strictly
+/// after, and a single worker batch of 16 MUST include tenant B's job (it lands
+/// at round-robin position 2, right behind tenant A's oldest).
 #[tokio::test]
 #[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
-async fn multi_tenant_claim_batch_starves_the_low_volume_tenant_red_baseline() {
+async fn multi_tenant_claim_batch_does_not_starve_the_low_volume_tenant() {
     let store = connect().await;
     let tenant_a = fresh_tenant(&store).await;
     let tenant_b = fresh_tenant(&store).await;
@@ -741,12 +805,12 @@ async fn multi_tenant_claim_batch_starves_the_low_volume_tenant_red_baseline() {
         .await
         .expect("claim");
 
+    assert_eq!(claimed.len(), WORKER_BATCH, "a full batch is claimed");
     assert!(
-        !claimed.iter().any(|row| row.job.tenant_id == tenant_b),
-        "RED BASELINE FLIPPED: tenant B's job was claimed even though tenant A \
-         had a 50-job head-start backlog — a per-tenant fairness fix appears to \
-         have landed; flip this assertion to require inclusion (see the doc \
-         comment above) and rename the test to drop '_red_baseline'"
+        claimed.iter().any(|row| row.job.tenant_id == tenant_b),
+        "tenant B's single job must be claimed in the first batch despite tenant \
+         A's 50-job head-start backlog — per-tenant fair claiming interleaves by \
+         age rank, so B lands right behind A's oldest job"
     );
 }
 
@@ -940,4 +1004,399 @@ async fn vector_candidates_filter_by_embedding_profile() {
             .any(|(candidate, _)| candidate.id == unit),
         "unit is reachable under the cross profile via its 4-dim embedding"
     );
+}
+
+/// R0 determinism guard: re-ingesting the same corpus into a fresh tenant mints
+/// new UUIDs, so any recall ordering point that breaks ties by insertion/heap
+/// order reshuffles run-to-run (the measured ±1-question docs-gate variance).
+/// The corpus is three token-PERMUTATIONS of the same words: distinct bodies
+/// (distinct dedup keys — `normalize_component` preserves word order) but an
+/// identical `StubEmbedding` vector, so they TIE exactly on vector distance.
+/// Ingested in NON-body order, a tie-cut that fell back to insertion/uuid order
+/// would diverge from the content order. The `<=>, unit.body` tie-break instead
+/// pins the vector candidates to body order, and the whole recall-candidate
+/// ordering is then identical across two independently-UUID'd tenants.
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn recall_ordering_is_content_stable_across_reingest() {
+    use memphant_core::{
+        EmbeddingProvider, StubEmbedding, VECTOR_CANDIDATE_LIMIT, embedding_profile_for,
+    };
+
+    // Inserted top-to-bottom; sorts bottom-to-top by body — insertion order is
+    // the reverse of the content order the tie-break must produce.
+    const CORPUS: [&str; 3] = [
+        "region alpha bravo",
+        "bravo region alpha",
+        "alpha bravo region",
+    ];
+    let mut sorted_bodies: Vec<String> = CORPUS.iter().map(|s| s.to_string()).collect();
+    sorted_bodies.sort();
+
+    let store = connect().await;
+    let stub = StubEmbedding::default();
+    let profile = embedding_profile_for(&stub);
+    let query_vec = stub
+        .embed(&["region".to_string()])
+        .expect("embed query")
+        .remove(0);
+
+    let only_corpus = |bodies: Vec<String>| -> Vec<String> {
+        bodies
+            .into_iter()
+            .filter(|b| CORPUS.contains(&b.as_str()))
+            .collect()
+    };
+
+    let mut per_tenant = Vec::new();
+    for _ in 0..2 {
+        let tenant = fresh_tenant(&store).await;
+        let scope = ScopeId::new();
+        let actor = ActorId::new();
+        let svc = MemoryService::new(Arc::new(store.clone()), Arc::new(CLOCK), Arc::new(stub));
+        for body in CORPUS {
+            retain_episode(
+                svc.store(),
+                retain_request(tenant, scope, actor, body, None),
+            )
+            .await
+            .expect("retain");
+        }
+        svc.reflect(tenant, scope, None).await.expect("reflect");
+
+        let vector_bodies = only_corpus(
+            store
+                .fetch_vector_candidates(
+                    tenant,
+                    &[scope],
+                    &[],
+                    &query_vec,
+                    profile.id,
+                    VECTOR_CANDIDATE_LIMIT,
+                )
+                .await
+                .expect("vector candidates")
+                .into_iter()
+                .map(|(unit, _)| unit.body)
+                .collect(),
+        );
+        assert_eq!(
+            vector_bodies, sorted_bodies,
+            "tied vector candidates must order by body, not insertion/uuid order"
+        );
+
+        let recall_bodies = only_corpus(
+            store
+                .fetch_recall_candidates(tenant, &[scope], &[], &["region".to_string()], 100)
+                .await
+                .expect("recall candidates")
+                .into_iter()
+                .map(|unit| unit.body)
+                .collect(),
+        );
+        per_tenant.push((vector_bodies, recall_bodies));
+    }
+
+    assert_eq!(
+        per_tenant[0], per_tenant[1],
+        "identical corpus recalls in identical order across a fresh-UUID re-ingest"
+    );
+}
+
+/// Sibling of the recall-ordering guard, for the degraded read-your-own-writes
+/// path: `fetch_episodes_for_scope` orders by `last_observed_at desc` and cuts
+/// at LIMIT. Every episode staged in one transaction shares `last_observed_at`
+/// (it is `now()`), so the recency key ties and the LIMIT boundary is decided
+/// by the `dedup_key` tie-break — a total, content-derived order. Without it the
+/// cut follows physical/insertion order and a fresh-UUID re-ingest surfaces a
+/// different subset as degraded citations.
+///
+/// The two tenants ingest the SAME corpus in OPPOSITE orders and then have every
+/// episode's `last_observed_at` collapsed to one instant: pre-fix the tied cut
+/// tracks insertion order and the two disagree; the content tie-break makes them
+/// agree. This is what makes the assertion a real guard rather than a
+/// coincidental pass.
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn episode_scope_cut_is_content_stable_across_reingest() {
+    const CORPUS: [&str; 5] = [
+        "Episode fact alpha.",
+        "Episode fact bravo.",
+        "Episode fact charlie.",
+        "Episode fact delta.",
+        "Episode fact echo.",
+    ];
+    let store = connect().await;
+
+    let mut per_tenant = Vec::new();
+    for order in [[0, 1, 2, 3, 4], [4, 3, 2, 1, 0]] {
+        let tenant = fresh_tenant(&store).await;
+        let scope = ScopeId::new();
+        let actor = ActorId::new();
+        for index in order {
+            retain_episode(
+                &store,
+                retain_request(tenant, scope, actor, CORPUS[index], None),
+            )
+            .await
+            .expect("retain episode");
+        }
+        // Collapse every episode onto one `last_observed_at` in a single
+        // statement (all rows get the same `now()`), forcing the recency tie the
+        // content key must resolve.
+        sqlx::query("update memphant.episode set last_observed_at = now() where tenant_id = $1")
+            .bind(tenant.as_uuid())
+            .execute(store.pool())
+            .await
+            .expect("collapse last_observed_at");
+
+        let bodies: Vec<String> = store
+            .fetch_episodes_for_scope(tenant, scope, 3)
+            .await
+            .expect("fetch episodes")
+            .into_iter()
+            .map(|episode| episode.body)
+            .collect();
+        per_tenant.push(bodies);
+    }
+
+    assert_eq!(per_tenant[0].len(), 3, "the cut returns the limit");
+    assert_eq!(
+        per_tenant[0], per_tenant[1],
+        "the recency LIMIT cut must be content-stable regardless of ingest order / fresh UUIDs"
+    );
+}
+
+/// Regression: a direct-unit retain into a scope with >1000 pre-existing units
+/// must return the just-created unit's id. The response id used to be recovered
+/// via `scope_memory_page`, which clamps to 1000 rows ordered by id, so a fresh
+/// (larger) unit id fell off the page and `unit_ids` came back empty. The id now
+/// comes straight from `reflect_recorded`, independent of scope size.
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn direct_unit_retain_returns_unit_id_past_scope_page_clamp() {
+    let store = connect().await;
+    let tenant = fresh_tenant(&store).await;
+    let scope = ScopeId::new();
+    let actor = ActorId::new();
+
+    // Seed 1001 units in one reflect so the scope exceeds the 1000-row clamp.
+    let candidates: Vec<ReflectCandidate> = (0..1001)
+        .map(|i| ReflectCandidate {
+            source_kind: "user".to_string(),
+            trust_level: TrustLevel::TrustedUser,
+            actor_id: actor,
+            subject: Some(format!("seed-subject-{i}")),
+            predicate: Some("is".to_string()),
+            kind: Some(MemoryKind::Semantic),
+            body: format!("seed fact number {i} about widgets"),
+            churn_class: None,
+            admission_hint: None,
+            contextual_chunks: Vec::new(),
+            valid_from: None,
+            valid_to: None,
+        })
+        .collect();
+    reflect_recorded(
+        &store,
+        ReflectInput {
+            tenant_id: tenant,
+            scope_id: scope,
+            actor_id: actor,
+            episode_id: None,
+            resource_id: None,
+            job_id: JobId::new(),
+            compiler_version: "compiler-pg-seed".to_string(),
+            candidates,
+        },
+        &NoopEmbedding,
+        &CLOCK,
+    )
+    .await
+    .expect("seed reflect succeeds");
+
+    // `has_more` past the 1000-row page clamp proves the scope is oversized.
+    let seeded = store
+        .scope_memory_page(tenant, scope, None, usize::MAX)
+        .await
+        .expect("count seeded units");
+    assert!(
+        seeded.has_more,
+        "scope must exceed the 1000-row page clamp, got {}",
+        seeded.items.len()
+    );
+
+    let direct_body = "direct unit past the clamp".to_string();
+    let response = service(store)
+        .retain(
+            tenant,
+            RetainEpisodeHttpRequest {
+                tenant_id: tenant,
+                scope_id: scope,
+                actor_id: actor,
+                source_kind: "user".to_string(),
+                source_trust: TrustLevel::TrustedUser,
+                subject_hint: None,
+                subject: None,
+                predicate: None,
+                body: None,
+                resource: None,
+                unit: Some(RetainUnitPayload {
+                    kind: MemoryKind::Semantic,
+                    subject: "direct-subject".to_string(),
+                    predicate: "records".to_string(),
+                    body: direct_body.clone(),
+                    churn_class: None,
+                }),
+                compiler_version: Some("compiler-pg-seed".to_string()),
+            },
+        )
+        .await
+        .expect("direct unit retain succeeds");
+
+    assert!(
+        !response.unit_ids.is_empty(),
+        "response must surface the created unit id regardless of scope size"
+    );
+    let store = connect().await;
+    let resolved = store
+        .fetch_units_by_ids(tenant, &response.unit_ids)
+        .await
+        .expect("resolve returned unit ids");
+    assert!(
+        resolved.iter().any(|unit| unit.body == direct_body),
+        "a returned id must resolve to the just-created direct unit"
+    );
+}
+
+/// Regression: the write compiler must supersede against the WHOLE scope, not a
+/// recency-bounded slice. `reflect_recorded` loads its working set as "all open
+/// units in the scope"; when that load was served by `fetch_recall_candidates`
+/// (a ranked recall pool that PgStore caps at the 100 most-recent units), a
+/// prior semantic unit that had aged past the window was invisible — so a
+/// high-trust update failed to supersede it and instead tried to insert a second
+/// open unit on the same `subject_key`, violating the scope-subject unique index
+/// and hard-failing the write. Only PgStore reproduced it (the in-memory store
+/// returns the full scope), so it was invisible to every in-memory test.
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn semantic_update_supersedes_a_unit_aged_past_the_recall_window() {
+    const OLD_CLOCK: FixedClock = FixedClock("2026-07-01T00:00:00Z");
+    let store = connect().await;
+    let tenant = fresh_tenant(&store).await;
+    let scope = ScopeId::new();
+    let actor = ActorId::new();
+
+    // The target unit, written oldest so recency-ordering buries it.
+    reflect_recorded(
+        &store,
+        ReflectInput {
+            tenant_id: tenant,
+            scope_id: scope,
+            actor_id: actor,
+            episode_id: None,
+            resource_id: None,
+            job_id: JobId::new(),
+            compiler_version: "compiler-pg-supersede".to_string(),
+            candidates: vec![ReflectCandidate {
+                source_kind: "user".to_string(),
+                trust_level: TrustLevel::TrustedUser,
+                actor_id: actor,
+                subject: Some("role".to_string()),
+                predicate: Some("is".to_string()),
+                kind: Some(MemoryKind::Semantic),
+                body: "the user is an admin".to_string(),
+                churn_class: None,
+                admission_hint: None,
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+            }],
+        },
+        &NoopEmbedding,
+        &OLD_CLOCK,
+    )
+    .await
+    .expect("seed target unit");
+
+    // 105 newer unrelated units push the target out of the most-recent-100.
+    let fillers: Vec<ReflectCandidate> = (0..105)
+        .map(|i| ReflectCandidate {
+            source_kind: "user".to_string(),
+            trust_level: TrustLevel::TrustedUser,
+            actor_id: actor,
+            subject: Some(format!("filler-{i}")),
+            predicate: Some("is".to_string()),
+            kind: Some(MemoryKind::Semantic),
+            body: format!("filler fact number {i} about widgets"),
+            churn_class: None,
+            admission_hint: None,
+            contextual_chunks: Vec::new(),
+            valid_from: None,
+            valid_to: None,
+        })
+        .collect();
+    reflect_recorded(
+        &store,
+        ReflectInput {
+            tenant_id: tenant,
+            scope_id: scope,
+            actor_id: actor,
+            episode_id: None,
+            resource_id: None,
+            job_id: JobId::new(),
+            compiler_version: "compiler-pg-supersede".to_string(),
+            candidates: fillers,
+        },
+        &NoopEmbedding,
+        &CLOCK,
+    )
+    .await
+    .expect("seed fillers");
+
+    // Update the same subject/predicate: must supersede the aged unit, not
+    // collide with it on the scope-subject unique index.
+    service(store)
+        .retain(
+            tenant,
+            RetainEpisodeHttpRequest {
+                tenant_id: tenant,
+                scope_id: scope,
+                actor_id: actor,
+                source_kind: "user".to_string(),
+                source_trust: TrustLevel::TrustedUser,
+                subject_hint: None,
+                subject: None,
+                predicate: None,
+                body: None,
+                resource: None,
+                unit: Some(RetainUnitPayload {
+                    kind: MemoryKind::Semantic,
+                    subject: "role".to_string(),
+                    predicate: "is".to_string(),
+                    body: "the user is a developer".to_string(),
+                    churn_class: None,
+                }),
+                compiler_version: Some("compiler-pg-supersede".to_string()),
+            },
+        )
+        .await
+        .expect("update must supersede the aged unit, not fail on a duplicate subject");
+
+    // Exactly one OPEN semantic unit remains for the subject, carrying the new
+    // value; the old one is closed (superseded).
+    let store = connect().await;
+    let open: Vec<_> = store
+        .fetch_scope_open_units(tenant, scope)
+        .await
+        .expect("fetch open units")
+        .into_iter()
+        .filter(|unit| unit.body.contains("the user is"))
+        .collect();
+    assert_eq!(
+        open.len(),
+        1,
+        "the aged unit must be superseded, leaving one open value"
+    );
+    assert_eq!(open[0].body, "the user is a developer");
 }

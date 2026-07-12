@@ -12,7 +12,7 @@ use memphant_types::{
     COMPILER_VERSION, ContextualChunk, CorrectRequest, CorrectResult, ENGINE_VERSION, EpisodeId,
     ForgetRequest, ForgetResult, MarkRequest, MarkResult, MemoryKind, RecallContextItem,
     RecallHttpRequest, RecallMode, RecallRequest, RecallResponse, ReflectCandidate, ReflectInput,
-    ReflectJobKind, ReflectResult, ResourceId, RetainEpisodeHttpRequest, RetainEpisodeHttpResponse,
+    ReflectJobKind, ReflectResult, RetainEpisodeHttpRequest, RetainEpisodeHttpResponse,
     RetainRequest, RetainResourceRequest, RetrievalTrace, ScopeId, StoredEpisode, TenantId,
     TraceId, TrustLevel, UnitId,
 };
@@ -287,7 +287,7 @@ impl<S: MemoryStore> MemoryService<S> {
                 // caller-asserted candidate: the admission trust policy
                 // applies unchanged (untrusted keys mint candidate tier).
                 let job_id = memphant_types::JobId::new();
-                let trace = reflect_recorded(
+                let (trace, unit_ids) = reflect_recorded(
                     self.store.as_ref(),
                     ReflectInput {
                         tenant_id: tenant,
@@ -316,19 +316,6 @@ impl<S: MemoryStore> MemoryService<S> {
                     self.clock.as_ref(),
                 )
                 .await?;
-                let unit_ids = self
-                    .store
-                    .scope_memory_page(tenant, request.scope_id, None, usize::MAX)
-                    .await
-                    .map(|page| {
-                        page.items
-                            .iter()
-                            .filter(|stored| stored.source_kind.as_deref() == Some("direct"))
-                            .filter(|stored| stored.body == unit.body)
-                            .map(|stored| stored.id)
-                            .collect()
-                    })
-                    .unwrap_or_default();
                 Ok(RetainEpisodeHttpResponse {
                     episode_id: None,
                     resource_id: None,
@@ -384,7 +371,12 @@ impl<S: MemoryStore> MemoryService<S> {
     ) -> Result<RecallResponse, ServiceError> {
         let scope_id = request.scope_id;
         let query = request.query.clone();
-        let k = request.limit.unwrap_or(8);
+        // Defensive ceilings on caller-supplied sizing, for symmetry with the
+        // scope endpoint's clamp. No allocation is driven by these (output is
+        // bounded by the candidate pool), so they only reject absurd values.
+        const MAX_RECALL_LIMIT: usize = 1_000;
+        const MAX_RECALL_BUDGET_TOKENS: usize = 1_000_000;
+        let k = request.limit.unwrap_or(8).clamp(1, MAX_RECALL_LIMIT);
         // Real embedding provider → embed the query and run the vector
         // channel; the Noop provider keeps the channel honestly disabled.
         let query_vec = if self.embedder.dimensions() > 0 {
@@ -419,7 +411,10 @@ impl<S: MemoryStore> MemoryService<S> {
                     .unwrap_or_else(|| vec![scope_id]),
                 query: query.clone(),
                 k,
-                budget_tokens: request.budget_tokens.unwrap_or(512),
+                budget_tokens: request
+                    .budget_tokens
+                    .unwrap_or(512)
+                    .clamp(1, MAX_RECALL_BUDGET_TOKENS),
                 mode: request.mode.unwrap_or(RecallMode::Fast),
                 include_beliefs: request.include_beliefs.unwrap_or(false),
                 edge_expansion_enabled: request.edge_expansion_enabled.unwrap_or(true),
@@ -510,7 +505,9 @@ impl<S: MemoryStore> MemoryService<S> {
             if outcome.consumed > 0 {
                 trace_ref = Some(format!("memphant://trace/{}", job.job.id.as_uuid()));
             }
-            self.store.complete_reflect_job(job.job.id).await?;
+            self.store
+                .complete_reflect_job(job.job.tenant_id, job.job.id)
+                .await?;
         }
         Ok(ReflectResult {
             reflect_id: format!("rfl_{}", scope.as_uuid()),
@@ -526,7 +523,13 @@ impl<S: MemoryStore> MemoryService<S> {
         mut request: CorrectRequest,
     ) -> Result<CorrectResult, ServiceError> {
         request.tenant_id = tenant;
-        Ok(correct_memory(self.store.as_ref(), request, self.clock.as_ref()).await?)
+        Ok(correct_memory(
+            self.store.as_ref(),
+            request,
+            self.embedder.as_ref(),
+            self.clock.as_ref(),
+        )
+        .await?)
     }
 
     pub async fn forget(
@@ -583,7 +586,9 @@ impl<S: MemoryStore> MemoryService<S> {
             let result = CatchUnwind::new(self.compile_job(&job, None)).await;
             match result {
                 Ok(Ok(_)) => {
-                    self.store.complete_reflect_job(job.job.id).await?;
+                    self.store
+                        .complete_reflect_job(job.job.tenant_id, job.job.id)
+                        .await?;
                     completed += 1;
                 }
                 Ok(Err(error)) => {
@@ -728,7 +733,7 @@ impl<S: MemoryStore> MemoryService<S> {
             return Ok(CompileOutcome::default());
         };
 
-        let trace = reflect_recorded(
+        let (trace, _) = reflect_recorded(
             self.store.as_ref(),
             ReflectInput {
                 tenant_id: job.job.tenant_id,
@@ -1472,6 +1477,9 @@ fn degraded_episode_items(
             .partial_cmp(&left.1)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| left.0.body.cmp(&right.0.body))
+            // Total-order tie-break: `dedup_key` is unique per (tenant, scope),
+            // so same-body/same-score episodes still cite deterministically.
+            .then_with(|| left.0.dedup_key.cmp(&right.0.dedup_key))
     });
     scored
         .into_iter()
@@ -1493,12 +1501,6 @@ fn degraded_episode_items(
 /// no compiled unit yet; the id mirrors the episode identity).
 fn unit_id_for_episode(episode_id: EpisodeId) -> UnitId {
     UnitId::from_u128(episode_id.as_uuid().as_u128())
-}
-
-// Suppress unused warnings for the resource id import used only in signatures.
-#[allow(dead_code)]
-fn _resource_id_type_anchor(id: ResourceId) -> ResourceId {
-    id
 }
 
 /// A minimal `catch_unwind` future adapter (std-only; core has no futures

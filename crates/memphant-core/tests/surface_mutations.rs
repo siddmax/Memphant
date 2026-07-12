@@ -1,5 +1,6 @@
 use memphant_core::{
-    FixedClock, InMemoryStore, MemoryStore, correct_memory, forget_memory, recall, record_mark,
+    FixedClock, InMemoryStore, MemoryStore, NoopEmbedding, correct_memory, forget_memory, recall,
+    record_mark,
 };
 use memphant_types::{
     ActorId, CorrectRequest, CorrectSelector, CorrectionPayload, ForgetRequest, ForgetSelector,
@@ -53,6 +54,7 @@ async fn correct_supersedes_old_generation_and_recall_returns_new_value() {
                 valid_to: None,
             },
         },
+        &NoopEmbedding,
         &CLOCK,
     )
     .await
@@ -276,7 +278,7 @@ async fn seed_active_unit(
     subject_key: &str,
     body: &str,
 ) -> memphant_types::UnitId {
-    let mut tx = store.begin().await;
+    let mut tx = store.begin().await.expect("begin transaction");
     let episode = store
         .stage_episode(
             &mut tx,
@@ -321,4 +323,84 @@ async fn seed_active_unit(
         .expect("unit seed");
     store.commit(tx).await.expect("seed commit");
     unit_id
+}
+
+/// Correcting an already-superseded generation must be rejected, not mint a
+/// second live replacement. `apply_correction` locks + supersedes the target,
+/// but its guard only excluded `deleted` units — so re-correcting the SAME id
+/// (double-submit / retry) re-superseded an already-closed unit and created
+/// another active generation. In Postgres the partial unique scope-subject
+/// index masks this for `semantic` units (it errors instead), but non-semantic
+/// kinds silently double-insert; in-memory has no index, so any kind
+/// duplicates. The guard must require the OPEN generation (`transaction_to is
+/// null`) in both stores.
+#[tokio::test]
+async fn correct_rejects_an_already_superseded_generation() {
+    let store = InMemoryStore::default();
+    let tenant_id = tenant(80_100);
+    let scope_id = scope(80_101);
+    let actor_id = actor(80_102);
+    let old_id = seed_active_unit(
+        &store,
+        tenant_id,
+        scope_id,
+        actor_id,
+        "webhook_secret:value",
+        "Webhook secret is s1.",
+    )
+    .await;
+
+    let request = |value: &str| CorrectRequest {
+        tenant_id,
+        scope_id,
+        actor_id,
+        selector: CorrectSelector {
+            memory_unit_id: old_id,
+        },
+        correction: CorrectionPayload {
+            value: value.to_string(),
+            reason: "stale_fact".to_string(),
+            valid_from: None,
+            valid_to: None,
+        },
+    };
+
+    correct_memory(
+        &store,
+        request("Webhook secret is s2."),
+        &NoopEmbedding,
+        &CLOCK,
+    )
+    .await
+    .expect("first correction supersedes the open generation");
+
+    // `old_id` is now superseded; correcting it again targets a CLOSED
+    // generation and must fail rather than mint a second live unit.
+    let second = correct_memory(
+        &store,
+        request("Webhook secret is s3."),
+        &NoopEmbedding,
+        &CLOCK,
+    )
+    .await;
+    assert!(
+        second.is_err(),
+        "re-correcting an already-superseded generation must be rejected, got {second:?}"
+    );
+
+    let live: Vec<_> = store
+        .memory_units(tenant_id)
+        .into_iter()
+        .filter(|unit| {
+            unit.subject_key.as_deref() == Some("webhook_secret:value")
+                && unit.state == UnitState::Active
+                && unit.transaction_to.is_none()
+        })
+        .collect();
+    assert_eq!(
+        live.len(),
+        1,
+        "exactly one live generation must survive a double-correction, found {}",
+        live.len()
+    );
 }

@@ -86,12 +86,131 @@ RESULTS_PLACEHOLDER if scoring didn't finish), docs/superpowers/specs/memphant/S
 
 ## Known small fixes queued
 
-- bench-lme shares the runtime Postgres and leaves reflect-job debris; killed
-  bench processes orphan `running` jobs whose lease-reclaims starve a fresh
-  job on single worker ticks (bit the e2e probe on 2026-07-10 — drained with
-  repeated `MEMPHANT_WORKER_ONCE=1` ticks). Fix: bench uses a disposable
-  schema/DB, or cleans its tenants' jobs on exit.
-- Dead `include_trace` request flag removal (types + OpenAPI regen).
+- RESOLVED 2026-07-12 (audit follow-up, same class as the direct-unit `unit_ids`
+  fix — a write path misusing a bounded READ method): `reflect_recorded` loaded
+  its dedup/supersede working set via `fetch_recall_candidates(.., usize::MAX)`,
+  but PgStore's recall pool caps at the 100 most-recent units (InMemoryStore
+  returns the whole scope — so every in-memory test passed while production was
+  broken). In any scope >100 units, an update whose prior unit had aged past the
+  window failed to supersede: high-trust **semantic** updates hard-failed on the
+  `memphant_memory_unit_scope_subject_idx` unique index; beliefs/candidates
+  silently duplicated. Fix: new write-seam store method `fetch_scope_open_units`
+  (all `transaction_to is null` units in a scope, both stores identical);
+  `reflect_recorded` uses it instead of the ranked recall pool. Recall keeps its
+  bounded pool. Guard: `pg_store_contract::semantic_update_supersedes_a_unit_aged_past_the_recall_window`
+  (verified RED → GREEN). Open structural gap this exposed: InMemoryStore and
+  PgStore are separate mirrored test files, not one contract suite run against
+  both — that's what let the divergence hide. Worth parametrizing later.
+
+- ~~bench-lme shares the runtime Postgres and leaves reflect-job debris that
+  starves fresh jobs on the worker's global oldest-first tick (bit the e2e
+  probe 3× over 2026-07-09..10).~~ RESOLVED 2026-07-11: every harness now mints
+  its own ephemeral DB via `scripts/with_scratch_db.sh` (migrated, dropped on
+  exit even if killed) — the probe + pg contract/worker tests re-exec through
+  it in shell, and the two bench runners (`gate_run_memphant.py`,
+  `code_lane_run_memphant.py`) now self-re-exec through it too
+  (`gate_runtime.reexec_through_scratch_db`, guarded by `MEMPHANT_SCRATCH_ACTIVE`
+  exactly like the probe). No shared named DB (`memphant_gate` / `memphant_code_r0`)
+  remains; a killed bench cannot leave debris in any DB a live harness reads.
+- ~~`job_state` writes-by-id seq-scan: `complete_reflect_job` / job-result update
+  use `where id = $1`, which the composite PK `(tenant_id, id)` can't serve, so
+  each is a seq scan.~~ RESOLVED 2026-07-11: `complete_reflect_job` now carries
+  `tenant_id` (trait + PgStore + InMemoryStore + runtime delegate + both
+  `service.rs` call sites via `job.job.tenant_id`) and keys on
+  `where tenant_id = $1 and id = $2`. The job-result update was already scoped
+  (`tenant_id + id + compiler_version`) — only the completion write remained.
+  EXPLAIN on the live 165k-row table: bounded 2-column PK lookup (cost 8.44) vs
+  the old id-only full-index scan (cost 7104 — not a heap seq scan; Postgres used
+  `job_state_pkey` but couldn't bound the leading `tenant_id`).
+- RESOLVED 2026-07-11 (post-fix audit follow-ups):
+  - Embedding write-through is now atomic + idempotent. Reflect embeds BEFORE
+    the persist tx and threads the rows into `persist_compiled_units` (via new
+    `CompiledWrite.embedding_profile`/`embeddings`), so units + embeddings +
+    idempotency marker commit together; an embed failure writes nothing and a
+    retry recomputes instead of short-circuiting on a marker whose embeddings
+    never landed. Corrections now embed the replacement unit in the
+    `apply_correction` tx (via `CorrectionWrite.embedding`) so corrected truth
+    is vector-visible immediately (was silently absent from the inner-joined
+    vector channel). BDD tests in `tests/embedding_channel.rs`.
+  - `MemoryStore::begin()` returns `Result<Self::Txn, StoreError>` (was
+    infallible + `.expect`), so pool exhaustion / DB restart degrades to
+    `backend_unavailable` instead of panicking the write path.
+  - `review_event` PK restored to composite `(tenant_id, id)` to match the
+    tenancy convention every other domain table follows (migration 002 rewrote
+    it id-only); `review_event_unit` FK is now the tenant-composite form. Only
+    `api_key`, `tenant`, `schema_migrations` remain deliberately id-only.
+  - `tests/tenant_scoped_writes.rs` guards the whole partial-PK class: a new
+    `update`/`delete` on a composite-PK table without `tenant_id` fails CI.
+  - Dead `_resource_id_type_anchor` + its `ResourceId` import removed.
+- RESOLVED 2026-07-12: retain of a DIRECT unit returned an unreliable `unit_ids`
+  for scopes with >1000 units — `service.rs` recovered the created id via a
+  `scope_memory_page` re-query (clamped to 1000, ordered by id) plus a `body`
+  match, so a fresh unit past the clamp fell off the page. `reflect_recorded`
+  now returns `(ReflectTrace, Vec<UnitId>)` and the direct-retain path uses those
+  ids directly; the body-match re-query is gone. Regression guard:
+  `pg_store_contract::direct_unit_retain_returns_unit_id_past_scope_page_clamp`.
+- RESOLVED 2026-07-12 (reclaim resource double-insert): `persist_compiled_units`
+  now takes a `for update` row lock on the job_state idempotency record, so a
+  reclaimed re-compile serializes at the check instead of racing at READ
+  COMMITTED. The second writer blocks until the first commits, then sees
+  `result` set and no-ops — covering ALL compiled kinds, not just the semantic
+  units the partial unique scope-subject index already protected. Regression
+  guard: `reclaim_idempotency::reclaimed_resource_job_recompile_does_not_double_insert_units`
+  hammers 64 truly-parallel compile races (red before the lock, green after).
+- RESOLVED 2026-07-12 (correct an already-superseded generation): `apply_correction`
+  in BOTH stores guarded the target with `state <> 'deleted'` only, so
+  re-correcting the SAME unit id (double-submit / retry / concurrent) re-superseded
+  an already-closed row and minted a SECOND live generation — same class as the
+  reclaim double-insert. The partial unique scope-subject index masked it for
+  `semantic` kinds (unique-violation error) but resource/belief/procedural
+  silently double-inserted; in-memory (no index) duplicated any kind. Fix: the
+  target must be the OPEN generation (`transaction_to is null`) — with the
+  existing `for update` lock the second writer now re-reads the superseded row,
+  fails the predicate, and returns NotFound. Guard:
+  `surface_mutations::correct_rejects_an_already_superseded_generation`
+  (deterministic; red before the predicate, green after).
+- SURVEYED clean (2026-07-12, same audit): every other store write is already
+  race-safe — `stage_episode`/`enqueue_reflect` are atomic `insert … on conflict
+  do update` (unique-backed), `insert_edge`/`forgotten_source`/`review_event`/
+  `retrieval_trace`/embeddings use `on conflict do nothing/update`, `apply_forget`
+  mints a fresh `deletion_generation` per call (no counter race). The check-then-
+  write-without-a-backing-constraint pattern existed only in `persist_compiled_units`
+  and `apply_correction`. No static anti-pattern lint added: the safe cases are
+  textually identical to the unsafe ones (all `select`+`insert`), so a scanner
+  would be pure false positives — the two runtime guards above are the check.
+- InMemoryStore has no reclaim window: a failed job stays `claimed` forever
+  (attempts frozen at 1), diverging from Pg. Dev/test-only; align if the
+  in-memory store is ever used to model worker retry semantics.
+- RESOLVED 2026-07-12 (third audit round — MCP edge hardening; REST edge audited
+  clean, and the lexical channel confirmed structurally immune to the embedding
+  desync class because `body_tsv` is a Postgres generated-stored column):
+  - MCP streamable-HTTP transport now enforces per-request auth: an axum layer on
+    `/mcp` requires `Authorization: Bearer <MEMPHANT_API_KEY>` (constant-time
+    compare) outside dev mode, so a widened `MEMPHANT_MCP_BIND` no longer serves
+    the bound tenant unauthenticated. Decision logic in `mcp_http_authorized`.
+  - MCP tool errors no longer leak raw backend detail: `mcp_error` mirrors the
+    REST edge (`CoreError::Store(_)` -> generic "backend unavailable"; validation
+    / not-found / policy messages still surface). Tests in `tests/edge_auth.rs`.
+  - Recall `limit`/`budget_tokens` are clamped (defensive ceilings), matching the
+    scope endpoint. No DoS existed (output is candidate-pool-bounded); symmetry only.
+- DEFERRED (schema ahead of implementation — mark so it is not mistaken for
+  wired): `event_outbox` is fully defined (table, RLS, indexes, 6-value event
+  enum) but no code ever writes it — the transactional-outbox surface emits
+  nothing. `citation`, `scope_block`, `belief_observation` are dead tables (schema
+  + existence-check only, no reads/writes). Either wire or document as post-R0.
+- WON'T DO (audit round 3): a crate-wide clippy `deny(unwrap_used/expect_used/
+  panic/indexing_slicing)` panic-gate — the request path is already clean and the
+  lint is a false-positive magnet on internal code (violates the no-false-positive
+  bar). Latent footguns left as-is (not triggerable on the prod config): `enum_str`
+  uses `.expect`; the public `reflect` verb lacks the worker's `catch_unwind`
+  around `compile_job`.
+- Global background claim/sweep still seq-scan `job_state` when the worker
+  passes an empty filter (no tenant to lead the index). Fine while job_state is
+  small; if it grows (no GC of `done` rows), add a partial index on
+  non-terminal rows, e.g. `... (created_at) where state in ('queued','running')`.
+  Also unaddressed: cross-tenant *fairness* — one tenant's old backlog can
+  monopolize the global oldest-first worker. Needs real multi-tenant load
+  before choosing a policy; deliberately not built now.
 - Internal golden/security/ops eval subcommands are in-memory only — add
   --database-url paths so they also gate the Postgres runtime.
 - RLS policies + non-owner runtime role (currently app-layer tenancy only,

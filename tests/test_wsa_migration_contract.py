@@ -233,8 +233,15 @@ def test_runtime_reconciliation_rewrites_review_event_with_join_table() -> None:
     assert "caller_id text not null" in review_block
     assert "unique (trace_id, caller_id)" in review_block
 
+    review_pk = _table_block(sql, "review_event")
+    assert "primary key (tenant_id, id)" in review_pk
+
     join_block = _table_block(sql, "review_event_unit")
-    assert "review_event_id uuid not null references memphant.review_event(id) on delete cascade" in join_block
+    assert "review_event_id uuid not null" in join_block
+    assert (
+        "foreign key (tenant_id, review_event_id)\n    references memphant.review_event(tenant_id, id) on delete cascade"
+        in join_block
+    )
     assert "primary key (review_event_id, memory_unit_id)" in join_block
     assert "foreign key (tenant_id, memory_unit_id) references memphant.memory_unit(tenant_id, id)" in join_block
     assert "alter table memphant.review_event_unit enable row level security" in sql
