@@ -252,6 +252,15 @@ pub struct RetrievalTrace {
     pub citations: Vec<RecallCitation>,
     pub filter_selectivity: Option<f32>,
     pub iterative_scan_depth: Option<u32>,
+    /// R1.5-T0: the `recall_pool_depth` in effect for this recall — the ONE
+    /// knob the vector/rerank/packing-scan internal fan-out derived from
+    /// (never from `k`). Recorded per-trace so latency attribution stays
+    /// observable across deployments that override
+    /// `MEMPHANT_RECALL_POOL_DEPTH`. `#[serde(default)]` so traces recorded
+    /// before this field existed still deserialize (as `0`, a visible "not
+    /// recorded" sentinel — pool depth is never legitimately 0).
+    #[serde(default)]
+    pub recall_pool_depth: u32,
     pub consolidation_lag_ms: u64,
     pub weight_vector_id: String,
     pub mode_requested: RecallMode,

@@ -33,9 +33,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use memphant_core::service::MemoryService;
-use memphant_core::{
-    CrossReranker, DEFAULT_CANDIDATE_POOL_SIZE, EmbeddingProvider, NoopEmbedding, SystemClock,
-};
+use memphant_core::{CrossReranker, EmbeddingProvider, NoopEmbedding, SystemClock};
 use memphant_store_postgres::PgStore;
 use memphant_types::{
     ActorId, RecallHttpRequest, RecallMode, RetainEpisodeHttpRequest, ScopeId, TenantId, TrustLevel,
@@ -105,9 +103,14 @@ pub struct BenchLmeOptions {
     pub turns_window: usize,
     /// Packing token budget threaded to the recall call.
     pub budget_tokens: usize,
-    /// Vector-channel candidate-pool size (`--pool`) threaded to the recall
-    /// service via `with_candidate_pool_size`. Default
-    /// `DEFAULT_CANDIDATE_POOL_SIZE` (32) reproduces today's ranking.
+    /// R1.5-T0 recall-pool-depth (`--pool`) threaded to the recall service
+    /// via `with_recall_pool_depth` — the ONE knob every internal
+    /// channel/fusion limit in the recall path derives from (vector-channel
+    /// KNN fan-out, packing scan window, rerank rescoring cap), never `k`.
+    /// The flag name is unchanged (pre-R1.5-T0 it only set the vector-channel
+    /// fan-out via `with_candidate_pool_size`); its semantics widened to the
+    /// unified knob so there is one honest pool concept, not two. Default
+    /// `DEFAULT_RECALL_POOL_DEPTH` (64).
     pub pool: usize,
     /// W4 sibling-gather packing lever (`--sibling-gather`, default off) threaded
     /// via `with_sibling_gather_enabled`. The measurement-campaign flag; off
@@ -243,11 +246,18 @@ pub struct BenchLmeReport {
     /// for pre-flag reports — see `default_budget_tokens`).
     #[serde(default = "default_budget_tokens")]
     pub budget_tokens: usize,
-    /// Vector-channel candidate-pool size (`--pool`) used for this run. Defaults
-    /// to `DEFAULT_CANDIDATE_POOL_SIZE` (32) — the historical vector KNN fan-out
-    /// — for pre-flag reports, via `default_candidate_pool_size`.
-    #[serde(default = "default_candidate_pool_size")]
-    pub candidate_pool_size: usize,
+    /// R1.5-T0 recall-pool-depth (`--pool`) used for this run — the ONE knob
+    /// every internal channel/fusion limit in the recall path derives from.
+    /// Renamed from `candidate_pool_size` (which pre-R1.5-T0 only set the
+    /// vector-channel KNN fan-out); `#[serde(alias)]` keeps old reports
+    /// (written under the old field name) parseable. Defaults, for reports
+    /// written before EITHER field existed, to 32 — the historical
+    /// vector-channel-only fan-out those runs actually used
+    /// (`VECTOR_CANDIDATE_LIMIT`, NOT today's `DEFAULT_RECALL_POOL_DEPTH` —
+    /// see `default_recall_pool_depth_for_legacy_reports`).
+    #[serde(alias = "candidate_pool_size")]
+    #[serde(default = "default_recall_pool_depth_for_legacy_reports")]
+    pub recall_pool_depth: usize,
     /// Whether the W4 sibling-gather packing lever was on for this run. The serde
     /// default is `false`: every report written before the lever existed was a
     /// sibling-gather-off run, so an absent field ⇒ off.
@@ -319,12 +329,14 @@ fn default_budget_tokens() -> usize {
     DEFAULT_BUDGET_TOKENS
 }
 
-/// Parsing default for pre-flag reports (no `candidate_pool_size` field). As
-/// with `default_budget_tokens`, this coincides with the historical value every
-/// such report used: the vector KNN fan-out of `DEFAULT_CANDIDATE_POOL_SIZE`
-/// (32).
-fn default_candidate_pool_size() -> usize {
-    DEFAULT_CANDIDATE_POOL_SIZE
+/// Parsing default for reports written before EITHER `candidate_pool_size`
+/// (pre-R1.5-T0) or `recall_pool_depth` (R1.5-T0+) existed. UNLIKE
+/// `default_budget_tokens`, this deliberately does NOT coincide with today's
+/// lane default (`DEFAULT_RECALL_POOL_DEPTH`, 64): every report old enough to
+/// be missing both fields predates this flag entirely and actually ran with
+/// the historical vector-channel-only fan-out, `VECTOR_CANDIDATE_LIMIT` (32).
+fn default_recall_pool_depth_for_legacy_reports() -> usize {
+    memphant_core::VECTOR_CANDIDATE_LIMIT
 }
 
 /// Parsing default for pre-flag reports (no `embed_model` field): every such
@@ -752,9 +764,11 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
     } else {
         ingest_service.clone()
     }
-    // W3 candidate-pool knob (`--pool`): widens the recall vector-channel KNN
-    // fan-out for the rerank pool. Recall-time only; ingestion is unaffected.
-    .with_candidate_pool_size(options.pool)
+    // R1.5-T0 recall-pool-depth knob (`--pool`): widens every internal
+    // channel/fusion limit in the recall path (vector KNN fan-out, packing
+    // scan window, rerank rescoring cap). Recall-time only; ingestion is
+    // unaffected.
+    .with_recall_pool_depth(options.pool)
     // W4 packing levers (`--sibling-gather` / `--session-quota`): recall-time
     // only; both default off so the campaign measures each independently.
     .with_sibling_gather_enabled(options.sibling_gather)
@@ -1046,7 +1060,7 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
         granularity: options.granularity.clone(),
         turns_window: options.turns_window,
         budget_tokens: options.budget_tokens,
-        candidate_pool_size: options.pool,
+        recall_pool_depth: options.pool,
         sibling_gather: options.sibling_gather,
         session_quota: options.session_quota,
         temporal_grounding: options.temporal_grounding,
@@ -1080,6 +1094,7 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
 #[cfg(test)]
 mod tests {
     use super::*;
+    use memphant_core::DEFAULT_RECALL_POOL_DEPTH;
 
     /// R0-T1b feature-gated error path: `--embed-model qwen3` in a binary
     /// built with `--features fastembed` but WITHOUT `--features qwen3` (the
@@ -1331,8 +1346,14 @@ mod tests {
     fn turn_window_and_budget_tokens_defaults_are_pinned() {
         assert_eq!(DEFAULT_TURNS_WINDOW, 4);
         assert_eq!(DEFAULT_BUDGET_TOKENS, 8192);
-        // W3: the candidate-pool default is the historical vector KNN fan-out.
-        assert_eq!(DEFAULT_CANDIDATE_POOL_SIZE, 32);
+        // R1.5-T0: the recall-pool-depth default is the ONE knob every
+        // internal channel/fusion limit in the recall path derives from —
+        // pre-registered at 64, up from the historical vector-only 32
+        // (`VECTOR_CANDIDATE_LIMIT`, unchanged, still used directly by tests
+        // that call `fetch_vector_candidates` without going through the
+        // service).
+        assert_eq!(DEFAULT_RECALL_POOL_DEPTH, 64);
+        assert_eq!(memphant_core::VECTOR_CANDIDATE_LIMIT, 32);
     }
 
     #[test]
@@ -1377,11 +1398,17 @@ mod tests {
         assert_eq!(report.budget_tokens, 8192);
         assert_eq!(report.turns_window, DEFAULT_TURNS_WINDOW);
         assert_eq!(report.budget_tokens, DEFAULT_BUDGET_TOKENS);
-        // W3: a report written before `candidate_pool_size` existed must parse
-        // with the field defaulting to the vector KNN fan-out (32) every such
-        // report actually ran.
-        assert_eq!(report.candidate_pool_size, 32);
-        assert_eq!(report.candidate_pool_size, DEFAULT_CANDIDATE_POOL_SIZE);
+        // R1.5-T0 (superseding the W3 note this replaces): a report written
+        // before EITHER `candidate_pool_size` or `recall_pool_depth` existed
+        // must parse with the field defaulting to the vector-only KNN
+        // fan-out (32) every such report actually ran — NOT today's 64
+        // default, which postdates every such report.
+        assert_eq!(report.recall_pool_depth, 32);
+        assert_eq!(
+            report.recall_pool_depth,
+            memphant_core::VECTOR_CANDIDATE_LIMIT
+        );
+        assert_ne!(report.recall_pool_depth, DEFAULT_RECALL_POOL_DEPTH);
         // The runtime_chunks report field serde default STAYS false even after
         // the write path was promoted to default-on: every pre-promotion report
         // was a chunks-off run, so an absent field must parse chunks-OFF and
@@ -1429,6 +1456,51 @@ mod tests {
         assert!(
             !report.cross_rerank,
             "absent cross_rerank must parse false (pre-flag runs were rerank-off)"
+        );
+    }
+
+    /// R1.5-T0: a report written under the OLD field name (`candidate_pool_size`,
+    /// present since W3, before this task's rename to `recall_pool_depth`) must
+    /// still parse — the `#[serde(alias)]` keeps those reports readable without
+    /// falling back to the (wrong, pre-W3) legacy default.
+    #[test]
+    fn old_candidate_pool_size_field_name_still_parses_via_alias() {
+        let json = r#"{
+            "benchmark": "longmemeval_retrieval_only",
+            "dataset_path": "data.json",
+            "dataset_sha256": "abc123",
+            "dataset_questions": 10,
+            "sample_seed": 20260710,
+            "sample_n": 1,
+            "k": 10,
+            "runtime": "postgres",
+            "retrieval_only": true,
+            "embeddings": "noop",
+            "ingestion": "one episode per haystack session",
+            "reflect": "MemoryService::reflect",
+            "mode": "fast",
+            "disabled": null,
+            "command": "bench-lme --sample 1 --seed 20260710 --pool 96",
+            "generated_at_unix": 0,
+            "candidate_pool_size": 96,
+            "overall": {
+                "question_type": "overall",
+                "n": 0,
+                "n_scored": 0,
+                "recall_at_5": null,
+                "recall_at_10": null,
+                "abstention_n": 0,
+                "abstention_correct": 0
+            },
+            "strata": [],
+            "per_question": [],
+            "paired_vs_baseline": null
+        }"#;
+        let report: BenchLmeReport =
+            serde_json::from_str(json).expect("old-field-name report parses");
+        assert_eq!(
+            report.recall_pool_depth, 96,
+            "the serde alias maps the old `candidate_pool_size` field onto `recall_pool_depth`"
         );
     }
 

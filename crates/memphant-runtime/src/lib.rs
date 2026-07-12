@@ -9,10 +9,10 @@ use std::sync::Arc;
 
 use memphant_core::service::MemoryService;
 use memphant_core::{
-    ApiKeyRow, CompiledWrite, CorrectOutcome, CorrectionWrite, EmbedError, EmbeddingProfileRow,
-    EmbeddingProvider, EmbeddingRow, ForgetOutcome, ForgetWrite, InMemoryStore, InMemoryTxn,
-    JobFilter, MemoryStore, NoopEmbedding, ReflectJobRow, ReviewEventRow, ScopePage, StoreError,
-    SystemClock,
+    ApiKeyRow, CompiledWrite, CorrectOutcome, CorrectionWrite, DEFAULT_RECALL_POOL_DEPTH,
+    EmbedError, EmbeddingProfileRow, EmbeddingProvider, EmbeddingRow, ForgetOutcome, ForgetWrite,
+    InMemoryStore, InMemoryTxn, JobFilter, MemoryStore, NoopEmbedding, ReflectJobRow,
+    ReviewEventRow, ScopePage, StoreError, SystemClock,
 };
 use memphant_store_postgres::{PgStore, PgTxn};
 use memphant_types::{
@@ -219,10 +219,14 @@ fn fastembed_or(
 /// R1 docs-domain resource-chunk write path is threaded from
 /// `MEMPHANT_RESOURCE_CHUNKS` (default OFF) so BOTH the server and worker
 /// binaries honor the gate's `--resource-chunks` lever, mirroring how
-/// `MEMPHANT_EMBEDDINGS` reaches both via [`build_embedder`].
+/// `MEMPHANT_EMBEDDINGS` reaches both via [`build_embedder`]. R1.5-T0's
+/// `MEMPHANT_RECALL_POOL_DEPTH` (default `DEFAULT_RECALL_POOL_DEPTH`, 64) is
+/// threaded the same way, so the recall-pool-depth knob reaches both binaries
+/// from ONE env var.
 pub fn build_service(store: AnyStore) -> MemoryService<AnyStore> {
     MemoryService::new(Arc::new(store), Arc::new(SystemClock), build_embedder())
         .with_resource_chunks_write_enabled(resource_chunks_write_from_env())
+        .with_recall_pool_depth(recall_pool_depth_from_env())
 }
 
 /// `MEMPHANT_RESOURCE_CHUNKS` → bool. Truthy (`1`/`true`/`on`, case-insensitive)
@@ -238,6 +242,21 @@ fn resource_chunks_write_from_env() -> bool {
             .as_deref(),
         Some("1") | Some("true") | Some("on")
     )
+}
+
+/// `MEMPHANT_RECALL_POOL_DEPTH` → `usize`. Unset, empty, or unparseable-as a
+/// positive integer falls back to [`DEFAULT_RECALL_POOL_DEPTH`] (64) — the
+/// shipped default, so no env means byte-identical-to-the-new-default
+/// behavior. A parsed `0` also falls back to the default rather than
+/// disabling recall entirely (pool depth is never legitimately 0).
+fn recall_pool_depth_from_env() -> usize {
+    std::env::var("MEMPHANT_RECALL_POOL_DEPTH")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|depth| *depth > 0)
+        .unwrap_or(DEFAULT_RECALL_POOL_DEPTH)
 }
 
 fn txn_mismatch<T>() -> Result<T, StoreError> {
@@ -690,6 +709,73 @@ mod tests {
                         arms[left_index].0, arms[right_index].0
                     );
                 }
+            }
+        }
+    }
+
+    /// R1.5-T0: `MEMPHANT_RECALL_POOL_DEPTH` is the runtime-level override for
+    /// the ONE recall-pool-depth knob (mirrors `MEMPHANT_RESOURCE_CHUNKS`'s
+    /// plumbing pattern). No other test in this binary reads this env var, so
+    /// mutating it here is safe against parallel test execution; it is still
+    /// restored to its original value before returning.
+    #[test]
+    fn recall_pool_depth_env_override_parses_and_falls_back_to_default() {
+        use super::recall_pool_depth_from_env;
+
+        const VAR: &str = "MEMPHANT_RECALL_POOL_DEPTH";
+        let saved = std::env::var(VAR).ok();
+
+        // SAFETY: test-only mutation of a var no other test in this binary
+        // reads; restored below before returning.
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+        assert_eq!(
+            recall_pool_depth_from_env(),
+            memphant_core::DEFAULT_RECALL_POOL_DEPTH,
+            "unset falls back to the default"
+        );
+
+        unsafe {
+            std::env::set_var(VAR, "128");
+        }
+        assert_eq!(
+            recall_pool_depth_from_env(),
+            128,
+            "a valid positive integer is honored"
+        );
+
+        unsafe {
+            std::env::set_var(VAR, "  96  ");
+        }
+        assert_eq!(
+            recall_pool_depth_from_env(),
+            96,
+            "surrounding whitespace is trimmed"
+        );
+
+        unsafe {
+            std::env::set_var(VAR, "0");
+        }
+        assert_eq!(
+            recall_pool_depth_from_env(),
+            memphant_core::DEFAULT_RECALL_POOL_DEPTH,
+            "0 falls back to the default — pool depth is never legitimately zero"
+        );
+
+        unsafe {
+            std::env::set_var(VAR, "not-a-number");
+        }
+        assert_eq!(
+            recall_pool_depth_from_env(),
+            memphant_core::DEFAULT_RECALL_POOL_DEPTH,
+            "unparseable falls back to the default"
+        );
+
+        unsafe {
+            match &saved {
+                Some(value) => std::env::set_var(VAR, value),
+                None => std::env::remove_var(VAR),
             }
         }
     }

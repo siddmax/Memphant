@@ -1,7 +1,8 @@
-//! W3 candidate-pool knob: the construction-time `with_candidate_pool_size`
-//! service option widens the recall vector-channel KNN fan-out. A larger pool
-//! admits a vector candidate that the smaller (default) pool truncated away —
-//! the widened pool the W8 cross-encoder rerank arm reranks over.
+//! R1.5-T0 recall-pool-depth knob: the construction-time `with_recall_pool_depth`
+//! service option widens the recall vector-channel KNN fan-out (among other
+//! internal limits). A larger pool admits a vector candidate that the smaller
+//! pool truncated away — the widened pool the W8 cross-encoder rerank arm
+//! reranks over.
 
 use std::sync::Arc;
 
@@ -163,7 +164,7 @@ async fn larger_pool_admits_vector_candidate_default_pool_missed() {
 
     // Small pool == near_count: the far unit is truncated out of the vector
     // fetch entirely.
-    let small = stub_service(store.clone()).with_candidate_pool_size(near_pool);
+    let small = stub_service(store.clone()).with_recall_pool_depth(near_pool);
     let small_response = small
         .recall(tenant, recall_request(tenant, scope, actor, query))
         .await
@@ -192,7 +193,7 @@ async fn larger_pool_admits_vector_candidate_default_pool_missed() {
     );
 
     // Large pool == near_count + 1: the far unit is now admitted.
-    let large = stub_service(store.clone()).with_candidate_pool_size(near_pool + 1);
+    let large = stub_service(store.clone()).with_recall_pool_depth(near_pool + 1);
     let large_response = large
         .recall(tenant, recall_request(tenant, scope, actor, query))
         .await

@@ -510,6 +510,13 @@
     "query_hash": {
       "type": "string"
     },
+    "recall_pool_depth": {
+      "default": 0,
+      "description": "R1.5-T0: the `recall_pool_depth` in effect for this recall — the ONE\nknob the vector/rerank/packing-scan internal fan-out derived from\n(never from `k`). Recorded per-trace so latency attribution stays\nobservable across deployments that override\n`MEMPHANT_RECALL_POOL_DEPTH`. `#[serde(default)]` so traces recorded\nbefore this field existed still deserialize (as `0`, a visible \"not\nrecorded\" sentinel — pool depth is never legitimately 0).",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
     "rerank_input_count": {
       "format": "uint",
       "minimum": 0,

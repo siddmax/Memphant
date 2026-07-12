@@ -207,24 +207,35 @@ pub fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
     dot / (norm_left * norm_right)
 }
 
-/// The nearest-neighbour fan-out for the recall vector channel: how many
-/// units the store's vector query returns per recall. Matches the historical
-/// pgvector `<=>` top-K.
+/// The historical pgvector `<=>` top-K used directly by tests that call
+/// `fetch_vector_candidates` without going through the service. No longer the
+/// service's pool default (see [`DEFAULT_RECALL_POOL_DEPTH`]) — kept as a
+/// named literal so those direct store-level call sites stay self-documenting.
 pub const VECTOR_CANDIDATE_LIMIT: usize = 32;
 
-/// Default candidate-pool size for the recall vector channel — the historical
-/// vector KNN fan-out.
+/// Default depth of `MemoryService`'s ONE recall pool knob (R1.5-T0).
 ///
-/// THE POOL MAPPING (W3): the single `candidate_pool_size` construction-time
-/// service knob (see [`crate::service::MemoryService::with_candidate_pool_size`])
-/// sets the vector-channel KNN fetch limit DIRECTLY; this default reproduces
-/// today's ranking exactly. The lexical/recent/subject families are fetched via
-/// `fetch_recall_candidates` with no core-side cap (the store applies its own
-/// internal per-family caps — 200 FTS / 100 recent / 200 subject — already far
-/// wider than any cross-encoder rerank pool), so they are NOT the pool that
-/// gates rerank; the knob widens the one historically-narrow family — vector —
-/// that the W8 rerank arm needs at 64–128. Measured-tunable, not sacred.
-pub const DEFAULT_CANDIDATE_POOL_SIZE: usize = VECTOR_CANDIDATE_LIMIT;
+/// THE POOL MAPPING (R1.5-T0, superseding the W3 note this replaces): D1
+/// proved the recall pipeline's internal fan-out scaled with the CALLER'S
+/// requested `k` — a k=50 request changed even the top-5 ordering vs a k=10
+/// request over the identical corpus/query (R@5 0.067→0.167, same
+/// `docs/build-log/2026-07-12-r1-docs-gate.md` run). That conflates a
+/// presentation concern (`k`, how many items the caller gets back) with an
+/// engine concern (how many candidates the engine considers internally before
+/// ranking down to `k`). `recall_pool_depth` is the single construction-time
+/// knob every internal channel/fusion limit in the recall path now derives
+/// from INSTEAD of `k`: the vector-channel KNN fetch
+/// ([`crate::service::MemoryService::with_recall_pool_depth`]), the
+/// Fast/Balanced packing scan window and the Exhaustive scan multiplier
+/// (`recall_pack_scan_limit`), and the rerank rescoring cap
+/// (`rerank_input_cap`). Returned items still stop at exactly `k`
+/// (`PackCtx::output_limit`) — only the CONSIDERATION window widens/narrows
+/// with this knob, never with `k`. Also the target of bench-lme's `--pool`
+/// flag and the `MEMPHANT_RECALL_POOL_DEPTH` env override — one honest knob,
+/// not two pool concepts. Pre-registered at 64: at prosumer scale (≤100k
+/// units, exact scans) that is latency-trivial. Do not tune without a fresh
+/// measurement campaign.
+pub const DEFAULT_RECALL_POOL_DEPTH: usize = 64;
 
 /// Recommended per-`source_episode_id` diversity cap (W4 session-quota lever).
 ///
@@ -237,7 +248,7 @@ pub const DEFAULT_CANDIDATE_POOL_SIZE: usize = VECTOR_CANDIDATE_LIMIT;
 pub const DEFAULT_SESSION_DIVERSITY_QUOTA: usize = 2;
 
 /// W4 packing levers, threaded construction-time exactly like
-/// `candidate_pool_size` — no `RecallRequest`/wire/OpenAPI field (item 4). BOTH
+/// `recall_pool_depth` — no `RecallRequest`/wire/OpenAPI field (item 4). BOTH
 /// default OFF ([`PackLevers::default`]); with both off the packer is
 /// byte-identical to today. The service builders
 /// [`crate::service::MemoryService::with_sibling_gather_enabled`] and
@@ -2066,7 +2077,7 @@ where
         request,
         vector_query,
         clock,
-        DEFAULT_CANDIDATE_POOL_SIZE,
+        DEFAULT_RECALL_POOL_DEPTH,
         PackLevers::default(),
         false,
         None,
@@ -2074,17 +2085,19 @@ where
     .await
 }
 
-/// `recall` with the candidate-pool knob exposed. `candidate_pool_size` sets the
-/// vector-channel KNN fan-out — the one historically-narrow per-family fetch
-/// limit (`VECTOR_CANDIDATE_LIMIT`, 32) — so the W8 cross-encoder rerank arm can
-/// widen its rerank pool to 64–128 WITHOUT any wire change. The construction-time
-/// [`crate::service::MemoryService`] candidate-pool option threads its value
-/// here; the plain [`recall`] above delegates with [`DEFAULT_CANDIDATE_POOL_SIZE`]
-/// so every existing call site keeps today's behavior. See the pool-mapping note
-/// on [`DEFAULT_CANDIDATE_POOL_SIZE`].
+/// `recall` with the recall-pool-depth knob exposed. `recall_pool_depth` is the
+/// ONE knob every internal channel/fusion limit in the recall path derives
+/// from (R1.5-T0 — see the pool-mapping note on [`DEFAULT_RECALL_POOL_DEPTH`]):
+/// the vector-channel KNN fan-out, the Fast/Balanced packing scan window and
+/// Exhaustive scan multiplier, and the rerank rescoring cap. `k` never gates
+/// any of these — only the final `PackCtx::output_limit` truncation to `k`
+/// items. The construction-time [`crate::service::MemoryService`] recall-pool
+/// option threads its value here; the plain [`recall`] above delegates with
+/// [`DEFAULT_RECALL_POOL_DEPTH`] so every existing call site keeps today's
+/// (post-R1.5-T0) behavior.
 ///
 /// `pack_levers` threads the W4 packing levers (sibling-gather + session
-/// diversity quota) construction-time, mirroring `candidate_pool_size`; the
+/// diversity quota) construction-time, mirroring `recall_pool_depth`; the
 /// plain [`recall`] delegates with [`PackLevers::default`] (both off).
 ///
 /// `temporal_grounding_enabled` (W5, default off via the plain [`recall`]) gates
@@ -2096,7 +2109,7 @@ where
 ///
 /// `cross_reranker` (W8, `None` via the plain [`recall`]) is the cross-encoder
 /// rerank seam: when present, AFTER fusion produces the ranked candidate list
-/// and BEFORE packing, the top `candidate_pool_size` candidates are scored as
+/// and BEFORE packing, the top `recall_pool_depth` candidates are scored as
 /// `(query, unit body)` pairs and reordered by cross-encoder score (ties broken
 /// by prior fused rank via a stable sort). `None` leaves the fused order
 /// untouched — byte-identical to today. This is independent of, and never
@@ -2108,7 +2121,7 @@ pub async fn recall_with_pool<S>(
     request: RecallRequest,
     vector_query: Option<VectorQuery<'_>>,
     clock: &dyn Clock,
-    candidate_pool_size: usize,
+    recall_pool_depth: usize,
     pack_levers: PackLevers,
     temporal_grounding_enabled: bool,
     cross_reranker: Option<&dyn CrossReranker>,
@@ -2151,6 +2164,7 @@ where
             citations: Vec::new(),
             filter_selectivity: None,
             iterative_scan_depth: None,
+            recall_pool_depth: recall_pool_depth as u32,
             consolidation_lag_ms: 0,
             weight_vector_id: "none".to_string(),
             mode_requested: request.mode,
@@ -2202,9 +2216,9 @@ where
                     &[],
                     query.vec,
                     query.profile_id,
-                    // W3 pool knob: the vector KNN fan-out is the widen-able
-                    // per-family limit (default `VECTOR_CANDIDATE_LIMIT`).
-                    candidate_pool_size,
+                    // R1.5-T0 pool knob: the vector KNN fan-out derives from
+                    // `recall_pool_depth`, never from `k` (default 64).
+                    recall_pool_depth,
                 )
                 .await?;
             let mut seen: HashSet<UnitId> = tenant_units.iter().map(|unit| unit.id).collect();
@@ -2491,7 +2505,12 @@ where
         }
     }
 
-    let rerank = rerank_candidates(fused.as_mut_slice(), &request, &query_tokens);
+    let rerank = rerank_candidates(
+        fused.as_mut_slice(),
+        &request,
+        &query_tokens,
+        recall_pool_depth,
+    );
     for candidate in &fused {
         for trace_candidate in candidate_traces
             .iter_mut()
@@ -2503,7 +2522,7 @@ where
         }
     }
 
-    // W8 cross-encoder rerank: reorder the top `candidate_pool_size` fused
+    // W8 cross-encoder rerank: reorder the top `recall_pool_depth` fused
     // candidates by a real (query, body) cross-encoder before packing. A no-op
     // when no reranker is wired (the default) or the pool is empty — the fused
     // order then flows unchanged into packing.
@@ -2512,11 +2531,12 @@ where
             fused.as_mut_slice(),
             &request.query,
             reranker,
-            candidate_pool_size,
+            recall_pool_depth,
         );
     }
 
-    let iterative_scan_depth = recall_pack_scan_limit(&request, fused.len(), pack_levers);
+    let iterative_scan_depth =
+        recall_pack_scan_limit(&request, fused.len(), pack_levers, recall_pool_depth);
     let packed = pack_recall_context(
         fused,
         &request,
@@ -2582,6 +2602,7 @@ where
         citations: citations.clone(),
         filter_selectivity,
         iterative_scan_depth: Some(iterative_scan_depth as u32),
+        recall_pool_depth: recall_pool_depth as u32,
         consolidation_lag_ms: 0,
         weight_vector_id: rerank.weight_vector_id,
         mode_requested: request.mode,
@@ -2958,6 +2979,7 @@ fn rerank_candidates(
     fused: &mut [CandidateAccumulator],
     request: &RecallRequest,
     query_tokens: &[String],
+    recall_pool_depth: usize,
 ) -> RerankTraceFacts {
     if !request.rerank_enabled {
         return RerankTraceFacts {
@@ -2970,7 +2992,9 @@ fn rerank_candidates(
     }
 
     let profile = request.learned_rerank_profile.as_ref();
-    let input_count = fused.len().min(rerank_input_cap(request));
+    let input_count = fused
+        .len()
+        .min(rerank_input_cap(request, recall_pool_depth));
     for candidate in fused.iter_mut().take(input_count) {
         candidate.rerank_score = rerank_score(candidate, query_tokens, profile);
     }
@@ -3004,12 +3028,18 @@ fn rerank_candidates(
     }
 }
 
-fn rerank_input_cap(request: &RecallRequest) -> usize {
+/// R1.5-T0: the deterministic-rerank rescoring cap derives from
+/// `recall_pool_depth`, NOT from `k * 10` (the old formula) — a caller
+/// requesting a larger `k` no longer widens how many fused candidates get
+/// rescored. `mode_cap` (100 Fast / 200 Balanced+Exhaustive) is an
+/// independent, non-`k`-derived per-mode ceiling, unchanged by this task.
+/// Floored at `k` so the rerank always covers at least the final output size.
+fn rerank_input_cap(request: &RecallRequest, recall_pool_depth: usize) -> usize {
     let mode_cap = match request.mode {
         RecallMode::Fast => 100,
         RecallMode::Balanced | RecallMode::Exhaustive => 200,
     };
-    (request.k.saturating_mul(10)).min(mode_cap).max(request.k)
+    recall_pool_depth.min(mode_cap).max(request.k.max(1))
 }
 
 fn rerank_score(
@@ -3080,7 +3110,7 @@ struct CandidateAccumulator {
     rerank_rank: Option<usize>,
     rerank_score: f32,
     /// W8 cross-encoder rank (0-based): `Some` only for candidates the
-    /// cross-reranker scored (the top `candidate_pool_size` fused head). Packing
+    /// cross-reranker scored (the top `recall_pool_depth` fused head). Packing
     /// honors it FIRST when any candidate carries one, so the cross-encoder
     /// ordering survives the pack re-sort. `None` for the unreranked tail and
     /// for every run without a cross-reranker (then packing is unchanged).
@@ -3201,6 +3231,11 @@ struct PackCtx<'a> {
     /// W5: when on, each admitted item records its grounded date so the post-fill
     /// pass can prefix `[date YYYY-MM-DD]`. Off ⇒ no prefixes recorded or applied.
     temporal_grounding_enabled: bool,
+    /// R1.5-T0: `true` when a rank signal external to `packing_relevance_score`
+    /// (cross-encoder rerank, decomposition, or the deterministic/learned
+    /// reranker) governs this candidate list's established sort order. See
+    /// `admit_or_drop`'s "output already full" branch.
+    rank_based_ordering_active: bool,
 }
 
 /// Everything computed once per candidate before the admit/drop decision.
@@ -3265,6 +3300,19 @@ fn pack_recall_context(
 ) -> PackedRecallContext {
     let mut acc = PackAccumulator::default();
     let mut seen_subjects: HashMap<String, Vec<UnitId>> = HashMap::new();
+
+    // R1.5-T0: does an EXTERNAL rank signal (cross-encoder rerank,
+    // decomposition, or the deterministic/learned reranker) actually govern
+    // this candidate list's order? Mirrors the exact per-pair conditions the
+    // `fused.sort_by` below uses. Threaded into `PackCtx` so `admit_or_drop`
+    // can tell whether the established sort order is rank-authoritative (see
+    // the comment on the "output already full" branch there for why that
+    // matters).
+    let rank_based_ordering_active = fused.iter().any(|candidate| {
+        candidate.cross_rerank_rank.is_some()
+            || (request.query_decomposition_enabled && candidate.decomposition_rank.is_some())
+            || (request.rerank_enabled && candidate.rerank_rank.is_some())
+    });
 
     if request.context_packing_abstention_enabled {
         fused.sort_by(|left, right| {
@@ -3335,6 +3383,7 @@ fn pack_recall_context(
         output_limit: request.k.max(1),
         sibling_gather_enabled: pack_levers.sibling_gather_enabled,
         temporal_grounding_enabled,
+        rank_based_ordering_active,
     };
 
     // Greedy fill. With the session-diversity quota on, a candidate whose episode
@@ -3449,14 +3498,38 @@ fn admit_or_drop(
     };
 
     if acc.items.len() >= ctx.output_limit {
-        if let Some(replace_index) = replacement_index(
-            &acc.token_counts,
-            &acc.relevance_scores,
-            acc.token_estimate,
-            unit_tokens,
-            candidate_score,
-            request.budget_tokens,
-        ) {
+        // R1.5-T0: decoupling the packing scan window from `k` (widening it
+        // to `recall_pool_depth`) makes this branch reachable in Fast/Balanced
+        // mode for candidates beyond the top-`k` for the first time — before
+        // this fix `scan_limit == k == output_limit` made it unreachable
+        // there. `fused` is ALREADY sorted by the request's established
+        // priority before this loop runs, so a candidate reached here is, by
+        // construction, never higher-priority than an already-admitted one
+        // UNDER THAT ORDER. `replacement_index` below decides eligibility
+        // with `packing_relevance_score` — a DIFFERENT formula (it never
+        // reads `rerank_rank`/`decomposition_rank`/`cross_rerank_rank`) — so
+        // reopening this contest whenever a rank signal external to that
+        // formula governs the order would silently override the caller's
+        // opted-into rerank/decomposition decision. Skip the contest (just
+        // drop) in that case; otherwise (no rank signal in play — the
+        // historical case this mechanism was exercised for, via Exhaustive
+        // mode / the session-diversity quota) keep today's behavior
+        // unconditionally. The BUDGET-driven replacement below is a separate,
+        // unaffected mechanism — a legitimate substitution when a candidate
+        // would not fit as a fresh addition regardless of rank.
+        let replace_index = if ctx.rank_based_ordering_active {
+            None
+        } else {
+            replacement_index(
+                &acc.token_counts,
+                &acc.relevance_scores,
+                acc.token_estimate,
+                unit_tokens,
+                candidate_score,
+                request.budget_tokens,
+            )
+        };
+        if let Some(replace_index) = replace_index {
             let replaced_id = acc.evict(replace_index);
             dropped_items.push(RecallDroppedItem {
                 unit_id: replaced_id,
@@ -3581,28 +3654,42 @@ fn sibling_gather_pass(acc: &mut PackAccumulator, budget_tokens: usize) {
     }
 }
 
+/// R1.5-T0 / D1 fix: the packing CONSIDERATION window (how many of the
+/// fused, score-sorted candidates get a chance at admission) now derives from
+/// `recall_pool_depth`, never from `k`. Before this fix, Fast/Balanced set
+/// `scan_limit == output_limit == k` — a caller requesting a larger `k` gave
+/// the greedy fill a wider window to skip past subject-dedup/budget/quota
+/// drops, which changed WHICH candidates filled even the top-5 slots (D1:
+/// k=50 vs k=10 over an identical corpus/query produced different top-5
+/// orderings; R@5 0.067→0.167, `docs/build-log/2026-07-12-r1-docs-gate.md`).
+/// `pool_floor` is at least `recall_pool_depth` AND at least `output_limit`
+/// (so a `k` bigger than the pool still gets a wide-enough window to fill —
+/// returned items still stop at exactly `k`, only the scan window changed).
 fn recall_pack_scan_limit(
     request: &RecallRequest,
     candidate_count: usize,
     pack_levers: PackLevers,
+    recall_pool_depth: usize,
 ) -> usize {
     let output_limit = request.k.max(1);
+    let pool_floor = recall_pool_depth.max(output_limit);
     let scan_limit = match request.mode {
         RecallMode::Exhaustive => candidate_count
-            .min(output_limit.saturating_mul(25).max(25))
+            .min(pool_floor.saturating_mul(25).max(25))
             .max(output_limit),
-        RecallMode::Fast | RecallMode::Balanced => output_limit.min(candidate_count).max(1),
+        RecallMode::Fast | RecallMode::Balanced => pool_floor.min(candidate_count).max(1),
     };
-    // wave-final-review finding: in Fast/Balanced, scan_limit == output_limit
-    // == k, so the session-diversity quota (W4, `pack_levers.session_quota`)
-    // could only reshuffle the already-admitted top-k and could never surface
-    // a below-k distinct episode — its entire purpose. The quota's cap needs
-    // scan headroom past k to have candidates worth deferring, so widen to at
-    // least 2*k whenever the quota is enabled. `.take(scan_limit)` downstream
-    // clamps to `candidate_count`, so widening past it is harmless. Quota off
-    // leaves `scan_limit` untouched — byte-identical to today.
+    // wave-final-review finding (pre-R1.5-T0): in Fast/Balanced, scan_limit ==
+    // output_limit == k, so the session-diversity quota (W4,
+    // `pack_levers.session_quota`) could only reshuffle the already-admitted
+    // top-k and could never surface a below-k distinct episode — its entire
+    // purpose. R1.5-T0 widens this further past the pool floor (not past `k`,
+    // per the fix above) so the quota keeps its headroom independent of both
+    // `k` and `recall_pool_depth`. `.take(scan_limit)` downstream clamps to
+    // `candidate_count`, so widening past it is harmless. Quota off leaves
+    // `scan_limit` untouched.
     match pack_levers.session_quota {
-        Some(_) => scan_limit.max(output_limit.saturating_mul(2)),
+        Some(_) => scan_limit.max(recall_pool_depth.saturating_mul(2)),
         None => scan_limit,
     }
 }
@@ -6559,12 +6646,18 @@ mod pack_cost_tests {
         );
     }
 
-    /// wave-final-review finding: `recall_pack_scan_limit` clamped
-    /// `scan_limit == output_limit == k` in Fast/Balanced, so the quota could
-    /// only reshuffle the already-admitted top-k and never surface a below-k
-    /// distinct episode — its entire purpose. Quota off must reproduce
-    /// today's exact formula (`output_limit.min(candidate_count).max(1)`);
-    /// quota on must widen to give the quota scan headroom past k.
+    /// R1.5-T0 / D1 fix: `recall_pack_scan_limit` no longer clamps
+    /// `scan_limit == output_limit == k` in Fast/Balanced — that conflated the
+    /// caller-presentation `k` with the engine's internal fan-out (D1: a
+    /// larger `k` widened the scan window, which changed even the top-5
+    /// ordering). Quota off must now match `recall_pool_depth` (floored at
+    /// `k`, `k=8 < 64` here so the pool wins); quota on doubles the POOL
+    /// DEPTH (not `k`) for headroom.
+    ///
+    /// wave-final-review finding (superseded by the above): quota off used to
+    /// reproduce `output_limit.min(candidate_count).max(1)` and quota on
+    /// widened to `2*k` — both were `k`-derived, which this test now pins
+    /// against the decoupled formula instead.
     #[test]
     fn recall_pack_scan_limit_quota_off_is_unchanged_quota_on_widens() {
         let mut req = request(10_000);
@@ -6573,10 +6666,15 @@ mod pack_cost_tests {
 
         for mode in [RecallMode::Fast, RecallMode::Balanced] {
             req.mode = mode;
-            let off = recall_pack_scan_limit(&req, candidate_count, PackLevers::default());
+            let off = recall_pack_scan_limit(
+                &req,
+                candidate_count,
+                PackLevers::default(),
+                DEFAULT_RECALL_POOL_DEPTH,
+            );
             assert_eq!(
-                off, 8,
-                "{mode:?}: quota off must match today's output_limit.min(candidate_count).max(1)"
+                off, DEFAULT_RECALL_POOL_DEPTH,
+                "{mode:?}: quota off must match recall_pool_depth (floored at k), not k"
             );
 
             let on = recall_pack_scan_limit(
@@ -6586,10 +6684,12 @@ mod pack_cost_tests {
                     sibling_gather_enabled: false,
                     session_quota: Some(DEFAULT_SESSION_DIVERSITY_QUOTA),
                 },
+                DEFAULT_RECALL_POOL_DEPTH,
             );
             assert_eq!(
-                on, 16,
-                "{mode:?}: quota on widens to 2*k so the quota has headroom"
+                on,
+                DEFAULT_RECALL_POOL_DEPTH * 2,
+                "{mode:?}: quota on widens to 2*recall_pool_depth (not 2*k) so the quota has headroom"
             );
         }
     }
@@ -6625,7 +6725,12 @@ mod pack_cost_tests {
         req.mode = RecallMode::Fast;
 
         let off_levers = PackLevers::default();
-        let off_scan_limit = recall_pack_scan_limit(&req, candidates().len(), off_levers);
+        let off_scan_limit = recall_pack_scan_limit(
+            &req,
+            candidates().len(),
+            off_levers,
+            DEFAULT_RECALL_POOL_DEPTH,
+        );
         let off = pack_recall_context(
             candidates(),
             &req,
@@ -6646,7 +6751,12 @@ mod pack_cost_tests {
             sibling_gather_enabled: false,
             session_quota: Some(DEFAULT_SESSION_DIVERSITY_QUOTA),
         };
-        let on_scan_limit = recall_pack_scan_limit(&req, candidates().len(), on_levers);
+        let on_scan_limit = recall_pack_scan_limit(
+            &req,
+            candidates().len(),
+            on_levers,
+            DEFAULT_RECALL_POOL_DEPTH,
+        );
         assert!(
             on_scan_limit > req.k,
             "quota on: the real derivation must widen past k, got {on_scan_limit}"

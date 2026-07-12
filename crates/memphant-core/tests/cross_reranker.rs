@@ -1,5 +1,5 @@
 //! W8 cross-encoder rerank seam: `with_cross_reranker` reorders the top
-//! `candidate_pool_size` fused candidates by `(query, body)` scores AFTER fusion
+//! `recall_pool_depth` fused candidates by `(query, body)` scores AFTER fusion
 //! and BEFORE packing. Stub rerankers prove the three contract properties:
 //! reordering, prior-rank tie stability, and inert-when-absent/declined.
 

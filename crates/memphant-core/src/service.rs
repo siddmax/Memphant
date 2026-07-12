@@ -18,7 +18,7 @@ use memphant_types::{
 };
 
 use crate::{
-    Clock, CoreError, CrossReranker, DEFAULT_CANDIDATE_POOL_SIZE, EmbeddingProvider, JobFilter,
+    Clock, CoreError, CrossReranker, DEFAULT_RECALL_POOL_DEPTH, EmbeddingProvider, JobFilter,
     MemoryStore, PackLevers, ReflectJobRow, ScopePage, StoreError, VectorQuery, correct_memory,
     embedding_profile_for, forget_memory, normalize_component, parse_content_date,
     recall_with_pool, record_mark, reflect_recorded, retain_episode, retain_resource, tokenize,
@@ -92,14 +92,15 @@ pub struct MemoryService<S: MemoryStore> {
     /// `with_resource_chunks_write_enabled` (the gate's `--resource-chunks` /
     /// `MEMPHANT_RESOURCE_CHUNKS` thread it through the runtime).
     resource_chunks_write_enabled: bool,
-    /// W3 candidate-pool knob: the recall vector-channel KNN fan-out. DEFAULT
-    /// `DEFAULT_CANDIDATE_POOL_SIZE` (32), which reproduces today's ranking
-    /// exactly. Raised via `with_candidate_pool_size` so the W8 cross-encoder
-    /// rerank arm can rerank a widened 64–128 vector pool — no wire change. See
-    /// the pool-mapping note on `DEFAULT_CANDIDATE_POOL_SIZE`.
-    candidate_pool_size: usize,
+    /// R1.5-T0 recall-pool-depth knob: the ONE knob every internal
+    /// channel/fusion limit in the recall path derives from — vector-channel
+    /// KNN fan-out, packing scan window, rerank rescoring cap. DEFAULT
+    /// `DEFAULT_RECALL_POOL_DEPTH` (64). Raised via `with_recall_pool_depth`
+    /// (also lets the W8 cross-encoder rerank arm rerank a widened pool — no
+    /// wire change). See the pool-mapping note on `DEFAULT_RECALL_POOL_DEPTH`.
+    recall_pool_depth: usize,
     /// W4 packing levers (sibling-gather + session-diversity quota), threaded
-    /// construction-time like `candidate_pool_size`. BOTH DEFAULT OFF: they ship
+    /// construction-time like `recall_pool_depth`. BOTH DEFAULT OFF: they ship
     /// default-on only after the accuracy-wave measurement campaign, so the bench
     /// needs the flags. Set via `with_sibling_gather_enabled` / `with_session_quota`.
     pack_levers: PackLevers,
@@ -121,7 +122,7 @@ pub struct MemoryService<S: MemoryStore> {
     /// off and the bench threads it via `with_fact_extraction_enabled`.
     fact_extraction_enabled: bool,
     /// W8 cross-encoder rerank seam (DEFAULT `None`). When set, recall reorders
-    /// the top `candidate_pool_size` fused candidates by a real `(query, body)`
+    /// the top `recall_pool_depth` fused candidates by a real `(query, body)`
     /// cross-encoder AFTER fusion and BEFORE packing — the widened-pool rerank
     /// arm. `None` leaves recall byte-identical to today. Independent of the
     /// retired heuristic rerank stage. Set via `with_cross_reranker`; the bench
@@ -137,7 +138,7 @@ impl<S: MemoryStore> Clone for MemoryService<S> {
             embedder: Arc::clone(&self.embedder),
             contextual_chunks_write_enabled: self.contextual_chunks_write_enabled,
             resource_chunks_write_enabled: self.resource_chunks_write_enabled,
-            candidate_pool_size: self.candidate_pool_size,
+            recall_pool_depth: self.recall_pool_depth,
             pack_levers: self.pack_levers,
             temporal_grounding_enabled: self.temporal_grounding_enabled,
             fact_extraction_enabled: self.fact_extraction_enabled,
@@ -154,7 +155,7 @@ impl<S: MemoryStore> MemoryService<S> {
             embedder,
             contextual_chunks_write_enabled: true,
             resource_chunks_write_enabled: false,
-            candidate_pool_size: DEFAULT_CANDIDATE_POOL_SIZE,
+            recall_pool_depth: DEFAULT_RECALL_POOL_DEPTH,
             pack_levers: PackLevers::default(),
             temporal_grounding_enabled: false,
             fact_extraction_enabled: false,
@@ -183,14 +184,16 @@ impl<S: MemoryStore> MemoryService<S> {
         self
     }
 
-    /// Overrides the recall candidate-pool size (default
-    /// `DEFAULT_CANDIDATE_POOL_SIZE`). This directly sets the vector-channel KNN
-    /// fan-out for recall — the widen-able per-family limit the W8 rerank arm
-    /// needs at 64–128; the bench lane's `--pool <n>` threads its value here.
-    /// Construction-time only, mirroring `with_contextual_chunks_write_enabled`:
-    /// no recall-request/wire field changes.
-    pub fn with_candidate_pool_size(mut self, size: usize) -> Self {
-        self.candidate_pool_size = size;
+    /// Overrides the recall pool depth (default `DEFAULT_RECALL_POOL_DEPTH`,
+    /// 64) — R1.5-T0's ONE knob every internal channel/fusion limit in the
+    /// recall path derives from (vector-channel KNN fan-out, packing scan
+    /// window, rerank rescoring cap), NEVER `k`; the bench lane's `--pool <n>`
+    /// and the runtime's `MEMPHANT_RECALL_POOL_DEPTH` env override both thread
+    /// their value here. Construction-time only, mirroring
+    /// `with_contextual_chunks_write_enabled`: no recall-request/wire field
+    /// changes.
+    pub fn with_recall_pool_depth(mut self, depth: usize) -> Self {
+        self.recall_pool_depth = depth;
         self
     }
 
@@ -198,7 +201,7 @@ impl<S: MemoryStore> MemoryService<S> {
     /// after the greedy fill the packer spends leftover budget expanding already
     /// chunk-rendered items with their own unselected sibling chunks — never
     /// evicting a packed item nor exceeding budget. Construction-time only,
-    /// mirroring `with_candidate_pool_size`: no recall-request/wire change. The
+    /// mirroring `with_recall_pool_depth`: no recall-request/wire change. The
     /// bench lane's `--sibling-gather` threads its value here.
     pub fn with_sibling_gather_enabled(mut self, enabled: bool) -> Self {
         self.pack_levers.sibling_gather_enabled = enabled;
@@ -237,7 +240,7 @@ impl<S: MemoryStore> MemoryService<S> {
     }
 
     /// Installs the W8 cross-encoder rerank seam (default `None`). When set,
-    /// recall reorders the top `candidate_pool_size` fused candidates by this
+    /// recall reorders the top `recall_pool_depth` fused candidates by this
     /// reranker's `(query, body)` scores AFTER fusion and BEFORE packing.
     /// Construction-time only, mirroring the W3/W4/W5 knobs; the bench lane's
     /// `--cross-rerank` threads the real fastembed reranker here. Unset ⇒ recall
@@ -457,7 +460,7 @@ impl<S: MemoryStore> MemoryService<S> {
             },
             vector_query,
             self.clock.as_ref(),
-            self.candidate_pool_size,
+            self.recall_pool_depth,
             self.pack_levers,
             self.temporal_grounding_enabled,
             self.cross_reranker.as_deref(),
