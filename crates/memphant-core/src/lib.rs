@@ -2341,6 +2341,18 @@ where
     }
 
     if decomposition.active() {
+        // R1.5-T0 (review follow-up): the per-subquery per-channel fusion cap
+        // derives from the pool depth, never from the caller's `k` (it was
+        // `.take(request.k.max(1))`). This cap is doubly load-bearing: besides
+        // gating which units receive subquery fusion contributions, active
+        // decomposition RETAINS only subquery-tagged candidates after fusion
+        // (`fused.retain(|c| !c.subquery_ids.is_empty())` below), so the old
+        // k-derived cap silently controlled candidate MEMBERSHIP — a k=5
+        // caller lost every unit outside each subquery channel's top-5 while
+        // a k=50 caller kept it, changing even the top-5. Floored at
+        // `output_limit` like `recall_pack_scan_limit`'s `pool_floor`, so a
+        // `k` larger than the pool still tags at least `k` per channel.
+        let subquery_channel_cap = recall_pool_depth.max(request.k.max(1));
         for (subquery_index, subquery) in decomposition.subqueries.iter().enumerate() {
             let subquery_tokens = tokenize(&subquery.query);
             for pass in channels
@@ -2365,7 +2377,9 @@ where
                         .unwrap_or(std::cmp::Ordering::Equal)
                         .then_with(|| left.0.body.cmp(&right.0.body))
                 });
-                for (rank, (unit, score)) in ranked.into_iter().take(request.k.max(1)).enumerate() {
+                for (rank, (unit, score)) in
+                    ranked.into_iter().take(subquery_channel_cap).enumerate()
+                {
                     let channel_rank = rank + 1;
                     let decay =
                         decay_score_for(&unit, &tenant_review_events, request.decay_enabled);
@@ -3683,13 +3697,16 @@ fn recall_pack_scan_limit(
     // output_limit == k, so the session-diversity quota (W4,
     // `pack_levers.session_quota`) could only reshuffle the already-admitted
     // top-k and could never surface a below-k distinct episode — its entire
-    // purpose. R1.5-T0 widens this further past the pool floor (not past `k`,
-    // per the fix above) so the quota keeps its headroom independent of both
-    // `k` and `recall_pool_depth`. `.take(scan_limit)` downstream clamps to
+    // purpose. R1.5-T0 widens this past the POOL FLOOR (not past `k`) so the
+    // quota keeps its headroom independent of `k`; `pool_floor` (not bare
+    // `recall_pool_depth`) so a `k > recall_pool_depth` request still gets
+    // headroom past its own `k` — `recall_pool_depth*2` alone could sit at or
+    // below `scan_limit` there, silencing the quota again for exactly the
+    // large-k callers. `.take(scan_limit)` downstream clamps to
     // `candidate_count`, so widening past it is harmless. Quota off leaves
     // `scan_limit` untouched.
     match pack_levers.session_quota {
-        Some(_) => scan_limit.max(recall_pool_depth.saturating_mul(2)),
+        Some(_) => scan_limit.max(pool_floor.saturating_mul(2)),
         None => scan_limit,
     }
 }
@@ -6650,9 +6667,12 @@ mod pack_cost_tests {
     /// `scan_limit == output_limit == k` in Fast/Balanced — that conflated the
     /// caller-presentation `k` with the engine's internal fan-out (D1: a
     /// larger `k` widened the scan window, which changed even the top-5
-    /// ordering). Quota off must now match `recall_pool_depth` (floored at
-    /// `k`, `k=8 < 64` here so the pool wins); quota on doubles the POOL
-    /// DEPTH (not `k`) for headroom.
+    /// ordering). Quota off must now match the pool floor
+    /// (`recall_pool_depth.max(k)` — `k=8 < 64` here so the pool wins); quota
+    /// on doubles the POOL FLOOR for headroom, so a `k` LARGER than the pool
+    /// depth still gets scan room past its own `k` (second block below) —
+    /// `recall_pool_depth*2` alone would sit at/below `scan_limit` there and
+    /// silence the quota for exactly the large-k callers.
     ///
     /// wave-final-review finding (superseded by the above): quota off used to
     /// reproduce `output_limit.min(candidate_count).max(1)` and quota on
@@ -6690,6 +6710,39 @@ mod pack_cost_tests {
                 on,
                 DEFAULT_RECALL_POOL_DEPTH * 2,
                 "{mode:?}: quota on widens to 2*recall_pool_depth (not 2*k) so the quota has headroom"
+            );
+        }
+
+        // k LARGER than the pool depth: the quota widen must double the pool
+        // FLOOR (max(pool, k) = 200 here), not the bare pool depth — bare
+        // `64*2 = 128 < k` would leave the quota with no headroom past k.
+        req.k = 200;
+        let candidate_count = 1_000;
+        for mode in [RecallMode::Fast, RecallMode::Balanced] {
+            req.mode = mode;
+            let off = recall_pack_scan_limit(
+                &req,
+                candidate_count,
+                PackLevers::default(),
+                DEFAULT_RECALL_POOL_DEPTH,
+            );
+            assert_eq!(
+                off, 200,
+                "{mode:?}: quota off, k>pool: the pool floor is k itself"
+            );
+            let on = recall_pack_scan_limit(
+                &req,
+                candidate_count,
+                PackLevers {
+                    sibling_gather_enabled: false,
+                    session_quota: Some(DEFAULT_SESSION_DIVERSITY_QUOTA),
+                },
+                DEFAULT_RECALL_POOL_DEPTH,
+            );
+            assert_eq!(
+                on, 400,
+                "{mode:?}: quota on, k>pool: widen doubles the pool floor (2*max(pool, k)), \
+                 keeping headroom past k"
             );
         }
     }
