@@ -127,3 +127,24 @@ RESULTS_PLACEHOLDER if scoring didn't finish), docs/superpowers/specs/memphant/S
 > gte-modernbert. Binding: five-plane architecture (hot ≤1k / warm verbatim / cold
 > demotion-not-deletion / file plane / governance core); forgetting = demotion,
 > hard-delete only for privacy; verbatim is the memory; deterministic writes.
+
+> Update 2026-07-11 (FINAL v3 — R0 DONE, supersedes v2's "R0 first"): the embedder
+> bakeoff is COMPLETE (`docs/build-log/2026-07-11-r0-embedder-bakeoff.md`; CI table
+> `docs/build-log/artifacts/r0-embedder/r0-verdict-cis.json`). Verdicts: NO API
+> embedder promotion (voyage-context-4 best case fails the ≥3pt/CI-floor/two-set
+> bar); docs-lane winner modernbert-embed-large (plan-selected, `--embed-model
+> modernbert` / `MEMPHANT_EMBEDDINGS=modernbert`, grammar in `embedder_from_id`);
+> chat stays bge-small (ns ×3 models); qwen3 retired (CPU); code lane no API case
+> at 40Q sample scale. THE control-arm finding: Syndai's own embedder on our stack
+> scores .167 vs Syndai's .217 → the gate gap is heading-path context + fusion.
+> **Next = R1: flip the Syndai docs gate** — levers in evidence order: (1) prepend
+> heading-path/breadcrumb context to section bodies at ingest (Syndai does this,
+> we don't), (2) fusion behavior at 3k-section scale (lexical families win RRF
+> votes), (3) contextualized-embedding arm (local late-chunking approx vs
+> voyage-context-4, same promotion bar). Re-run `scripts/gate_run_syndai.py` +
+> `gate_run_memphant.py --embed-model modernbert` + `gate_compare.py` on BOTH
+> golden sets (v2 = `syndai_docs_golden_v2.jsonl`, seed 20260712). Harness facts
+> that bind analysis: ±1-question re-ingest variance at n=60 (stable-tiebreaker
+> follow-up open); R@5==R@10 pack-budget censoring; run scripts take GATE_PORT.
+> R0's 5 SDD incidents/fixes and open minors are ledgered in
+> `.superpowers/sdd/progress.md`.

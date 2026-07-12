@@ -1,0 +1,188 @@
+{
+ "generated": "2026-07-11",
+ "bootstrap_resamples": 1000,
+ "comparisons": {
+  "docs:voyage-context-4-vs-modernbert:v1": {
+   "mean": 0.05,
+   "ci95_low": -0.016666666666666666,
+   "ci95_high": 0.13333333333333333,
+   "ci_excludes_zero": false,
+   "n": 60
+  },
+  "docs:voyage-context-4-vs-modernbert:v2": {
+   "mean": 0.016666666666666666,
+   "ci95_low": 0.0,
+   "ci95_high": 0.05,
+   "ci_excludes_zero": false,
+   "n": 60
+  },
+  "docs:voyage-4-vs-modernbert:v1": {
+   "mean": 0.03333333333333333,
+   "ci95_low": -0.05,
+   "ci95_high": 0.1,
+   "ci_excludes_zero": false,
+   "n": 60
+  },
+  "docs:voyage-4-vs-modernbert:v2": {
+   "mean": 0.03333333333333333,
+   "ci95_low": 0.0,
+   "ci95_high": 0.08333333333333333,
+   "ci_excludes_zero": false,
+   "n": 60
+  },
+  "docs:voyage-4-lite-vs-modernbert:v1": {
+   "mean": 0.016666666666666666,
+   "ci95_low": -0.05,
+   "ci95_high": 0.08333333333333333,
+   "ci_excludes_zero": false,
+   "n": 60
+  },
+  "docs:voyage-4-lite-vs-modernbert:v2": {
+   "mean": 0.0,
+   "ci95_low": 0.0,
+   "ci95_high": 0.0,
+   "ci_excludes_zero": false,
+   "n": 60
+  },
+  "docs:voyage-4-large-vs-modernbert:v1": {
+   "mean": -0.016666666666666666,
+   "ci95_low": -0.1,
+   "ci95_high": 0.06666666666666667,
+   "ci_excludes_zero": false,
+   "n": 60
+  },
+  "docs:voyage-4-large-vs-modernbert:v2": {
+   "mean": 0.016666666666666666,
+   "ci95_low": 0.0,
+   "ci95_high": 0.05,
+   "ci_excludes_zero": false,
+   "n": 60
+  },
+  "docs:gemini-embedding-001-vs-modernbert:v1": {
+   "mean": -0.05,
+   "ci95_low": -0.11666666666666667,
+   "ci95_high": 0.0,
+   "ci_excludes_zero": false,
+   "n": 60
+  },
+  "docs:gemini-embedding-001-vs-modernbert:v2": {
+   "mean": 0.0,
+   "ci95_low": -0.05,
+   "ci95_high": 0.05,
+   "ci_excludes_zero": false,
+   "n": 60
+  },
+  "docs:openai-text-embedding-3-small-vs-modernbert:v1": {
+   "mean": -0.016666666666666666,
+   "ci95_low": -0.06666666666666667,
+   "ci95_high": 0.03333333333333333,
+   "ci_excludes_zero": false,
+   "n": 60
+  },
+  "docs:openai-text-embedding-3-small-vs-modernbert:v2": {
+   "mean": -0.016666666666666666,
+   "ci95_low": -0.06666666666666667,
+   "ci95_high": 0.03333333333333333,
+   "ci_excludes_zero": false,
+   "n": 60
+  },
+  "docs:modernbert-vs-small:v1": {
+   "mean": 0.05,
+   "ci95_low": -0.016666666666666666,
+   "ci95_high": 0.11666666666666667,
+   "ci_excludes_zero": false,
+   "n": 60
+  },
+  "docs:modernbert-vs-small:v2": {
+   "mean": 0.03333333333333333,
+   "ci95_low": 0.0,
+   "ci95_high": 0.08333333333333333,
+   "ci_excludes_zero": false,
+   "n": 60
+  },
+  "docs:gemma-vs-small:v1": {
+   "mean": 0.05,
+   "ci95_low": -0.016666666666666666,
+   "ci95_high": 0.13333333333333333,
+   "ci_excludes_zero": false,
+   "n": 60
+  },
+  "docs:gemma-vs-small:v2": {
+   "mean": 0.016666666666666666,
+   "ci95_low": -0.03333333333333333,
+   "ci95_high": 0.08333333333333333,
+   "ci_excludes_zero": false,
+   "n": 60
+  },
+  "docs:qwen3-vs-small:v1": {
+   "mean": 0.016666666666666666,
+   "ci95_low": -0.06666666666666667,
+   "ci95_high": 0.1,
+   "ci_excludes_zero": false,
+   "n": 60
+  },
+  "docs:qwen3-vs-small:v2": {
+   "mean": 0.0,
+   "ci95_low": -0.05,
+   "ci95_high": 0.05,
+   "ci_excludes_zero": false,
+   "n": 60
+  },
+  "docs:voyage-context-4-vs-small:v1": {
+   "mean": 0.1,
+   "ci95_low": 0.03333333333333333,
+   "ci95_high": 0.18333333333333332,
+   "ci_excludes_zero": true,
+   "n": 60
+  },
+  "docs:voyage-context-4-vs-small:v2": {
+   "mean": 0.05,
+   "ci95_low": 0.0,
+   "ci95_high": 0.11666666666666667,
+   "ci_excludes_zero": false,
+   "n": 60
+  },
+  "chat:base-vs-small:20260710": {
+   "mean": -0.01,
+   "ci95_low": -0.05,
+   "ci95_high": 0.02,
+   "ci_excludes_zero": false,
+   "n": 100
+  },
+  "chat:modernbert-vs-small:20260710": {
+   "mean": -0.01,
+   "ci95_low": -0.03,
+   "ci95_high": 0.0,
+   "ci_excludes_zero": false,
+   "n": 100
+  },
+  "chat:gemma-vs-small:20260710": {
+   "mean": 0.0,
+   "ci95_low": -0.05,
+   "ci95_high": 0.05,
+   "ci_excludes_zero": false,
+   "n": 100
+  },
+  "code:voyage-code-3-vs-modernbert": {
+   "mean": 0.025,
+   "ci95_low": -0.05,
+   "ci95_high": 0.125,
+   "ci_excludes_zero": false,
+   "n": 40
+  },
+  "code:voyage-code-3-vs-small": {
+   "mean": 0.05,
+   "ci95_low": 0.0,
+   "ci95_high": 0.125,
+   "ci_excludes_zero": false,
+   "n": 40
+  },
+  "code:modernbert-vs-small": {
+   "mean": 0.025,
+   "ci95_low": 0.0,
+   "ci95_high": 0.075,
+   "ci_excludes_zero": false,
+   "n": 40
+  }
+ }
+}

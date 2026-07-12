@@ -1,0 +1,445 @@
+{
+  "benchmark": "longmemeval_reader_qa",
+  "engine": "openrouter",
+  "reader": "openai/gpt-5.6-terra (openrouter chat/completions API)",
+  "judge": "containment+anthropic/claude-sonnet-5 (normalized containment first; one LLM judge call on non-match; abstention = exact 'I don't know' containment)",
+  "reader_model_id": "openai/gpt-5.6-terra",
+  "judge_model_id": "anthropic/claude-sonnet-5",
+  "prompt_version": 1,
+  "routing": null,
+  "reasoning_effort": null,
+  "runtime": "postgres",
+  "label": "r0-code-modernbert",
+  "evidence_path": "docs/build-log/artifacts/r0-embedder/code/modernbert/evidence.jsonl",
+  "retrieval_report": null,
+  "command": "scripts/run_reader.py --engine openrouter --model openai/gpt-5.6-terra --judge-model anthropic/claude-sonnet-5 --evidence docs/build-log/artifacts/r0-embedder/code/modernbert/evidence.jsonl --out docs/build-log/artifacts/r0-embedder/code/modernbert/reader.json --label r0-code-modernbert --cache-dir docs/build-log/artifacts/r0-embedder/reader-cache --max-calls 150",
+  "generated_at_unix": 1783823270,
+  "aborted": null,
+  "fresh_calls": 44,
+  "cached_calls": 3,
+  "overall": {
+    "n": 40,
+    "n_scored": 40,
+    "qa_accuracy": 0.25
+  },
+  "strata": {
+    "assistant": {
+      "n": 19,
+      "n_scored": 19,
+      "qa_accuracy": 0.21052631578947367
+    },
+    "toolResult": {
+      "n": 18,
+      "n_scored": 18,
+      "qa_accuracy": 0.16666666666666666
+    },
+    "user": {
+      "n": 3,
+      "n_scored": 3,
+      "qa_accuracy": 1.0
+    }
+  },
+  "per_question": [
+    {
+      "question_id": "code_lane_001_assistant",
+      "question_type": "assistant",
+      "is_abstention": false,
+      "gold_answer": "feed/params.ts",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_002_toolResult",
+      "question_type": "toolResult",
+      "is_abstention": false,
+      "gold_answer": "\"DRAGON GIRL\" => norm= \"dragon girl\" slug= \"dragon-girl\" compact= \"dragongirl\"",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_003_assistant",
+      "question_type": "assistant",
+      "is_abstention": false,
+      "gold_answer": "`normalizeTagSearchText` in `web/lib/tags.ts`",
+      "reply": "`Flutter/.maestro/smoke_test.yaml` Maestro smoke-test routine.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_004_toolResult",
+      "question_type": "toolResult",
+      "is_abstention": false,
+      "gold_answer": "Users cannot create arbitrary tags - only these approved tags are allowed.",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_005_assistant",
+      "question_type": "assistant",
+      "is_abstention": false,
+      "gold_answer": "main.dart",
+      "reply": "main.dart",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_006_toolResult",
+      "question_type": "toolResult",
+      "is_abstention": false,
+      "gold_answer": "canonicalizeStoryTags",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_007_assistant",
+      "question_type": "assistant",
+      "is_abstention": false,
+      "gold_answer": "3-line markdown diff, no security surface, no interface change.",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_008_toolResult",
+      "question_type": "toolResult",
+      "is_abstention": false,
+      "gold_answer": "Assets.poppinsRegular",
+      "reply": "Assets.poppinsRegular",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_009_user",
+      "question_type": "user",
+      "is_abstention": false,
+      "gold_answer": "`caas:brainstorm`",
+      "reply": "`caas:brainstorm`",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_010_assistant",
+      "question_type": "assistant",
+      "is_abstention": false,
+      "gold_answer": "buildStoryDetailMetaDescription",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_011_toolResult",
+      "question_type": "toolResult",
+      "is_abstention": false,
+      "gold_answer": "43 passed (43)",
+      "reply": "1",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_012_assistant",
+      "question_type": "assistant",
+      "is_abstention": false,
+      "gold_answer": "a rich scaffold with stats",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_013_toolResult",
+      "question_type": "toolResult",
+      "is_abstention": false,
+      "gold_answer": "const TITLE_BUDGET = 60",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_014_assistant",
+      "question_type": "assistant",
+      "is_abstention": false,
+      "gold_answer": "`com.example.toobaiProjectWebApp`",
+      "reply": "com.example.toobaiProjectWebApp",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_015_toolResult",
+      "question_type": "toolResult",
+      "is_abstention": false,
+      "gold_answer": "/Users/sidsharma/.npm/_logs/2026-07-06T15_45_32_820Z-debug-0.log",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_016_user",
+      "question_type": "user",
+      "is_abstention": false,
+      "gold_answer": "`caas:brainstorm`",
+      "reply": "`caas:brainstorm`",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_017_assistant",
+      "question_type": "assistant",
+      "is_abstention": false,
+      "gold_answer": "localized synopsis",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_018_toolResult",
+      "question_type": "toolResult",
+      "is_abstention": false,
+      "gold_answer": "159 files checked",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_019_user",
+      "question_type": "user",
+      "is_abstention": false,
+      "gold_answer": "`caas:brainstorm`",
+      "reply": "`caas:brainstorm`",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_020_assistant",
+      "question_type": "assistant",
+      "is_abstention": false,
+      "gold_answer": "The `.translation-state.json` file (1.6MB) was being included in the diff and exceeded commit guardrails",
+      "reply": "The new E2E test file lacked a trailing newline, causing a Biome formatting error.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_021_toolResult",
+      "question_type": "toolResult",
+      "is_abstention": false,
+      "gold_answer": "components/account/clear-reading-history-button.tsx",
+      "reply": "I don't know",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_022_assistant",
+      "question_type": "assistant",
+      "is_abstention": false,
+      "gold_answer": "The existing test `normalizeFeedSearch(\"  ass   licking  \")` expects `\"ass licking\"` (case + space preserved), and character `\"  Mio   Akiyama  \"` \u2192 `\"Mio Akiyama\"`",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_023_toolResult",
+      "question_type": "toolResult",
+      "is_abstention": false,
+      "gold_answer": "135ms",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_024_assistant",
+      "question_type": "assistant",
+      "is_abstention": false,
+      "gold_answer": "their configured cwd `/workspace/...` doesn't exist on this filesystem",
+      "reply": "The agent used an unavailable hardcoded working-directory path.",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_025_toolResult",
+      "question_type": "toolResult",
+      "is_abstention": false,
+      "gold_answer": "web/lib/captions/translate-caption.test.ts",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_026_assistant",
+      "question_type": "assistant",
+      "is_abstention": false,
+      "gold_answer": "$SYNDAI_RUN_STATE_DIR/feature-flow-state.json",
+      "reply": "`$SYNDAI_RUN_STATE_DIR/feature-flow-state.json`",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_027_toolResult",
+      "question_type": "toolResult",
+      "is_abstention": false,
+      "gold_answer": "lib/captions/resolve-caption-display.test.ts",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_028_assistant",
+      "question_type": "assistant",
+      "is_abstention": false,
+      "gold_answer": "the author model is not lineage-resolvable",
+      "reply": "The ship-signal `run_skill` callback failed with a fetch error because the skill server was unreachable.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_029_toolResult",
+      "question_type": "toolResult",
+      "is_abstention": false,
+      "gold_answer": ".syndai_validation_deps_installed.marker",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_030_assistant",
+      "question_type": "assistant",
+      "is_abstention": false,
+      "gold_answer": "hyphens aren't normalized",
+      "reply": "It uses string concatenation instead of a template literal.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_031_toolResult",
+      "question_type": "toolResult",
+      "is_abstention": false,
+      "gold_answer": "must have required properties path",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_032_assistant",
+      "question_type": "assistant",
+      "is_abstention": false,
+      "gold_answer": "make `normalizeTagSearchText` normalize hyphens (and other punctuation) to spaces",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_033_toolResult",
+      "question_type": "toolResult",
+      "is_abstention": false,
+      "gold_answer": "\"http://localhost:3100\"",
+      "reply": "http://localhost:3100",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_034_assistant",
+      "question_type": "assistant",
+      "is_abstention": false,
+      "gold_answer": "web/app/[locale]/layout.tsx",
+      "reply": "README.md",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_035_toolResult",
+      "question_type": "toolResult",
+      "is_abstention": false,
+      "gold_answer": "Semantics",
+      "reply": "Semantics",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_036_assistant",
+      "question_type": "assistant",
+      "is_abstention": false,
+      "gold_answer": "`resolveCaptionDisplay`",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_037_toolResult",
+      "question_type": "toolResult",
+      "is_abstention": false,
+      "gold_answer": "\"Two rivals share a balcony. \u2014 Read Moonlit Rivals by A. Creator (3 chapters, 120 pages) free on Yurivan.\"",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_038_assistant",
+      "question_type": "assistant",
+      "is_abstention": false,
+      "gold_answer": "TAG_SEARCH_ALIASES",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_039_toolResult",
+      "question_type": "toolResult",
+      "is_abstention": false,
+      "gold_answer": ".replace(/[\\s_-]+/g, \"\")",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "code_lane_040_assistant",
+      "question_type": "assistant",
+      "is_abstention": false,
+      "gold_answer": "chapter page",
+      "reply": "I don't know",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    }
+  ],
+  "paired_vs_baseline": null
+}
