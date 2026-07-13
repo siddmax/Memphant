@@ -1,0 +1,77 @@
+{
+ "generated": "2026-07-12",
+ "comparisons": {
+  "L1-vs-syndai:pooled": {
+   "mean": -0.08333333333333333,
+   "ci95_low": -0.175,
+   "ci95_high": 0.008333333333333333,
+   "ci_excludes_zero": false,
+   "n": 120
+  },
+  "L1X-vs-syndai:pooled": {
+   "mean": 0.075,
+   "ci95_low": -0.008333333333333333,
+   "ci95_high": 0.16666666666666666,
+   "ci_excludes_zero": false,
+   "n": 120
+  },
+  "L1C-vs-syndai:pooled": {
+   "mean": -0.075,
+   "ci95_low": -0.15,
+   "ci95_high": 0.008333333333333333,
+   "ci_excludes_zero": false,
+   "n": 120
+  },
+  "L1XC-vs-syndai:pooled": {
+   "mean": 0.08333333333333333,
+   "ci95_low": 0.0,
+   "ci95_high": 0.16666666666666666,
+   "ci_excludes_zero": false,
+   "n": 120
+  },
+  "L1-vs-R1A2:pooled": {
+   "mean": 0.0,
+   "ci95_low": -0.03333333333333333,
+   "ci95_high": 0.03333333333333333,
+   "ci_excludes_zero": false,
+   "n": 120
+  },
+  "L2-attr:pooled": {
+   "mean": 0.15833333333333333,
+   "ci95_low": 0.06666666666666667,
+   "ci95_high": 0.25,
+   "ci_excludes_zero": true,
+   "n": 120
+  },
+  "chunks-attr:pooled": {
+   "mean": 0.008333333333333333,
+   "ci95_low": -0.041666666666666664,
+   "ci95_high": 0.06666666666666667,
+   "ci_excludes_zero": false,
+   "n": 120
+  },
+  "chunks-attr-on-rerank:pooled": {
+   "mean": 0.008333333333333333,
+   "ci95_low": -0.03333333333333333,
+   "ci95_high": 0.05,
+   "ci_excludes_zero": false,
+   "n": 120
+  },
+  "chat-regression:small-20260710": {
+   "mean": -0.01,
+   "ci95_low": -0.06,
+   "ci95_high": 0.04,
+   "ci_excludes_zero": false,
+   "n": 100
+  }
+ },
+ "latency": {
+  "cross_rerank_ms_samples": [
+   12893,
+   13514,
+   13635
+  ],
+  "pool": 64,
+  "note": "full-section candidates; 625ms smoke was short texts"
+ }
+}

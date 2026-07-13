@@ -339,3 +339,18 @@ RESULTS_PLACEHOLDER if scoring didn't finish), docs/superpowers/specs/memphant/S
 > cost ~5×, and is the same lever the R2 chat lane's pack-displacement failures point
 > at. R6 replacement stays gated on that or explicit cost acceptance. Docs-lane recall
 > recommendation for Syndai integration TODAY: k=50, budget_tokens=8192, modernbert.
+
+> Update 2026-07-12 (FINAL v5 — R1.5 DONE, supersedes v4's decision point): rank
+> compression measured (`docs/build-log/2026-07-12-r15-rank-compression.md`).
+> Shipped default: recall_pool_depth=64 (k-invariance correctness contract).
+> Cross-rerank: +0.158 excl0 attribution (campaign's biggest lever) but 13s/query
+> CPU on full sections -> flag-gated, latency-retired; follow-ups named:
+> truncated-input rerank, top-32 pool, smaller reranker, async — any 4-8x cut
+> ships it. Chunks: 3rd ns, retirement candidate. R6 NOT unlocked (best
+> comparable-volume arm floor exactly 0.000). NEXT per §9 order: **R2 chat round**
+> (n=300 seed 20260712 → full-500 confirm: Chain-of-Note v4, hot-plane profile
+> block, temporal re-measure, HyDE) — the reader-side levers R2 tests are exactly
+> where the chat lane's headroom lives (R@10 .83-.94, QA .56). The rerank-latency
+> follow-up can ride any later docs round; it is measurement-ready (flag + trace
+> ms field all wired). Chat-lane regression baseline for R2: r15-docs/chat/
+> reader-small-20260710.json (QA .550 on binary 800ac41).

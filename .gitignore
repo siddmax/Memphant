@@ -74,3 +74,6 @@ docs/build-log/artifacts/r0-embedder/reader-cache/
 docs/build-log/artifacts/code-lane/miner-cache/
 docs/build-log/artifacts/r1-docs/**/evidence.jsonl
 docs/build-log/artifacts/r1-docs/**/server-*.log
+docs/build-log/artifacts/r15-docs/**/evidence.jsonl
+docs/build-log/artifacts/r15-docs/**/server-*.log
+docs/build-log/artifacts/r15-docs/chat/ev-*.jsonl

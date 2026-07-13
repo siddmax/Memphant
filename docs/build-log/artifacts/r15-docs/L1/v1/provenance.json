@@ -1,0 +1,561 @@
+{
+  "engine": "memphant",
+  "runtime": "memphant-server resource ingest + /v1/recall",
+  "embed_model": "modernbert",
+  "label": "r15-L1",
+  "breadcrumb": false,
+  "resource_chunks": false,
+  "cross_rerank": false,
+  "golden_path": "benchmarks/data/syndai_docs_golden.jsonl",
+  "database_url_db": "memphant_scratch_65685_1783895476",
+  "k": 10,
+  "recall_mode": "exhaustive",
+  "budget_tokens": 8192,
+  "haystack_sections": 3257,
+  "golden_sha256": "c424b08f02608510445007a5d75dcf5903c8ac34d31c073c629717db9a0f0c83",
+  "golden_count": 60,
+  "recall_at_5": 0.06666666666666667,
+  "recall_at_10": 0.11666666666666667,
+  "per_question": [
+    {
+      "question_id": "syndai_docs_s001_ops",
+      "question_type": "ops",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s002_plans",
+      "question_type": "plans",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s003_root",
+      "question_type": "root",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s004_specs",
+      "question_type": "specs",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s005_tools",
+      "question_type": "tools",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": true,
+      "hit_at_10": true
+    },
+    {
+      "question_id": "syndai_docs_s006_root",
+      "question_type": "root",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s007_specs",
+      "question_type": "specs",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": true
+    },
+    {
+      "question_id": "syndai_docs_s008_ops",
+      "question_type": "ops",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s009_root",
+      "question_type": "root",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s010_specs",
+      "question_type": "specs",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s011_tools",
+      "question_type": "tools",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": true,
+      "hit_at_10": true
+    },
+    {
+      "question_id": "syndai_docs_s012_decisions",
+      "question_type": "decisions",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s013_ops",
+      "question_type": "ops",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s014_root",
+      "question_type": "root",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s015_contracts",
+      "question_type": "contracts",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s016_specs",
+      "question_type": "specs",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s017_tools",
+      "question_type": "tools",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s018_ops",
+      "question_type": "ops",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s019_root",
+      "question_type": "root",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s020_ops",
+      "question_type": "ops",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s021_specs",
+      "question_type": "specs",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s022_root",
+      "question_type": "root",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s023_root",
+      "question_type": "root",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s024_specs",
+      "question_type": "specs",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s025_ops",
+      "question_type": "ops",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s026_runbooks",
+      "question_type": "runbooks",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s027_ops",
+      "question_type": "ops",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s028_plans",
+      "question_type": "plans",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": true
+    },
+    {
+      "question_id": "syndai_docs_s029_root",
+      "question_type": "root",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s030_specs",
+      "question_type": "specs",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s031_root",
+      "question_type": "root",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s032_specs",
+      "question_type": "specs",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s033_decisions",
+      "question_type": "decisions",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s034_root",
+      "question_type": "root",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s035_specs",
+      "question_type": "specs",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": true,
+      "hit_at_10": true
+    },
+    {
+      "question_id": "syndai_docs_s036_root",
+      "question_type": "root",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s037_root",
+      "question_type": "root",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s038_runbooks",
+      "question_type": "runbooks",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s039_plans",
+      "question_type": "plans",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s040_root",
+      "question_type": "root",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s041_runbooks",
+      "question_type": "runbooks",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": true
+    },
+    {
+      "question_id": "syndai_docs_s042_plans",
+      "question_type": "plans",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s043_runbooks",
+      "question_type": "runbooks",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s044_root",
+      "question_type": "root",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s045_specs",
+      "question_type": "specs",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s046_root",
+      "question_type": "root",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s047_runbooks",
+      "question_type": "runbooks",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_s048_runbooks",
+      "question_type": "runbooks",
+      "multi_hop": false,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_m001",
+      "question_type": "multi-hop",
+      "multi_hop": true,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_m002",
+      "question_type": "multi-hop",
+      "multi_hop": true,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_m003",
+      "question_type": "multi-hop",
+      "multi_hop": true,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": true,
+      "hit_at_10": true
+    },
+    {
+      "question_id": "syndai_docs_m004",
+      "question_type": "multi-hop",
+      "multi_hop": true,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_m005",
+      "question_type": "multi-hop",
+      "multi_hop": true,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_m006",
+      "question_type": "multi-hop",
+      "multi_hop": true,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_m007",
+      "question_type": "multi-hop",
+      "multi_hop": true,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_m008",
+      "question_type": "multi-hop",
+      "multi_hop": true,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_m009",
+      "question_type": "multi-hop",
+      "multi_hop": true,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_m010",
+      "question_type": "multi-hop",
+      "multi_hop": true,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_m011",
+      "question_type": "multi-hop",
+      "multi_hop": true,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "syndai_docs_m012",
+      "question_type": "multi-hop",
+      "multi_hop": true,
+      "returned_items": 10,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    }
+  ]
+}
