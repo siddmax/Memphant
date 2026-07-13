@@ -151,3 +151,29 @@ chars/question + rerank p50/p95 into provenance.
   `.fastembed_cache/` warm.
 - Reader cache dir `docs/build-log/artifacts/r0-embedder/reader-cache` is shared across all
   waves — reuse it; re-scores of unchanged evidence are free.
+
+## 8. npcsh/npcpy source audit (2026-07-12) — verdict SKIP; three folds, no new workstream
+
+Full-source audit (5 parallel deep-dives) of npc-worldwide npcsh/npcpy/npcrs + their paper
+(arXiv 2603.20380). Nothing competes with any MemPhant lane: no rerank, no packing/admission,
+brute-force cosine over JSON-in-BLOB, recency-only memory injection, zero recall evals, and three
+live store-divergence bugs of exactly the class our store contract + testkit forbids. Detail in
+auto-memory `npcsh-npcpy-verdict.md`; do not re-investigate. Fold-ins (opportunistic; none block
+R2):
+1. **Extraction rule-prompt content** (npcpy `llm_funcs.py` ~1415–1450: ban speaker attribution,
+   interaction mechanics, greetings, generic truisms; demand nuance-preserving statements +
+   source excerpts + explicit/inferred tag; return-EMPTY few-shot negatives) → applies ONLY where
+   we already run LLMs — the R5 consolidator prompt and keys/metadata extraction. Verbatim-is-
+   the-memory and no-LLM-at-ingest stand; their retry-until-facts-appear anti-pattern is the
+   cautionary pairing (never pressure a model out of returning empty).
+2. **SHA-256 content-hash-gated incremental re-extraction + noise-file heuristic** (lockfiles,
+   avg line length, printable ratio) → R3 file-plane ingest MVP and R4 code-lane corpus refresh.
+3. **Approval-lifecycle edit history (initial vs final memory, approve/reject/edit labels) as
+   training signal for a learned admission gate** → R3 governance back pocket; pairs with the
+   packing-tier reconciliation carry item.
+Carry-list add: an e2e assertion that the recalled band is NON-EMPTY in the final packed context
+(their Rust port templates memory into the system prompt but nothing ever populates it — silent
+zero-recall, shipped, untested).
+Citable numbers (small-model ≤35B caveat): tool-call accuracy ~95%→~25% as tool catalog grows
+1→8 (keep the MCP surface lean); failed-attempt context poisons retries (delegation retry gain
+~3pp vs ~20pp for search) — independent support for suppression-heavy packing.
