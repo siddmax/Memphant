@@ -2546,6 +2546,43 @@ mod tests {
     }
 
     #[test]
+    fn campaign_candidate_config_hashes_are_cross_language_frozen() {
+        for (model, input_price, output_price, expected) in [
+            (
+                "anthropic/claude-sonnet-5-20260630",
+                2_000_000,
+                10_000_000,
+                "cc38c23befeb5de0aeb8250277c22a7babe8439cae3a6f4f8977b27d27264b1c",
+            ),
+            (
+                "openai/gpt-5.6-luna-20260709",
+                1_100_000,
+                6_600_000,
+                "292510ca45480129e94d459a4eaa4c70556369dfcd11a24e72f5c30f0c848b05",
+            ),
+            (
+                "openai/gpt-5.6-sol-20260709",
+                5_500_000,
+                33_000_000,
+                "b02a7147b5eaaf286b0192e3e7d0108f06af8d1a52783f7a9afcc63db36199a3",
+            ),
+        ] {
+            let candidate = DeepConfig::new(
+                "secret".into(),
+                model.into(),
+                "campaign prompt".into(),
+                vec!["azure".into()],
+                input_price,
+                output_price,
+            )
+            .unwrap();
+            let provider =
+                OpenRouterDeepRecall::with_transport(candidate, Arc::new(PanicTransport));
+            assert_eq!(provider.identity.config_hash, expected);
+        }
+    }
+
+    #[test]
     fn deep_mode_env_grammar_is_strict() {
         assert!(!deep_mode_from_value(None).unwrap());
         assert!(!deep_mode_from_value(Some("off")).unwrap());

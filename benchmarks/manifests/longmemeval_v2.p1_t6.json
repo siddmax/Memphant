@@ -54,7 +54,7 @@
       "settlement_models": ["qwen/qwen3.5-9b","qwen/qwen3.5-9b-20260310"],
       "provider": "deepinfra",
       "quantization": "bf16",
-      "provider_policy": {"allow_fallbacks":false,"data_collection":"deny","only":["deepinfra"],"require_parameters":true,"zdr":true},
+      "provider_policy": {"allow_fallbacks":false,"data_collection":"deny","max_price":{"completion":0.15,"prompt":0.1},"only":["deepinfra"],"quantizations":["bf16"],"require_parameters":true,"zdr":true},
       "endpoint_contract": {"name":"DeepInfra | qwen/qwen3.5-9b-20260310","model_id":"qwen/qwen3.5-9b","provider_name":"DeepInfra","tag":"deepinfra/bf16","quantization":"bf16","min_context_length":262144,"min_completion_tokens":20000,"required_parameters":["max_tokens"],"prompt_price_micros_per_million_max":100000,"completion_price_micros_per_million_max":150000},
       "prompt_price_micros_per_million": 100000,
       "completion_price_micros_per_million": 150000
@@ -62,9 +62,9 @@
     "judge": {"official_alias":"gpt-5.2","model":"gpt-5.2-2025-12-11","reasoning_effort":"medium","max_completion_tokens":4096,"input_price_micros_per_million":1750000,"cached_input_price_micros_per_million":175000,"output_price_micros_per_million":14000000,"pricing_source":"https://developers.openai.com/api/docs/models/gpt-5.2"},
     "deep_limits": {"wall_time_ms":120000,"max_tool_iterations":24,"max_context_tokens":96000,"max_spend_micros":300000,"max_completion_tokens":4096},
     "deep_candidates": {
-      "sonnet": {"requested_alias":"anthropic/claude-sonnet-5","model":"anthropic/claude-sonnet-5-20260630","endpoint_model_id":"anthropic/claude-sonnet-5","providers":["azure"],"input_price_micros_per_million":2000000,"output_price_micros_per_million":10000000},
-      "luna": {"requested_alias":"openai/gpt-5.6-luna","model":"openai/gpt-5.6-luna-20260709","endpoint_model_id":"openai/gpt-5.6-luna","providers":["azure"],"input_price_micros_per_million":1100000,"output_price_micros_per_million":6600000},
-      "sol": {"requested_alias":"openai/gpt-5.6-sol","model":"openai/gpt-5.6-sol-20260709","endpoint_model_id":"openai/gpt-5.6-sol","providers":["azure"],"input_price_micros_per_million":5500000,"output_price_micros_per_million":33000000}
+      "sonnet": {"requested_alias":"anthropic/claude-sonnet-5","model":"anthropic/claude-sonnet-5-20260630","endpoint_model_id":"anthropic/claude-sonnet-5","providers":["azure"],"input_price_micros_per_million":2000000,"output_price_micros_per_million":10000000,"config_sha256":"cc38c23befeb5de0aeb8250277c22a7babe8439cae3a6f4f8977b27d27264b1c"},
+      "luna": {"requested_alias":"openai/gpt-5.6-luna","model":"openai/gpt-5.6-luna-20260709","endpoint_model_id":"openai/gpt-5.6-luna","providers":["azure"],"input_price_micros_per_million":1100000,"output_price_micros_per_million":6600000,"config_sha256":"292510ca45480129e94d459a4eaa4c70556369dfcd11a24e72f5c30f0c848b05"},
+      "sol": {"requested_alias":"openai/gpt-5.6-sol","model":"openai/gpt-5.6-sol-20260709","endpoint_model_id":"openai/gpt-5.6-sol","providers":["azure"],"input_price_micros_per_million":5500000,"output_price_micros_per_million":33000000,"config_sha256":"b02a7147b5eaaf286b0192e3e7d0108f06af8d1a52783f7a9afcc63db36199a3"}
     }
   },
   "run_order": {

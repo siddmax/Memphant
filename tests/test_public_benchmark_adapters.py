@@ -604,9 +604,9 @@ def test_memphant_memory_tiny_packaged_rest_dry_run(monkeypatch, tmp_path):
             "MEMPHANT_LME_WORKER_BIN", str(ROOT / "target/debug/memphant-worker")
         )
         monkeypatch.setenv("MEMPHANT_LME_RUN_ID", "packaged-dry-run")
-        memory = registry["memphant"](
-            json.loads(MEMPHANT_CONFIG.read_text())["memory_params"]
-        )
+        memory_params = json.loads(MEMPHANT_CONFIG.read_text())["memory_params"]
+        memory_params["mode"] = "fast"
+        memory = registry["memphant"](memory_params)
         memory.insert(
             {
                 "id": "fixture-trajectory",

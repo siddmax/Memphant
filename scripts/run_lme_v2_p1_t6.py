@@ -54,6 +54,10 @@ ENDPOINT_FIELDS = (
 )
 MICROS_PER_USD = Decimal(1_000_000)
 MILLION = Decimal(1_000_000)
+SAFE_ENVIRONMENT_KEYS = (
+    "HOME", "LANG", "LC_ALL", "PATH", "RUST_BACKTRACE", "RUST_LOG",
+    "SSL_CERT_DIR", "SSL_CERT_FILE", "TMPDIR", "TZ",
+)
 
 
 def require(condition: bool, message: str) -> None:
@@ -94,6 +98,80 @@ def token_price_to_micros_per_million(value: object) -> int:
 def liability_micros(token_upper_bound: int, price_micros_per_million: int) -> int:
     require(token_upper_bound >= 0 and price_micros_per_million >= 0, "negative liability")
     return (token_upper_bound * price_micros_per_million + 999_999) // 1_000_000
+
+
+def _clean_environment(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Construct a child environment from a narrow non-secret allowlist."""
+    clean = {
+        key: os.environ[key]
+        for key in SAFE_ENVIRONMENT_KEYS
+        if key in os.environ
+    }
+    clean.update(extra or {})
+    return clean
+
+
+def _redact_secrets(directory: Path, secrets: list[str]) -> None:
+    needles = [secret.encode() for secret in secrets if secret]
+    if not needles:
+        return
+    for path in sorted(directory.rglob("*")):
+        if not path.is_file():
+            continue
+        body = path.read_bytes()
+        redacted = body
+        for needle in needles:
+            redacted = redacted.replace(needle, b"[REDACTED]")
+        if redacted != body:
+            path.write_bytes(redacted)
+
+
+def _row_secret_values(
+    openrouter_key: str, openai_key: str, database_url: str
+) -> list[str]:
+    values = [openrouter_key, openai_key, database_url]
+    parsed = urllib.parse.urlsplit(database_url)
+    if parsed.netloc:
+        values.append(parsed.netloc)
+        userinfo = parsed.netloc.rsplit("@", 1)[0]
+        if ":" in userinfo:
+            raw_password = userinfo.split(":", 1)[1]
+            values.extend([raw_password, urllib.parse.unquote(raw_password)])
+    return list(dict.fromkeys(value for value in values if value))
+
+
+def _expected_deep_config_hash(candidate: dict) -> str:
+    return canonical_sha256({
+        "model": candidate["model"],
+        "providers": ["azure"],
+        "input_price_micros_per_million": candidate["input_price_micros_per_million"],
+        "output_price_micros_per_million": candidate["output_price_micros_per_million"],
+        "limits": {
+            "wall_time_ms": 120_000,
+            "max_tool_iterations": 24,
+            "max_context_tokens": 96_000,
+            "max_spend_micros": 300_000,
+        },
+        "max_completion_tokens": 4_096,
+        "completion_url": "https://openrouter.ai/api/v1/chat/completions",
+        "generation_url": "https://openrouter.ai/api/v1/generation",
+        "connect_timeout_ms": 10_000,
+        "settlement_reserve_ms": 5_000,
+        "max_retries": 2,
+        "retry_base_ms": 250,
+        "implicit_protocol_retries": "disabled",
+        "redirects": "disabled",
+        "ambient_proxies": "disabled",
+        "tool_limits": {
+            "list_results": 256,
+            "query_chars": 256,
+            "search_hits": 128,
+            "output_bytes": 64 * 1024,
+            "read_lines": 512,
+            "evidence_ids": 256,
+            "malformed_responses": 1,
+        },
+    })
 
 
 def artifact_hashes(directory: Path, *, exclude: set[str] | None = None) -> dict[str, str]:
@@ -225,6 +303,19 @@ def verify_campaign_manifest(manifest: dict) -> dict[str, int]:
             "campaign liability exceeds hard ceiling")
     require(manifest["protocol"]["deep_prompt_sha256"]
             == sha256_file(ROOT / "config/deep-recall-v1.txt"), "Deep prompt lock drift")
+    reader = manifest["protocol"]["reader"]
+    require(reader["provider_policy"] == {
+        "only": ["deepinfra"], "allow_fallbacks": False,
+        "require_parameters": True, "data_collection": "deny", "zdr": True,
+        "quantizations": ["bf16"],
+        "max_price": {
+            "prompt": reader["prompt_price_micros_per_million"] / 1_000_000,
+            "completion": reader["completion_price_micros_per_million"] / 1_000_000,
+        },
+    }, "reader dispatch policy drift")
+    for name, candidate in manifest["protocol"]["deep_candidates"].items():
+        require(candidate["config_sha256"] == _expected_deep_config_hash(candidate),
+                f"Deep runtime config hash drift: {name}")
     return {"cases": 12, "rows": 48, "arms": 4}
 
 
@@ -654,11 +745,8 @@ def _direct_opener():
 
 
 def _reader_proxy(api_key: str, audit_path: Path, manifest: dict) -> tuple[ThreadingHTTPServer, str]:
-    policy = {
-        "only": ["deepinfra"], "allow_fallbacks": False,
-        "require_parameters": True, "data_collection": "deny", "zdr": True,
-    }
     contract = manifest["protocol"]["reader"]
+    policy = contract["provider_policy"]
     dispatch_lock = threading.Lock()
     dispatched = False
 
@@ -741,11 +829,17 @@ def _reader_proxy(api_key: str, audit_path: Path, manifest: dict) -> tuple[Threa
                         "tokens_completion": settlement["tokens_completion"], "total_cost": settlement["total_cost"],
                     })
                 except Exception as error:
-                    audit.update({"audit_status": "invalid", "audit_error": str(error)})
+                    audit.update({
+                        "audit_status": "invalid",
+                        "audit_error": "reader_generation_receipt_invalid",
+                    })
                 atomic_write_json(audit_path, audit)
-            except Exception as error:
+            except Exception:
                 if response_body is None:
-                    response_body = canonical_bytes({"error": {"message": str(error), "type": "reader_route_proof"}})
+                    response_body = canonical_bytes({"error": {
+                        "message": "reader route contract rejected",
+                        "type": "reader_route_proof",
+                    }})
             self.send_response(status)
             self.send_header("content-type", "application/json")
             self.send_header("content-length", str(len(response_body)))
@@ -835,14 +929,20 @@ def _judge_proxy(api_key: str, audit_dir: Path, manifest: dict) -> tuple[Threadi
                         "output_tokens": output_tokens, "reasoning_tokens": reasoning,
                         "cost_micros": cost_micros,
                     })
-                except Exception as error:
-                    audit.update({"audit_status": "invalid", "audit_error": str(error)})
+                except Exception:
+                    audit.update({
+                        "audit_status": "invalid",
+                        "audit_error": "judge_response_audit_invalid",
+                    })
                 with lock:
                     call_count += 1
                 atomic_write_json(audit_path, audit)
-            except Exception as error:
+            except Exception:
                 if response_body is None:
-                    response_body = canonical_bytes({"error": {"message": str(error), "type": "judge_route_proof"}})
+                    response_body = canonical_bytes({"error": {
+                        "message": "judge route contract rejected",
+                        "type": "judge_route_proof",
+                    }})
             self.send_response(status)
             self.send_header("content-type", "application/json")
             self.send_header("content-length", str(len(response_body)))
@@ -881,19 +981,135 @@ def _audit_cost(audit: dict) -> tuple[int, int]:
     return settled, 0
 
 
+def _deep_evidence(row_dir: Path) -> dict | None:
+    proof_dir = row_dir / "memory-proofs"
+    paths = list(proof_dir.glob("*.json")) if proof_dir.exists() else []
+    if not paths:
+        return None
+    require(len(paths) == 1, "row has multiple memory proofs")
+    memory = json.loads(paths[0].read_text())
+    return ((memory.get("public") or {}).get("recall_response") or {}).get("deep")
+
+
+def _deep_receipt_payload_agrees(payload: dict, deep: dict, candidate: dict) -> bool:
+    generation_ids = deep.get("generation_ids")
+    usage = deep.get("usage")
+    if (
+        not isinstance(generation_ids, list)
+        or not generation_ids
+        or not all(isinstance(item, str) and item for item in generation_ids)
+        or len(set(generation_ids)) != len(generation_ids)
+        or not isinstance(usage, dict)
+        or payload.get("audit_status") != "settled"
+        or payload.get("generation_ids") != generation_ids
+    ):
+        return False
+    receipts = payload.get("receipts")
+    if not isinstance(receipts, list) or [item.get("id") for item in receipts] != generation_ids:
+        return False
+    for receipt in receipts:
+        if (
+            str(receipt.get("provider_name", "")).lower() != "azure"
+            or receipt.get("model") != candidate["model"]
+            or not isinstance(receipt.get("tokens_prompt"), int)
+            or isinstance(receipt.get("tokens_prompt"), bool)
+            or receipt["tokens_prompt"] < 0
+            or not isinstance(receipt.get("tokens_completion"), int)
+            or isinstance(receipt.get("tokens_completion"), bool)
+            or receipt["tokens_completion"] < 0
+            or not isinstance(receipt.get("total_cost_micros"), int)
+            or isinstance(receipt.get("total_cost_micros"), bool)
+            or receipt["total_cost_micros"] < 0
+        ):
+            return False
+    return (
+        int(usage.get("unsettled_context_tokens_upper_bound", -1)) == 0
+        and int(usage.get("unsettled_spend_micros_upper_bound", -1)) == 0
+        and sum(item["tokens_prompt"] for item in receipts)
+        == int(usage.get("context_tokens", -1))
+        and sum(item["total_cost_micros"] for item in receipts)
+        == int(usage.get("spend_micros", -1))
+    )
+
+
+def _archive_deep_generation_receipts(
+    row_dir: Path, row: dict, manifest: dict, api_key: str
+) -> None:
+    if row["arm"] == "fast":
+        return
+    deep = _deep_evidence(row_dir)
+    if not isinstance(deep, dict):
+        return
+    generation_ids = deep.get("generation_ids")
+    payload: dict[str, object] = {
+        "audit_status": "invalid",
+        "failure_code": "deep_generation_receipt_invalid",
+        "generation_ids": generation_ids if isinstance(generation_ids, list) else [],
+        "receipts": [],
+    }
+    if (
+        not isinstance(generation_ids, list)
+        or not generation_ids
+        or not all(isinstance(item, str) and item for item in generation_ids)
+        or len(set(generation_ids)) != len(generation_ids)
+    ):
+        atomic_write_json(row_dir / "deep-generation-receipts.json", payload)
+        return
+    receipts: list[dict[str, object]] = []
+    for generation_id in generation_ids:
+        settled = None
+        for _ in range(10):
+            try:
+                response = _json_url(
+                    "https://openrouter.ai/api/v1/generation?id="
+                    + urllib.parse.quote(generation_id),
+                    api_key,
+                )
+                settled = response.get("data")
+                if isinstance(settled, dict):
+                    break
+            except Exception:
+                pass
+            time.sleep(1)
+        if not isinstance(settled, dict):
+            break
+        try:
+            receipts.append({
+                "id": settled["id"],
+                "provider_name": settled["provider_name"],
+                "model": settled["model"],
+                "tokens_prompt": settled["tokens_prompt"],
+                "tokens_completion": settled["tokens_completion"],
+                "total_cost_micros": usd_to_micros(settled["total_cost"]),
+            })
+        except (KeyError, TypeError, ValueError):
+            break
+    payload["receipts"] = receipts
+    candidate = manifest["protocol"]["deep_candidates"][row["arm"]]
+    candidate_payload = {**payload, "audit_status": "settled"}
+    candidate_payload.pop("failure_code", None)
+    if _deep_receipt_payload_agrees(candidate_payload, deep, candidate):
+        payload = candidate_payload
+    atomic_write_json(row_dir / "deep-generation-receipts.json", payload)
+
+
 def _row_settlement(row_dir: Path, row: dict, reservation: dict, *, orphaned: bool) -> dict[str, object]:
     deep_settled = 0
     deep_unsettled = 0
-    memory_proofs = list((row_dir / "memory-proofs").glob("*.json")) if (row_dir / "memory-proofs").exists() else []
-    if memory_proofs:
-        require(len(memory_proofs) == 1, "row has multiple memory proofs")
-        memory = json.loads(memory_proofs[0].read_text())
-        usage = ((memory.get("public") or {}).get("recall_response") or {}).get("deep") or {}
-        usage = usage.get("usage") or {}
-        deep_settled = int(usage.get("spend_micros", 0))
-        deep_unsettled = int(usage.get("unsettled_spend_micros_upper_bound", 0))
-    elif row["arm"] != "fast":
-        deep_unsettled = int(reservation["deep_hard_cap_micros"])
+    if row["arm"] != "fast":
+        deep = _deep_evidence(row_dir)
+        receipt_path = row_dir / "deep-generation-receipts.json"
+        candidate = load_campaign_manifest()["protocol"]["deep_candidates"][row["arm"]]
+        if (
+            isinstance(deep, dict)
+            and receipt_path.is_file()
+            and _deep_receipt_payload_agrees(
+                json.loads(receipt_path.read_text()), deep, candidate
+            )
+        ):
+            deep_settled = int(deep["usage"]["spend_micros"])
+        else:
+            deep_unsettled = int(reservation["deep_hard_cap_micros"])
 
     reader_settled = reader_unsettled = 0
     reader_path = row_dir / "reader-route.json"
@@ -926,13 +1142,27 @@ def _row_settlement(row_dir: Path, row: dict, reservation: dict, *, orphaned: bo
 
 def _write_row_proof(row_dir: Path, row: dict, reservation_path: Path, outcome: str,
                      extra: dict[str, object] | None = None, *, orphaned: bool = False) -> dict:
+    manifest = load_campaign_manifest()
     reservation = json.loads(reservation_path.read_text())
-    require(reservation == _reservation(row, load_campaign_manifest()), "row reservation drift")
+    require(reservation == _reservation(row, manifest), "row reservation drift")
     settlement = _row_settlement(row_dir, row, reservation, orphaned=orphaned)
     atomic_write_json(row_dir / "spend-settlement.json", settlement)
     root_path = row_dir.parent / "pre-execution-proof.json"
     root_proof = json.loads(root_path.read_text())
     case_contract = root_proof["materialization"]["cases"][row["question_id"]]
+    expected_config_hash = (
+        None if row["arm"] == "fast"
+        else manifest["protocol"]["deep_candidates"][row["arm"]]["config_sha256"]
+    )
+    deep = _deep_evidence(row_dir)
+    actual_config_hash = None
+    memory_paths = list((row_dir / "memory-proofs").glob("*.json")) if (row_dir / "memory-proofs").exists() else []
+    if memory_paths:
+        require(len(memory_paths) == 1, "row has multiple memory proofs")
+        memory = json.loads(memory_paths[0].read_text())
+        actual_config_hash = ((memory.get("public") or {}).get("trace") or {}).get(
+            "l4_config_hash"
+        )
     proof = {
         "row": row, "outcome": outcome, "operational": outcome == "success",
         "reservation_sha256": sha256_file(reservation_path),
@@ -940,6 +1170,9 @@ def _write_row_proof(row_dir: Path, row: dict, reservation_path: Path, outcome: 
         "pre_execution_proof_sha256": sha256_file(root_path),
         "case_materialization_contract_sha256": canonical_sha256(case_contract),
         "frozen_binaries": root_proof["binaries"],
+        "expected_deep_config_hash": expected_config_hash,
+        "observed_deep_config_hash": actual_config_hash,
+        "deep_config_hash_bound": actual_config_hash == expected_config_hash,
         "git_commit": subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
                                      capture_output=True, text=True, check=True).stdout.strip(),
         "manifest_sha256": sha256_file(CAMPAIGN_MANIFEST), "immutable": True, "complete": True,
@@ -964,6 +1197,7 @@ def verify_resume_contract(frozen: dict, current: dict) -> None:
     for field in (
         "manifest_sha256", "run_order_sha256", "outputs_observed_before_freeze",
         "materialization", "git_commit", "binaries", "deep_prompt_sha256",
+        "deep_config_hashes", "environment_contract_sha256",
     ):
         require(frozen[field] == current[field], f"campaign resume contract drift: {field}")
     require({key: value["material_contract_sha256"] for key, value in frozen["endpoint_hashes"].items()}
@@ -989,7 +1223,7 @@ def _treatment_operational(public: dict, row: dict, manifest: dict, *, truncated
         and str(trace.get("l4_observed_provider", "")).lower() == "azure"
         and trace.get("l4_observed_model") == configured["model"]
         and trace.get("l4_prompt_hash") == manifest["protocol"]["deep_prompt_sha256"]
-        and isinstance(trace.get("l4_config_hash"), str) and len(trace["l4_config_hash"]) == 64
+        and trace.get("l4_config_hash") == configured["config_sha256"]
     )
 
 
@@ -1002,6 +1236,15 @@ def _wait_health(base_url: str, process: subprocess.Popen) -> None:
         except urllib.error.URLError:
             time.sleep(0.5)
     raise RuntimeError("MemPhant server health timed out")
+
+
+def _terminate_and_reap(process: subprocess.Popen) -> None:
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
 
 
 def run_row(directory: Path, materialized: Path, output: Path, row: dict, manifest: dict) -> dict:
@@ -1024,10 +1267,7 @@ def run_row(directory: Path, materialized: Path, output: Path, row: dict, manife
     port = _free_port()
     server_url = f"http://127.0.0.1:{port}"
     binaries = {name: ROOT / "target/debug" / f"memphant-{name}" for name in ("server", "worker", "cli")}
-    server_env = dict(os.environ)
-    server_env.pop("DATABASE_URL", None)
-    server_env.pop("OPENAI_API_KEY", None)
-    server_env.update({
+    server_env = _clean_environment({
         "MEMPHANT_APP_DATABASE_URL": database_url,
         "MEMPHANT_AUTHN_DATABASE_URL": database_url,
         "MEMPHANT_BIND": f"127.0.0.1:{port}",
@@ -1037,10 +1277,10 @@ def run_row(directory: Path, materialized: Path, output: Path, row: dict, manife
     arm = row["arm"]
     if arm == "fast":
         server_env["MEMPHANT_DEEP"] = "off"
-        server_env.pop("OPENROUTER_API_KEY", None)
     else:
         candidate = manifest["protocol"]["deep_candidates"][arm]
         server_env.update({
+            "OPENROUTER_API_KEY": openrouter_key,
             "MEMPHANT_DEEP": "on", "MEMPHANT_DEEP_MODEL": candidate["model"],
             "MEMPHANT_DEEP_PROMPT_PATH": str(ROOT / "config/deep-recall-v1.txt"),
             "MEMPHANT_DEEP_PROVIDERS": "azure",
@@ -1057,13 +1297,17 @@ def run_row(directory: Path, materialized: Path, output: Path, row: dict, manife
         _wait_health(server_url, server)
         case_dir = materialized / row["question_id"]
         root_proof = json.loads((output / "pre-execution-proof.json").read_text())
+        require(
+            root_proof["environment_contract_sha256"]
+            == canonical_sha256(_clean_environment()),
+            "row ambient environment differs from frozen allowlist contract",
+        )
         verify_case_materialization(case_dir, root_proof["materialization"]["cases"][row["question_id"]])
         proof_dir = row_dir / "memory-proofs"
         proof_dir.mkdir()
-        child_env = dict(os.environ)
-        child_env.pop("OPENROUTER_API_KEY", None)
-        child_env.pop("OPENAI_API_KEY", None)
-        child_env.update({
+        child_env = _clean_environment({
+            "MEMPHANT_SCRATCH_ACTIVE": "1",
+            "MEMPHANT_TEST_DATABASE_URL": database_url,
             "MEMPHANT_LME_SERVER_URL": server_url,
             "MEMPHANT_CLI_BIN": str(binaries["cli"]),
             "MEMPHANT_LME_SERVER_BIN": str(binaries["server"]),
@@ -1095,15 +1339,20 @@ def run_row(directory: Path, materialized: Path, output: Path, row: dict, manife
         completed = subprocess.run(command, cwd=directory / "official", env=child_env, check=False)
         exit_code = completed.returncode
     finally:
-        server.terminate()
-        try:
-            server.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            server.kill()
+        _terminate_and_reap(server)
         proxy.shutdown()
         proxy.server_close()
         judge_proxy.shutdown()
         judge_proxy.server_close()
+        _redact_secrets(
+            row_dir,
+            _row_secret_values(openrouter_key, openai_key, database_url),
+        )
+    _archive_deep_generation_receipts(row_dir, row, manifest, openrouter_key)
+    _redact_secrets(
+        row_dir,
+        _row_secret_values(openrouter_key, openai_key, database_url),
+    )
     if exit_code != 0:
         atomic_write_json(row_dir / "failure.json", {
             "row": row, "official_exit_code": exit_code,
@@ -1139,6 +1388,13 @@ def run_row(directory: Path, materialized: Path, output: Path, row: dict, manife
         memory_proof["public"], row, manifest,
         truncated=bool(official_score["memory_context_was_truncated"]),
     )
+    settlement_preview = _row_settlement(
+        row_dir, row, json.loads(reservation_path.read_text()), orphaned=False
+    )
+    treatment_operational = (
+        treatment_operational
+        and settlement_preview["deep_unsettled_upper_bound_micros"] == 0
+    )
     extra = {
         "official_exit_code": exit_code,
         "execution_complete": True, "treatment_operational": treatment_operational,
@@ -1158,6 +1414,8 @@ def run_row(directory: Path, materialized: Path, output: Path, row: dict, manife
 
 
 def run_campaign(directory: Path, materialized: Path, output: Path, base_database_url: str, manifest: dict) -> dict:
+    require(os.environ.get("OPENROUTER_API_KEY") and os.environ.get("OPENAI_API_KEY"),
+            "OPENROUTER_API_KEY and OPENAI_API_KEY are required")
     preflight_proof = preflight(directory, materialized, manifest)
     endpoint_hashes = verify_endpoint_inventory(manifest)
     subprocess.run(["cargo", "build", "-p", "memphant-server", "-p", "memphant-worker", "-p", "memphant-cli"], cwd=ROOT, check=True)
@@ -1175,6 +1433,11 @@ def run_campaign(directory: Path, materialized: Path, output: Path, base_databas
                                      capture_output=True, text=True, check=True).stdout.strip(),
         "binaries": frozen_binaries,
         "deep_prompt_sha256": sha256_file(ROOT / "config/deep-recall-v1.txt"),
+        "deep_config_hashes": {
+            name: candidate["config_sha256"]
+            for name, candidate in manifest["protocol"]["deep_candidates"].items()
+        },
+        "environment_contract_sha256": canonical_sha256(_clean_environment()),
     }
     root_path = output / "pre-execution-proof.json"
     if root_path.exists():
@@ -1231,12 +1494,20 @@ def run_campaign(directory: Path, materialized: Path, output: Path, base_databas
                    "child_pid": None, "reservation_sha256": sha256_file(ledger_row)}
         atomic_write_json(staging / "attempt.json", attempt)
         command = [
-            "env", "MEMPHANT_SCRATCH_ACTIVE=1", "bash", str(SCRATCH_HELPER),
+            "/bin/bash", str(SCRATCH_HELPER),
             base_database_url, "MEMPHANT_TEST_DATABASE_URL", sys.executable, __file__, "_run-row",
             "--directory", str(directory), "--output", str(output),
             "--materialized", str(materialized), "--row-id", row["row_id"],
         ]
-        process = subprocess.Popen(command, cwd=ROOT)
+        process = subprocess.Popen(
+            command,
+            cwd=ROOT,
+            env=_clean_environment({
+                "MEMPHANT_SCRATCH_ACTIVE": "1",
+                "OPENROUTER_API_KEY": os.environ["OPENROUTER_API_KEY"],
+                "OPENAI_API_KEY": os.environ["OPENAI_API_KEY"],
+            }),
+        )
         attempt["child_pid"] = process.pid
         if staging.exists():
             atomic_write_json(staging / "attempt.json", attempt)
@@ -1276,6 +1547,10 @@ def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
     require(root_proof["deep_prompt_sha256"] == manifest["protocol"]["deep_prompt_sha256"]
             == sha256_file(ROOT / "config/deep-recall-v1.txt"),
             "Deep prompt changed after execution freeze")
+    require(root_proof["deep_config_hashes"] == {
+        name: candidate["config_sha256"]
+        for name, candidate in manifest["protocol"]["deep_candidates"].items()
+    }, "frozen Deep runtime config hashes drifted")
     require(root_proof["binaries"] == {
         name: _fingerprint(ROOT / "target/debug" / f"memphant-{name}")
         for name in ("server", "worker", "cli")
@@ -1322,6 +1597,12 @@ def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
         require(proof["git_commit"] == root_proof["git_commit"]
                 and proof["frozen_binaries"] == root_proof["binaries"],
                 "row commit/binary freeze drift")
+        expected_config_hash = (
+            None if row["arm"] == "fast"
+            else root_proof["deep_config_hashes"][row["arm"]]
+        )
+        require(proof.get("expected_deep_config_hash") == expected_config_hash,
+                "row expected Deep config hash drift")
         if "binaries" in proof:
             require(proof["binaries"] == root_proof["binaries"], "row used mixed binaries")
         require(proof["artifact_hashes"] == artifact_hashes(row_dir, exclude={"row-proof.json"}),
@@ -1345,6 +1626,8 @@ def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
                 "memory_proof_sha256": proof.get("memory_proof_sha256"),
             }
             continue
+        require(proof.get("deep_config_hash_bound") is True,
+                "successful row did not observe its frozen Deep config hash")
         memory_paths = list((row_dir / "memory-proofs").glob("*.json"))
         require(len(memory_paths) == 1, "successful row lacks one memory proof")
         memory_path = memory_paths[0]
@@ -1417,7 +1700,7 @@ def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
             records[(pair["question_id"], arm)]["deep_config_hash"]
             for pair in pairs if records[(pair["question_id"], arm)]["deep_config_hash"] is not None
         }
-        require(len(config_hashes) <= 1,
+        require(config_hashes <= {manifest["protocol"]["deep_candidates"][arm]["config_sha256"]},
                 f"Deep config drift across candidate rows: {arm}")
         delta = sum(pair["delta"] for pair in pairs) / 12
         predicates = {

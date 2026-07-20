@@ -47,6 +47,13 @@ def _write_synthetic_root(campaign, output: Path, manifest: dict) -> None:
         ).stdout.strip(),
         "binaries": binaries,
         "deep_prompt_sha256": campaign.sha256_file(campaign.ROOT / "config/deep-recall-v1.txt"),
+        "deep_config_hashes": {
+            name: candidate["config_sha256"]
+            for name, candidate in manifest["protocol"]["deep_candidates"].items()
+        },
+        "environment_contract_sha256": campaign.canonical_sha256(
+            campaign._clean_environment()
+        ),
         "materialization": {"proof_sha256": "a" * 64, "cases": {
             case["id"]: {"synthetic": case["id"]} for case in manifest["selection"]["cases"]
         }},
@@ -245,6 +252,8 @@ def test_resume_keeps_initial_inventory_evidence_when_material_contract_is_stabl
         "manifest_sha256": "a", "run_order_sha256": "b",
         "outputs_observed_before_freeze": False, "materialization": {"c": "d"},
         "git_commit": "e", "binaries": {"f": "g"}, "deep_prompt_sha256": "h",
+        "deep_config_hashes": {"sonnet": "i"},
+        "environment_contract_sha256": "j",
     }
     frozen = {**common, "endpoint_hashes": {
         "reader": {"inventory_sha256": "old", "material_contract_sha256": "stable"}
@@ -263,6 +272,207 @@ def test_decimal_cost_ceiling_never_rounds_liability_down() -> None:
     assert campaign.usd_to_micros("0.0000001") == 1
     assert campaign.usd_to_micros("0.001234000001") == 1235
     assert campaign.token_price_to_micros_per_million("0.00000015") == 150000
+
+
+def test_reader_policy_enforces_frozen_bf16_and_price_caps_before_dispatch() -> None:
+    campaign = _load()
+    reader = campaign.load_campaign_manifest()["protocol"]["reader"]
+    assert reader["provider_policy"] == {
+        "only": ["deepinfra"],
+        "allow_fallbacks": False,
+        "require_parameters": True,
+        "data_collection": "deny",
+        "zdr": True,
+        "quantizations": ["bf16"],
+        "max_price": {"prompt": 0.1, "completion": 0.15},
+    }
+
+
+def test_clean_child_environment_drops_ambient_secrets_and_deep_overrides(
+    monkeypatch,
+) -> None:
+    campaign = _load()
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "must-not-cross")
+    monkeypatch.setenv("UNRELATED_VENDOR_TOKEN", "must-not-cross")
+    monkeypatch.setenv("MEMPHANT_DEEP_OPENROUTER_BASE_URL", "https://wrong.test/v1")
+    monkeypatch.setenv("MEMPHANT_DEEP_MODEL", "wrong/model")
+    monkeypatch.setenv("PATH", "/safe/bin")
+    child = campaign._clean_environment({"EXPLICIT_VALUE": "allowed"})
+    assert child["PATH"] == "/safe/bin"
+    assert child["EXPLICIT_VALUE"] == "allowed"
+    assert "AWS_SECRET_ACCESS_KEY" not in child
+    assert "UNRELATED_VENDOR_TOKEN" not in child
+    assert not any(key.startswith("MEMPHANT_DEEP") for key in child)
+
+
+def test_secret_redaction_covers_nested_text_and_binary_artifacts(tmp_path: Path) -> None:
+    campaign = _load()
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (tmp_path / "stdout.log").write_text("prefix live-key suffix")
+    (nested / "response.bin").write_bytes(b"before\x00live-key\x00after")
+    campaign._redact_secrets(tmp_path, ["live-key"])
+    assert "live-key" not in (tmp_path / "stdout.log").read_text()
+    assert b"live-key" not in (nested / "response.bin").read_bytes()
+
+
+def test_row_secret_values_redact_scratch_dsn_and_password_variants(tmp_path: Path) -> None:
+    campaign = _load()
+    database_url = "postgres://bench:sentinel%2Fpassword@db.test:5432/scratch"
+    artifact = tmp_path / "server.stderr"
+    artifact.write_text(
+        f"dsn={database_url} password=sentinel/password "
+        "authority=bench:sentinel%2Fpassword@db.test:5432"
+    )
+    campaign._redact_secrets(
+        tmp_path,
+        campaign._row_secret_values("router-key", "judge-key", database_url),
+    )
+    redacted = artifact.read_text()
+    assert "sentinel/password" not in redacted
+    assert "sentinel%2Fpassword" not in redacted
+    assert database_url not in redacted
+
+
+def test_forced_server_cleanup_reaps_child_before_artifact_redaction() -> None:
+    campaign = _load()
+
+    class Process:
+        def __init__(self):
+            self.events = []
+
+        def terminate(self):
+            self.events.append("terminate")
+
+        def wait(self, timeout=None):
+            self.events.append(("wait", timeout))
+            if timeout is not None:
+                raise campaign.subprocess.TimeoutExpired("server", timeout)
+            return -9
+
+        def kill(self):
+            self.events.append("kill")
+
+    process = Process()
+    campaign._terminate_and_reap(process)
+    assert process.events == [
+        "terminate", ("wait", 10), "kill", ("wait", None),
+    ]
+
+
+def test_deep_receipts_must_exactly_reconcile_ids_route_tokens_and_cost(
+    tmp_path: Path,
+) -> None:
+    campaign = _load()
+    manifest = campaign.load_campaign_manifest()
+    row = next(
+        item for item in campaign.expanded_run_order(manifest) if item["arm"] == "sonnet"
+    )
+    reservation = campaign._reservation(row, manifest)
+    (tmp_path / "memory-proofs").mkdir()
+    candidate = manifest["protocol"]["deep_candidates"]["sonnet"]
+    deep = {
+        "generation_ids": ["gen-1"],
+        "usage": {
+            "context_tokens": 10,
+            "spend_micros": 1_000,
+            "unsettled_context_tokens_upper_bound": 0,
+            "unsettled_spend_micros_upper_bound": 0,
+        },
+    }
+    campaign.atomic_write_json(
+        tmp_path / "memory-proofs/proof.json",
+        {"public": {"recall_response": {"deep": deep}}},
+    )
+    receipt = {
+        "audit_status": "settled",
+        "generation_ids": ["gen-1"],
+        "receipts": [{
+            "id": "gen-1",
+            "provider_name": "Azure",
+            "model": candidate["model"],
+            "tokens_prompt": 10,
+            "tokens_completion": 2,
+            "total_cost_micros": 1_000,
+        }],
+    }
+    campaign.atomic_write_json(tmp_path / "deep-generation-receipts.json", receipt)
+    settlement = campaign._row_settlement(
+        tmp_path, row, reservation, orphaned=False
+    )
+    assert settlement["deep_settled_micros"] == 1_000
+    assert settlement["deep_unsettled_upper_bound_micros"] == 0
+
+    receipt["receipts"][0]["total_cost_micros"] = 999
+    campaign.atomic_write_json(tmp_path / "deep-generation-receipts.json", receipt)
+    settlement = campaign._row_settlement(
+        tmp_path, row, reservation, orphaned=False
+    )
+    assert settlement["deep_settled_micros"] == 0
+    assert settlement["deep_unsettled_upper_bound_micros"] == reservation[
+        "deep_hard_cap_micros"
+    ]
+
+
+def test_manifest_binds_each_candidate_to_the_runtime_config_hash() -> None:
+    campaign = _load()
+    candidates = campaign.load_campaign_manifest()["protocol"]["deep_candidates"]
+    hashes = {
+        name: campaign._expected_deep_config_hash(candidate)
+        for name, candidate in candidates.items()
+    }
+    assert len(set(hashes.values())) == 3
+    assert hashes == {
+        name: candidate["config_sha256"] for name, candidate in candidates.items()
+    }
+
+
+def test_deep_receipt_archive_is_sanitized_and_exact(tmp_path: Path, monkeypatch) -> None:
+    campaign = _load()
+    manifest = campaign.load_campaign_manifest()
+    row = next(
+        item for item in campaign.expanded_run_order(manifest) if item["arm"] == "luna"
+    )
+    candidate = manifest["protocol"]["deep_candidates"]["luna"]
+    (tmp_path / "memory-proofs").mkdir()
+    campaign.atomic_write_json(tmp_path / "memory-proofs/proof.json", {
+        "public": {"recall_response": {"deep": {
+            "generation_ids": ["gen-1"],
+            "usage": {
+                "context_tokens": 20,
+                "spend_micros": 1_235,
+                "unsettled_context_tokens_upper_bound": 0,
+                "unsettled_spend_micros_upper_bound": 0,
+            },
+        }}},
+    })
+    monkeypatch.setattr(campaign, "_json_url", lambda *_args: {"data": {
+        "id": "gen-1",
+        "provider_name": "Azure",
+        "model": candidate["model"],
+        "tokens_prompt": 20,
+        "tokens_completion": 3,
+        "total_cost": "0.001234000001",
+        "prompt": "must not be archived",
+        "upstream_secret": "must not be archived",
+    }})
+    campaign._archive_deep_generation_receipts(
+        tmp_path, row, manifest, "secret-key"
+    )
+    receipt = json.loads((tmp_path / "deep-generation-receipts.json").read_text())
+    assert receipt["audit_status"] == "settled"
+    assert receipt["receipts"] == [{
+        "id": "gen-1",
+        "provider_name": "Azure",
+        "model": candidate["model"],
+        "tokens_prompt": 20,
+        "tokens_completion": 3,
+        "total_cost_micros": 1_235,
+    }]
+    archived = json.dumps(receipt)
+    assert "must not be archived" not in archived
+    assert "upstream_secret" not in archived
+    assert "secret-key" not in archived
 
 
 def test_synthetic_all_failure_aggregate_is_complete_and_zero_scored(tmp_path: Path) -> None:
@@ -312,7 +522,7 @@ def test_synthetic_success_aggregate_applies_registered_ranking(tmp_path: Path) 
             deep = {
                 "status": "completed", "stop_reason": "completed",
                 "generation_ids": [f"generation-{row['row_id']}"],
-                "usage": {"spend_micros": 1000,
+                "usage": {"context_tokens": 10, "spend_micros": 1000,
                           "unsettled_spend_micros_upper_bound": 0,
                           "unsettled_context_tokens_upper_bound": 0},
             }
@@ -320,7 +530,7 @@ def test_synthetic_success_aggregate_applies_registered_ranking(tmp_path: Path) 
                 "deep": deep, "l4_model": candidate["model"], "l4_provider": "azure",
                 "l4_observed_provider": "Azure", "l4_observed_model": candidate["model"],
                 "l4_prompt_hash": manifest["protocol"]["deep_prompt_sha256"],
-                "l4_config_hash": "b" * 64,
+                "l4_config_hash": candidate["config_sha256"],
             })
         memory = {
             "public": {"recall_response": {"trace_id": "trace", "deep": deep}, "trace": trace},
@@ -329,6 +539,19 @@ def test_synthetic_success_aggregate_applies_registered_ranking(tmp_path: Path) 
         }
         memory_path = row_dir / "memory-proofs/proof.json"
         campaign.atomic_write_json(memory_path, memory)
+        if deep is not None:
+            campaign.atomic_write_json(row_dir / "deep-generation-receipts.json", {
+                "audit_status": "settled",
+                "generation_ids": deep["generation_ids"],
+                "receipts": [{
+                    "id": deep["generation_ids"][0],
+                    "provider_name": "Azure",
+                    "model": candidate["model"],
+                    "tokens_prompt": 10,
+                    "tokens_completion": 2,
+                    "total_cost_micros": 1000,
+                }],
+            })
         campaign.atomic_write_json(row_dir / "reader-route.json", {
             "audit_status": "settled", "max_liability_micros": 5000,
             "total_cost": "0.001", "provider_name": "DeepInfra",
@@ -384,8 +607,8 @@ def test_reader_post_acceptance_audit_failure_never_replays_or_changes_2xx(
     calls = []
 
     class Opener:
-        def open(self, _request, timeout=None):
-            calls.append(timeout)
+        def open(self, request, timeout=None):
+            calls.append((timeout, json.loads(request.data)))
             return _FakeResponse(original)
 
     monkeypatch.setattr(campaign.urllib.request, "build_opener", lambda *_args: Opener())
@@ -416,6 +639,7 @@ def test_reader_post_acceptance_audit_failure_never_replays_or_changes_2xx(
         server.shutdown()
         server.server_close()
     assert len(calls) == 1
+    assert calls[0][1]["provider"] == manifest["protocol"]["reader"]["provider_policy"]
     assert json.loads((tmp_path / "reader.json").read_text())["audit_status"] == "invalid"
 
 
