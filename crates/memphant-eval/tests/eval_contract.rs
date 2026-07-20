@@ -360,6 +360,30 @@ fn rung12_disabled_arm_is_explicitly_unavailable_not_balanced() {
 }
 
 #[test]
+fn rung12_fake_provider_arm_executes_while_control_is_unavailable() {
+    let suite = repo_root().join("benchmarks/rung12-l4-exhaustive-sampled.yaml");
+    let enabled = run_eval_file(&suite, EvalRunOptions::default()).unwrap();
+    let control = run_eval_file(
+        &suite,
+        EvalRunOptions {
+            l4_exhaustive_enabled: false,
+            ..EvalRunOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert!(enabled.case_results[0].error.is_none());
+    assert!(enabled.case_results[0].trace_id.is_some());
+    assert!(
+        control.case_results[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("deep recall is unavailable"))
+    );
+    assert!(control.case_results[0].trace_id.is_none());
+}
+
+#[test]
 fn rung13_state_style_suite_proves_learned_rerank_delta() {
     let suite = repo_root().join("benchmarks/rung13-learned-rerank-sampled.yaml");
     let with_learned =

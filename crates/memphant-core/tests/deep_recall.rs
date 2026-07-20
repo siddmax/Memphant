@@ -23,6 +23,7 @@ struct RecordingProvider {
     result: Mutex<DeepRecallProviderResult>,
     calls: AtomicUsize,
     workspaces: Mutex<Vec<String>>,
+    delay_ms: u64,
 }
 
 impl RecordingProvider {
@@ -45,6 +46,7 @@ impl RecordingProvider {
             }),
             calls: AtomicUsize::new(0),
             workspaces: Mutex::new(Vec::new()),
+            delay_ms: 0,
         }
     }
 
@@ -60,7 +62,13 @@ impl RecordingProvider {
             result: Mutex::new(result),
             calls: AtomicUsize::new(0),
             workspaces: Mutex::new(Vec::new()),
+            delay_ms: 0,
         }
+    }
+
+    fn with_delay(mut self, delay_ms: u64) -> Self {
+        self.delay_ms = delay_ms;
+        self
     }
 }
 
@@ -94,7 +102,13 @@ impl DeepRecallProvider for RecordingProvider {
                 .join("\n"),
         );
         let result = self.result.lock().unwrap().clone();
-        Box::pin(async move { Ok(result) })
+        let delay_ms = self.delay_ms;
+        Box::pin(async move {
+            if delay_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            }
+            Ok(result)
+        })
     }
 }
 
@@ -330,6 +344,8 @@ async fn fast_and_balanced_never_call_an_installed_deep_provider() {
             "deep",
             "l4_provider",
             "l4_model",
+            "l4_observed_provider",
+            "l4_observed_model",
             "l4_prompt_hash",
             "l4_config_hash",
             "l4_workspace_manifest_sha256",
@@ -376,6 +392,10 @@ async fn deep_promotes_provider_nominated_bound_unit_with_citation() {
     assert!(trace.candidates.iter().any(|candidate| {
         candidate.unit_id == answer_id && candidate.channel == RecallChannel::Deep
     }));
+    assert_eq!(trace.l4_provider.as_deref(), Some("test"));
+    assert_eq!(trace.l4_model.as_deref(), Some("test/deep"));
+    assert_eq!(trace.l4_observed_provider.as_deref(), Some("test"));
+    assert_eq!(trace.l4_observed_model.as_deref(), Some("test/deep"));
     assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
     let response_json = serde_json::to_value(&response).unwrap();
     assert!(response_json.get("deep").is_some());
@@ -385,12 +405,69 @@ async fn deep_promotes_provider_nominated_bound_unit_with_citation() {
         "l4_sandbox_id",
         "l4_provider",
         "l4_model",
+        "l4_observed_provider",
+        "l4_observed_model",
         "l4_prompt_hash",
         "l4_config_hash",
         "l4_workspace_manifest_sha256",
     ] {
         assert!(trace_json.get(field).is_some(), "{field} must be present");
     }
+}
+
+#[tokio::test]
+async fn observed_routing_is_distinct_from_configured_identity() {
+    let (store, context, _, source_id) = seeded_service().await;
+    let provider = RecordingProvider::with_result(DeepRecallProviderResult {
+        status: DeepRecallStatus::Completed,
+        stop_reason: DeepRecallStopReason::Completed,
+        source_ids: vec![source_id],
+        usage: DeepRecallUsage::default(),
+        observed_provider: "routed-provider".to_string(),
+        observed_model: "routed/model-v2".to_string(),
+    });
+    let service = MemoryService::new(
+        Arc::new(store.clone()),
+        Arc::new(CLOCK),
+        Arc::new(NoopEmbedding),
+    )
+    .with_deep_recall_provider(Arc::new(provider));
+
+    let response = service
+        .recall_internal(request(context, RecallMode::Deep))
+        .await
+        .unwrap();
+    let trace = store.trace_by_id_any_tenant(response.trace_id).unwrap();
+    assert_eq!(trace.l4_provider.as_deref(), Some("test"));
+    assert_eq!(trace.l4_model.as_deref(), Some("test/deep"));
+    assert_eq!(
+        trace.l4_observed_provider.as_deref(),
+        Some("routed-provider")
+    );
+    assert_eq!(trace.l4_observed_model.as_deref(), Some("routed/model-v2"));
+}
+
+#[tokio::test]
+async fn top_level_deep_latency_is_measured_not_provider_reported() {
+    let (store, context, _, _) = seeded_service().await;
+    let provider = RecordingProvider::completed(Vec::new()).with_delay(5);
+    let service = MemoryService::new(
+        Arc::new(store.clone()),
+        Arc::new(CLOCK),
+        Arc::new(NoopEmbedding),
+    )
+    .with_deep_recall_provider(Arc::new(provider));
+    let mut recall = request(context, RecallMode::Deep);
+    recall.query = "quuxxyzy".to_string();
+
+    let response = service.recall_internal(recall).await.unwrap();
+    let trace = store.trace_by_id_any_tenant(response.trace_id).unwrap();
+    assert_eq!(trace.deep.as_ref().unwrap().usage.wall_time_ms, 0);
+    assert!(
+        trace.latency_ms >= 5,
+        "measured latency: {}",
+        trace.latency_ms
+    );
 }
 
 #[tokio::test]
@@ -452,7 +529,6 @@ async fn every_cap_returns_a_machine_readable_partial_result() {
         assert_eq!(summary.usage, usage);
         let trace = store.trace_by_id_any_tenant(response.trace_id).unwrap();
         assert_eq!(trace.deep.unwrap(), summary);
-        assert_eq!(trace.latency_ms, usage.wall_time_ms);
         assert_eq!(trace.cost_micros, usage.spend_micros);
     }
 }
@@ -569,7 +645,7 @@ async fn invalid_provider_results_fail_closed_without_a_success_trace() {
             source_ids: Vec::new(),
             usage: DeepRecallUsage::default(),
             observed_provider: "test".to_string(),
-            observed_model: "unexpected/model".to_string(),
+            observed_model: " ".to_string(),
         },
     ];
 
@@ -617,6 +693,20 @@ async fn invalid_provider_results_fail_closed_without_a_success_trace() {
             .await,
         Err(ServiceError::Core(CoreError::DeepProviderInvalidOutput))
     ));
+
+    let (store, context, _, _) = seeded_service().await;
+    let mut invalid_identity = RecordingProvider::completed(Vec::new());
+    invalid_identity.identity.provider.clear();
+    let invalid_identity = Arc::new(invalid_identity);
+    let service = MemoryService::new(Arc::new(store), Arc::new(CLOCK), Arc::new(NoopEmbedding))
+        .with_deep_recall_provider(invalid_identity.clone());
+    assert!(matches!(
+        service
+            .recall_internal(request(context, RecallMode::Deep))
+            .await,
+        Err(ServiceError::Core(CoreError::DeepProviderInvalidOutput))
+    ));
+    assert_eq!(invalid_identity.calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

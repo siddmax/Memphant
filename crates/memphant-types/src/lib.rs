@@ -770,8 +770,14 @@ pub struct RetrievalTrace {
     #[serde(default)]
     pub procedure_validation_states: Vec<ProcedureTraceFact>,
     pub abstention_signal: bool,
+    /// Monotonic top-level recall latency. Deep service calls start timing
+    /// before query embedding; provider-loop time remains separately available
+    /// as `deep.usage.wall_time_ms`.
     pub latency_ms: u64,
     pub token_estimate: usize,
+    /// Metered recall cost. For Deep this currently includes provider-reported
+    /// model spend; embedding-provider cost is not yet exposed by the embedder
+    /// contract and therefore is not included.
     pub cost_micros: u64,
     #[serde(default)]
     pub decay_model_id: String,
@@ -782,9 +788,17 @@ pub struct RetrievalTrace {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deep: Option<DeepRecallSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Provider configured on the Deep provider instance.
     pub l4_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Model configured on the Deep provider instance.
     pub l4_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Provider actually observed after routing or fallback.
+    pub l4_observed_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Model actually observed after routing or fallback.
+    pub l4_observed_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub l4_prompt_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

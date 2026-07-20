@@ -1561,6 +1561,8 @@ pub async fn review_marks_credit_synthetic_sources_and_stay_trace_bound<H: Store
         deep: None,
         l4_provider: None,
         l4_model: None,
+        l4_observed_provider: None,
+        l4_observed_model: None,
         l4_prompt_hash: None,
         l4_config_hash: None,
         l4_workspace_manifest_sha256: None,

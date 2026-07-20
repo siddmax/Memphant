@@ -1,18 +1,125 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::time::Instant;
 
-use memphant_core::{FixedClock, InMemoryStore, MemoryStore, forget_memory, recall, record_mark};
+use memphant_core::deep_recall::{
+    DeepRecallProvider, DeepRecallProviderError, DeepRecallProviderRequest,
+    DeepRecallProviderResult,
+};
+use memphant_core::{
+    CrossRerankCandidateSelection, DEFAULT_RECALL_POOL_DEPTH, FixedClock, InMemoryStore,
+    MemoryStore, PackLevers, forget_memory, recall, recall_with_pool_and_selection_and_deep,
+    record_mark,
+};
 
 /// Deterministic clock for eval fixtures (pinned to the WS-A methodology date).
 const EVAL_CLOCK: FixedClock = FixedClock("2026-07-03T00:00:00Z");
+
+/// Deterministic bounded evidence gatherer for the public evaluator contract.
+/// It sees only core's authorized workspace, ranks raw sources by query-token
+/// overlap with a stable length/path tie-break, and returns UUIDs only. It is
+/// deliberately local and cost-free; Task 5 supplies the real runtime agent.
+struct EvalDeepProvider {
+    identity: DeepProviderIdentity,
+}
+
+impl Default for EvalDeepProvider {
+    fn default() -> Self {
+        Self {
+            identity: DeepProviderIdentity {
+                provider: "memphant-eval".to_string(),
+                model: "deterministic-manifest-search-v1".to_string(),
+                prompt_hash: "eval-deep-query-overlap-v1".to_string(),
+                config_hash: "max-sources-8-length-path-tiebreak-v1".to_string(),
+            },
+        }
+    }
+}
+
+impl DeepRecallProvider for EvalDeepProvider {
+    fn identity(&self) -> &DeepProviderIdentity {
+        &self.identity
+    }
+
+    fn limits(&self) -> DeepRecallLimits {
+        DeepRecallLimits {
+            wall_time_ms: 1_000,
+            max_tool_iterations: 1,
+            max_context_tokens: 16_384,
+            max_spend_micros: 0,
+        }
+    }
+
+    fn gather<'a>(
+        &'a self,
+        request: DeepRecallProviderRequest,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<DeepRecallProviderResult, DeepRecallProviderError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        let query_tokens = request
+            .query
+            .split(|character: char| !character.is_alphanumeric())
+            .filter(|token| token.len() > 2)
+            .map(str::to_ascii_lowercase)
+            .collect::<Vec<_>>();
+        let mut ranked = request
+            .workspace
+            .files
+            .into_iter()
+            .filter(|file| {
+                file.path.starts_with("episodes/") || file.path.starts_with("resources/")
+            })
+            .filter_map(|file| {
+                let source_id = Path::new(&file.path).file_stem()?.to_str()?.parse().ok()?;
+                let body = file.body.to_ascii_lowercase();
+                let overlap = query_tokens
+                    .iter()
+                    .filter(|token| body.contains(token.as_str()))
+                    .count();
+                Some((overlap, file.body.len(), file.path, source_id))
+            })
+            .collect::<Vec<_>>();
+        ranked.sort_by(|left, right| {
+            right
+                .0
+                .cmp(&left.0)
+                .then_with(|| right.1.cmp(&left.1))
+                .then_with(|| left.2.cmp(&right.2))
+        });
+        let source_ids = ranked
+            .into_iter()
+            .take(8)
+            .map(|(_, _, _, source_id)| source_id)
+            .collect();
+        Box::pin(async move {
+            Ok(DeepRecallProviderResult {
+                status: DeepRecallStatus::Completed,
+                stop_reason: DeepRecallStopReason::Completed,
+                source_ids,
+                usage: DeepRecallUsage {
+                    tool_iterations: 1,
+                    ..DeepRecallUsage::default()
+                },
+                observed_provider: "memphant-eval-local".to_string(),
+                observed_model: "deterministic-manifest-search-v1".to_string(),
+            })
+        })
+    }
+}
 use memphant_types::{
-    ActorId, AgentNodeId, ContextualChunk, ENGINE_VERSION, ForgetRequest, ForgetSelector,
-    LearnedRerankProfile, MarkOutcome, MarkRequest, MemoryEdgeKind, MemoryKind, NewEpisode,
-    NewMemoryEdge, NewMemoryUnit, RecallContextItem, RecallDropReason, RecallMode, RecallRequest,
-    RecallTime, ResolvedMemoryContext, RetrievalTrace, ScopeId, SubjectId, TRACE_SCHEMA_VERSION,
-    TenantId, TraceId, TrustLevel, UnitId, UnitState,
+    ActorId, AgentNodeId, ContextualChunk, DeepProviderIdentity, DeepRecallLimits,
+    DeepRecallStatus, DeepRecallStopReason, DeepRecallUsage, ENGINE_VERSION, ForgetRequest,
+    ForgetSelector, LearnedRerankProfile, MarkOutcome, MarkRequest, MemoryEdgeKind, MemoryKind,
+    NewEpisode, NewMemoryEdge, NewMemoryUnit, RecallContextItem, RecallDropReason, RecallMode,
+    RecallRequest, RecallTime, ResolvedMemoryContext, RetrievalTrace, ScopeId, SubjectId,
+    TRACE_SCHEMA_VERSION, TenantId, TraceId, TrustLevel, UnitId, UnitState,
 };
 use schemars::schema_for;
 use serde::{Deserialize, Serialize};
@@ -558,6 +665,7 @@ struct GoldenRunControls {
     query_decomposition_enabled: bool,
     procedure_recall_enabled: bool,
     decay_enabled: bool,
+    l4_exhaustive_enabled: bool,
     filesystem_control_enabled: bool,
 }
 
@@ -573,6 +681,7 @@ impl Default for GoldenRunControls {
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
             decay_enabled: true,
+            l4_exhaustive_enabled: true,
             filesystem_control_enabled: false,
         }
     }
@@ -590,6 +699,7 @@ impl From<&EvalRunOptions> for GoldenRunControls {
             query_decomposition_enabled: options.query_decomposition_enabled,
             procedure_recall_enabled: options.procedure_recall_enabled,
             decay_enabled: options.decay_enabled,
+            l4_exhaustive_enabled: options.l4_exhaustive_enabled,
             filesystem_control_enabled: options.filesystem_control_enabled,
         }
     }
@@ -1910,7 +2020,10 @@ async fn run_golden_case_inner(
         controls.edge_expansion_enabled && !controls.filesystem_control_enabled;
     let mode = case.mode.unwrap_or(RecallMode::Fast);
     let recall_started_at = Instant::now();
-    let response = recall(
+    let deep_provider = controls
+        .l4_exhaustive_enabled
+        .then(EvalDeepProvider::default);
+    let response = recall_with_pool_and_selection_and_deep(
         &context.store,
         RecallRequest {
             context: context.resolved(),
@@ -1936,6 +2049,14 @@ async fn run_golden_case_inner(
         },
         None,
         &EVAL_CLOCK,
+        DEFAULT_RECALL_POOL_DEPTH,
+        PackLevers::default(),
+        false,
+        None,
+        CrossRerankCandidateSelection::FusedHead,
+        deep_provider
+            .as_ref()
+            .map(|provider| provider as &dyn DeepRecallProvider),
     )
     .await
     .map_err(|error| EvalError::Core(error.to_string()))?;
@@ -2547,6 +2668,8 @@ fn seeded_review_trace(
         deep: None,
         l4_provider: None,
         l4_model: None,
+        l4_observed_provider: None,
+        l4_observed_model: None,
         l4_prompt_hash: None,
         l4_config_hash: None,
         l4_workspace_manifest_sha256: None,

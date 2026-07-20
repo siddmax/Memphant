@@ -2195,6 +2195,7 @@
           "type": "array"
         },
         "cost_micros": {
+          "description": "Metered recall cost. For Deep this currently includes provider-reported\nmodel spend; embedding-provider cost is not yet exposed by the embedder\ncontract and therefore is not included.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -2298,6 +2299,21 @@
           "type": "array"
         },
         "l4_model": {
+          "description": "Model configured on the Deep provider instance.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "l4_observed_model": {
+          "description": "Model actually observed after routing or fallback.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "l4_observed_provider": {
+          "description": "Provider actually observed after routing or fallback.",
           "type": [
             "string",
             "null"
@@ -2310,6 +2326,7 @@
           ]
         },
         "l4_provider": {
+          "description": "Provider configured on the Deep provider instance.",
           "type": [
             "string",
             "null"
@@ -2329,6 +2346,7 @@
           ]
         },
         "latency_ms": {
+          "description": "Monotonic top-level recall latency. Deep service calls start timing\nbefore query embedding; provider-loop time remains separately available\nas `deep.usage.wall_time_ms`.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"

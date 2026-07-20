@@ -31,8 +31,9 @@ use crate::{
     MutationVerb, PackLevers, PreparedCompiledWrite, ReflectJobRow, ScopePage, StoreError,
     StructuredStateProvider, StructuredStateRequest, VectorQuery, canonical_mutation_request_hash,
     derive_episode_dedup_key, embedding_profile_for, normalize_component, parse_content_date,
-    prepare_compiled_write, project_structured_state, recall_with_pool_and_selection_and_deep,
-    reflect_recorded_claimed, structured_compiler_identity, tokenize, validate_valid_interval,
+    prepare_compiled_write, project_structured_state, recall_scope_admitted,
+    recall_with_pool_and_selection_and_deep_started, reflect_recorded_claimed,
+    structured_compiler_identity, tokenize, validate_valid_interval,
 };
 
 pub const DEFAULT_STRUCTURED_STATE_PREFETCH_CONCURRENCY: usize = 4;
@@ -1377,11 +1378,14 @@ impl<S: MemoryStore> MemoryService<S> {
         &self,
         request: RecallRequest,
     ) -> Result<RecallResponse, ServiceError> {
+        let deep_started_at = (request.mode == RecallMode::Deep).then(std::time::Instant::now);
         let context = request.context.clone();
         let query = request.query.clone();
         let k = request.k;
-        if request.mode == RecallMode::Deep && self.deep_recall_provider.is_none() {
-            return recall_with_pool_and_selection_and_deep(
+        if !recall_scope_admitted(&request.context)
+            || (request.mode == RecallMode::Deep && self.deep_recall_provider.is_none())
+        {
+            return recall_with_pool_and_selection_and_deep_started(
                 self.store.as_ref(),
                 request,
                 None,
@@ -1391,7 +1395,8 @@ impl<S: MemoryStore> MemoryService<S> {
                 self.temporal_grounding_enabled,
                 self.cross_reranker.as_deref(),
                 self.cross_rerank_candidate_selection,
-                None,
+                self.deep_recall_provider.as_deref(),
+                deep_started_at,
             )
             .await
             .map_err(ServiceError::from);
@@ -1418,7 +1423,7 @@ impl<S: MemoryStore> MemoryService<S> {
             vec,
             profile_id: embedding_profile_for(self.embedder()).id,
         });
-        let response = recall_with_pool_and_selection_and_deep(
+        let response = recall_with_pool_and_selection_and_deep_started(
             self.store.as_ref(),
             request.clone(),
             vector_query,
@@ -1429,6 +1434,7 @@ impl<S: MemoryStore> MemoryService<S> {
             self.cross_reranker.as_deref(),
             self.cross_rerank_candidate_selection,
             self.deep_recall_provider.as_deref(),
+            deep_started_at,
         )
         .await?;
 

@@ -5821,8 +5821,21 @@ where
         cross_reranker,
         cross_rerank_candidate_selection,
         None,
+        None,
     )
     .await
+}
+
+/// Stage-0 recall admission shared by the service preflight and core trace
+/// path. Keeping one predicate prevents denied queries from reaching remote
+/// embedding or Deep providers before the canonical policy decision.
+pub fn recall_scope_admitted(context: &ResolvedMemoryContext) -> bool {
+    context.sources_by_kind.values().any(|sources| {
+        sources.contains(&ResolvedMemorySource {
+            scope_id: context.scope_id,
+            agent_node_id: context.agent_node_id,
+        })
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5841,6 +5854,40 @@ pub async fn recall_with_pool_and_selection_and_deep<S>(
 where
     S: MemoryStore,
 {
+    let deep_started_at = (request.mode == RecallMode::Deep).then(std::time::Instant::now);
+    recall_with_pool_and_selection_and_deep_started(
+        store,
+        request,
+        vector_query,
+        clock,
+        recall_pool_depth,
+        pack_levers,
+        temporal_grounding_enabled,
+        cross_reranker,
+        cross_rerank_candidate_selection,
+        deep_provider,
+        deep_started_at,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn recall_with_pool_and_selection_and_deep_started<S>(
+    store: &S,
+    request: RecallRequest,
+    vector_query: Option<VectorQuery<'_>>,
+    clock: &dyn Clock,
+    recall_pool_depth: usize,
+    pack_levers: PackLevers,
+    temporal_grounding_enabled: bool,
+    cross_reranker: Option<&dyn CrossReranker>,
+    cross_rerank_candidate_selection: CrossRerankCandidateSelection,
+    deep_provider: Option<&dyn DeepRecallProvider>,
+    deep_started_at: Option<std::time::Instant>,
+) -> Result<RecallResponse, CoreError>
+where
+    S: MemoryStore,
+{
     recall_with_pool_and_selection_impl(
         store,
         request,
@@ -5852,6 +5899,7 @@ where
         cross_reranker,
         cross_rerank_candidate_selection,
         deep_provider,
+        deep_started_at,
     )
     .await
 }
@@ -5865,6 +5913,17 @@ struct DeepRunFacts {
     workspace_sha256: String,
     source_ids: Vec<Uuid>,
     ranked_units: Vec<StoredMemoryUnit>,
+}
+
+fn validate_deep_provider_identity(identity: &DeepProviderIdentity) -> Result<(), CoreError> {
+    if identity.provider.trim().is_empty()
+        || identity.model.trim().is_empty()
+        || identity.prompt_hash.trim().is_empty()
+        || identity.config_hash.trim().is_empty()
+    {
+        return Err(CoreError::DeepProviderInvalidOutput);
+    }
+    Ok(())
 }
 
 fn validate_deep_provider_result(
@@ -5891,10 +5950,11 @@ fn validate_deep_provider_result(
     if !status_matches
         || !usage_fits
         || result.observed_provider.trim().is_empty()
-        || result.observed_model != identity.model
+        || result.observed_model.trim().is_empty()
     {
         return Err(CoreError::DeepProviderInvalidOutput);
     }
+    validate_deep_provider_identity(identity)?;
 
     let mut seen = HashSet::new();
     let mut ranked_units = Vec::new();
@@ -5928,6 +5988,7 @@ async fn recall_with_pool_and_selection_impl<S>(
     cross_reranker: Option<&dyn CrossReranker>,
     cross_rerank_candidate_selection: CrossRerankCandidateSelection,
     deep_provider: Option<&dyn DeepRecallProvider>,
+    deep_started_at: Option<std::time::Instant>,
 ) -> Result<RecallResponse, CoreError>
 where
     S: MemoryStore,
@@ -5948,12 +6009,7 @@ where
     let temporal_window = temporal_grounding_enabled
         .then(|| extract_query_date(&request.query))
         .flatten();
-    let allowed = request.context.sources_by_kind.values().any(|sources| {
-        sources.contains(&ResolvedMemorySource {
-            scope_id: request.context.scope_id,
-            agent_node_id: request.context.agent_node_id,
-        })
-    });
+    let allowed = recall_scope_admitted(&request.context);
 
     if !allowed {
         let trace_id = TraceId::new();
@@ -6010,6 +6066,8 @@ where
             deep: None,
             l4_provider: None,
             l4_model: None,
+            l4_observed_provider: None,
+            l4_observed_model: None,
             l4_prompt_hash: None,
             l4_config_hash: None,
             l4_workspace_manifest_sha256: None,
@@ -6025,6 +6083,8 @@ where
 
     let deep_run = if request.mode == RecallMode::Deep {
         let provider = deep_provider.ok_or(CoreError::DeepUnavailable)?;
+        let identity = provider.identity().clone();
+        validate_deep_provider_identity(&identity)?;
         let mut entries = store
             .fetch_deep_snapshot(&request.context, &recall_time)
             .await?;
@@ -6046,7 +6106,6 @@ where
         });
         let workspace = build_deep_workspace(&entries);
         let limits = provider.limits();
-        let identity = provider.identity().clone();
         let result = provider
             .gather(DeepRecallProviderRequest {
                 query: request.query.clone(),
@@ -6595,9 +6654,9 @@ where
         procedure_ids,
         procedure_validation_states,
         abstention_signal: abstention,
-        latency_ms: deep_run
-            .as_ref()
-            .map_or(0, |deep| deep.summary.usage.wall_time_ms),
+        latency_ms: deep_started_at.map_or(0, |started| {
+            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+        }),
         token_estimate,
         cost_micros: deep_run
             .as_ref()
@@ -6606,8 +6665,10 @@ where
         l4_sandbox_id: deep_run.as_ref().map(|deep| deep.workspace_sha256.clone()),
         l4_gathered_evidence_ids,
         deep: deep_run.as_ref().map(|deep| deep.summary.clone()),
-        l4_provider: deep_run.as_ref().map(|deep| deep.observed_provider.clone()),
-        l4_model: deep_run.as_ref().map(|deep| deep.observed_model.clone()),
+        l4_provider: deep_run.as_ref().map(|deep| deep.identity.provider.clone()),
+        l4_model: deep_run.as_ref().map(|deep| deep.identity.model.clone()),
+        l4_observed_provider: deep_run.as_ref().map(|deep| deep.observed_provider.clone()),
+        l4_observed_model: deep_run.as_ref().map(|deep| deep.observed_model.clone()),
         l4_prompt_hash: deep_run
             .as_ref()
             .map(|deep| deep.identity.prompt_hash.clone()),
@@ -12475,9 +12536,29 @@ mod pack_cost_tests {
 mod deep_call_routing_tests {
     use super::*;
     use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct PanicProvider {
         identity: DeepProviderIdentity,
+    }
+
+    struct RecordingRemoteEmbedding {
+        calls: AtomicUsize,
+    }
+
+    impl EmbeddingProvider for RecordingRemoteEmbedding {
+        fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![vec![1.0, 0.0, 0.0]; texts.len()])
+        }
+
+        fn dimensions(&self) -> usize {
+            3
+        }
+
+        fn id(&self) -> &str {
+            "recording-remote"
+        }
     }
 
     impl DeepRecallProvider for PanicProvider {
@@ -12560,5 +12641,75 @@ mod deep_call_routing_tests {
             .unwrap();
         }
         assert_eq!(store.deep_snapshot_read_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn denied_requests_in_all_modes_perform_no_remote_or_snapshot_work() {
+        let store = InMemoryStore::default();
+        let mut context = memphant_store_testkit::resolved_context(
+            TenantId::from_u128(92_000),
+            ScopeId::from_u128(92_001),
+            ActorId::from_u128(92_002),
+        );
+        store.seed_context_binding(&context);
+        for sources in context.sources_by_kind.values_mut() {
+            sources.clear();
+        }
+        let embedder = Arc::new(RecordingRemoteEmbedding {
+            calls: AtomicUsize::new(0),
+        });
+        let provider = Arc::new(PanicProvider {
+            identity: DeepProviderIdentity {
+                provider: "test".to_string(),
+                model: "test/deep".to_string(),
+                prompt_hash: "prompt".to_string(),
+                config_hash: "config".to_string(),
+            },
+        });
+        let service = service::MemoryService::new(
+            Arc::new(store.clone()),
+            Arc::new(FixedClock("2026-07-20T00:00:00Z")),
+            embedder.clone(),
+        )
+        .with_deep_recall_provider(provider);
+
+        for mode in [RecallMode::Fast, RecallMode::Balanced, RecallMode::Deep] {
+            let error = service
+                .recall_internal(RecallRequest {
+                    context: context.clone(),
+                    query: "denied secret query".to_string(),
+                    k: 1,
+                    budget_tokens: 32,
+                    mode,
+                    include_beliefs: false,
+                    edge_expansion_enabled: false,
+                    context_packing_abstention_enabled: true,
+                    rerank_enabled: false,
+                    learned_rerank_profile: None,
+                    query_decomposition_enabled: false,
+                    procedure_recall_enabled: true,
+                    decay_enabled: false,
+                    engine_version: "test".to_string(),
+                    transaction_as_of: None,
+                    valid_at: None,
+                    aggregation_window: None,
+                })
+                .await
+                .unwrap_err();
+
+            assert!(matches!(
+                error,
+                service::ServiceError::Core(CoreError::PolicyDenied(_))
+            ));
+        }
+        assert_eq!(embedder.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(store.deep_snapshot_read_count(), 0);
+        let traces = store.retrieval_traces(TenantId::from_u128(92_000));
+        assert_eq!(traces.len(), 3);
+        assert!(
+            traces
+                .iter()
+                .all(|trace| trace.channel_runs[0].detail == "denied_scope")
+        );
     }
 }
