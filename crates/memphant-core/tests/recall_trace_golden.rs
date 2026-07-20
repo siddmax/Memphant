@@ -1,10 +1,12 @@
 use std::collections::HashMap;
 
-use memphant_core::{CoreError, FixedClock, InMemoryStore, MemoryStore, recall, record_mark};
+use memphant_core::{
+    CoreError, FixedClock, InMemoryStore, MemoryStore, SystemClock, recall, record_mark,
+};
 use memphant_types::{
     ActorId, ContextualChunk, LearnedRerankProfile, MarkOutcome, MarkRequest, MemoryEdgeKind,
     MemoryKind, NewEpisode, NewMemoryEdge, NewMemoryUnit, RecallChannel, RecallDropReason,
-    RecallMode, RecallRequest, ScopeId, TenantId, TraceId, TrustLevel, UnitId, UnitState,
+    RecallMode, RecallRequest, ScopeId, TenantId, TrustLevel, UnitId, UnitState,
 };
 use serde::Deserialize;
 
@@ -26,17 +28,28 @@ fn actor(value: u128) -> ActorId {
 async fn recall_writes_trace_for_scope_denial() {
     let store = InMemoryStore::default();
     let tenant_id = tenant(70_000);
+    // A scope value that never gets a real binding — it's only used as filler
+    // inside `sources_by_kind` below, which the store never validates against
+    // the binding registry (only the context's OWN identity tuple is
+    // registry-checked). Any value distinct from the bound context's own
+    // `scope_id` reproduces the "home scope isn't in the allowed sources"
+    // denial this test exercises.
     let allowed_scope = scope(70_001);
-    let denied_scope = scope(70_002);
-    let actor_id = actor(70_003);
+    let context = memphant_store_testkit::bind_context(&store, tenant_id).await;
+    let mut denied_context = context.clone();
+    for sources in denied_context.sources_by_kind.values_mut() {
+        *sources = vec![memphant_types::ResolvedMemorySource {
+            scope_id: allowed_scope,
+            agent_node_id: memphant_types::AgentNodeId::from_u128(
+                allowed_scope.as_uuid().as_u128(),
+            ),
+        }];
+    }
 
     let error = recall(
         &store,
         RecallRequest {
-            tenant_id,
-            scope_id: denied_scope,
-            actor_id,
-            allowed_scope_ids: vec![allowed_scope],
+            context: denied_context,
             query: "Which callback version is current?".to_string(),
             k: 3,
             budget_tokens: 80,
@@ -50,6 +63,9 @@ async fn recall_writes_trace_for_scope_denial() {
             procedure_recall_enabled: true,
             decay_enabled: true,
             engine_version: "engine-wsc-test".to_string(),
+            transaction_as_of: None,
+            valid_at: None,
+            aggregation_window: None,
         },
         None,
         &CLOCK,
@@ -60,7 +76,7 @@ async fn recall_writes_trace_for_scope_denial() {
     assert!(matches!(error, CoreError::PolicyDenied(_)));
     let traces = store.retrieval_traces(tenant_id);
     assert_eq!(traces.len(), 1);
-    assert_eq!(traces[0].scope_id, denied_scope);
+    assert_eq!(traces[0].scope_id, context.scope_id);
     assert_eq!(traces[0].policy_filters[0].reason, RecallDropReason::Scope);
     assert!(traces[0].context_items.is_empty());
     assert!(traces[0].abstention_signal);
@@ -72,23 +88,40 @@ async fn dsr_decay_fold_promotes_reinforced_memory_over_ignored_stale_candidate(
     let tenant_id = tenant(71_000);
     let scope_id = scope(71_001);
     let actor_id = actor(71_002);
+    store.seed_context_binding(&memphant_store_testkit::resolved_context(
+        tenant_id, scope_id, actor_id,
+    ));
 
-    let mut tx = store.begin().await;
+    let mut tx = store
+        .begin(&memphant_store_testkit::resolved_context(
+            tenant_id, scope_id, actor_id,
+        ))
+        .await
+        .expect("begin transaction");
     let stale_id = store
         .stage_memory_unit(
             &mut tx,
             NewMemoryUnit {
                 tenant_id,
+                data_subject_id: memphant_types::SubjectId::from_u128(
+                    tenant_id.as_uuid().as_u128(),
+                ),
                 scope_id,
+                agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                subject_generation: 0,
                 kind: MemoryKind::Semantic,
                 state: UnitState::Active,
-                subject_key: Some("deploy runbook current".to_string()),
+                fact_key: Some("deploy runbook current".to_string()),
+                predicate: None,
                 body: "Aardvark deploy runbook says to restart the legacy queue.".to_string(),
+                confidence: Some(1.0),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: Some("slow".to_string()),
                 freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
                 source_episode_id: None,
                 source_resource_id: None,
                 deletion_generation: None,
@@ -106,16 +139,25 @@ async fn dsr_decay_fold_promotes_reinforced_memory_over_ignored_stale_candidate(
             &mut tx,
             NewMemoryUnit {
                 tenant_id,
+                data_subject_id: memphant_types::SubjectId::from_u128(
+                    tenant_id.as_uuid().as_u128(),
+                ),
                 scope_id,
+                agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                subject_generation: 0,
                 kind: MemoryKind::Semantic,
                 state: UnitState::Active,
-                subject_key: Some("deploy runbook current".to_string()),
+                fact_key: Some("deploy runbook current".to_string()),
+                predicate: None,
                 body: "Zulu deploy runbook says to run the atlas cutover checklist.".to_string(),
+                confidence: Some(1.0),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: Some("stable".to_string()),
                 freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
                 source_episode_id: None,
                 source_resource_id: None,
                 deletion_generation: None,
@@ -129,30 +171,81 @@ async fn dsr_decay_fold_promotes_reinforced_memory_over_ignored_stale_candidate(
         .await
         .expect("durable unit seeded");
     store.commit(tx).await.expect("seed committed");
+    let context = memphant_store_testkit::resolved_context(tenant_id, scope_id, actor_id);
+
+    // `record_mark` requires each mark to reference a real retrieval trace whose
+    // canonical inclusion whitelist covers the marked unit (canonical cutover).
+    // Prime one recall that packs BOTH competing units — abstention and decay off
+    // so the near-duplicate pair is neither suppressed nor reordered — and mark
+    // against its trace.
+    let priming = recall(
+        &store,
+        RecallRequest {
+            context: context.clone(),
+            query: "deploy runbook legacy queue atlas cutover checklist".to_string(),
+            k: 4,
+            budget_tokens: 256,
+            mode: RecallMode::Balanced,
+            include_beliefs: false,
+            edge_expansion_enabled: true,
+            context_packing_abstention_enabled: false,
+            rerank_enabled: true,
+            learned_rerank_profile: None,
+            query_decomposition_enabled: true,
+            procedure_recall_enabled: true,
+            decay_enabled: false,
+            engine_version: "engine-rung11-priming".to_string(),
+            transaction_as_of: None,
+            valid_at: None,
+            aggregation_window: None,
+        },
+        None,
+        &CLOCK,
+    )
+    .await
+    .expect("priming recall succeeds");
+    let priming_trace = priming.trace_id;
+    assert!(
+        priming.items.iter().any(|item| item.unit_id == durable_id)
+            && priming.items.iter().any(|item| item.unit_id == stale_id),
+        "priming trace must pack both competing units for the mark whitelist"
+    );
 
     for index in 0..3 {
         record_mark(
             &store,
+            &context,
             MarkRequest {
-                tenant_id,
-                trace_id: TraceId::from_u128(71_100 + index),
+                subject_id: context.data_subject_id,
+                scope_id,
+                actor_id,
+                agent_node_id: context.agent_node_id,
+                subject_generation: 0,
+                trace_id: priming_trace,
                 caller_id: format!("rung11-positive-{index}"),
                 used_ids: vec![durable_id],
                 outcome: MarkOutcome::Success,
             },
+            &CLOCK,
         )
         .await
         .expect("positive review recorded");
     }
     record_mark(
         &store,
+        &context,
         MarkRequest {
-            tenant_id,
-            trace_id: TraceId::from_u128(71_200),
+            subject_id: context.data_subject_id,
+            scope_id,
+            actor_id,
+            agent_node_id: context.agent_node_id,
+            subject_generation: 0,
+            trace_id: priming_trace,
             caller_id: "rung11-negative".to_string(),
             used_ids: vec![stale_id],
             outcome: MarkOutcome::Ignored,
         },
+        &CLOCK,
     )
     .await
     .expect("negative review recorded");
@@ -160,10 +253,7 @@ async fn dsr_decay_fold_promotes_reinforced_memory_over_ignored_stale_candidate(
     let response = recall(
         &store,
         RecallRequest {
-            tenant_id,
-            scope_id,
-            actor_id,
-            allowed_scope_ids: vec![scope_id],
+            context: memphant_store_testkit::resolved_context(tenant_id, scope_id, actor_id),
             query: "Which deploy runbook is current?".to_string(),
             k: 1,
             budget_tokens: 80,
@@ -177,6 +267,9 @@ async fn dsr_decay_fold_promotes_reinforced_memory_over_ignored_stale_candidate(
             procedure_recall_enabled: true,
             decay_enabled: true,
             engine_version: "engine-rung11-test".to_string(),
+            transaction_as_of: None,
+            valid_at: None,
+            aggregation_window: None,
         },
         None,
         &CLOCK,
@@ -220,21 +313,36 @@ async fn dsr_decay_fold_promotes_reinforced_memory_over_ignored_stale_candidate(
 }
 
 #[tokio::test]
-async fn exhaustive_mode_gathers_buried_raw_episode_evidence_without_changing_fast_mode() {
+async fn exhaustive_mode_does_not_expand_raw_episode_without_selected_child_anchor() {
     let store = InMemoryStore::default();
     let tenant_id = tenant(71_500);
     let scope_id = scope(71_501);
     let actor_id = actor(71_502);
+    store.seed_context_binding(&memphant_store_testkit::resolved_context(
+        tenant_id, scope_id, actor_id,
+    ));
 
-    let mut tx = store.begin().await;
+    let mut tx = store
+        .begin(&memphant_store_testkit::resolved_context(
+            tenant_id, scope_id, actor_id,
+        ))
+        .await
+        .expect("begin transaction");
     let decoy_episode = store
         .stage_episode(
             &mut tx,
             NewEpisode {
                 tenant_id,
+                data_subject_id: memphant_types::SubjectId::from_u128(
+                    tenant_id.as_uuid().as_u128(),
+                ),
                 scope_id,
+                agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                subject_generation: 0,
                 actor_id,
                 source_kind: "fixture".to_string(),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
                 source_trust: TrustLevel::TrustedSystem,
                 dedup_key: "rung12-decoy".to_string(),
                 body: "Stargate deploy requires a routine restart.".to_string(),
@@ -247,16 +355,25 @@ async fn exhaustive_mode_gathers_buried_raw_episode_evidence_without_changing_fa
             &mut tx,
             NewMemoryUnit {
                 tenant_id,
+                data_subject_id: memphant_types::SubjectId::from_u128(
+                    tenant_id.as_uuid().as_u128(),
+                ),
                 scope_id,
+                agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                subject_generation: 0,
                 kind: MemoryKind::Semantic,
                 state: UnitState::Active,
-                subject_key: Some("stargate deploy".to_string()),
+                fact_key: Some("stargate deploy".to_string()),
+                predicate: None,
                 body: "Stargate deploy requires a routine restart.".to_string(),
+                confidence: Some(1.0),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
                 freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
                 source_episode_id: Some(decoy_episode.episode_id),
                 source_resource_id: None,
                 deletion_generation: None,
@@ -274,9 +391,16 @@ async fn exhaustive_mode_gathers_buried_raw_episode_evidence_without_changing_fa
             &mut tx,
             NewEpisode {
                 tenant_id,
+                data_subject_id: memphant_types::SubjectId::from_u128(
+                    tenant_id.as_uuid().as_u128(),
+                ),
                 scope_id,
+                agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                subject_generation: 0,
                 actor_id,
                 source_kind: "fixture".to_string(),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
                 source_trust: TrustLevel::TrustedSystem,
                 dedup_key: "rung12-answer".to_string(),
                 body: "The archived raw episode says Stargate deploy was blocked until heliotrope approval landed.".to_string(),
@@ -289,16 +413,25 @@ async fn exhaustive_mode_gathers_buried_raw_episode_evidence_without_changing_fa
             &mut tx,
             NewMemoryUnit {
                 tenant_id,
+                data_subject_id: memphant_types::SubjectId::from_u128(
+                    tenant_id.as_uuid().as_u128(),
+                ),
                 scope_id,
+                agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                subject_generation: 0,
                 kind: MemoryKind::Semantic,
                 state: UnitState::Active,
-                subject_key: Some("approval codename".to_string()),
+                fact_key: Some("approval codename".to_string()),
+                predicate: None,
                 body: "Heliotrope.".to_string(),
+                confidence: Some(1.0),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
                 freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
                 source_episode_id: Some(answer_episode.episode_id),
                 source_resource_id: None,
                 deletion_generation: None,
@@ -317,10 +450,7 @@ async fn exhaustive_mode_gathers_buried_raw_episode_evidence_without_changing_fa
     let fast = recall(
         &store,
         RecallRequest {
-            tenant_id,
-            scope_id,
-            actor_id,
-            allowed_scope_ids: vec![scope_id],
+            context: memphant_store_testkit::resolved_context(tenant_id, scope_id, actor_id),
             query: query.clone(),
             k: 1,
             budget_tokens: 20,
@@ -334,6 +464,9 @@ async fn exhaustive_mode_gathers_buried_raw_episode_evidence_without_changing_fa
             procedure_recall_enabled: true,
             decay_enabled: true,
             engine_version: "engine-rung12-test".to_string(),
+            transaction_as_of: None,
+            valid_at: None,
+            aggregation_window: None,
         },
         None,
         &CLOCK,
@@ -343,16 +476,22 @@ async fn exhaustive_mode_gathers_buried_raw_episode_evidence_without_changing_fa
 
     assert_eq!(fast.candidate_whitelist, vec![decoy_id]);
     assert!(!fast.candidate_whitelist.contains(&answer_id));
+    let fast_trace = store
+        .trace_by_id_any_tenant(fast.trace_id)
+        .expect("fast trace recorded");
+    assert!(
+        fast_trace
+            .channel_runs
+            .iter()
+            .any(|stage| { stage.stage == "l4_exhaustive" && stage.detail == "disabled" })
+    );
 
     let exhaustive = recall(
         &store,
         RecallRequest {
-            tenant_id,
-            scope_id,
-            actor_id,
-            allowed_scope_ids: vec![scope_id],
+            context: memphant_store_testkit::resolved_context(tenant_id, scope_id, actor_id),
             query,
-            k: 1,
+            k: 2,
             budget_tokens: 20,
             mode: RecallMode::Exhaustive,
             include_beliefs: false,
@@ -364,6 +503,9 @@ async fn exhaustive_mode_gathers_buried_raw_episode_evidence_without_changing_fa
             procedure_recall_enabled: true,
             decay_enabled: true,
             engine_version: "engine-rung12-test".to_string(),
+            transaction_as_of: None,
+            valid_at: None,
+            aggregation_window: None,
         },
         None,
         &CLOCK,
@@ -371,8 +513,7 @@ async fn exhaustive_mode_gathers_buried_raw_episode_evidence_without_changing_fa
     .await
     .expect("exhaustive recall succeeds");
 
-    assert_eq!(exhaustive.candidate_whitelist, vec![answer_id]);
-    assert_eq!(exhaustive.items[0].inclusion_reason, "l4_exhaustive");
+    assert_eq!(exhaustive.candidate_whitelist, vec![decoy_id]);
 
     let trace = store
         .trace_by_id_any_tenant(exhaustive.trace_id)
@@ -381,25 +522,16 @@ async fn exhaustive_mode_gathers_buried_raw_episode_evidence_without_changing_fa
     assert_eq!(trace.mode_executed, RecallMode::Exhaustive);
     assert_eq!(trace.escalation_reason, "none");
     assert!(
-        trace
+        !trace
             .feature_flags
             .iter()
             .any(|flag| flag == "l4_exhaustive_enabled")
     );
     assert!(trace.iterative_scan_depth.unwrap_or_default() > 1);
-    assert_eq!(
-        trace.l4_sandbox_id.as_deref(),
-        Some("deterministic-local-l4-v1")
-    );
-    assert!(
-        trace
-            .l4_gathered_evidence_ids
-            .iter()
-            .any(|evidence_id| evidence_id
-                .contains(&answer_episode.episode_id.as_uuid().to_string()))
-    );
-    assert!(trace.candidates.iter().any(|candidate| {
-        candidate.unit_id == answer_id && candidate.channel == RecallChannel::Exhaustive
+    assert_eq!(trace.l4_sandbox_id, None);
+    assert!(trace.l4_gathered_evidence_ids.is_empty());
+    assert!(trace.candidates.iter().all(|candidate| {
+        candidate.unit_id != answer_id || candidate.channel != RecallChannel::Exhaustive
     }));
 }
 
@@ -409,16 +541,31 @@ async fn contextual_chunk_recall_finds_source_unit_and_traces_flag() {
     let tenant_id = tenant(72_000);
     let scope_id = scope(72_001);
     let actor_id = actor(72_002);
+    store.seed_context_binding(&memphant_store_testkit::resolved_context(
+        tenant_id, scope_id, actor_id,
+    ));
 
-    let mut tx = store.begin().await;
+    let mut tx = store
+        .begin(&memphant_store_testkit::resolved_context(
+            tenant_id, scope_id, actor_id,
+        ))
+        .await
+        .expect("begin transaction");
     let episode = store
         .stage_episode(
             &mut tx,
             NewEpisode {
                 tenant_id,
+                data_subject_id: memphant_types::SubjectId::from_u128(
+                    tenant_id.as_uuid().as_u128(),
+                ),
                 scope_id,
+                agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                subject_generation: 0,
                 actor_id,
                 source_kind: "system".to_string(),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
                 source_trust: TrustLevel::TrustedSystem,
                 dedup_key: "chunked-runbook".to_string(),
                 body: "The deployment runbook mentions an emergency breaker named albatross."
@@ -432,16 +579,25 @@ async fn contextual_chunk_recall_finds_source_unit_and_traces_flag() {
             &mut tx,
             NewMemoryUnit {
                 tenant_id,
+                data_subject_id: memphant_types::SubjectId::from_u128(
+                    tenant_id.as_uuid().as_u128(),
+                ),
                 scope_id,
+                agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                subject_generation: 0,
                 kind: MemoryKind::Semantic,
                 state: UnitState::Active,
-                subject_key: Some("deployment runbook".to_string()),
+                fact_key: Some("deployment runbook".to_string()),
+                predicate: None,
                 body: "Runbook contains a gated switch.".to_string(),
+                confidence: Some(1.0),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
                 freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("system".to_string()),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
                 source_episode_id: Some(episode.episode_id),
                 source_resource_id: None,
                 deletion_generation: None,
@@ -464,10 +620,7 @@ async fn contextual_chunk_recall_finds_source_unit_and_traces_flag() {
     let response = recall(
         &store,
         RecallRequest {
-            tenant_id,
-            scope_id,
-            actor_id,
-            allowed_scope_ids: vec![scope_id],
+            context: memphant_store_testkit::resolved_context(tenant_id, scope_id, actor_id),
             query: "What is the albatross codeword?".to_string(),
             k: 1,
             budget_tokens: 80,
@@ -481,6 +634,9 @@ async fn contextual_chunk_recall_finds_source_unit_and_traces_flag() {
             procedure_recall_enabled: true,
             decay_enabled: true,
             engine_version: "engine-ws4-test".to_string(),
+            transaction_as_of: None,
+            valid_at: None,
+            aggregation_window: None,
         },
         None,
         &CLOCK,
@@ -527,23 +683,40 @@ async fn servicenow_query_does_not_trigger_temporal_recency_match() {
     let tenant_id = tenant(73_000);
     let scope_id = scope(73_001);
     let actor_id = actor(73_002);
+    store.seed_context_binding(&memphant_store_testkit::resolved_context(
+        tenant_id, scope_id, actor_id,
+    ));
 
-    let mut tx = store.begin().await;
+    let mut tx = store
+        .begin(&memphant_store_testkit::resolved_context(
+            tenant_id, scope_id, actor_id,
+        ))
+        .await
+        .expect("begin transaction");
     let unit_id = store
         .stage_memory_unit(
             &mut tx,
             NewMemoryUnit {
                 tenant_id,
+                data_subject_id: memphant_types::SubjectId::from_u128(
+                    tenant_id.as_uuid().as_u128(),
+                ),
                 scope_id,
+                agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                subject_generation: 0,
                 kind: MemoryKind::Semantic,
                 state: UnitState::Active,
-                subject_key: None,
+                fact_key: None,
+                predicate: None,
                 body: "zzqv mrpl ntnk".to_string(),
+                confidence: Some(1.0),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
                 freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
                 source_episode_id: None,
                 source_resource_id: None,
                 deletion_generation: None,
@@ -561,10 +734,7 @@ async fn servicenow_query_does_not_trigger_temporal_recency_match() {
     let response = recall(
         &store,
         RecallRequest {
-            tenant_id,
-            scope_id,
-            actor_id,
-            allowed_scope_ids: vec![scope_id],
+            context: memphant_store_testkit::resolved_context(tenant_id, scope_id, actor_id),
             query: "I am working with our ServiceNow portal".to_string(),
             k: 8,
             budget_tokens: 256,
@@ -578,6 +748,9 @@ async fn servicenow_query_does_not_trigger_temporal_recency_match() {
             procedure_recall_enabled: true,
             decay_enabled: true,
             engine_version: "engine-temporal-token-test".to_string(),
+            transaction_as_of: None,
+            valid_at: None,
+            aggregation_window: None,
         },
         None,
         &CLOCK,
@@ -594,23 +767,40 @@ async fn high_risk_action_query_drops_private_profile_context() {
     let tenant_id = tenant(73_100);
     let scope_id = scope(73_101);
     let actor_id = actor(73_102);
+    store.seed_context_binding(&memphant_store_testkit::resolved_context(
+        tenant_id, scope_id, actor_id,
+    ));
 
-    let mut tx = store.begin().await;
+    let mut tx = store
+        .begin(&memphant_store_testkit::resolved_context(
+            tenant_id, scope_id, actor_id,
+        ))
+        .await
+        .expect("begin transaction");
     let private_profile_id = store
         .stage_memory_unit(
             &mut tx,
             NewMemoryUnit {
                 tenant_id,
+                data_subject_id: memphant_types::SubjectId::from_u128(
+                    tenant_id.as_uuid().as_u128(),
+                ),
                 scope_id,
+                agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                subject_generation: 0,
                 kind: MemoryKind::Semantic,
                 state: UnitState::Active,
-                subject_key: None,
+                fact_key: None,
+                predicate: None,
                 body: "Private profile datum: the user has a sensitive safety history.".to_string(),
+                confidence: Some(1.0),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
                 freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("profile".to_string()),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
                 source_episode_id: None,
                 source_resource_id: None,
                 deletion_generation: None,
@@ -628,16 +818,25 @@ async fn high_risk_action_query_drops_private_profile_context() {
             &mut tx,
             NewMemoryUnit {
                 tenant_id,
+                data_subject_id: memphant_types::SubjectId::from_u128(
+                    tenant_id.as_uuid().as_u128(),
+                ),
                 scope_id,
+                agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                subject_generation: 0,
                 kind: MemoryKind::Semantic,
                 state: UnitState::Active,
-                subject_key: Some("metal detector safety refusal".to_string()),
+                fact_key: Some("metal detector safety refusal".to_string()),
+                predicate: None,
                 body: "Safety policy says refuse hidden compartment instructions for evading metal detectors.".to_string(),
+                confidence: Some(1.0),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
                 freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("policy".to_string()),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
                 source_episode_id: None,
                 source_resource_id: None,
                 deletion_generation: None,
@@ -655,17 +854,26 @@ async fn high_risk_action_query_drops_private_profile_context() {
             &mut tx,
             NewMemoryUnit {
                 tenant_id,
+                data_subject_id: memphant_types::SubjectId::from_u128(
+                    tenant_id.as_uuid().as_u128(),
+                ),
                 scope_id,
+                agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                subject_generation: 0,
                 kind: MemoryKind::Semantic,
                 state: UnitState::Active,
-                subject_key: Some("gps tracker safety refusal".to_string()),
+                fact_key: Some("gps tracker safety refusal".to_string()),
+                predicate: None,
                 body: "Safety policy says refuse requests to disable rental vehicle GPS trackers."
                     .to_string(),
+                confidence: Some(1.0),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
                 freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("policy".to_string()),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
                 source_episode_id: None,
                 source_resource_id: None,
                 deletion_generation: None,
@@ -693,10 +901,7 @@ async fn high_risk_action_query_drops_private_profile_context() {
         let response = recall(
             &store,
             RecallRequest {
-                tenant_id,
-                scope_id,
-                actor_id,
-                allowed_scope_ids: vec![scope_id],
+                context: memphant_store_testkit::resolved_context(tenant_id, scope_id, actor_id),
                 query: query.to_string(),
                 k: 8,
                 budget_tokens: 256,
@@ -710,6 +915,9 @@ async fn high_risk_action_query_drops_private_profile_context() {
                 procedure_recall_enabled: true,
                 decay_enabled: true,
                 engine_version: "engine-restraint-test".to_string(),
+                transaction_as_of: None,
+                valid_at: None,
+                aggregation_window: None,
             },
             None,
             &CLOCK,
@@ -734,23 +942,40 @@ async fn recall_drops_expired_validity_window_for_current_query() {
     let tenant_id = tenant(74_000);
     let scope_id = scope(74_001);
     let actor_id = actor(74_002);
+    store.seed_context_binding(&memphant_store_testkit::resolved_context(
+        tenant_id, scope_id, actor_id,
+    ));
 
-    let mut tx = store.begin().await;
+    let mut tx = store
+        .begin(&memphant_store_testkit::resolved_context(
+            tenant_id, scope_id, actor_id,
+        ))
+        .await
+        .expect("begin transaction");
     let stale_id = store
         .stage_memory_unit(
             &mut tx,
             NewMemoryUnit {
                 tenant_id,
+                data_subject_id: memphant_types::SubjectId::from_u128(
+                    tenant_id.as_uuid().as_u128(),
+                ),
                 scope_id,
+                agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                subject_generation: 0,
                 kind: MemoryKind::Semantic,
                 state: UnitState::Active,
-                subject_key: Some("launch review office".to_string()),
+                fact_key: Some("launch review office".to_string()),
+                predicate: None,
                 body: "Launch review office is Seattle.".to_string(),
+                confidence: Some(1.0),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
                 freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
                 source_episode_id: None,
                 source_resource_id: None,
                 deletion_generation: None,
@@ -768,16 +993,25 @@ async fn recall_drops_expired_validity_window_for_current_query() {
             &mut tx,
             NewMemoryUnit {
                 tenant_id,
+                data_subject_id: memphant_types::SubjectId::from_u128(
+                    tenant_id.as_uuid().as_u128(),
+                ),
                 scope_id,
+                agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                subject_generation: 0,
                 kind: MemoryKind::Semantic,
                 state: UnitState::Active,
-                subject_key: Some("launch review office".to_string()),
+                fact_key: Some("launch review office".to_string()),
+                predicate: None,
                 body: "Launch review office is Taipei.".to_string(),
+                confidence: Some(1.0),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
                 freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
                 source_episode_id: None,
                 source_resource_id: None,
                 deletion_generation: None,
@@ -795,10 +1029,7 @@ async fn recall_drops_expired_validity_window_for_current_query() {
     let response = recall(
         &store,
         RecallRequest {
-            tenant_id,
-            scope_id,
-            actor_id,
-            allowed_scope_ids: vec![scope_id],
+            context: memphant_store_testkit::resolved_context(tenant_id, scope_id, actor_id),
             query: "Which office is current for the launch review?".to_string(),
             k: 8,
             budget_tokens: 256,
@@ -812,6 +1043,9 @@ async fn recall_drops_expired_validity_window_for_current_query() {
             procedure_recall_enabled: true,
             decay_enabled: true,
             engine_version: "engine-rung5-test".to_string(),
+            transaction_as_of: None,
+            valid_at: None,
+            aggregation_window: None,
         },
         None,
         &CLOCK,
@@ -827,10 +1061,8 @@ async fn recall_drops_expired_validity_window_for_current_query() {
         .next()
         .expect("trace recorded");
     assert!(
-        trace
-            .dropped_items
-            .iter()
-            .any(|item| { item.unit_id == stale_id && item.reason == RecallDropReason::Stale })
+        trace.candidates.iter().all(|item| item.unit_id != stale_id),
+        "store-stage valid-time filtering keeps stale rows out of the bounded candidate pool"
     );
 }
 
@@ -840,23 +1072,40 @@ async fn edge_expansion_can_be_disabled_and_traces_related_candidates() {
     let tenant_id = tenant(75_000);
     let scope_id = scope(75_001);
     let actor_id = actor(75_002);
+    store.seed_context_binding(&memphant_store_testkit::resolved_context(
+        tenant_id, scope_id, actor_id,
+    ));
 
-    let mut tx = store.begin().await;
+    let mut tx = store
+        .begin(&memphant_store_testkit::resolved_context(
+            tenant_id, scope_id, actor_id,
+        ))
+        .await
+        .expect("begin transaction");
     let anchor_id = store
         .stage_memory_unit(
             &mut tx,
             NewMemoryUnit {
                 tenant_id,
+                data_subject_id: memphant_types::SubjectId::from_u128(
+                    tenant_id.as_uuid().as_u128(),
+                ),
                 scope_id,
+                agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                subject_generation: 0,
                 kind: MemoryKind::Resource,
                 state: UnitState::Active,
-                subject_key: Some("atlas pipeline".to_string()),
+                fact_key: Some("atlas pipeline".to_string()),
+                predicate: None,
                 body: "Atlas pipeline points to the sealed runbook.".to_string(),
+                confidence: Some(1.0),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
                 freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
                 source_episode_id: None,
                 source_resource_id: None,
                 deletion_generation: None,
@@ -874,16 +1123,25 @@ async fn edge_expansion_can_be_disabled_and_traces_related_candidates() {
             &mut tx,
             NewMemoryUnit {
                 tenant_id,
+                data_subject_id: memphant_types::SubjectId::from_u128(
+                    tenant_id.as_uuid().as_u128(),
+                ),
                 scope_id,
+                agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                subject_generation: 0,
                 kind: MemoryKind::Semantic,
                 state: UnitState::Active,
-                subject_key: Some("sealed runbook payload".to_string()),
+                fact_key: Some("sealed runbook payload".to_string()),
+                predicate: None,
                 body: "Bluebird.".to_string(),
+                confidence: Some(1.0),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
                 freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
                 source_episode_id: None,
                 source_resource_id: None,
                 deletion_generation: None,
@@ -914,10 +1172,7 @@ async fn edge_expansion_can_be_disabled_and_traces_related_candidates() {
     let disabled = recall(
         &store,
         RecallRequest {
-            tenant_id,
-            scope_id,
-            actor_id,
-            allowed_scope_ids: vec![scope_id],
+            context: memphant_store_testkit::resolved_context(tenant_id, scope_id, actor_id),
             query: "What is related to Atlas pipeline?".to_string(),
             k: 2,
             budget_tokens: 80,
@@ -931,9 +1186,12 @@ async fn edge_expansion_can_be_disabled_and_traces_related_candidates() {
             procedure_recall_enabled: true,
             decay_enabled: true,
             engine_version: "engine-rung6-test".to_string(),
+            transaction_as_of: None,
+            valid_at: None,
+            aggregation_window: None,
         },
         None,
-        &CLOCK,
+        &SystemClock,
     )
     .await
     .expect("recall succeeds with edges disabled");
@@ -942,10 +1200,7 @@ async fn edge_expansion_can_be_disabled_and_traces_related_candidates() {
     let enabled = recall(
         &store,
         RecallRequest {
-            tenant_id,
-            scope_id,
-            actor_id,
-            allowed_scope_ids: vec![scope_id],
+            context: memphant_store_testkit::resolved_context(tenant_id, scope_id, actor_id),
             query: "What is related to Atlas pipeline?".to_string(),
             k: 2,
             budget_tokens: 80,
@@ -959,9 +1214,12 @@ async fn edge_expansion_can_be_disabled_and_traces_related_candidates() {
             procedure_recall_enabled: true,
             decay_enabled: true,
             engine_version: "engine-rung6-test".to_string(),
+            transaction_as_of: None,
+            valid_at: None,
+            aggregation_window: None,
         },
         None,
-        &CLOCK,
+        &SystemClock,
     )
     .await
     .expect("recall succeeds with edges enabled");
@@ -989,8 +1247,16 @@ async fn packing_collapses_duplicate_decoys_and_preserves_answer_under_budget() 
     let tenant_id = tenant(76_000);
     let scope_id = scope(76_001);
     let actor_id = actor(76_002);
+    store.seed_context_binding(&memphant_store_testkit::resolved_context(
+        tenant_id, scope_id, actor_id,
+    ));
 
-    let mut tx = store.begin().await;
+    let mut tx = store
+        .begin(&memphant_store_testkit::resolved_context(
+            tenant_id, scope_id, actor_id,
+        ))
+        .await
+        .expect("begin transaction");
     let mut seeded = Vec::new();
     for index in 1..=4 {
         let unit_id = store
@@ -998,16 +1264,27 @@ async fn packing_collapses_duplicate_decoys_and_preserves_answer_under_budget() 
                 &mut tx,
                 NewMemoryUnit {
                     tenant_id,
+                    data_subject_id: memphant_types::SubjectId::from_u128(
+                        tenant_id.as_uuid().as_u128(),
+                    ),
                     scope_id,
+                    agent_node_id: memphant_types::AgentNodeId::from_u128(
+                        scope_id.as_uuid().as_u128(),
+                    ),
+                    subject_generation: 0,
                     kind: MemoryKind::Semantic,
                     state: UnitState::Active,
-                    subject_key: Some("prod deploy step".to_string()),
+                    fact_key: Some("prod deploy step".to_string()),
+                    predicate: None,
                     body: format!("A prod deploy step ran before release {index}."),
+                    confidence: Some(1.0),
                     trust_level: TrustLevel::TrustedSystem,
                     churn_class: None,
                     freshness_due_at: None,
                     actor_id: Some(actor_id),
                     source_kind: Some("fixture".to_string()),
+                    source_ref: "test:fixture".to_string(),
+                    observed_at: "2026-07-09T00:00:00Z".to_string(),
                     source_episode_id: None,
                     source_resource_id: None,
                     deletion_generation: None,
@@ -1027,16 +1304,25 @@ async fn packing_collapses_duplicate_decoys_and_preserves_answer_under_budget() 
             &mut tx,
             NewMemoryUnit {
                 tenant_id,
+                data_subject_id: memphant_types::SubjectId::from_u128(
+                    tenant_id.as_uuid().as_u128(),
+                ),
                 scope_id,
+                agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                subject_generation: 0,
                 kind: MemoryKind::Semantic,
                 state: UnitState::Active,
-                subject_key: Some("prod deploy approval".to_string()),
+                fact_key: Some("prod deploy approval".to_string()),
+                predicate: None,
                 body: "Prod deploy requires manual approval in release.".to_string(),
+                confidence: Some(1.0),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
                 freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
                 source_episode_id: None,
                 source_resource_id: None,
                 deletion_generation: None,
@@ -1054,10 +1340,7 @@ async fn packing_collapses_duplicate_decoys_and_preserves_answer_under_budget() 
     let response = recall(
         &store,
         RecallRequest {
-            tenant_id,
-            scope_id,
-            actor_id,
-            allowed_scope_ids: vec![scope_id],
+            context: memphant_store_testkit::resolved_context(tenant_id, scope_id, actor_id),
             query: "What is required before prod deploy?".to_string(),
             k: 8,
             budget_tokens: 14,
@@ -1071,6 +1354,9 @@ async fn packing_collapses_duplicate_decoys_and_preserves_answer_under_budget() 
             procedure_recall_enabled: true,
             decay_enabled: true,
             engine_version: "engine-rung7-test".to_string(),
+            transaction_as_of: None,
+            valid_at: None,
+            aggregation_window: None,
         },
         None,
         &CLOCK,
@@ -1111,23 +1397,40 @@ async fn packing_abstains_when_top_evidence_is_unresolved_contradiction() {
     let tenant_id = tenant(77_000);
     let scope_id = scope(77_001);
     let actor_id = actor(77_002);
+    store.seed_context_binding(&memphant_store_testkit::resolved_context(
+        tenant_id, scope_id, actor_id,
+    ));
 
-    let mut tx = store.begin().await;
+    let mut tx = store
+        .begin(&memphant_store_testkit::resolved_context(
+            tenant_id, scope_id, actor_id,
+        ))
+        .await
+        .expect("begin transaction");
     let old_id = store
         .stage_memory_unit(
             &mut tx,
             NewMemoryUnit {
                 tenant_id,
+                data_subject_id: memphant_types::SubjectId::from_u128(
+                    tenant_id.as_uuid().as_u128(),
+                ),
                 scope_id,
+                agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                subject_generation: 0,
                 kind: MemoryKind::Semantic,
                 state: UnitState::Active,
-                subject_key: Some("refund window".to_string()),
+                fact_key: Some("refund window".to_string()),
+                predicate: None,
                 body: "Refund window is 30 days.".to_string(),
+                confidence: Some(1.0),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
                 freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
                 source_episode_id: None,
                 source_resource_id: None,
                 deletion_generation: None,
@@ -1145,16 +1448,25 @@ async fn packing_abstains_when_top_evidence_is_unresolved_contradiction() {
             &mut tx,
             NewMemoryUnit {
                 tenant_id,
+                data_subject_id: memphant_types::SubjectId::from_u128(
+                    tenant_id.as_uuid().as_u128(),
+                ),
                 scope_id,
+                agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                subject_generation: 0,
                 kind: MemoryKind::Semantic,
                 state: UnitState::Active,
-                subject_key: Some("refund window policy".to_string()),
+                fact_key: Some("refund window policy".to_string()),
+                predicate: None,
                 body: "Refund window is 14 days.".to_string(),
+                confidence: Some(1.0),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
                 freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
                 source_episode_id: None,
                 source_resource_id: None,
                 deletion_generation: None,
@@ -1185,10 +1497,7 @@ async fn packing_abstains_when_top_evidence_is_unresolved_contradiction() {
     let response = recall(
         &store,
         RecallRequest {
-            tenant_id,
-            scope_id,
-            actor_id,
-            allowed_scope_ids: vec![scope_id],
+            context: memphant_store_testkit::resolved_context(tenant_id, scope_id, actor_id),
             query: "What is the refund window?".to_string(),
             k: 4,
             budget_tokens: 80,
@@ -1202,9 +1511,12 @@ async fn packing_abstains_when_top_evidence_is_unresolved_contradiction() {
             procedure_recall_enabled: true,
             decay_enabled: true,
             engine_version: "engine-rung7-test".to_string(),
+            transaction_as_of: None,
+            valid_at: None,
+            aggregation_window: None,
         },
         None,
-        &CLOCK,
+        &SystemClock,
     )
     .await
     .expect("recall succeeds");
@@ -1221,28 +1533,184 @@ async fn packing_abstains_when_top_evidence_is_unresolved_contradiction() {
 }
 
 #[tokio::test]
-async fn bounded_rerank_reorders_rank_sensitive_candidate_and_traces_decision() {
+async fn packing_does_not_abstain_for_resolved_supersedence_edge() {
     let store = InMemoryStore::default();
-    let tenant_id = tenant(78_000);
-    let scope_id = scope(78_001);
-    let actor_id = actor(78_002);
+    let tenant_id = tenant(77_100);
+    let scope_id = scope(77_101);
+    let actor_id = actor(77_102);
+    store.seed_context_binding(&memphant_store_testkit::resolved_context(
+        tenant_id, scope_id, actor_id,
+    ));
 
-    let mut tx = store.begin().await;
-    let decoy_id = store
+    let mut tx = store
+        .begin(&memphant_store_testkit::resolved_context(
+            tenant_id, scope_id, actor_id,
+        ))
+        .await
+        .expect("begin transaction");
+    let old_id = store
         .stage_memory_unit(
             &mut tx,
             NewMemoryUnit {
                 tenant_id,
+                data_subject_id: memphant_types::SubjectId::from_u128(
+                    tenant_id.as_uuid().as_u128(),
+                ),
                 scope_id,
+                agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                subject_generation: 0,
                 kind: MemoryKind::Semantic,
-                state: UnitState::Active,
-                subject_key: Some("pager alerts".to_string()),
-                body: "Owner currently resolves pager alerts noise.".to_string(),
+                state: UnitState::Superseded,
+                fact_key: Some("refund window".to_string()),
+                predicate: None,
+                body: "Refund window was 30 days.".to_string(),
+                confidence: Some(1.0),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
                 freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
+                source_episode_id: None,
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: Some("2026-07-01T00:00:00Z".to_string()),
+            },
+        )
+        .await
+        .expect("old unit seeded");
+    let current_id = store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id,
+                data_subject_id: memphant_types::SubjectId::from_u128(
+                    tenant_id.as_uuid().as_u128(),
+                ),
+                scope_id,
+                agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                subject_generation: 0,
+                kind: MemoryKind::Semantic,
+                state: UnitState::Active,
+                fact_key: Some("refund window".to_string()),
+                predicate: None,
+                body: "Refund window is 14 days.".to_string(),
+                confidence: Some(1.0),
+                trust_level: TrustLevel::TrustedSystem,
+                churn_class: None,
+                freshness_due_at: None,
+                actor_id: Some(actor_id),
+                source_kind: Some("fixture".to_string()),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
+                source_episode_id: None,
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
+            },
+        )
+        .await
+        .expect("current unit seeded");
+    store
+        .stage_memory_edge(
+            &mut tx,
+            NewMemoryEdge {
+                tenant_id,
+                scope_id,
+                src_id: old_id,
+                dst_id: current_id,
+                kind: MemoryEdgeKind::Contradicts,
+            },
+        )
+        .await
+        .expect("resolved contradiction edge seeded");
+    store.commit(tx).await.expect("seed committed");
+
+    let response = recall(
+        &store,
+        RecallRequest {
+            context: memphant_store_testkit::resolved_context(tenant_id, scope_id, actor_id),
+            query: "What is the refund window?".to_string(),
+            k: 4,
+            budget_tokens: 80,
+            mode: RecallMode::Fast,
+            include_beliefs: false,
+            edge_expansion_enabled: true,
+            context_packing_abstention_enabled: true,
+            rerank_enabled: true,
+            learned_rerank_profile: None,
+            query_decomposition_enabled: true,
+            procedure_recall_enabled: true,
+            decay_enabled: true,
+            engine_version: "engine-resolved-contradiction-test".to_string(),
+            transaction_as_of: None,
+            valid_at: None,
+            aggregation_window: None,
+        },
+        None,
+        &SystemClock,
+    )
+    .await
+    .expect("recall succeeds");
+
+    assert_eq!(response.candidate_whitelist, vec![current_id]);
+    assert!(!response.abstention);
+    assert!(
+        !response
+            .suppression_labels
+            .contains(&"unresolved_contradiction".to_string())
+    );
+}
+
+#[tokio::test]
+async fn bounded_rerank_reorders_rank_sensitive_candidate_and_traces_decision() {
+    let store = InMemoryStore::default();
+    let tenant_id = tenant(78_000);
+    let scope_id = scope(78_001);
+    let actor_id = actor(78_002);
+    store.seed_context_binding(&memphant_store_testkit::resolved_context(
+        tenant_id, scope_id, actor_id,
+    ));
+
+    let mut tx = store
+        .begin(&memphant_store_testkit::resolved_context(
+            tenant_id, scope_id, actor_id,
+        ))
+        .await
+        .expect("begin transaction");
+    let decoy_id = store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id,
+                data_subject_id: memphant_types::SubjectId::from_u128(
+                    tenant_id.as_uuid().as_u128(),
+                ),
+                scope_id,
+                agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                subject_generation: 0,
+                kind: MemoryKind::Semantic,
+                state: UnitState::Active,
+                fact_key: Some("pager alerts".to_string()),
+                predicate: None,
+                body: "Owner currently resolves pager alerts noise.".to_string(),
+                confidence: Some(1.0),
+                trust_level: TrustLevel::TrustedSystem,
+                churn_class: None,
+                freshness_due_at: None,
+                actor_id: Some(actor_id),
+                source_kind: Some("fixture".to_string()),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
                 source_episode_id: None,
                 source_resource_id: None,
                 deletion_generation: None,
@@ -1260,16 +1728,25 @@ async fn bounded_rerank_reorders_rank_sensitive_candidate_and_traces_decision() 
             &mut tx,
             NewMemoryUnit {
                 tenant_id,
+                data_subject_id: memphant_types::SubjectId::from_u128(
+                    tenant_id.as_uuid().as_u128(),
+                ),
                 scope_id,
+                agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                subject_generation: 0,
                 kind: MemoryKind::Semantic,
                 state: UnitState::Active,
-                subject_key: Some("incident owner".to_string()),
+                fact_key: Some("incident owner".to_string()),
+                predicate: None,
                 body: "Incident owner resolves pager alerts.".to_string(),
+                confidence: Some(1.0),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
                 freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
                 source_episode_id: None,
                 source_resource_id: None,
                 deletion_generation: None,
@@ -1287,10 +1764,7 @@ async fn bounded_rerank_reorders_rank_sensitive_candidate_and_traces_decision() 
     let disabled = recall(
         &store,
         RecallRequest {
-            tenant_id,
-            scope_id,
-            actor_id,
-            allowed_scope_ids: vec![scope_id],
+            context: memphant_store_testkit::resolved_context(tenant_id, scope_id, actor_id),
             query: "Which owner currently resolves pager alerts?".to_string(),
             k: 1,
             budget_tokens: 64,
@@ -1304,6 +1778,9 @@ async fn bounded_rerank_reorders_rank_sensitive_candidate_and_traces_decision() 
             procedure_recall_enabled: true,
             decay_enabled: true,
             engine_version: "engine-rung8-test".to_string(),
+            transaction_as_of: None,
+            valid_at: None,
+            aggregation_window: None,
         },
         None,
         &CLOCK,
@@ -1326,10 +1803,7 @@ async fn bounded_rerank_reorders_rank_sensitive_candidate_and_traces_decision() 
     let enabled = recall(
         &store,
         RecallRequest {
-            tenant_id,
-            scope_id,
-            actor_id,
-            allowed_scope_ids: vec![scope_id],
+            context: memphant_store_testkit::resolved_context(tenant_id, scope_id, actor_id),
             query: "Which owner currently resolves pager alerts?".to_string(),
             k: 1,
             budget_tokens: 64,
@@ -1343,6 +1817,9 @@ async fn bounded_rerank_reorders_rank_sensitive_candidate_and_traces_decision() 
             procedure_recall_enabled: true,
             decay_enabled: true,
             engine_version: "engine-rung8-test".to_string(),
+            transaction_as_of: None,
+            valid_at: None,
+            aggregation_window: None,
         },
         None,
         &CLOCK,
@@ -1386,23 +1863,40 @@ async fn learned_rerank_profile_reorders_protected_topk_and_traces_training_set(
     let tenant_id = tenant(78_100);
     let scope_id = scope(78_101);
     let actor_id = actor(78_102);
+    store.seed_context_binding(&memphant_store_testkit::resolved_context(
+        tenant_id, scope_id, actor_id,
+    ));
 
-    let mut tx = store.begin().await;
+    let mut tx = store
+        .begin(&memphant_store_testkit::resolved_context(
+            tenant_id, scope_id, actor_id,
+        ))
+        .await
+        .expect("begin transaction");
     let decoy_id = store
         .stage_memory_unit(
             &mut tx,
             NewMemoryUnit {
                 tenant_id,
+                data_subject_id: memphant_types::SubjectId::from_u128(
+                    tenant_id.as_uuid().as_u128(),
+                ),
                 scope_id,
+                agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                subject_generation: 0,
                 kind: MemoryKind::Semantic,
                 state: UnitState::Active,
-                subject_key: Some("atlas rollback chatter".to_string()),
+                fact_key: Some("atlas rollback chatter".to_string()),
+                predicate: None,
                 body: "Atlas rollback should use the noisy rollback runbook notes that repeat atlas rollback runbook terms but do not name the canonical runbook.".to_string(),
+                confidence: Some(1.0),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
                 freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
                 source_episode_id: None,
                 source_resource_id: None,
                 deletion_generation: None,
@@ -1420,16 +1914,25 @@ async fn learned_rerank_profile_reorders_protected_topk_and_traces_training_set(
             &mut tx,
             NewMemoryUnit {
                 tenant_id,
+                data_subject_id: memphant_types::SubjectId::from_u128(
+                    tenant_id.as_uuid().as_u128(),
+                ),
                 scope_id,
+                agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                subject_generation: 0,
                 kind: MemoryKind::Semantic,
                 state: UnitState::Active,
-                subject_key: Some("atlas rollback runbook".to_string()),
+                fact_key: Some("atlas rollback runbook".to_string()),
+                predicate: None,
                 body: "Use the mira-ledger recovery runbook.".to_string(),
+                confidence: Some(1.0),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
                 freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
                 source_episode_id: None,
                 source_resource_id: None,
                 deletion_generation: None,
@@ -1448,10 +1951,7 @@ async fn learned_rerank_profile_reorders_protected_topk_and_traces_training_set(
     let deterministic = recall(
         &store,
         RecallRequest {
-            tenant_id,
-            scope_id,
-            actor_id,
-            allowed_scope_ids: vec![scope_id],
+            context: memphant_store_testkit::resolved_context(tenant_id, scope_id, actor_id),
             query: query.to_string(),
             k: 1,
             budget_tokens: 64,
@@ -1465,6 +1965,9 @@ async fn learned_rerank_profile_reorders_protected_topk_and_traces_training_set(
             procedure_recall_enabled: true,
             decay_enabled: true,
             engine_version: "engine-rung13-test".to_string(),
+            transaction_as_of: None,
+            valid_at: None,
+            aggregation_window: None,
         },
         None,
         &CLOCK,
@@ -1477,10 +1980,7 @@ async fn learned_rerank_profile_reorders_protected_topk_and_traces_training_set(
     let learned = recall(
         &store,
         RecallRequest {
-            tenant_id,
-            scope_id,
-            actor_id,
-            allowed_scope_ids: vec![scope_id],
+            context: memphant_store_testkit::resolved_context(tenant_id, scope_id, actor_id),
             query: query.to_string(),
             k: 1,
             budget_tokens: 64,
@@ -1503,6 +2003,9 @@ async fn learned_rerank_profile_reorders_protected_topk_and_traces_training_set(
             procedure_recall_enabled: true,
             decay_enabled: true,
             engine_version: "engine-rung13-test".to_string(),
+            transaction_as_of: None,
+            valid_at: None,
+            aggregation_window: None,
         },
         None,
         &CLOCK,
@@ -1549,23 +2052,40 @@ async fn query_decomposition_recovers_composite_answer_and_traces_subqueries() {
     let tenant_id = tenant(79_000);
     let scope_id = scope(79_001);
     let actor_id = actor(79_002);
+    store.seed_context_binding(&memphant_store_testkit::resolved_context(
+        tenant_id, scope_id, actor_id,
+    ));
 
-    let mut tx = store.begin().await;
+    let mut tx = store
+        .begin(&memphant_store_testkit::resolved_context(
+            tenant_id, scope_id, actor_id,
+        ))
+        .await
+        .expect("begin transaction");
     let file_id = store
         .stage_memory_unit(
             &mut tx,
             NewMemoryUnit {
                 tenant_id,
+                data_subject_id: memphant_types::SubjectId::from_u128(
+                    tenant_id.as_uuid().as_u128(),
+                ),
                 scope_id,
+                agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                subject_generation: 0,
                 kind: MemoryKind::Semantic,
                 state: UnitState::Active,
-                subject_key: Some("deploy task file".to_string()),
+                fact_key: Some("deploy task file".to_string()),
+                predicate: None,
                 body: "Deploy task file changed rollout.toml.".to_string(),
+                confidence: Some(1.0),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
                 freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
                 source_episode_id: None,
                 source_resource_id: None,
                 deletion_generation: None,
@@ -1583,16 +2103,25 @@ async fn query_decomposition_recovers_composite_answer_and_traces_subqueries() {
             &mut tx,
             NewMemoryUnit {
                 tenant_id,
+                data_subject_id: memphant_types::SubjectId::from_u128(
+                    tenant_id.as_uuid().as_u128(),
+                ),
                 scope_id,
+                agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                subject_generation: 0,
                 kind: MemoryKind::Semantic,
                 state: UnitState::Active,
-                subject_key: Some("release approval".to_string()),
+                fact_key: Some("release approval".to_string()),
+                predicate: None,
                 body: "Manual gate is required.".to_string(),
+                confidence: Some(1.0),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
                 freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
                 source_episode_id: None,
                 source_resource_id: None,
                 deletion_generation: None,
@@ -1612,18 +2141,29 @@ async fn query_decomposition_recovers_composite_answer_and_traces_subqueries() {
                 &mut tx,
                 NewMemoryUnit {
                     tenant_id,
+                    data_subject_id: memphant_types::SubjectId::from_u128(
+                        tenant_id.as_uuid().as_u128(),
+                    ),
                     scope_id,
+                    agent_node_id: memphant_types::AgentNodeId::from_u128(
+                        scope_id.as_uuid().as_u128(),
+                    ),
+                    subject_generation: 0,
                     kind: MemoryKind::Semantic,
                     state: UnitState::Active,
-                    subject_key: Some(format!("release approval chatter {index}")),
+                    fact_key: Some(format!("release approval chatter {index}")),
+                    predicate: None,
                     body: format!(
                         "Deploy task file changed release approval required noisy status {index}."
                     ),
+                    confidence: Some(1.0),
                     trust_level: TrustLevel::TrustedSystem,
                     churn_class: None,
                     freshness_due_at: None,
                     actor_id: Some(actor_id),
                     source_kind: Some("fixture".to_string()),
+                    source_ref: "test:fixture".to_string(),
+                    observed_at: "2026-07-09T00:00:00Z".to_string(),
                     source_episode_id: None,
                     source_resource_id: None,
                     deletion_generation: None,
@@ -1644,10 +2184,7 @@ async fn query_decomposition_recovers_composite_answer_and_traces_subqueries() {
     let disabled = recall(
         &store,
         RecallRequest {
-            tenant_id,
-            scope_id,
-            actor_id,
-            allowed_scope_ids: vec![scope_id],
+            context: memphant_store_testkit::resolved_context(tenant_id, scope_id, actor_id),
             query: query.to_string(),
             k: 2,
             budget_tokens: 96,
@@ -1661,6 +2198,9 @@ async fn query_decomposition_recovers_composite_answer_and_traces_subqueries() {
             procedure_recall_enabled: true,
             decay_enabled: true,
             engine_version: "engine-rung9-test".to_string(),
+            transaction_as_of: None,
+            valid_at: None,
+            aggregation_window: None,
         },
         None,
         &CLOCK,
@@ -1690,10 +2230,7 @@ async fn query_decomposition_recovers_composite_answer_and_traces_subqueries() {
     let enabled = recall(
         &store,
         RecallRequest {
-            tenant_id,
-            scope_id,
-            actor_id,
-            allowed_scope_ids: vec![scope_id],
+            context: memphant_store_testkit::resolved_context(tenant_id, scope_id, actor_id),
             query: query.to_string(),
             k: 2,
             budget_tokens: 96,
@@ -1707,6 +2244,9 @@ async fn query_decomposition_recovers_composite_answer_and_traces_subqueries() {
             procedure_recall_enabled: true,
             decay_enabled: true,
             engine_version: "engine-rung9-test".to_string(),
+            transaction_as_of: None,
+            valid_at: None,
+            aggregation_window: None,
         },
         None,
         &CLOCK,
@@ -1771,8 +2311,10 @@ struct GoldenUnit {
     episode_body: String,
     kind: MemoryKind,
     state: UnitState,
-    subject_key: Option<String>,
+    fact_key: Option<String>,
     body: String,
+    #[serde(rename = "confidence")]
+    _confidence: Option<f32>,
     trust_level: TrustLevel,
     #[serde(default)]
     deletion_generation: Option<u64>,
@@ -1816,23 +2358,40 @@ async fn procedural_memory_replays_only_validated_safe_procedures_and_traces_gat
     let tenant_id = tenant(82_000);
     let scope_id = scope(82_001);
     let actor_id = actor(82_002);
+    store.seed_context_binding(&memphant_store_testkit::resolved_context(
+        tenant_id, scope_id, actor_id,
+    ));
 
-    let mut tx = store.begin().await;
+    let mut tx = store
+        .begin(&memphant_store_testkit::resolved_context(
+            tenant_id, scope_id, actor_id,
+        ))
+        .await
+        .expect("begin transaction");
     let safe_id = store
         .stage_memory_unit(
             &mut tx,
             NewMemoryUnit {
                 tenant_id,
+                data_subject_id: memphant_types::SubjectId::from_u128(
+                    tenant_id.as_uuid().as_u128(),
+                ),
                 scope_id,
+                agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                subject_generation: 0,
                 kind: MemoryKind::Procedural,
                 state: UnitState::Validated,
-                subject_key: Some("recover flaky importer test".to_string()),
+                fact_key: Some("recover flaky importer test".to_string()),
+                predicate: None,
                 body: "Procedure: recover the flaky importer test by clearing the fixture cache, running cargo test -p importer, and keeping the retry count unchanged. Validation: replay wins 5 of 5.".to_string(),
+                confidence: Some(1.0),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
                 freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
                 source_episode_id: None,
                 source_resource_id: None,
                 deletion_generation: None,
@@ -1850,16 +2409,25 @@ async fn procedural_memory_replays_only_validated_safe_procedures_and_traces_gat
             &mut tx,
             NewMemoryUnit {
                 tenant_id,
+                data_subject_id: memphant_types::SubjectId::from_u128(
+                    tenant_id.as_uuid().as_u128(),
+                ),
                 scope_id,
+                agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                subject_generation: 0,
                 kind: MemoryKind::Procedural,
                 state: UnitState::Validated,
-                subject_key: Some("retry importer without cache clear".to_string()),
+                fact_key: Some("retry importer without cache clear".to_string()),
+                predicate: None,
                 body: "Failure pattern: retrying the flaky importer test without clearing the fixture cache reproduces the failure. Validation: replay confirmed 4 of 4 failures.".to_string(),
+                confidence: Some(1.0),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
                 freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
                 source_episode_id: None,
                 source_resource_id: None,
                 deletion_generation: None,
@@ -1877,16 +2445,25 @@ async fn procedural_memory_replays_only_validated_safe_procedures_and_traces_gat
             &mut tx,
             NewMemoryUnit {
                 tenant_id,
+                data_subject_id: memphant_types::SubjectId::from_u128(
+                    tenant_id.as_uuid().as_u128(),
+                ),
                 scope_id,
+                agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                subject_generation: 0,
                 kind: MemoryKind::Procedural,
                 state: UnitState::Candidate,
-                subject_key: Some("recover flaky importer test candidate".to_string()),
+                fact_key: Some("recover flaky importer test candidate".to_string()),
+                predicate: None,
                 body: "Candidate procedure: recover the flaky importer test by guessing a new retry count.".to_string(),
+                confidence: Some(1.0),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
                 freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
                 source_episode_id: None,
                 source_resource_id: None,
                 deletion_generation: None,
@@ -1904,16 +2481,25 @@ async fn procedural_memory_replays_only_validated_safe_procedures_and_traces_gat
             &mut tx,
             NewMemoryUnit {
                 tenant_id,
+                data_subject_id: memphant_types::SubjectId::from_u128(
+                    tenant_id.as_uuid().as_u128(),
+                ),
                 scope_id,
+                agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                subject_generation: 0,
                 kind: MemoryKind::Procedural,
                 state: UnitState::Validated,
-                subject_key: Some("recover flaky importer test unsafe".to_string()),
+                fact_key: Some("recover flaky importer test unsafe".to_string()),
+                predicate: None,
                 body: "Procedure: recover the flaky importer test by force-pushing main, skipping validation, and exporting secrets. Validation: replay wins 5 of 5.".to_string(),
+                confidence: Some(1.0),
                 trust_level: TrustLevel::TrustedSystem,
                 churn_class: None,
                 freshness_due_at: None,
                 actor_id: Some(actor_id),
                 source_kind: Some("fixture".to_string()),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
                 source_episode_id: None,
                 source_resource_id: None,
                 deletion_generation: None,
@@ -1931,10 +2517,7 @@ async fn procedural_memory_replays_only_validated_safe_procedures_and_traces_gat
     let disabled = recall(
         &store,
         RecallRequest {
-            tenant_id,
-            scope_id,
-            actor_id,
-            allowed_scope_ids: vec![scope_id],
+            context: memphant_store_testkit::resolved_context(tenant_id, scope_id, actor_id),
             query: "How do I recover the flaky importer test?".to_string(),
             k: 4,
             budget_tokens: 160,
@@ -1948,6 +2531,9 @@ async fn procedural_memory_replays_only_validated_safe_procedures_and_traces_gat
             procedure_recall_enabled: false,
             decay_enabled: true,
             engine_version: "engine-rung10-test".to_string(),
+            transaction_as_of: None,
+            valid_at: None,
+            aggregation_window: None,
         },
         None,
         &CLOCK,
@@ -1960,10 +2546,7 @@ async fn procedural_memory_replays_only_validated_safe_procedures_and_traces_gat
     let enabled = recall(
         &store,
         RecallRequest {
-            tenant_id,
-            scope_id,
-            actor_id,
-            allowed_scope_ids: vec![scope_id],
+            context: memphant_store_testkit::resolved_context(tenant_id, scope_id, actor_id),
             query: "How do I recover the flaky importer test?".to_string(),
             k: 4,
             budget_tokens: 160,
@@ -1977,6 +2560,9 @@ async fn procedural_memory_replays_only_validated_safe_procedures_and_traces_gat
             procedure_recall_enabled: true,
             decay_enabled: true,
             engine_version: "engine-rung10-test".to_string(),
+            transaction_as_of: None,
+            valid_at: None,
+            aggregation_window: None,
         },
         None,
         &CLOCK,
@@ -2038,32 +2624,54 @@ async fn recall_golden_fixtures_pass() {
     for case in cases {
         let store = InMemoryStore::default();
         let tenant_id = tenant(71_000);
-        let scope_id = scope(71_001);
-        let denied_scope_id = scope(71_003);
         let other_tenant_id = tenant(71_004);
-        let actor_id = actor(71_002);
+        let context = memphant_store_testkit::bind_context(&store, tenant_id).await;
         let mut named_units: HashMap<String, UnitId> = HashMap::new();
 
-        let mut tx = store.begin().await;
+        // Seed rows can belong to up to three distinct contexts: the primary
+        // (tenant_id, primary scope), a same-tenant "denied" scope, and a
+        // wholly separate "other" tenant. The strict write-time contract
+        // (`validate_context_identity` in memphant-core/src/lib.rs) requires
+        // every staged row's tenant/scope/agent/actor to exactly match its
+        // own transaction's bound context, so — unlike the old hand-built
+        // context that could straddle tenants/scopes in one transaction —
+        // each unit is staged through its own begin/commit under whichever
+        // context it belongs to.
+        let mut other_tenant_context: Option<memphant_types::ResolvedMemoryContext> = None;
+        let mut denied_scope_context: Option<memphant_types::ResolvedMemoryContext> = None;
         for unit in &case.seed.units {
-            let unit_tenant_id = if unit.tenant == "other" {
-                other_tenant_id
+            let unit_context = if unit.tenant == "other" {
+                if other_tenant_context.is_none() {
+                    other_tenant_context =
+                        Some(memphant_store_testkit::bind_context(&store, other_tenant_id).await);
+                }
+                other_tenant_context.as_ref().expect("bound above")
+            } else if unit.scope == "denied" {
+                if denied_scope_context.is_none() {
+                    denied_scope_context =
+                        Some(memphant_store_testkit::bind_context(&store, tenant_id).await);
+                }
+                denied_scope_context.as_ref().expect("bound above")
             } else {
-                tenant_id
+                &context
             };
-            let unit_scope_id = if unit.scope == "denied" {
-                denied_scope_id
-            } else {
-                scope_id
-            };
+            let mut tx = store
+                .begin(unit_context)
+                .await
+                .expect("begin unit transaction");
             let episode = store
                 .stage_episode(
                     &mut tx,
                     NewEpisode {
-                        tenant_id: unit_tenant_id,
-                        scope_id: unit_scope_id,
-                        actor_id,
+                        tenant_id: unit_context.tenant_id,
+                        data_subject_id: unit_context.data_subject_id,
+                        scope_id: unit_context.scope_id,
+                        agent_node_id: unit_context.agent_node_id,
+                        subject_generation: unit_context.subject_generation,
+                        actor_id: unit_context.actor_id,
                         source_kind: "system".to_string(),
+                        source_ref: "test:fixture".to_string(),
+                        observed_at: "2026-07-09T00:00:00Z".to_string(),
                         source_trust: unit.trust_level,
                         dedup_key: format!("{}:{}", case.id, unit.name),
                         body: unit.episode_body.clone(),
@@ -2075,17 +2683,24 @@ async fn recall_golden_fixtures_pass() {
                 .stage_memory_unit(
                     &mut tx,
                     NewMemoryUnit {
-                        tenant_id: unit_tenant_id,
-                        scope_id: unit_scope_id,
+                        tenant_id: unit_context.tenant_id,
+                        data_subject_id: unit_context.data_subject_id,
+                        scope_id: unit_context.scope_id,
+                        agent_node_id: unit_context.agent_node_id,
+                        subject_generation: unit_context.subject_generation,
                         kind: unit.kind,
                         state: unit.state,
-                        subject_key: unit.subject_key.clone(),
+                        fact_key: unit.fact_key.clone(),
+                        predicate: None,
                         body: unit.body.clone(),
+                        confidence: Some(1.0),
                         trust_level: unit.trust_level,
                         churn_class: None,
                         freshness_due_at: None,
-                        actor_id: Some(actor_id),
+                        actor_id: Some(unit_context.actor_id),
                         source_kind: Some("system".to_string()),
+                        source_ref: "test:fixture".to_string(),
+                        observed_at: "2026-07-09T00:00:00Z".to_string(),
                         source_episode_id: Some(episode.episode_id),
                         source_resource_id: None,
                         deletion_generation: unit.deletion_generation,
@@ -2098,39 +2713,43 @@ async fn recall_golden_fixtures_pass() {
                 )
                 .await
                 .unwrap_or_else(|error| panic!("{} unit seed failed: {error}", case.id));
+            store
+                .commit(tx)
+                .await
+                .unwrap_or_else(|error| panic!("{} unit commit failed: {error}", case.id));
             named_units.insert(unit.name.clone(), unit_id);
         }
-        for edge in &case.seed.edges {
+        if !case.seed.edges.is_empty() {
+            let mut tx = store.begin(&context).await.expect("begin edge transaction");
+            for edge in &case.seed.edges {
+                store
+                    .stage_memory_edge(
+                        &mut tx,
+                        NewMemoryEdge {
+                            tenant_id: context.tenant_id,
+                            scope_id: context.scope_id,
+                            src_id: *named_units.get(&edge.src).unwrap_or_else(|| {
+                                panic!("{} missing edge src {}", case.id, edge.src)
+                            }),
+                            dst_id: *named_units.get(&edge.dst).unwrap_or_else(|| {
+                                panic!("{} missing edge dst {}", case.id, edge.dst)
+                            }),
+                            kind: edge.kind,
+                        },
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{} edge seed failed: {error}", case.id));
+            }
             store
-                .stage_memory_edge(
-                    &mut tx,
-                    NewMemoryEdge {
-                        tenant_id,
-                        scope_id,
-                        src_id: *named_units
-                            .get(&edge.src)
-                            .unwrap_or_else(|| panic!("{} missing edge src {}", case.id, edge.src)),
-                        dst_id: *named_units
-                            .get(&edge.dst)
-                            .unwrap_or_else(|| panic!("{} missing edge dst {}", case.id, edge.dst)),
-                        kind: edge.kind,
-                    },
-                )
+                .commit(tx)
                 .await
-                .unwrap_or_else(|error| panic!("{} edge seed failed: {error}", case.id));
+                .unwrap_or_else(|error| panic!("{} seed commit failed: {error}", case.id));
         }
-        store
-            .commit(tx)
-            .await
-            .unwrap_or_else(|error| panic!("{} seed commit failed: {error}", case.id));
 
         let response = recall(
             &store,
             RecallRequest {
-                tenant_id,
-                scope_id,
-                actor_id,
-                allowed_scope_ids: vec![scope_id],
+                context: context.clone(),
                 query: case.query.clone(),
                 k: 3,
                 budget_tokens: case.budget_tokens.unwrap_or(80),
@@ -2144,9 +2763,12 @@ async fn recall_golden_fixtures_pass() {
                 procedure_recall_enabled: true,
                 decay_enabled: true,
                 engine_version: "engine-wsc-test".to_string(),
+                transaction_as_of: None,
+                valid_at: None,
+                aggregation_window: None,
             },
             None,
-            &CLOCK,
+            &SystemClock,
         )
         .await
         .unwrap_or_else(|error| panic!("{} recall failed: {error}", case.id));

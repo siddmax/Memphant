@@ -1,0 +1,57 @@
+{
+  "lane": "internal_syndai_code_experience",
+  "classification": "private_internal_diagnostic",
+  "run_date": "2026-07-13",
+  "corpus_sha256": "cd1dde7092a7aac51ac9688831288aa574f22fa5dc7aa904d23e186e8c347fab",
+  "golden_sha256": "b7bf9b34959c7c751502dee6bfecb8a794f9fdf87418b69a397e50611c5429e7",
+  "questions": 40,
+  "controls": {
+    "deterministic_file_search": {
+      "mechanism": "BM25 over 600 immutable raw source-event documents",
+      "k": 10,
+      "recall_at_5": 0.225,
+      "recall_at_10": 0.275,
+      "development_n": 36,
+      "development_recall_at_5": 0.2222222222,
+      "development_recall_at_10": 0.2777777778,
+      "repository_held_out_n": 4,
+      "repository_held_out_recall_at_5": 0.25,
+      "repository_held_out_recall_at_10": 0.25,
+      "runner_sha256": "7cdd67ebfb6ed24c7d157a344ac11cb8f770a931ccf50691f38cbde23b284588",
+      "evidence_sha256": "b655e1f57f687a3412655b341cee115a400b7d972d190b63bc5dfe8b58eb4a39",
+      "provenance_sha256": "e460813dfe8566744fed8d3194e7074a09215c2a8ddb01784295982f3c8ceb9a"
+    },
+    "verbatim_memphant": {
+      "mechanism": "eight role-prefixed raw attempt episodes through packaged Postgres server, worker, and exhaustive REST recall; no embedder",
+      "k": 10,
+      "budget_tokens": 8192,
+      "recall_at_5": 0.225,
+      "recall_at_10": 0.225,
+      "development_n": 36,
+      "development_recall_at_5": 0.1388888889,
+      "development_recall_at_10": 0.1388888889,
+      "repository_held_out_n": 4,
+      "repository_held_out_recall_at_5": 1.0,
+      "repository_held_out_recall_at_10": 1.0,
+      "paired_delta_recall_at_5": 0.0,
+      "paired_delta_recall_at_10": -0.05,
+      "runner_sha256": "0efde9a15f164787dd1444a1519bf6cf474122a275572f03656571214d99d347",
+      "server_binary_sha256": "659c901a45d0651a18e27557c4c4bb400d03c42c98417bcc8ebef721c6a438d6",
+      "worker_binary_sha256": "f9fdd74966f743c34ee5e8f01956a759250abd1bd1a4b1c42c321aa10d4e5c26",
+      "cli_binary_sha256": "f08aba0ac40c31215555a2db64c37bc00eaa0b9bb9dd2d827d2421393ab48eb3",
+      "evidence_sha256": "d5dfc1b3200507e97ffa85e9b65f7bbeaa742d0c4917f51df6adc8d71d6379d4",
+      "provenance_sha256": "f5e4911491aad155a4583ef9f42dd74b37b1cfdab4293c25a110dce4de663bdb",
+      "scratch_database_dropped": true
+    },
+    "outcome_marked_memphant": {
+      "executed": false,
+      "fail_closed": true,
+      "reason": "The pinned transcript rows have no explicit typed post-action outcomes or validator evidence. Run phase, exit code, and partial validator counts are not valid substitutes."
+    }
+  },
+  "interpretation": [
+    "Verbatim MemPhant ties deterministic search at top five and loses two of forty questions at top ten on this diagnostic set.",
+    "The four-question repository-held-out slice is too small for a promotion claim despite its 4/4 MemPhant result.",
+    "These are retrieval mechanism results only, not coding-agent task-success, SWE-Explore, SOTA, or replacement evidence."
+  ]
+}

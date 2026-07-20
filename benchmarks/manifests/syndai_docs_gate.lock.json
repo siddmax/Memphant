@@ -1,7 +1,7 @@
 {
   "corpus": "syndai_product_docs",
-  "syndai_root": "/Users/sidsharma/Syndai",
-  "git_commit": "6945f429a81d66440751840f7368b3358186ecb1",
+  "syndai_repo": "Syndai",
+  "git_commit": "fb650da183a9bc8935e7c4c0acdae78c4dcfe7eb",
   "globs": [
     "docs/*.md",
     "docs/**/*.md"
@@ -10,7 +10,14 @@
     "docs/superpowers/"
   ],
   "exclusion_rationale": "docs/superpowers/ is SDD process scaffolding (plans, audits, briefs, research), not product documentation; the gate corpus is the real product/architecture/spec docs.",
-  "file_count": 108,
+  "file_count": 109,
+  "total_bytes": 5400406,
+  "sectionizer": "markdown_heading_leaf_v1",
+  "section_count": 4870,
+  "section_chars": 5134459,
+  "section_revision": "sha256:82814a4c39ee7894fcc94d5af0192f709ecd845536e638c88966c3117aaea581",
+  "mining_candidate_section_count": 3257,
+  "mining_candidate_rule": "content chars >= 240 and section body chars <= 3200; mining only, never indexing",
   "files": {
     "docs/APP_UX_DESIGN.md": {
       "sha256": "e01867428ca4828079efadcf37e61803ae5cb2ac2d896dfd91885655b8d68822",
@@ -203,6 +210,10 @@
     "docs/runbooks/code-intel-ab-measurement.md": {
       "sha256": "b590a9bf8ad6e40ef5f0c1f1f9538eb70555c9c488199fbf8a8bd713d75946e5",
       "bytes": 11230
+    },
+    "docs/runbooks/evalrank-truth-kernel-authority.md": {
+      "sha256": "f045d481d13cf040dd376bc4667331a6c7208437f3fb1548c795d77569f3f1a9",
+      "bytes": 2828
     },
     "docs/runbooks/frontier-monitor-live-weekly-digest.md": {
       "sha256": "9e5cd367958bd8f3c5d200d5dd0848a7406816ececdbaea724ff80e1f09c1024",

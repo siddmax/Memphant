@@ -16,3 +16,4 @@ tokio = { workspace = true, features = ["signal", "time"] }
 [features]
 default = ["fastembed"]
 fastembed = ["memphant-runtime/fastembed"]
+qwen3 = ["memphant-runtime/qwen3"]

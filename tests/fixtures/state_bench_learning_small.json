@@ -1,0 +1,54 @@
+{
+  "domains": {
+    "travel": {
+      "train_trajectories": [
+        {
+          "conversation": [
+            {
+              "role": "system",
+              "content": "Use travel policy and tools."
+            },
+            {
+              "role": "user",
+              "content": "Move my trip to Friday."
+            },
+            {
+              "role": "assistant",
+              "content": "I will compare options before changing anything.",
+              "tool_calls": [
+                {
+                  "name": "search_flights",
+                  "arguments": {
+                    "date": "Friday"
+                  },
+                  "result": {
+                    "status": "rejected",
+                    "message": "No matching flights."
+                  }
+                },
+                {
+                  "name": "update_booking",
+                  "arguments": {
+                    "flight_id": "BAD"
+                  },
+                  "result": {
+                    "error": "Flight BAD not found."
+                  }
+                }
+              ]
+            }
+          ],
+          "task_id": "1-train",
+          "task_requirements": "DO_NOT_EXPOSE_TRAIN_GOLD",
+          "state_requirements": "DO_NOT_EXPOSE_TRAIN_STATE",
+          "task_completion_pass": "DO_NOT_EXPOSE_TRAIN_SCORE"
+        }
+      ],
+      "test_ids": [
+        "2-test"
+      ],
+      "test_task_answers": "DO_NOT_EXPOSE_TEST_ANSWERS",
+      "scorer_fields": "DO_NOT_EXPOSE_SCORER_FIELDS"
+    }
+  }
+}

@@ -1,0 +1,660 @@
+{
+  "benchmark": "longmemeval_reader_qa",
+  "engine": "openrouter",
+  "reader": "openai/gpt-5.6-terra (openrouter chat/completions API)",
+  "judge": "containment+anthropic/claude-sonnet-5 (normalized containment first; one LLM judge call on non-match; abstention = exact 'I don't know' containment)",
+  "reader_model_id": "openai/gpt-5.6-terra",
+  "judge_model_id": "anthropic/claude-sonnet-5",
+  "prompt_version": 1,
+  "routing": null,
+  "reasoning_effort": null,
+  "runtime": "postgres",
+  "label": "r0-docs-gemma-v2",
+  "evidence_path": "docs/build-log/artifacts/r0-embedder/gemma/v2/evidence.jsonl",
+  "retrieval_report": null,
+  "command": "scripts/run_reader.py --engine openrouter --model openai/gpt-5.6-terra --judge-model anthropic/claude-sonnet-5 --evidence docs/build-log/artifacts/r0-embedder/gemma/v2/evidence.jsonl --out docs/build-log/artifacts/r0-embedder/gemma/v2/reader.json --label r0-docs-gemma-v2 --cache-dir docs/build-log/artifacts/r0-embedder/reader-cache --max-calls 150",
+  "generated_at_unix": 1783818515,
+  "aborted": null,
+  "fresh_calls": 60,
+  "cached_calls": 12,
+  "overall": {
+    "n": 60,
+    "n_scored": 60,
+    "qa_accuracy": 0.08333333333333333
+  },
+  "strata": {
+    "decisions": {
+      "n": 9,
+      "n_scored": 9,
+      "qa_accuracy": 0.1111111111111111
+    },
+    "multi-hop": {
+      "n": 12,
+      "n_scored": 12,
+      "qa_accuracy": 0.08333333333333333
+    },
+    "plans": {
+      "n": 9,
+      "n_scored": 9,
+      "qa_accuracy": 0.0
+    },
+    "root": {
+      "n": 11,
+      "n_scored": 11,
+      "qa_accuracy": 0.09090909090909091
+    },
+    "runbooks": {
+      "n": 9,
+      "n_scored": 9,
+      "qa_accuracy": 0.2222222222222222
+    },
+    "specs": {
+      "n": 10,
+      "n_scored": 10,
+      "qa_accuracy": 0.0
+    }
+  },
+  "per_question": [
+    {
+      "question_id": "syndai_docs_v2_s001_plans",
+      "question_type": "plans",
+      "is_abstention": false,
+      "gold_answer": "swe_bench_verified_mini",
+      "reply": "Lite evaluation suite.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s002_root",
+      "question_type": "root",
+      "is_abstention": false,
+      "gold_answer": "Learn from mistakes",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s003_specs",
+      "question_type": "specs",
+      "is_abstention": false,
+      "gold_answer": "Available for attachment",
+      "reply": "It enables notification actions: View, Reply, and Share.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s004_decisions",
+      "question_type": "decisions",
+      "is_abstention": false,
+      "gold_answer": "DeepSeek-V3-Coder and GLM-4.5-Coder",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s005_plans",
+      "question_type": "plans",
+      "is_abstention": false,
+      "gold_answer": "keeping L2 cases unchanged",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s006_root",
+      "question_type": "root",
+      "is_abstention": false,
+      "gold_answer": "Settings > Usage",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s007_runbooks",
+      "question_type": "runbooks",
+      "is_abstention": false,
+      "gold_answer": "30 GB",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s008_specs",
+      "question_type": "specs",
+      "is_abstention": false,
+      "gold_answer": "credential forms",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s009_decisions",
+      "question_type": "decisions",
+      "is_abstention": false,
+      "gold_answer": "`coding_eval_prod_correlation` table",
+      "reply": "`criterion_evaluations` table.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s010_plans",
+      "question_type": "plans",
+      "is_abstention": false,
+      "gold_answer": "you've layered a new\ncategory on a confused router formula.",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s011_root",
+      "question_type": "root",
+      "is_abstention": false,
+      "gold_answer": "Append correction after original",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s012_runbooks",
+      "question_type": "runbooks",
+      "is_abstention": false,
+      "gold_answer": "--check-live-readiness",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s013_specs",
+      "question_type": "specs",
+      "is_abstention": false,
+      "gold_answer": "backend/src/features/tasks/context.py",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s014_decisions",
+      "question_type": "decisions",
+      "is_abstention": false,
+      "gold_answer": "cross_validation_score",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s015_plans",
+      "question_type": "plans",
+      "is_abstention": false,
+      "gold_answer": "move one import inside the function",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s016_root",
+      "question_type": "root",
+      "is_abstention": false,
+      "gold_answer": "collaborative AI team concept",
+      "reply": "Task-centric AI agent teams.",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s017_runbooks",
+      "question_type": "runbooks",
+      "is_abstention": false,
+      "gold_answer": "Tuesday 06:00 UTC",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s018_decisions",
+      "question_type": "decisions",
+      "is_abstention": false,
+      "gold_answer": "run the tail-risk pack against the bootstrap row's (adapter, model) pairs",
+      "reply": "I don't know",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s019_plans",
+      "question_type": "plans",
+      "is_abstention": false,
+      "gold_answer": "single-edit\nperformance",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s020_root",
+      "question_type": "root",
+      "is_abstention": false,
+      "gold_answer": "$10-100+",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s021_runbooks",
+      "question_type": "runbooks",
+      "is_abstention": false,
+      "gold_answer": "needs_operator_input",
+      "reply": "BLOCKING `needs_operator_input` outcome.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s022_specs",
+      "question_type": "specs",
+      "is_abstention": false,
+      "gold_answer": "consumable purchases like credit packs",
+      "reply": "I don't know",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s023_decisions",
+      "question_type": "decisions",
+      "is_abstention": false,
+      "gold_answer": "~470 KB",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s024_plans",
+      "question_type": "plans",
+      "is_abstention": false,
+      "gold_answer": "the agent's *wait* behavior",
+      "reply": "Capsolver execution securely redacts API keys and solution tokens from persisted data and logs.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s025_root",
+      "question_type": "root",
+      "is_abstention": false,
+      "gold_answer": "PromptArmor",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s026_runbooks",
+      "question_type": "runbooks",
+      "is_abstention": false,
+      "gold_answer": "at dispatch time",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s027_specs",
+      "question_type": "specs",
+      "is_abstention": false,
+      "gold_answer": "single quotes",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s028_decisions",
+      "question_type": "decisions",
+      "is_abstention": false,
+      "gold_answer": "MIT",
+      "reply": "MIT license.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s029_plans",
+      "question_type": "plans",
+      "is_abstention": false,
+      "gold_answer": "`(benchmark_name, score)`",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s030_root",
+      "question_type": "root",
+      "is_abstention": false,
+      "gold_answer": "ml.is_featured = TRUE OR ma.install_count > 0",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s031_specs",
+      "question_type": "specs",
+      "is_abstention": false,
+      "gold_answer": "GET /api/v1/sync/stream",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s032_plans",
+      "question_type": "plans",
+      "is_abstention": false,
+      "gold_answer": "clears the lock",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s033_root",
+      "question_type": "root",
+      "is_abstention": false,
+      "gold_answer": "X-Slack-Request-Timestamp",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s034_runbooks",
+      "question_type": "runbooks",
+      "is_abstention": false,
+      "gold_answer": "they hide the\nactual invocation from the gate",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s035_specs",
+      "question_type": "specs",
+      "is_abstention": false,
+      "gold_answer": "connected",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s036_decisions",
+      "question_type": "decisions",
+      "is_abstention": false,
+      "gold_answer": "TypeError",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s037_root",
+      "question_type": "root",
+      "is_abstention": false,
+      "gold_answer": "PDF, DOC, TXT, or web page",
+      "reply": "I don't know",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s038_runbooks",
+      "question_type": "runbooks",
+      "is_abstention": false,
+      "gold_answer": "fdad3f9d",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s039_specs",
+      "question_type": "specs",
+      "is_abstention": false,
+      "gold_answer": "unbounded parallel runs",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s040_decisions",
+      "question_type": "decisions",
+      "is_abstention": false,
+      "gold_answer": "SWE-bench runs cost dollars\n  per task, Node subprocess builds are brittle in CI, and the deterministic\n  backend gate must stay hermetic.",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s041_plans",
+      "question_type": "plans",
+      "is_abstention": false,
+      "gold_answer": "CAPSOLVER_PAYLOAD_INVALID",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s042_root",
+      "question_type": "root",
+      "is_abstention": false,
+      "gold_answer": "Allow editing any message and regenerating from that point",
+      "reply": "Continue (resume from where streaming stopped).",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s043_runbooks",
+      "question_type": "runbooks",
+      "is_abstention": false,
+      "gold_answer": "ios_validation_manifest.secret_files",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s044_specs",
+      "question_type": "specs",
+      "is_abstention": false,
+      "gold_answer": "bash .claude/skills/preflight/run.sh",
+      "reply": "Verify before delivery.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s045_decisions",
+      "question_type": "decisions",
+      "is_abstention": false,
+      "gold_answer": "19.78%",
+      "reply": "I don't know",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s046_root",
+      "question_type": "root",
+      "is_abstention": false,
+      "gold_answer": "Redis/Dragonfly",
+      "reply": "Postgres and Temporal",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s047_runbooks",
+      "question_type": "runbooks",
+      "is_abstention": false,
+      "gold_answer": "coding_run_id",
+      "reply": "`coding_run_id`",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_s048_specs",
+      "question_type": "specs",
+      "is_abstention": false,
+      "gold_answer": "flushes without raising",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_m001",
+      "question_type": "multi-hop",
+      "is_abstention": false,
+      "gold_answer": "customer auth, repo picker, policy wizard, webhooks, SDK, customer-facing docs, billing polish",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_m002",
+      "question_type": "multi-hop",
+      "is_abstention": false,
+      "gold_answer": "3-5 frontier models",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_m003",
+      "question_type": "multi-hop",
+      "is_abstention": false,
+      "gold_answer": "providerDidFail",
+      "reply": "ProviderObserver.didUpdateProvider override.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_m004",
+      "question_type": "multi-hop",
+      "is_abstention": false,
+      "gold_answer": "`backend/tests/integration/features/memory/test_learned_facts.py`",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_m005",
+      "question_type": "multi-hop",
+      "is_abstention": false,
+      "gold_answer": "A custom toolchain base image is non-negotiable",
+      "reply": "A validated pull request through the coding-run lifecycle.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_m006",
+      "question_type": "multi-hop",
+      "is_abstention": false,
+      "gold_answer": "\u2705 (extended)",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_m007",
+      "question_type": "multi-hop",
+      "is_abstention": false,
+      "gold_answer": "`estimate_cost()` and `log_trace_cost()`",
+      "reply": "I don't know",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_m008",
+      "question_type": "multi-hop",
+      "is_abstention": false,
+      "gold_answer": "Stage 4",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_m009",
+      "question_type": "multi-hop",
+      "is_abstention": false,
+      "gold_answer": "Hover preview: Show chunk content on hover",
+      "reply": "Hover preview.",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_m010",
+      "question_type": "multi-hop",
+      "is_abstention": false,
+      "gold_answer": "\"subject\": 78",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_m011",
+      "question_type": "multi-hop",
+      "is_abstention": false,
+      "gold_answer": "Your approval wasn't recorded.",
+      "reply": "\u2713 Approved",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_v2_m012",
+      "question_type": "multi-hop",
+      "is_abstention": false,
+      "gold_answer": "ValidationError",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    }
+  ],
+  "paired_vs_baseline": null
+}

@@ -1,0 +1,25 @@
+{
+  "schema": "syndai-docs-negative-v1",
+  "created_at": "2026-07-13T00:00:00Z",
+  "provenance": "hand-authored exposed-development synthetic restraint cases",
+  "semantic_disjointness": "synthetic queries are distinct from positive questions; unique nonsense canaries are absent from positive goldens",
+  "corpus_revision": "sha256:82814a4c39ee7894fcc94d5af0192f709ecd845536e638c88966c3117aaea581",
+  "positive_lock_sha256": {
+    "v1": "93c81abb37bbfdd1279c1cb69899c2a705ed70c02b12a4491ac4310717d76d9e",
+    "v2": "cf1a2f39de862a2873a5bc3f4974c26b33f1beb4abe76b3af3b0325f3af78899"
+  },
+  "sha256": "a13cb072a63f0d52674f058df1ab418c843f6183007321af16c250fb5113a41f",
+  "count": 10,
+  "case_kinds": [
+    "answerable_but_unsupported",
+    "lexical_collision",
+    "plausible_absent",
+    "post_snapshot",
+    "stale_superseded_only",
+    "unrelated",
+    "wrong_agent",
+    "wrong_project",
+    "wrong_tenant",
+    "wrong_user"
+  ]
+}

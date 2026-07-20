@@ -5,6 +5,212 @@
         "format": "uuid",
         "type": "string"
       },
+      "AgentNodeId": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "AggregationWindow": {
+        "additionalProperties": false,
+        "properties": {
+          "from": {
+            "description": "Inclusive RFC 3339 lower bound supplied by the host.",
+            "type": "string"
+          },
+          "to": {
+            "description": "Exclusive RFC 3339 upper bound supplied by the host.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "from",
+          "to"
+        ],
+        "type": "object"
+      },
+      "ContextBindingAccessPolicy": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "$ref": "#/components/schemas/MemoryKind"
+              },
+              "mode": {
+                "const": "inherit",
+                "type": "string"
+              },
+              "source_agent_node_external_ref": {
+                "type": "string"
+              },
+              "source_scope_external_ref": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode",
+              "source_scope_external_ref",
+              "source_agent_node_external_ref",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "$ref": "#/components/schemas/MemoryKind"
+              },
+              "mode": {
+                "const": "grant",
+                "type": "string"
+              },
+              "source_agent_node_external_ref": {
+                "type": "string"
+              },
+              "source_scope_external_ref": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode",
+              "source_scope_external_ref",
+              "source_agent_node_external_ref",
+              "kind"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ContextBindingAgentRef": {
+        "additionalProperties": false,
+        "properties": {
+          "external_ref": {
+            "type": "string"
+          },
+          "parent_external_ref": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "external_ref"
+        ],
+        "type": "object"
+      },
+      "ContextBindingEntityRef": {
+        "additionalProperties": false,
+        "properties": {
+          "external_ref": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "external_ref",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "ContextBindingRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "access_policies": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ContextBindingAccessPolicy"
+            },
+            "type": "array"
+          },
+          "actor": {
+            "$ref": "#/components/schemas/ContextBindingEntityRef"
+          },
+          "agent_node": {
+            "$ref": "#/components/schemas/ContextBindingAgentRef"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ContextBindingScopeRef"
+          },
+          "subject": {
+            "$ref": "#/components/schemas/ContextBindingEntityRef"
+          }
+        },
+        "required": [
+          "subject",
+          "actor",
+          "scope",
+          "agent_node"
+        ],
+        "type": "object"
+      },
+      "ContextBindingResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "actor_id": {
+            "$ref": "#/components/schemas/ActorId"
+          },
+          "agent_level": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "agent_node_id": {
+            "$ref": "#/components/schemas/AgentNodeId"
+          },
+          "policy_revision": {
+            "type": "string"
+          },
+          "scope_id": {
+            "$ref": "#/components/schemas/ScopeId"
+          },
+          "subject_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject_id": {
+            "$ref": "#/components/schemas/SubjectId"
+          }
+        },
+        "required": [
+          "subject_id",
+          "actor_id",
+          "scope_id",
+          "agent_node_id",
+          "agent_level",
+          "policy_revision",
+          "subject_generation"
+        ],
+        "type": "object"
+      },
+      "ContextBindingScopeRef": {
+        "additionalProperties": false,
+        "properties": {
+          "external_ref": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "parent_external_ref": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "external_ref",
+          "kind"
+        ],
+        "type": "object"
+      },
       "ContextualChunk": {
         "properties": {
           "body": {
@@ -31,9 +237,13 @@
         "type": "object"
       },
       "CorrectRequest": {
+        "additionalProperties": false,
         "properties": {
           "actor_id": {
             "$ref": "#/components/schemas/ActorId"
+          },
+          "agent_node_id": {
+            "$ref": "#/components/schemas/AgentNodeId"
           },
           "correction": {
             "$ref": "#/components/schemas/CorrectionPayload"
@@ -44,14 +254,21 @@
           "selector": {
             "$ref": "#/components/schemas/CorrectSelector"
           },
-          "tenant_id": {
-            "$ref": "#/components/schemas/TenantId"
+          "subject_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject_id": {
+            "$ref": "#/components/schemas/SubjectId"
           }
         },
         "required": [
-          "tenant_id",
+          "subject_id",
           "scope_id",
           "actor_id",
+          "agent_node_id",
+          "subject_generation",
           "selector",
           "correction"
         ],
@@ -93,6 +310,7 @@
         "type": "object"
       },
       "CorrectSelector": {
+        "additionalProperties": false,
         "properties": {
           "memory_unit_id": {
             "$ref": "#/components/schemas/UnitId"
@@ -104,17 +322,26 @@
         "type": "object"
       },
       "CorrectionPayload": {
+        "additionalProperties": false,
         "properties": {
+          "observed_at": {
+            "type": "string"
+          },
           "reason": {
             "type": "string"
           },
+          "source_ref": {
+            "type": "string"
+          },
           "valid_from": {
+            "default": null,
             "type": [
               "string",
               "null"
             ]
           },
           "valid_to": {
+            "default": null,
             "type": [
               "string",
               "null"
@@ -126,7 +353,82 @@
         },
         "required": [
           "value",
-          "reason"
+          "reason",
+          "source_ref",
+          "observed_at"
+        ],
+        "type": "object"
+      },
+      "CrossRerankFailure": {
+        "enum": [
+          "none",
+          "error",
+          "empty",
+          "invalid_score_count",
+          "non_finite_score"
+        ],
+        "type": "string"
+      },
+      "CrossRerankTrace": {
+        "properties": {
+          "batch_size": {
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "candidate_count": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "candidate_limit": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "failure": {
+            "$ref": "#/components/schemas/CrossRerankFailure"
+          },
+          "input_chars_max": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "input_chars_p50": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "input_chars_p95": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_length": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "model": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "model",
+          "candidate_limit",
+          "candidate_count",
+          "max_length",
+          "input_chars_p50",
+          "input_chars_p95",
+          "input_chars_max",
+          "failure"
         ],
         "type": "object"
       },
@@ -144,6 +446,22 @@
         "required": [
           "matched",
           "observation_count"
+        ],
+        "type": "object"
+      },
+      "DegradedRecallTraceItem": {
+        "additionalProperties": false,
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/MemoryKind"
+          }
+        },
+        "required": [
+          "body",
+          "kind"
         ],
         "type": "object"
       },
@@ -184,9 +502,13 @@
         "type": "object"
       },
       "ForgetRequest": {
+        "additionalProperties": false,
         "properties": {
           "actor_id": {
             "$ref": "#/components/schemas/ActorId"
+          },
+          "agent_node_id": {
+            "$ref": "#/components/schemas/AgentNodeId"
           },
           "reason": {
             "type": "string"
@@ -197,14 +519,21 @@
           "selector": {
             "$ref": "#/components/schemas/ForgetSelector"
           },
-          "tenant_id": {
-            "$ref": "#/components/schemas/TenantId"
+          "subject_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject_id": {
+            "$ref": "#/components/schemas/SubjectId"
           }
         },
         "required": [
-          "tenant_id",
+          "subject_id",
           "scope_id",
           "actor_id",
+          "agent_node_id",
+          "subject_generation",
           "selector",
           "reason"
         ],
@@ -245,6 +574,7 @@
         "type": "object"
       },
       "ForgetSelector": {
+        "additionalProperties": false,
         "properties": {
           "episode_id": {
             "anyOf": [
@@ -326,6 +656,10 @@
         ],
         "type": "object"
       },
+      "JobId": {
+        "format": "uuid",
+        "type": "string"
+      },
       "MarkOutcome": {
         "enum": [
           "success",
@@ -336,15 +670,30 @@
         "type": "string"
       },
       "MarkRequest": {
+        "additionalProperties": false,
         "properties": {
+          "actor_id": {
+            "$ref": "#/components/schemas/ActorId"
+          },
+          "agent_node_id": {
+            "$ref": "#/components/schemas/AgentNodeId"
+          },
           "caller_id": {
             "type": "string"
           },
           "outcome": {
             "$ref": "#/components/schemas/MarkOutcome"
           },
-          "tenant_id": {
-            "$ref": "#/components/schemas/TenantId"
+          "scope_id": {
+            "$ref": "#/components/schemas/ScopeId"
+          },
+          "subject_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject_id": {
+            "$ref": "#/components/schemas/SubjectId"
           },
           "trace_id": {
             "$ref": "#/components/schemas/TraceId"
@@ -357,7 +706,11 @@
           }
         },
         "required": [
-          "tenant_id",
+          "subject_id",
+          "scope_id",
+          "actor_id",
+          "agent_node_id",
+          "subject_generation",
           "trace_id",
           "caller_id",
           "used_ids",
@@ -504,11 +857,35 @@
             },
             "type": "array"
           },
+          "transaction_from": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "transaction_to": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "trust_level": {
             "$ref": "#/components/schemas/TrustLevel"
           },
           "unit_id": {
             "$ref": "#/components/schemas/UnitId"
+          },
+          "valid_from": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "valid_to": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -536,6 +913,13 @@
       },
       "RecallCitation": {
         "properties": {
+          "derived_from_unit_ids": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/UnitId"
+            },
+            "type": "array"
+          },
           "episode_id": {
             "anyOf": [
               {
@@ -593,6 +977,13 @@
           "derived_by": {
             "type": "string"
           },
+          "derived_from_unit_ids": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/UnitId"
+            },
+            "type": "array"
+          },
           "inclusion_reason": {
             "type": "string"
           },
@@ -618,6 +1009,37 @@
           "suppression_labels"
         ],
         "type": "object"
+      },
+      "RecallDegradationDiagnostic": {
+        "additionalProperties": false,
+        "properties": {
+          "consolidation_lag_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/DegradedRecallTraceItem"
+            },
+            "type": "array"
+          },
+          "reason": {
+            "$ref": "#/components/schemas/RecallDegradationReason"
+          }
+        },
+        "required": [
+          "reason",
+          "consolidation_lag_ms",
+          "items"
+        ],
+        "type": "object"
+      },
+      "RecallDegradationReason": {
+        "enum": [
+          "pending_reflection_read_your_own_writes"
+        ],
+        "type": "string"
       },
       "RecallDropReason": {
         "enum": [
@@ -655,42 +1077,30 @@
         "type": "object"
       },
       "RecallHttpRequest": {
+        "additionalProperties": false,
         "properties": {
           "actor_id": {
             "$ref": "#/components/schemas/ActorId"
           },
-          "allowed_scope_ids": {
-            "items": {
-              "$ref": "#/components/schemas/ScopeId"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
+          "agent_node_id": {
+            "$ref": "#/components/schemas/AgentNodeId"
+          },
+          "aggregation_window": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AggregationWindow"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           },
           "budget_tokens": {
             "format": "uint",
             "minimum": 0,
             "type": [
               "integer",
-              "null"
-            ]
-          },
-          "context_packing_abstention_enabled": {
-            "type": [
-              "boolean",
-              "null"
-            ]
-          },
-          "decay_enabled": {
-            "type": [
-              "boolean",
-              "null"
-            ]
-          },
-          "edge_expansion_enabled": {
-            "type": [
-              "boolean",
               "null"
             ]
           },
@@ -718,38 +1128,39 @@
               }
             ]
           },
-          "procedure_recall_enabled": {
-            "type": [
-              "boolean",
-              "null"
-            ]
-          },
           "query": {
             "type": "string"
-          },
-          "query_decomposition_enabled": {
-            "type": [
-              "boolean",
-              "null"
-            ]
-          },
-          "rerank_enabled": {
-            "type": [
-              "boolean",
-              "null"
-            ]
           },
           "scope_id": {
             "$ref": "#/components/schemas/ScopeId"
           },
-          "tenant_id": {
-            "$ref": "#/components/schemas/TenantId"
+          "subject_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject_id": {
+            "$ref": "#/components/schemas/SubjectId"
+          },
+          "transaction_as_of": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "valid_at": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
-          "tenant_id",
+          "subject_id",
           "scope_id",
           "actor_id",
+          "agent_node_id",
+          "subject_generation",
           "query"
         ],
         "type": "object"
@@ -810,6 +1221,9 @@
             },
             "type": "array"
           },
+          "recall_time": {
+            "$ref": "#/components/schemas/RecallTime"
+          },
           "suppression_labels": {
             "items": {
               "type": "string"
@@ -827,61 +1241,69 @@
           "citations",
           "abstention",
           "degraded",
-          "suppression_labels"
+          "suppression_labels",
+          "recall_time"
+        ],
+        "type": "object"
+      },
+      "RecallTime": {
+        "properties": {
+          "evaluated_at": {
+            "type": "string"
+          },
+          "transaction_as_of": {
+            "type": "string"
+          },
+          "valid_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "evaluated_at",
+          "transaction_as_of",
+          "valid_at"
+        ],
+        "type": "object"
+      },
+      "ReflectAccepted": {
+        "additionalProperties": false,
+        "properties": {
+          "job_id": {
+            "$ref": "#/components/schemas/JobId"
+          }
+        },
+        "required": [
+          "job_id"
         ],
         "type": "object"
       },
       "ReflectRequest": {
+        "additionalProperties": false,
         "properties": {
           "actor_id": {
             "$ref": "#/components/schemas/ActorId"
           },
-          "compiler_version": {
-            "type": [
-              "string",
-              "null"
-            ]
+          "agent_node_id": {
+            "$ref": "#/components/schemas/AgentNodeId"
           },
           "scope_id": {
             "$ref": "#/components/schemas/ScopeId"
           },
-          "tenant_id": {
-            "$ref": "#/components/schemas/TenantId"
+          "subject_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject_id": {
+            "$ref": "#/components/schemas/SubjectId"
           }
         },
         "required": [
-          "tenant_id",
+          "subject_id",
           "scope_id",
-          "actor_id"
-        ],
-        "type": "object"
-      },
-      "ReflectResult": {
-        "properties": {
-          "candidates_created": {
-            "format": "uint",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "episodes_consumed": {
-            "format": "uint",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "reflect_id": {
-            "type": "string"
-          },
-          "trace_ref": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "reflect_id",
-          "episodes_consumed",
-          "candidates_created"
+          "actor_id",
+          "agent_node_id",
+          "subject_generation"
         ],
         "type": "object"
       },
@@ -914,88 +1336,45 @@
         "type": "string"
       },
       "RetainEpisodeHttpRequest": {
-        "description": "The retain verb request: payload-dispatched between `episode` (default,\n`body` required), `resource`, and `unit` shapes.",
+        "additionalProperties": false,
+        "description": "The retain verb request with exactly one tagged episode, resource, or unit payload.",
         "properties": {
           "actor_id": {
             "$ref": "#/components/schemas/ActorId"
           },
-          "body": {
-            "default": null,
-            "description": "Episode body; required for the episode payload shape.",
-            "type": [
-              "string",
-              "null"
-            ]
+          "agent_node_id": {
+            "$ref": "#/components/schemas/AgentNodeId"
           },
-          "compiler_version": {
-            "type": [
-              "string",
-              "null"
-            ]
+          "observed_at": {
+            "type": "string"
           },
-          "predicate": {
-            "default": null,
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "resource": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/RetainResourcePayload"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "description": "Present → resource payload shape."
+          "payload": {
+            "$ref": "#/components/schemas/RetainPayload"
           },
           "scope_id": {
             "$ref": "#/components/schemas/ScopeId"
           },
-          "source_kind": {
+          "source_ref": {
             "type": "string"
           },
-          "source_trust": {
-            "$ref": "#/components/schemas/TrustLevel"
+          "subject_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
           },
-          "subject": {
-            "default": null,
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "subject_hint": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "tenant_id": {
-            "$ref": "#/components/schemas/TenantId"
-          },
-          "unit": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/RetainUnitPayload"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "description": "Present → direct unit payload shape."
+          "subject_id": {
+            "$ref": "#/components/schemas/SubjectId"
           }
         },
         "required": [
-          "tenant_id",
+          "subject_id",
           "scope_id",
           "actor_id",
-          "source_kind",
-          "source_trust"
+          "agent_node_id",
+          "subject_generation",
+          "source_ref",
+          "observed_at",
+          "payload"
         ],
         "type": "object"
       },
@@ -1071,7 +1450,64 @@
         ],
         "type": "object"
       },
+      "RetainEpisodePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "source_kind": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_kind",
+          "body"
+        ],
+        "type": "object"
+      },
+      "RetainPayload": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "episode": {
+                "$ref": "#/components/schemas/RetainEpisodePayload"
+              }
+            },
+            "required": [
+              "episode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "resource": {
+                "$ref": "#/components/schemas/RetainResourcePayload"
+              }
+            },
+            "required": [
+              "resource"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "unit": {
+                "$ref": "#/components/schemas/RetainUnitPayload"
+              }
+            },
+            "required": [
+              "unit"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "RetainResourcePayload": {
+        "additionalProperties": false,
         "description": "Resource payload for the retain verb (spec 08 §209 `resource` shape).",
         "properties": {
           "body": {
@@ -1119,17 +1555,18 @@
         "type": "object"
       },
       "RetainUnitPayload": {
-        "description": "Direct pre-compiled unit payload for trusted callers (spec 08 §209 `unit`\nshape). Requires an explicit subject/predicate and kind; the admission\ntrust policy still applies.",
+        "additionalProperties": false,
+        "description": "Direct pre-compiled unit payload for trusted callers (spec 08 §209 `unit`\nshape). Requires an explicit fact key, predicate, confidence, and kind; the admission\ntrust policy still applies.",
         "properties": {
           "body": {
             "type": "string"
           },
-          "churn_class": {
-            "default": null,
-            "type": [
-              "string",
-              "null"
-            ]
+          "confidence": {
+            "format": "float",
+            "type": "number"
+          },
+          "fact_key": {
+            "type": "string"
           },
           "kind": {
             "$ref": "#/components/schemas/MemoryKind"
@@ -1137,15 +1574,27 @@
           "predicate": {
             "type": "string"
           },
-          "subject": {
-            "type": "string"
+          "valid_from": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "valid_to": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
           "kind",
-          "subject",
+          "fact_key",
           "predicate",
-          "body"
+          "body",
+          "confidence"
         ],
         "type": "object"
       },
@@ -1156,6 +1605,9 @@
           },
           "actor_id": {
             "$ref": "#/components/schemas/ActorId"
+          },
+          "agent_node_id": {
+            "$ref": "#/components/schemas/AgentNodeId"
           },
           "candidates": {
             "items": {
@@ -1191,12 +1643,44 @@
             "minimum": 0,
             "type": "integer"
           },
+          "cross_rerank": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CrossRerankTrace"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "cross_rerank_ms": {
+            "default": 0,
+            "description": "R1.5-T1: per-recall wall-clock (ms) spent inside the W8 cross-encoder\nrerank stage ([`crate::CrossReranker`], distinct from the retired\nheuristic `reranker_id`/`rerank_input_count`/`rerank_overfetch_ratio`\nfields below). `0` when no cross-reranker is installed on the service\n(the default) or the candidate pool was empty — a legitimate \"not\nrun\" value, not a sentinel. `#[serde(default)]` so traces recorded\nbefore this field existed still deserialize.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "data_subject_id": {
+            "$ref": "#/components/schemas/SubjectId"
+          },
           "decay_model_id": {
             "default": "",
             "type": "string"
           },
           "decomposition_reason": {
             "type": "string"
+          },
+          "degradation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RecallDegradationDiagnostic"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           },
           "dropped_items": {
             "items": {
@@ -1272,6 +1756,9 @@
             },
             "type": "array"
           },
+          "policy_revision": {
+            "type": "string"
+          },
           "procedure_ids": {
             "default": [],
             "items": {
@@ -1289,6 +1776,16 @@
           "query_hash": {
             "type": "string"
           },
+          "recall_pool_depth": {
+            "default": 0,
+            "description": "R1.5-T0: the `recall_pool_depth` in effect for this recall — the ONE\nknob the vector/rerank/packing-scan internal fan-out derived from\n(never from `k`). Recorded per-trace so latency attribution stays\nobservable across deployments that override\n`MEMPHANT_RECALL_POOL_DEPTH`. `#[serde(default)]` so traces recorded\nbefore this field existed still deserialize (as `0`, a visible \"not\nrecorded\" sentinel — pool depth is never legitimately 0).",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "recall_time": {
+            "$ref": "#/components/schemas/RecallTime"
+          },
           "rerank_input_count": {
             "format": "uint",
             "minimum": 0,
@@ -1303,6 +1800,11 @@
           },
           "scope_id": {
             "$ref": "#/components/schemas/ScopeId"
+          },
+          "subject_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
           },
           "subquery_ids": {
             "default": [],
@@ -1326,8 +1828,12 @@
         "required": [
           "id",
           "tenant_id",
+          "data_subject_id",
           "scope_id",
           "actor_id",
+          "agent_node_id",
+          "subject_generation",
+          "policy_revision",
           "query_hash",
           "engine_version",
           "feature_flags",
@@ -1349,7 +1855,8 @@
           "abstention_signal",
           "latency_ms",
           "token_estimate",
-          "cost_micros"
+          "cost_micros",
+          "recall_time"
         ],
         "type": "object"
       },
@@ -1401,6 +1908,9 @@
               }
             ]
           },
+          "agent_node_id": {
+            "$ref": "#/components/schemas/AgentNodeId"
+          },
           "body": {
             "type": "string"
           },
@@ -1410,11 +1920,21 @@
               "null"
             ]
           },
+          "confidence": {
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
           "contextual_chunks": {
             "items": {
               "$ref": "#/components/schemas/ContextualChunk"
             },
             "type": "array"
+          },
+          "data_subject_id": {
+            "$ref": "#/components/schemas/SubjectId"
           },
           "deletion_generation": {
             "format": "uint64",
@@ -1429,6 +1949,12 @@
             "format": "float",
             "type": [
               "number",
+              "null"
+            ]
+          },
+          "fact_key": {
+            "type": [
+              "string",
               "null"
             ]
           },
@@ -1447,6 +1973,15 @@
           },
           "last_reinforced_at": {
             "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "observed_at": {
+            "type": "string"
+          },
+          "predicate": {
             "type": [
               "string",
               "null"
@@ -1477,6 +2012,9 @@
               "null"
             ]
           },
+          "source_ref": {
+            "type": "string"
+          },
           "source_resource_id": {
             "anyOf": [
               {
@@ -1498,11 +2036,10 @@
           "state": {
             "$ref": "#/components/schemas/UnitState"
           },
-          "subject_key": {
-            "type": [
-              "string",
-              "null"
-            ]
+          "subject_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
           },
           "tenant_id": {
             "$ref": "#/components/schemas/TenantId"
@@ -1538,14 +2075,23 @@
         "required": [
           "id",
           "tenant_id",
+          "data_subject_id",
           "scope_id",
+          "agent_node_id",
+          "subject_generation",
           "kind",
           "state",
           "body",
           "trust_level",
+          "source_ref",
+          "observed_at",
           "contextual_chunks"
         ],
         "type": "object"
+      },
+      "SubjectId": {
+        "format": "uuid",
+        "type": "string"
       },
       "TenantId": {
         "format": "uuid",
@@ -1592,7 +2138,7 @@
     "securitySchemes": {
       "bearerApiKey": {
         "bearerFormat": "mk_<key>",
-        "description": "MemPhant API key; the key binds the tenant and caps source_trust at its max_trust tier.",
+        "description": "MemPhant API key; the key binds the tenant and caps the bound actor trust at its max_trust tier.",
         "scheme": "bearer",
         "type": "http"
       }
@@ -1604,8 +2150,63 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/v1/context-bindings/{client_ref}": {
+      "put": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "client_ref",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContextBindingRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContextBindingResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/correct": {
       "post": {
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -1639,6 +2240,18 @@
     },
     "/v1/episodes": {
       "post": {
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -1672,6 +2285,18 @@
     },
     "/v1/forget": {
       "post": {
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -1730,6 +2355,18 @@
     },
     "/v1/mark": {
       "post": {
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -1796,6 +2433,18 @@
     },
     "/v1/reflect": {
       "post": {
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -1806,11 +2455,11 @@
           }
         },
         "responses": {
-          "200": {
+          "202": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ReflectResult"
+                  "$ref": "#/components/schemas/ReflectAccepted"
                 }
               }
             }
@@ -1837,6 +2486,41 @@
             "schema": {
               "format": "uuid",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "subject_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "actor_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "agent_node_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "subject_generation",
+            "required": true,
+            "schema": {
+              "type": "integer"
             }
           },
           {

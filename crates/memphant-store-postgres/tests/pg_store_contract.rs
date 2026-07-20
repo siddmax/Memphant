@@ -1,26 +1,117 @@
-//! Live-Postgres contract tests for `PgStore`, mirroring the in-memory
-//! `store_contract.rs` scenarios plus durability/cross-tenant/queue checks.
+//! Live-Postgres contract tests for `PgStore`.
+//!
+//! The shared `MemoryStore` contract runs here via `memphant-store-testkit`
+//! (the `pg_contract_test!` wrappers) — the SAME scenarios `memphant-core` runs
+//! against `InMemoryStore`, so a per-store trait divergence fails on at least
+//! one backend. The rest are pg-specific tests exercising behaviour the trait
+//! can't express: fresh-pool durability, the reflect job queue, pgvector, and
+//! SQL-level invariants.
 //!
 //! Gated: every test is `#[ignore]` and reads `MEMPHANT_TEST_DATABASE_URL`.
 //! Run with:
 //!   MEMPHANT_TEST_DATABASE_URL=postgres://memphant:memphant@localhost:5432/memphant \
 //!     cargo test -p memphant-store-postgres -- --ignored --test-threads=1
 
+use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use memphant_core::service::MemoryService;
 use memphant_core::{
-    FixedClock, JobFilter, MemoryStore, NoopEmbedding, forget_memory, recall, retain_episode,
+    FixedClock, JobFilter, MemoryStore, NoopEmbedding, StructuredStateOp, StructuredStateOperation,
+    StructuredStateProvider, StructuredStateProviderError, StructuredStateProviderIdentity,
+    StructuredStateRequest, derive_fact_key, recall, reflect_recorded, retain_episode,
     retain_resource,
 };
 use memphant_store_postgres::PgStore;
+use memphant_store_testkit::StoreHarness;
 use memphant_types::{
-    ActorId, ForgetRequest, ForgetSelector, MemoryKind, RecallHttpRequest, RecallMode,
-    RecallRequest, RetainRequest, RetainResourceRequest, ScopeId, TenantId, TrustLevel,
+    ContextBindingAccessPolicy, ContextBindingAgentRef, ContextBindingEntityRef,
+    ContextBindingRequest, ContextBindingScopeRef, JobId, MarkOutcome, MemoryKind,
+    RecallHttpRequest, RecallMode, RecallRequest, RecallTime, ReflectCandidate, ReflectInput,
+    ReflectJob, ReflectJobKind, ResolvedMemoryContext, RetainEpisodeHttpRequest,
+    RetainEpisodeHttpResponse, RetainEpisodePayload, RetainPayload, RetainRequest,
+    RetainResourceRequest, RetainUnitPayload, ReviewEvent, TenantId, TrustLevel, UnitState,
 };
 use uuid::Uuid;
 
-const CLOCK: FixedClock = FixedClock("2026-07-09T00:00:00Z");
+#[derive(Debug)]
+struct FixedStructuredProvider {
+    identity: StructuredStateProviderIdentity,
+    operations: Vec<StructuredStateOp>,
+}
+
+impl FixedStructuredProvider {
+    fn new(operations: Vec<StructuredStateOp>) -> Self {
+        Self {
+            identity: StructuredStateProviderIdentity {
+                model: "fixed-structured-state".to_string(),
+                prompt_hash: "pg-contract-prompt-sha256".to_string(),
+                schema_hash: "pg-contract-schema-sha256".to_string(),
+            },
+            operations,
+        }
+    }
+}
+
+impl StructuredStateProvider for FixedStructuredProvider {
+    fn identity(&self) -> &StructuredStateProviderIdentity {
+        &self.identity
+    }
+
+    fn extract<'a>(
+        &'a self,
+        request: &'a StructuredStateRequest,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Vec<StructuredStateOp>, StructuredStateProviderError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        let mut operations = self.operations.clone();
+        for operation in &mut operations {
+            if operation.operation != StructuredStateOperation::Create {
+                continue;
+            }
+            let targets = request
+                .active_items
+                .iter()
+                .filter(|item| {
+                    item.namespace == operation.namespace
+                        && item.item_key == operation.item_key
+                        && item
+                            .valid_from
+                            .as_deref()
+                            .zip(operation.valid_to.as_deref())
+                            .is_none_or(|(from, to)| from < to)
+                        && operation
+                            .valid_from
+                            .as_deref()
+                            .zip(item.valid_to.as_deref())
+                            .is_none_or(|(from, to)| from < to)
+                })
+                .map(|item| item.unit_id)
+                .collect::<Vec<_>>();
+            if !targets.is_empty() {
+                operation.operation = StructuredStateOperation::Replace;
+                operation.target_unit_ids = targets;
+            }
+        }
+        Box::pin(async move { Ok(operations) })
+    }
+}
+
+const CLOCK: FixedClock = FixedClock("2030-01-01T00:00:00Z");
+
+fn test_recall_time() -> RecallTime {
+    RecallTime {
+        evaluated_at: CLOCK.0.to_string(),
+        transaction_as_of: CLOCK.0.to_string(),
+        valid_at: CLOCK.0.to_string(),
+    }
+}
 
 fn db_url() -> String {
     std::env::var("MEMPHANT_TEST_DATABASE_URL")
@@ -43,18 +134,362 @@ fn service(store: PgStore) -> MemoryService<PgStore> {
     MemoryService::new(Arc::new(store), Arc::new(CLOCK), Arc::new(NoopEmbedding))
 }
 
+fn context_binding_request(suffix: &str) -> ContextBindingRequest {
+    ContextBindingRequest {
+        subject: ContextBindingEntityRef {
+            external_ref: format!("syndai:user:{suffix}"),
+            kind: "user".to_string(),
+        },
+        actor: ContextBindingEntityRef {
+            external_ref: format!("syndai:user:{suffix}"),
+            kind: "user".to_string(),
+        },
+        scope: ContextBindingScopeRef {
+            external_ref: format!("syndai:user:{suffix}:root"),
+            kind: "user_root".to_string(),
+            parent_external_ref: None,
+        },
+        agent_node: ContextBindingAgentRef {
+            external_ref: format!("syndai:user:{suffix}:l0"),
+            parent_external_ref: None,
+        },
+        access_policies: vec![],
+    }
+}
+
+async fn fresh_memory_context(store: &PgStore, tenant: TenantId) -> ResolvedMemoryContext {
+    memphant_store_testkit::bind_context(store, tenant).await
+}
+
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn context_binding_is_atomic_replay_safe_and_tenant_isolated() {
+    let store = connect().await;
+    let tenant_a = fresh_tenant(&store).await;
+    let tenant_b = fresh_tenant(&store).await;
+    let suffix = Uuid::now_v7().to_string();
+    let request = context_binding_request(&suffix);
+    let client_ref = format!("syndai:binding:{suffix}");
+
+    let created = store
+        .resolve_context_binding(tenant_a, client_ref.clone(), request.clone())
+        .await
+        .expect("create binding");
+    let replayed = store
+        .resolve_context_binding(tenant_a, client_ref.clone(), request.clone())
+        .await
+        .expect("replay binding");
+    assert_eq!(replayed, created);
+
+    let other_tenant = store
+        .resolve_context_binding(tenant_b, client_ref.clone(), request.clone())
+        .await
+        .expect("same external refs are isolated by tenant");
+    assert_ne!(other_tenant.subject_id, created.subject_id);
+    assert_ne!(other_tenant.scope_id, created.scope_id);
+
+    let pool = sqlx::PgPool::connect(&db_url())
+        .await
+        .expect("connect raw pool");
+    let mut generation_tx = pool.begin().await.expect("begin generation update");
+    sqlx::query("select memphant.bind_tenant($1)")
+        .bind(tenant_a.as_uuid())
+        .execute(&mut *generation_tx)
+        .await
+        .expect("bind generation tenant");
+    sqlx::query("update memphant.subject set generation = 7 where tenant_id = $1 and id = $2")
+        .bind(tenant_a.as_uuid())
+        .bind(created.subject_id.as_uuid())
+        .execute(&mut *generation_tx)
+        .await
+        .expect("advance subject generation");
+    generation_tx.commit().await.expect("commit generation");
+
+    let mut child_request = request.clone();
+    child_request.scope = ContextBindingScopeRef {
+        external_ref: format!("syndai:user:{suffix}:workspace"),
+        kind: "agent_workspace".to_string(),
+        parent_external_ref: Some(format!("syndai:user:{suffix}:root")),
+    };
+    child_request.agent_node = ContextBindingAgentRef {
+        external_ref: format!("syndai:user:{suffix}:l1-a"),
+        parent_external_ref: Some(format!("syndai:user:{suffix}:l0")),
+    };
+    child_request.access_policies.clear();
+    let child = store
+        .resolve_context_binding(
+            tenant_a,
+            format!("syndai:binding:{suffix}:l1-a"),
+            child_request.clone(),
+        )
+        .await
+        .expect("create child binding");
+    assert_eq!(child.subject_id, created.subject_id);
+    assert_eq!(child.actor_id, created.actor_id);
+    assert_eq!(child.subject_generation, 7);
+    assert_eq!(child.agent_level, 1);
+
+    child_request.agent_node.external_ref = format!("syndai:user:{suffix}:l1-b");
+    let sibling = store
+        .resolve_context_binding(
+            tenant_a,
+            format!("syndai:binding:{suffix}:l1-b"),
+            child_request,
+        )
+        .await
+        .expect("create a second agent in the shared scope");
+    assert_eq!(sibling.scope_id, child.scope_id);
+    assert_ne!(sibling.agent_node_id, child.agent_node_id);
+
+    let mut policy_update = request.clone();
+    policy_update.access_policies = vec![ContextBindingAccessPolicy::Grant {
+        source_scope_external_ref: format!("syndai:user:{suffix}:workspace"),
+        source_agent_node_external_ref: format!("syndai:user:{suffix}:l1-a"),
+        kind: MemoryKind::Resource,
+    }];
+    let updated = store
+        .resolve_context_binding(tenant_a, client_ref.clone(), policy_update)
+        .await
+        .expect("policy-only update");
+    assert_eq!(updated.subject_id, created.subject_id);
+    assert_eq!(updated.scope_id, created.scope_id);
+    assert_ne!(updated.policy_revision, created.policy_revision);
+
+    let alias_error = store
+        .resolve_context_binding(tenant_a, format!("{client_ref}:alias"), request.clone())
+        .await
+        .expect_err("one identity cannot hide behind two client refs");
+    assert!(matches!(
+        alias_error,
+        memphant_core::StoreError::Conflict(_)
+    ));
+
+    let mut conflicting = request;
+    conflicting.scope.kind = "agent_workspace".to_string();
+    let error = store
+        .resolve_context_binding(tenant_a, client_ref, conflicting)
+        .await
+        .expect_err("immutable replay must conflict");
+    assert!(matches!(error, memphant_core::StoreError::Conflict(_)));
+}
+
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn context_binding_accepts_stale_uuid_refs() {
+    let store = connect().await;
+    let tenant = fresh_tenant(&store).await;
+    let uid = "7c0ae4e7-6b5a-42a2-891b-0ccf553bfe7f";
+    let external_ref = format!("stale:{uid}");
+    let request = ContextBindingRequest {
+        subject: ContextBindingEntityRef {
+            external_ref: external_ref.clone(),
+            kind: "user".to_string(),
+        },
+        actor: ContextBindingEntityRef {
+            external_ref: external_ref.clone(),
+            kind: "user".to_string(),
+        },
+        scope: ContextBindingScopeRef {
+            external_ref: format!("{external_ref}:root"),
+            kind: "stale_record".to_string(),
+            parent_external_ref: None,
+        },
+        agent_node: ContextBindingAgentRef {
+            external_ref: format!("{external_ref}:agent"),
+            parent_external_ref: None,
+        },
+        access_policies: vec![],
+    };
+
+    store
+        .resolve_context_binding(tenant, external_ref, request)
+        .await
+        .expect("bind STALE UUID context");
+}
+
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn context_binding_external_refs_are_isolated_by_subject() {
+    let store = connect().await;
+    let tenant = fresh_tenant(&store).await;
+    let suffix = Uuid::now_v7().to_string();
+    let first_request = context_binding_request(&format!("subject-a:{suffix}"));
+    let mut second_request = first_request.clone();
+    second_request.subject.external_ref = format!("syndai:user:subject-b:{suffix}");
+
+    let first = store
+        .resolve_context_binding(tenant, format!("subject-a:{suffix}"), first_request)
+        .await
+        .expect("bind first subject");
+    let second = store
+        .resolve_context_binding(tenant, format!("subject-b:{suffix}"), second_request)
+        .await
+        .expect("the same external actor, scope, and agent refs are subject-local");
+
+    assert_ne!(second.subject_id, first.subject_id);
+    assert_ne!(second.actor_id, first.actor_id);
+    assert_ne!(second.scope_id, first.scope_id);
+    assert_ne!(second.agent_node_id, first.agent_node_id);
+}
+
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn retain_persists_subject_context_and_rejects_mixed_bindings() {
+    let store = connect().await;
+    let tenant = fresh_tenant(&store).await;
+    let suffix = Uuid::now_v7().to_string();
+    let first = store
+        .resolve_context_binding(
+            tenant,
+            format!("retain-subject-a:{suffix}"),
+            context_binding_request(&format!("retain-a:{suffix}")),
+        )
+        .await
+        .expect("bind first subject");
+    let second = store
+        .resolve_context_binding(
+            tenant,
+            format!("retain-subject-b:{suffix}"),
+            context_binding_request(&format!("retain-b:{suffix}")),
+        )
+        .await
+        .expect("bind second subject");
+    let first_context = store
+        .resolve_memory_context(
+            tenant,
+            first.subject_id,
+            first.actor_id,
+            first.scope_id,
+            first.agent_node_id,
+        )
+        .await
+        .expect("resolve first context");
+    let service = service(store.clone());
+
+    let retained = service
+        .retain(
+            &first_context,
+            "pg-contract-subject-bound",
+            TrustLevel::TrustedUser,
+            RetainEpisodeHttpRequest {
+                subject_id: first.subject_id,
+                scope_id: first.scope_id,
+                actor_id: first.actor_id,
+                agent_node_id: first.agent_node_id,
+                subject_generation: first.subject_generation,
+                source_ref: "pg-contract:episode".to_string(),
+                observed_at: CLOCK.0.to_string(),
+                payload: RetainPayload::Episode(RetainEpisodePayload {
+                    source_kind: "user".to_string(),
+                    body: "subject-bound Postgres memory".to_string(),
+                }),
+            },
+        )
+        .await
+        .expect("retain with one resolved context");
+    let retained_response: RetainEpisodeHttpResponse =
+        serde_json::from_slice(retained.body()).unwrap();
+    let episode = store
+        .fetch_episode(
+            &first_context,
+            retained_response.episode_id.expect("episode id"),
+        )
+        .await
+        .expect("fetch episode")
+        .expect("stored episode");
+    assert_eq!(episode.data_subject_id, first.subject_id);
+    assert_eq!(episode.agent_node_id, first.agent_node_id);
+    assert_eq!(episode.subject_generation, first.subject_generation);
+
+    let reflected = service
+        .run_worker_tick_scoped(
+            memphant_store_testkit::tenant_filter(&first_context),
+            usize::MAX,
+        )
+        .await
+        .expect("reflect subject-bound episode");
+    assert_eq!(reflected, 1);
+    let page = store
+        .scope_memory_page(&first_context, None, 10)
+        .await
+        .expect("list reflected units");
+    assert!(!page.items.is_empty());
+    assert!(page.items.iter().all(|unit| {
+        unit.data_subject_id == first.subject_id
+            && unit.agent_node_id == first.agent_node_id
+            && unit.subject_generation == first.subject_generation
+    }));
+
+    let mixed = service
+        .retain(
+            &first_context,
+            "pg-contract-mixed",
+            TrustLevel::TrustedUser,
+            RetainEpisodeHttpRequest {
+                subject_id: first.subject_id,
+                scope_id: second.scope_id,
+                actor_id: second.actor_id,
+                agent_node_id: second.agent_node_id,
+                subject_generation: first.subject_generation,
+                source_ref: "pg-contract:episode-mixed".to_string(),
+                observed_at: CLOCK.0.to_string(),
+                payload: RetainPayload::Episode(RetainEpisodePayload {
+                    source_kind: "user".to_string(),
+                    body: "must not cross subjects".to_string(),
+                }),
+            },
+        )
+        .await;
+    assert!(
+        mixed.is_err(),
+        "mixed subject/scope context must fail closed"
+    );
+}
+
+fn structured_service(
+    store: PgStore,
+    operations: Vec<StructuredStateOp>,
+) -> MemoryService<PgStore> {
+    service(store)
+        .with_structured_state_provider(Arc::new(FixedStructuredProvider::new(operations)))
+}
+
+fn structured_upsert(
+    body: &str,
+    quote: &str,
+    value: &str,
+    valid_from: &str,
+    valid_to: &str,
+) -> StructuredStateOp {
+    let start = body.find(quote).expect("structured evidence quote exists");
+    StructuredStateOp {
+        operation: StructuredStateOperation::Create,
+        namespace: "profile".to_string(),
+        item_key: "home_city".to_string(),
+        target_unit_ids: vec![],
+        fields: BTreeMap::from([("value".to_string(), serde_json::json!(value))]),
+        evidence_quote: quote.to_string(),
+        source_span: format!("{start}-{}", start + quote.len()),
+        valid_from: Some(valid_from.to_string()),
+        valid_to: Some(valid_to.to_string()),
+    }
+}
+
 fn retain_request(
-    tenant_id: TenantId,
-    scope_id: ScopeId,
-    actor_id: ActorId,
+    context: &ResolvedMemoryContext,
     body: &str,
     subject: Option<&str>,
 ) -> RetainRequest {
     RetainRequest {
-        tenant_id,
-        scope_id,
-        actor_id,
+        tenant_id: context.tenant_id,
+        data_subject_id: context.data_subject_id,
+        scope_id: context.scope_id,
+        actor_id: context.actor_id,
+        agent_node_id: context.agent_node_id,
+        subject_generation: context.subject_generation,
         source_kind: "user".to_string(),
+        source_ref: "pg-contract:retain-request".to_string(),
+        observed_at: CLOCK.0.to_string(),
         source_trust: TrustLevel::TrustedUser,
         subject_hint: subject.map(str::to_string),
         subject: subject.map(str::to_string),
@@ -64,17 +499,9 @@ fn retain_request(
     }
 }
 
-fn recall_request(
-    tenant_id: TenantId,
-    scope_id: ScopeId,
-    actor_id: ActorId,
-    query: &str,
-) -> RecallRequest {
+fn recall_request(context: &ResolvedMemoryContext, query: &str) -> RecallRequest {
     RecallRequest {
-        tenant_id,
-        scope_id,
-        actor_id,
-        allowed_scope_ids: vec![scope_id],
+        context: context.clone(),
         query: query.to_string(),
         k: 4,
         budget_tokens: 256,
@@ -88,65 +515,88 @@ fn recall_request(
         procedure_recall_enabled: true,
         decay_enabled: true,
         engine_version: "pg-contract-test".to_string(),
+        transaction_as_of: None,
+        valid_at: None,
+        aggregation_window: None,
     }
 }
 
-#[tokio::test]
-#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
-async fn retain_stores_episode_and_reflect_job_and_dedups() {
-    let store = connect().await;
-    let tenant = fresh_tenant(&store).await;
-    let scope = ScopeId::new();
-    let actor = ActorId::new();
+/// The shared `MemoryStore` contract, run against `PgStore`. These are the
+/// SAME scenarios `memphant-core` runs against `InMemoryStore` — one suite, two
+/// backends, so a per-store trait divergence fails on at least one of them. The
+/// pg-specific tests below exercise behaviour the trait alone can't express
+/// (fresh-pool durability, the job queue, pgvector, SQL-level invariants).
+struct PgHarness(PgStore);
 
-    let request = retain_request(tenant, scope, actor, "Staging pins Node 24.15.0.", None);
-    let first = retain_episode(&store, request.clone())
-        .await
-        .expect("retain");
-    let second = retain_episode(&store, request).await.expect("retain again");
+impl StoreHarness for PgHarness {
+    type Store = PgStore;
 
-    assert!(!first.dedup.matched);
-    assert!(second.dedup.matched);
-    assert_eq!(second.episode_id, first.episode_id);
-    assert_eq!(second.dedup.observation_count, 2);
+    fn store(&self) -> &PgStore {
+        &self.0
+    }
 
-    let episodes = store
-        .fetch_episodes_for_scope(tenant, scope, 10)
-        .await
-        .expect("episodes");
-    assert_eq!(episodes.len(), 1);
-    assert_eq!(episodes[0].observation_count, 2);
-    assert!(store.pending_job_count(tenant, scope).await.expect("count") >= 1);
+    async fn fresh_tenant(&self) -> TenantId {
+        fresh_tenant(&self.0).await
+    }
 }
+
+async fn contract_harness() -> PgHarness {
+    PgHarness(connect().await)
+}
+
+macro_rules! pg_contract_test {
+    ($name:ident) => {
+        #[tokio::test]
+        #[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+        async fn $name() {
+            memphant_store_testkit::$name(&contract_harness().await).await;
+        }
+    };
+}
+
+pg_contract_test!(retain_episode_dedups_and_enqueues);
+pg_contract_test!(retain_resource_registers_and_enqueues);
+pg_contract_test!(commit_publishes_staged_episode_and_unit);
+pg_contract_test!(drop_rolls_back_staged_rows);
+pg_contract_test!(recall_candidates_are_tenant_and_scope_scoped);
+pg_contract_test!(trace_is_tenant_bound);
+pg_contract_test!(review_marks_credit_synthetic_sources_and_stay_trace_bound);
+pg_contract_test!(forget_by_episode_blocks_recompilation);
+pg_contract_test!(forget_by_episode_cascades_through_correction_lineage);
+pg_contract_test!(forget_source_cascades_to_composed_dependent);
+pg_contract_test!(forget_by_unit_closes_and_purges);
+pg_contract_test!(fetch_episodes_honors_large_limit);
+pg_contract_test!(semantic_update_supersedes_unit_aged_past_recall_window);
+pg_contract_test!(scope_memory_page_paginates_without_overlap);
 
 #[tokio::test]
 #[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
 async fn durability_write_with_pool_a_read_with_fresh_pool_b() {
     let store_a = connect().await;
     let tenant = fresh_tenant(&store_a).await;
-    let scope = ScopeId::new();
-    let actor = ActorId::new();
-
+    let context = fresh_memory_context(&store_a, tenant).await;
     let svc_a = service(store_a);
     retain_episode(
         svc_a.store(),
+        &context,
         retain_request(
-            tenant,
-            scope,
-            actor,
+            &context,
             "Durable release region is Taipei.",
             Some("release region"),
         ),
     )
     .await
     .expect("retain");
-    svc_a.reflect(tenant, scope, None).await.expect("reflect");
+    svc_a
+        .run_worker_tick_scoped(memphant_store_testkit::tenant_filter(&context), usize::MAX)
+        .await
+        .expect("reflect");
 
     // A COMPLETELY fresh pool must see the compiled unit.
     let store_b = connect().await;
     let recalled = recall(
         &store_b,
-        recall_request(tenant, scope, actor, "Where is the durable release region?"),
+        recall_request(&context, "Where is the durable release region?"),
         None,
         &CLOCK,
     )
@@ -157,7 +607,7 @@ async fn durability_write_with_pool_a_read_with_fresh_pool_b() {
     // The recall's trace is durable and tenant-bound through yet another pool.
     let store_c = connect().await;
     let trace = store_c
-        .trace_by_id(tenant, recalled.trace_id)
+        .trace_by_id(&context, recalled.trace_id)
         .await
         .expect("trace lookup");
     assert!(trace.is_some(), "trace persists across pools");
@@ -165,74 +615,22 @@ async fn durability_write_with_pool_a_read_with_fresh_pool_b() {
 
 #[tokio::test]
 #[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
-async fn cross_tenant_candidates_and_traces_are_isolated() {
-    let store = connect().await;
-    let tenant_a = fresh_tenant(&store).await;
-    let tenant_b = fresh_tenant(&store).await;
-    let scope = ScopeId::new();
-    let actor = ActorId::new();
-
-    let svc = service(store.clone());
-    retain_episode(
-        svc.store(),
-        retain_request(tenant_a, scope, actor, "Tenant A secret deploy fact.", None),
-    )
-    .await
-    .expect("retain");
-    svc.reflect(tenant_a, scope, None).await.expect("reflect");
-
-    let own = store
-        .fetch_recall_candidates(tenant_a, &[scope], &[], &["deploy".to_string()], 100)
-        .await
-        .expect("candidates");
-    assert!(!own.is_empty());
-
-    let cross = store
-        .fetch_recall_candidates(tenant_b, &[scope], &[], &["deploy".to_string()], 100)
-        .await
-        .expect("candidates");
-    assert!(cross.is_empty(), "tenant B must never see tenant A units");
-
-    let recalled = recall(
-        &store,
-        recall_request(tenant_a, scope, actor, "secret deploy fact"),
-        None,
-        &CLOCK,
-    )
-    .await
-    .expect("recall");
-    let own_trace = store
-        .trace_by_id(tenant_a, recalled.trace_id)
-        .await
-        .expect("lookup");
-    assert!(own_trace.is_some());
-    let cross_trace = store
-        .trace_by_id(tenant_b, recalled.trace_id)
-        .await
-        .expect("lookup");
-    assert!(
-        cross_trace.is_none(),
-        "wrong tenant gets None, never a trace"
-    );
-}
-
-#[tokio::test]
-#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
 async fn claim_reflect_jobs_is_disjoint_and_does_not_reclaim_fresh_claims() {
     let store = connect().await;
     let tenant = fresh_tenant(&store).await;
-    let scope = ScopeId::new();
-    let actor = ActorId::new();
-
+    let context = fresh_memory_context(&store, tenant).await;
+    let scope = context.scope_id;
     retain_episode(
         &store,
-        retain_request(tenant, scope, actor, "Claim scenario fact one.", None),
+        &context,
+        retain_request(&context, "Claim scenario fact one.", None),
     )
     .await
     .expect("retain one");
     retain_episode(
         &store,
-        retain_request(tenant, scope, actor, "Claim scenario fact two.", None),
+        &context,
+        retain_request(&context, "Claim scenario fact two.", None),
     )
     .await
     .expect("retain two");
@@ -241,14 +639,12 @@ async fn claim_reflect_jobs_is_disjoint_and_does_not_reclaim_fresh_claims() {
         tenant: Some(tenant),
         scope: Some(scope),
     };
-    let first = store.claim_reflect_jobs(filter, 1).await.expect("claim 1");
+    let first = store.claim_reflect_jobs(filter, 10).await.expect("claim 1");
     let second = store.claim_reflect_jobs(filter, 1).await.expect("claim 2");
-    assert_eq!(first.len(), 1);
-    assert_eq!(second.len(), 1);
-    assert_ne!(
-        first[0].job.id.as_uuid(),
-        second[0].job.id.as_uuid(),
-        "a freshly claimed job must not be handed out twice"
+    assert_eq!(first.len(), 2, "one owner claims the contiguous scope lane");
+    assert!(
+        second.is_empty(),
+        "a fresh scope-lane lease blocks a second owner"
     );
 
     // Both jobs are claimed; nothing is left to claim inside the window.
@@ -258,15 +654,260 @@ async fn claim_reflect_jobs_is_disjoint_and_does_not_reclaim_fresh_claims() {
 
 #[tokio::test]
 #[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
-async fn exhausted_jobs_dead_letter_and_surface_in_count() {
+async fn concurrent_workers_cannot_split_a_scope_lane_and_reclaim_reuses_preparation() {
+    let store_a = connect().await;
+    let store_b = connect().await;
+    let tenant = fresh_tenant(&store_a).await;
+    let context = fresh_memory_context(&store_a, tenant).await;
+    let scope = context.scope_id;
+    for index in 0..6 {
+        retain_episode(
+            &store_a,
+            &context,
+            retain_request(&context, &format!("Ordered lane fact {index}."), None),
+        )
+        .await
+        .expect("retain lane item");
+    }
+    let expected: Vec<Uuid> = sqlx::query_scalar(
+        "select id from memphant.job_state
+         where tenant_id = $1 and scope_id = $2
+         order by queue_order limit 4",
+    )
+    .bind(tenant.as_uuid())
+    .bind(scope.as_uuid())
+    .fetch_all(store_a.pool())
+    .await
+    .expect("canonical jobs");
+    let filter = JobFilter {
+        tenant: Some(tenant),
+        scope: Some(scope),
+    };
+    let (left, right) = tokio::join!(
+        store_a.claim_reflect_jobs(filter, 4),
+        store_b.claim_reflect_jobs(filter, 4)
+    );
+    let left = left.expect("left claim");
+    let right = right.expect("right claim");
+    assert!(left.is_empty() ^ right.is_empty(), "only one lane owner");
+    let claimed = if left.is_empty() { right } else { left };
+    assert_eq!(claimed.len(), 4);
+    assert_eq!(
+        claimed
+            .iter()
+            .map(|row| row.job.id.as_uuid())
+            .collect::<Vec<_>>(),
+        expected,
+        "the owner receives a canonical contiguous prefix"
+    );
+
+    let prepared_job = claimed[1].job.id;
+    store_a
+        .store_prepared_structured_state(&claimed[1], Vec::new())
+        .await
+        .expect("persist preparation");
+    assert_eq!(
+        store_b
+            .fetch_prepared_structured_state(&claimed[1])
+            .await
+            .expect("fresh-pool preparation read"),
+        Some(Vec::new())
+    );
+
+    sqlx::query(
+        "update memphant.job_state
+         set claimed_at = now() - interval '16 minutes'
+         where tenant_id = $1 and scope_id = $2 and state = 'running'",
+    )
+    .bind(tenant.as_uuid())
+    .bind(scope.as_uuid())
+    .execute(store_a.pool())
+    .await
+    .expect("expire lane lease");
+    let reclaimed = store_b
+        .claim_reflect_jobs(filter, 4)
+        .await
+        .expect("reclaim stale lane");
+    assert_eq!(
+        reclaimed
+            .iter()
+            .map(|row| row.job.id.as_uuid())
+            .collect::<Vec<_>>(),
+        expected
+    );
+    store_a
+        .complete_reflect_job(&claimed[0])
+        .await
+        .expect("stale completion is a no-op");
+    let state: String =
+        sqlx::query_scalar("select state from memphant.job_state where tenant_id = $1 and id = $2")
+            .bind(tenant.as_uuid())
+            .bind(reclaimed[0].job.id.as_uuid())
+            .fetch_one(store_a.pool())
+            .await
+            .expect("reclaimed state");
+    assert_eq!(state, "running", "attempt 1 cannot complete attempt 2");
+    store_a
+        .release_reflect_job(&claimed[1], 0, "stale release".to_string())
+        .await
+        .expect("stale release is a no-op");
+    store_b
+        .release_reflect_job(&reclaimed[1], 0, "retry preparation".to_string())
+        .await
+        .expect("current release");
+    let released_state: String =
+        sqlx::query_scalar("select state from memphant.job_state where tenant_id = $1 and id = $2")
+            .bind(tenant.as_uuid())
+            .bind(prepared_job.as_uuid())
+            .fetch_one(store_a.pool())
+            .await
+            .expect("released state");
+    assert_eq!(released_state, "queued");
+    assert_eq!(
+        store_b
+            .fetch_prepared_structured_state(&reclaimed[1])
+            .await
+            .expect("reclaimed preparation"),
+        Some(Vec::new()),
+        "reclaim must not lose the paid preparation"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn source_job_precedes_its_scope_barrier_by_queue_order() {
     let store = connect().await;
     let tenant = fresh_tenant(&store).await;
-    let scope = ScopeId::new();
-    let actor = ActorId::new();
+    let context = fresh_memory_context(&store, tenant).await;
+    retain_episode(
+        &store,
+        &context,
+        retain_request(&context, "Source before scope barrier.", None),
+    )
+    .await
+    .expect("retain source");
+    let mut tx = store.begin(&context).await.expect("begin scope barrier");
+    let scope_job = store
+        .enqueue_reflect(
+            &mut tx,
+            ReflectJob {
+                tenant_id: tenant,
+                data_subject_id: context.data_subject_id,
+                scope_id: context.scope_id,
+                actor_id: context.actor_id,
+                agent_node_id: context.agent_node_id,
+                subject_generation: context.subject_generation,
+                episode_id: None,
+                resource_id: None,
+                kind: ReflectJobKind::ReflectScope,
+                compiler_version: memphant_types::COMPILER_VERSION.to_string(),
+                subject: None,
+                predicate: None,
+            },
+        )
+        .await
+        .expect("enqueue scope barrier");
+    store.commit(tx).await.expect("commit scope barrier");
+
+    let ordered: Vec<(Uuid, i64)> = sqlx::query_as(
+        "select id, queue_order from memphant.job_state
+         where tenant_id = $1 and data_subject_id = $2 and scope_id = $3
+         order by queue_order",
+    )
+    .bind(tenant.as_uuid())
+    .bind(context.data_subject_id.as_uuid())
+    .bind(context.scope_id.as_uuid())
+    .fetch_all(store.pool())
+    .await
+    .expect("ordered lane");
+    assert_eq!(ordered.len(), 2);
+    assert!(ordered[0].1 < ordered[1].1);
+    assert_eq!(ordered[1].0, scope_job.as_uuid());
+
+    let claimed = store
+        .claim_reflect_jobs(
+            JobFilter {
+                tenant: Some(tenant),
+                scope: Some(context.scope_id),
+            },
+            2,
+        )
+        .await
+        .expect("claim ordered lane");
+    assert_eq!(claimed[0].job.kind, ReflectJobKind::ReflectEpisode);
+    assert_eq!(claimed[1].job.kind, ReflectJobKind::ReflectScope);
+}
+
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn terminal_failure_is_dead_lettered_once_with_diagnostic() {
+    let store = connect().await;
+    let tenant = fresh_tenant(&store).await;
+    let context = fresh_memory_context(&store, tenant).await;
+    let scope = context.scope_id;
 
     retain_episode(
         &store,
-        retain_request(tenant, scope, actor, "Dead letter scenario fact.", None),
+        &context,
+        retain_request(&context, "Terminal provider output.", None),
+    )
+    .await
+    .expect("retain");
+    let job = store
+        .claim_reflect_jobs(
+            JobFilter {
+                tenant: Some(tenant),
+                scope: Some(scope),
+            },
+            1,
+        )
+        .await
+        .expect("claim")
+        .pop()
+        .expect("job");
+
+    store
+        .fail_reflect_job(&job, "terminal invalid structured output".to_string())
+        .await
+        .expect("terminal fail");
+
+    let row: (String, Option<String>) = sqlx::query_as(
+        "select state, last_error from memphant.job_state where tenant_id = $1 and id = $2",
+    )
+    .bind(tenant.as_uuid())
+    .bind(job.job.id.as_uuid())
+    .fetch_one(store.pool())
+    .await
+    .expect("terminal state");
+    assert_eq!(row.0, "dead");
+    assert_eq!(row.1.as_deref(), Some("terminal invalid structured output"));
+    assert!(
+        store
+            .claim_reflect_jobs(
+                JobFilter {
+                    tenant: Some(tenant),
+                    scope: Some(scope),
+                },
+                1,
+            )
+            .await
+            .expect("reclaim")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn exhausted_jobs_dead_letter_and_surface_in_count() {
+    let store = connect().await;
+    let tenant = fresh_tenant(&store).await;
+    let context = fresh_memory_context(&store, tenant).await;
+    let scope = context.scope_id;
+
+    retain_episode(
+        &store,
+        &context,
+        retain_request(&context, "Dead letter scenario fact.", None),
     )
     .await
     .expect("retain");
@@ -300,90 +941,75 @@ async fn exhausted_jobs_dead_letter_and_surface_in_count() {
     assert!(store.dead_letter_count().await.expect("dead letters") >= 1);
 }
 
+/// A tenant-scoped claim must dead-letter only its own exhausted jobs, never
+/// another tenant's. Regression guard for the sweep that used to run globally
+/// on every claim — it crossed the tenant boundary (tenant A's foreground
+/// reflect wrote tenant B's rows) and seq-scanned job_state on the hot path.
 #[tokio::test]
 #[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
-async fn forget_by_episode_tombstone_blocks_recompilation_durably() {
+async fn dead_letter_sweep_stays_within_the_claim_filter() {
     let store = connect().await;
-    let tenant = fresh_tenant(&store).await;
-    let scope = ScopeId::new();
-    let actor = ActorId::new();
-    let svc = service(store.clone());
+    let tenant_a = fresh_tenant(&store).await;
+    let tenant_b = fresh_tenant(&store).await;
+    let context_a = fresh_memory_context(&store, tenant_a).await;
+    let context_b = fresh_memory_context(&store, tenant_b).await;
+    let scope_a = context_a.scope_id;
 
-    let retained = retain_episode(
-        svc.store(),
-        retain_request(
-            tenant,
-            scope,
-            actor,
-            "Payment processor is AcmePay.",
-            Some("payment processor"),
-        ),
-    )
-    .await
-    .expect("retain");
-    svc.reflect(tenant, scope, None).await.expect("reflect");
-
-    let recalled = recall(
-        &store,
-        recall_request(tenant, scope, actor, "Which payment processor do we use?"),
-        None,
-        &CLOCK,
-    )
-    .await
-    .expect("recall");
-    assert_eq!(recalled.items[0].body, "Payment processor is AcmePay.");
-
-    let forgotten = forget_memory(
-        &store,
-        ForgetRequest {
-            tenant_id: tenant,
-            scope_id: scope,
-            actor_id: actor,
-            selector: ForgetSelector {
-                memory_unit_id: None,
-                episode_id: Some(retained.episode_id),
-                resource_id: None,
-                scope_id: scope,
-            },
-            reason: "user_request".to_string(),
-        },
-        &CLOCK,
-    )
-    .await
-    .expect("forget");
-    assert_eq!(forgotten.invalidated_units.len(), 1);
-    assert_eq!(forgotten.verification, "post_forget_recall_probe_hits=0");
-
-    // Re-enqueue + recompile with a bumped compiler: the durable tombstone
-    // must refuse re-derivation from the forgotten episode.
     retain_episode(
         &store,
-        RetainRequest {
-            compiler_version: "compiler-pg-contract-v2".to_string(),
-            ..retain_request(
-                tenant,
-                scope,
-                actor,
-                "Payment processor is AcmePay.",
-                Some("payment processor"),
-            )
-        },
+        &context_a,
+        retain_request(&context_a, "A fact.", None),
     )
     .await
-    .expect("re-enqueue");
-    svc.reflect(tenant, scope, None).await.expect("recompile");
-
-    let recalled_again = recall(
+    .expect("retain A");
+    retain_episode(
         &store,
-        recall_request(tenant, scope, actor, "Which payment processor do we use?"),
-        None,
-        &CLOCK,
+        &context_b,
+        retain_request(&context_b, "B fact.", None),
     )
     .await
-    .expect("recall after recompile");
+    .expect("retain B");
+
+    // Exhaust BOTH tenants' jobs, then run a claim scoped to A only.
+    sqlx::query("update memphant.job_state set attempts = 5 where tenant_id = any($1)")
+        .bind(vec![tenant_a.as_uuid(), tenant_b.as_uuid()])
+        .execute(store.pool())
+        .await
+        .expect("exhaust attempts");
+
+    store
+        .claim_reflect_jobs(
+            JobFilter {
+                tenant: Some(tenant_a),
+                scope: Some(scope_a),
+            },
+            10,
+        )
+        .await
+        .expect("claim A");
+
+    let a_dead: i64 = sqlx::query_scalar(
+        "select count(*) from memphant.job_state where tenant_id = $1 and state = 'dead'",
+    )
+    .bind(tenant_a.as_uuid())
+    .fetch_one(store.pool())
+    .await
+    .expect("A dead count");
+    let b_dead: i64 = sqlx::query_scalar(
+        "select count(*) from memphant.job_state where tenant_id = $1 and state = 'dead'",
+    )
+    .bind(tenant_b.as_uuid())
+    .fetch_one(store.pool())
+    .await
+    .expect("B dead count");
+
     assert!(
-        recalled_again.items.is_empty(),
-        "tombstoned episode must not re-derive units"
+        a_dead >= 1,
+        "A's exhausted job dead-letters on A's own claim"
+    );
+    assert_eq!(
+        b_dead, 0,
+        "B's job must NOT dead-letter from A's tenant-scoped claim"
     );
 }
 
@@ -392,17 +1018,23 @@ async fn forget_by_episode_tombstone_blocks_recompilation_durably() {
 async fn resource_retain_reflect_recall_round_trips_via_service() {
     let store = connect().await;
     let tenant = fresh_tenant(&store).await;
-    let scope = ScopeId::new();
-    let actor = ActorId::new();
+    let context = fresh_memory_context(&store, tenant).await;
+    let scope = context.scope_id;
     let svc = service(store.clone());
 
     let retained = retain_resource(
         svc.store(),
+        &context,
         RetainResourceRequest {
             tenant_id: tenant,
+            data_subject_id: context.data_subject_id,
             scope_id: scope,
-            actor_id: actor,
+            actor_id: context.actor_id,
+            agent_node_id: context.agent_node_id,
+            subject_generation: context.subject_generation,
             uri: "https://example.test/runbooks/deploy.md".to_string(),
+            source_ref: "pg-contract:resource".to_string(),
+            observed_at: CLOCK.0.to_string(),
             kind: Some(memphant_types::ResourceKind::Document),
             content_hash: "sha256:deploy-runbook".to_string(),
             mime_type: "text/markdown".to_string(),
@@ -414,16 +1046,13 @@ async fn resource_retain_reflect_recall_round_trips_via_service() {
     )
     .await
     .expect("retain resource");
-    svc.reflect(tenant, scope, None).await.expect("reflect");
+    svc.run_worker_tick_scoped(memphant_store_testkit::tenant_filter(&context), usize::MAX)
+        .await
+        .expect("reflect");
 
     let recalled = recall(
         &store,
-        recall_request(
-            tenant,
-            scope,
-            actor,
-            "How does the deploy runbook roll forward?",
-        ),
+        recall_request(&context, "How does the deploy runbook roll forward?"),
         None,
         &CLOCK,
     )
@@ -439,60 +1068,6 @@ async fn resource_retain_reflect_recall_round_trips_via_service() {
 
 #[tokio::test]
 #[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
-async fn scope_memory_page_cursors_without_overlap() {
-    let store = connect().await;
-    let tenant = fresh_tenant(&store).await;
-    let scope = ScopeId::new();
-    let actor = ActorId::new();
-    let svc = service(store.clone());
-
-    for index in 0..5 {
-        retain_episode(
-            svc.store(),
-            retain_request(
-                tenant,
-                scope,
-                actor,
-                &format!("Paginated durable fact number {index}."),
-                Some(&format!("paginated fact {index}")),
-            ),
-        )
-        .await
-        .expect("retain");
-    }
-    svc.reflect(tenant, scope, None).await.expect("reflect");
-
-    let page_one = store
-        .scope_memory_page(tenant, scope, None, 3)
-        .await
-        .expect("page one");
-    assert_eq!(page_one.items.len(), 3);
-    assert!(page_one.has_more);
-    let cursor = page_one.next_cursor.expect("cursor");
-
-    let page_two = store
-        .scope_memory_page(tenant, scope, Some(cursor), 3)
-        .await
-        .expect("page two");
-    assert!(!page_two.items.is_empty());
-    assert!(!page_two.has_more);
-
-    let ids_one: std::collections::HashSet<_> = page_one
-        .items
-        .iter()
-        .map(|unit| unit.id.as_uuid())
-        .collect();
-    let ids_two: std::collections::HashSet<_> = page_two
-        .items
-        .iter()
-        .map(|unit| unit.id.as_uuid())
-        .collect();
-    assert!(ids_one.is_disjoint(&ids_two));
-    assert_eq!(ids_one.len() + ids_two.len(), 5);
-}
-
-#[tokio::test]
-#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
 async fn api_key_lookup_and_revocation_round_trip() {
     let store = connect().await;
     let tenant = fresh_tenant(&store).await;
@@ -504,6 +1079,7 @@ async fn api_key_lookup_and_revocation_round_trip() {
             &key_hash,
             "contract",
             TrustLevel::TrustedUser,
+            None,
         )
         .await
         .expect("create key");
@@ -515,6 +1091,9 @@ async fn api_key_lookup_and_revocation_round_trip() {
         .expect("key exists");
     assert_eq!(row.tenant_id, tenant);
     assert_eq!(row.max_trust, TrustLevel::TrustedUser);
+    assert_eq!(row.data_subject_id, None);
+    assert_eq!(row.subject_generation, None);
+    assert_eq!(row.agent_node_id, None);
     assert!(!row.revoked);
 
     assert!(store.revoke_api_key(key_id).await.expect("revoke"));
@@ -532,22 +1111,48 @@ async fn api_key_lookup_and_revocation_round_trip() {
 
 #[tokio::test]
 #[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn scoped_api_key_round_trips_the_full_memory_context() {
+    let store = connect().await;
+    let tenant = fresh_tenant(&store).await;
+    let context = fresh_memory_context(&store, tenant).await;
+    let key_hash = format!("scoped-hash-{}", Uuid::now_v7());
+
+    store
+        .create_api_key(
+            tenant.as_uuid(),
+            &key_hash,
+            "scoped-contract",
+            TrustLevel::TrustedUser,
+            Some(&context),
+        )
+        .await
+        .expect("create scoped key");
+
+    let row = store
+        .lookup_api_key(&key_hash)
+        .await
+        .expect("lookup")
+        .expect("scoped key exists");
+    assert_eq!(row.data_subject_id, Some(context.data_subject_id));
+    assert_eq!(row.subject_generation, Some(context.subject_generation));
+    assert_eq!(row.actor_id, Some(context.actor_id));
+    assert_eq!(row.scope_id, Some(context.scope_id));
+    assert_eq!(row.agent_node_id, Some(context.agent_node_id));
+}
+
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
 async fn degraded_read_your_own_writes_serves_unreflected_episodes() {
     let store = connect().await;
     let tenant = fresh_tenant(&store).await;
-    let scope = ScopeId::new();
-    let actor = ActorId::new();
+    let context = fresh_memory_context(&store, tenant).await;
+    let scope = context.scope_id;
     let svc = service(store.clone());
 
     retain_episode(
         svc.store(),
-        retain_request(
-            tenant,
-            scope,
-            actor,
-            "Fallback rollout window is Thursday night.",
-            None,
-        ),
+        &context,
+        retain_request(&context, "Fallback rollout window is Thursday night.", None),
     )
     .await
     .expect("retain");
@@ -555,23 +1160,21 @@ async fn degraded_read_your_own_writes_serves_unreflected_episodes() {
     // No reflect: the service-level recall must fall back to raw episodes.
     let response = svc
         .recall(
-            tenant,
+            context.clone(),
             RecallHttpRequest {
-                tenant_id: tenant,
+                subject_id: context.data_subject_id,
                 scope_id: scope,
-                actor_id: actor,
-                allowed_scope_ids: Some(vec![scope]),
+                agent_node_id: context.agent_node_id,
+                subject_generation: context.subject_generation,
+                actor_id: context.actor_id,
                 query: "When is the fallback rollout window?".to_string(),
                 limit: Some(4),
                 budget_tokens: Some(256),
                 mode: None,
                 include_beliefs: None,
-                edge_expansion_enabled: None,
-                context_packing_abstention_enabled: None,
-                rerank_enabled: None,
-                query_decomposition_enabled: None,
-                procedure_recall_enabled: None,
-                decay_enabled: None,
+                transaction_as_of: None,
+                valid_at: None,
+                aggregation_window: None,
             },
         )
         .await
@@ -599,8 +1202,7 @@ assistant: A blue Tesla, understood.\n";
 async fn contextual_chunks_round_trip_through_postgres_via_fresh_pool() {
     let store_a = connect().await;
     let tenant = fresh_tenant(&store_a).await;
-    let scope = ScopeId::new();
-    let actor = ActorId::new();
+    let context = fresh_memory_context(&store_a, tenant).await;
 
     // Default construction mints contextual chunks (promoted to default-on
     // 2026-07-10) — the product path, same as `service()` elsewhere in this
@@ -608,11 +1210,15 @@ async fn contextual_chunks_round_trip_through_postgres_via_fresh_pool() {
     let svc_a = service(store_a);
     let retained = retain_episode(
         svc_a.store(),
-        retain_request(tenant, scope, actor, CHUNK_EPISODE_BODY, None),
+        &context,
+        retain_request(&context, CHUNK_EPISODE_BODY, None),
     )
     .await
     .expect("retain");
-    svc_a.reflect(tenant, scope, None).await.expect("reflect");
+    svc_a
+        .run_worker_tick_scoped(memphant_store_testkit::tenant_filter(&context), usize::MAX)
+        .await
+        .expect("reflect");
 
     // A COMPLETELY fresh pool must see the compiled unit's chunks: this is
     // the payload jsonb round trip through `memphant.memory_unit`, never
@@ -620,7 +1226,7 @@ async fn contextual_chunks_round_trip_through_postgres_via_fresh_pool() {
     // construction" only, per InMemoryStore assertions).
     let store_b = connect().await;
     let page = store_b
-        .scope_memory_page(tenant, scope, None, 100)
+        .scope_memory_page(&context, None, 100)
         .await
         .expect("page via fresh pool");
     let unit = page
@@ -672,45 +1278,35 @@ async fn contextual_chunks_round_trip_through_postgres_via_fresh_pool() {
 }
 
 /// Multi-tenant job-claim fairness (plan addendum W1-b): `claim_reflect_jobs`
-/// orders strictly by `created_at` with no per-tenant partitioning
-/// (`crates/memphant-store-postgres/src/store.rs::claim_reflect_jobs`, the
-/// `order by created_at ... limit $3` clause). A tenant with a large backlog
-/// starves out a tenant with a single, more urgent job for as many claim
-/// batches as it takes to drain the backlog. This is the exact gap that
-/// produced the orphaned-backlog e2e failure named in the research audit
-/// (scratchpad/research/tests-audit.md, gap 3).
+/// claims per-tenant round-robin — each tenant's eligible jobs are ranked by
+/// enqueue order (`row_number() over (partition by tenant_id order by queue_order)`) and
+/// the batch draws every tenant's oldest before any tenant's second
+/// (`crates/memphant-store-postgres/src/store.rs::claim_reflect_jobs`). A tenant
+/// with a large backlog can therefore no longer starve a low-volume tenant's
+/// single, more urgent job — the exact gap that produced the orphaned-backlog
+/// e2e failure named in the research audit (scratchpad/research/tests-audit.md,
+/// gap 3).
 ///
-/// CONFIRMED red baseline, pinned on purpose. Every test in this file is
-/// `#[ignore]`d by the file's own convention (gated on
-/// `MEMPHANT_TEST_DATABASE_URL`, opted into via `cargo test -- --ignored`),
-/// so an ordinary `#[ignore]` on just this test would NOT remove it from
-/// that same `--ignored` sweep — it would still run, and still fail, every
-/// time the documented gate runs. Per the W1 brief this task does NOT
-/// change claim logic, so instead of leaving a permanently-failing test in
-/// the gate, this test asserts TODAY'S observed (buggy) behavior: a single
-/// claim batch of 16 never includes tenant B's job while tenant A has a
-/// 50-job backlog created first. THIS ASSERTION MUST FLIP (to require
-/// tenant B's job IS claimed) the moment a per-tenant fairness fix lands —
-/// a flip to green on that line is the fix's proof.
+/// This is the GREEN assertion that flipped the former `_red_baseline`: tenant A
+/// floods a 50-job backlog created first, tenant B queues one job strictly
+/// after, and a single worker batch of 16 MUST include tenant B's job (it lands
+/// at round-robin position 2, right behind tenant A's oldest).
 #[tokio::test]
 #[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
-async fn multi_tenant_claim_batch_starves_the_low_volume_tenant_red_baseline() {
+async fn multi_tenant_claim_batch_does_not_starve_the_low_volume_tenant() {
     let store = connect().await;
     let tenant_a = fresh_tenant(&store).await;
     let tenant_b = fresh_tenant(&store).await;
-    let scope_a = ScopeId::new();
-    let scope_b = ScopeId::new();
-    let actor_a = ActorId::new();
-    let actor_b = ActorId::new();
+    let context_a = fresh_memory_context(&store, tenant_a).await;
+    let context_b = fresh_memory_context(&store, tenant_b).await;
 
     // Tenant A floods the global queue with a 50-job backlog...
     for index in 0..50 {
         retain_episode(
             &store,
+            &context_a,
             retain_request(
-                tenant_a,
-                scope_a,
-                actor_a,
+                &context_a,
                 &format!("Tenant A backlog fact number {index}."),
                 None,
             ),
@@ -722,13 +1318,8 @@ async fn multi_tenant_claim_batch_starves_the_low_volume_tenant_red_baseline() {
     // ...then tenant B queues a single job strictly AFTER tenant A's backlog.
     retain_episode(
         &store,
-        retain_request(
-            tenant_b,
-            scope_b,
-            actor_b,
-            "Tenant B single urgent fact.",
-            None,
-        ),
+        &context_b,
+        retain_request(&context_b, "Tenant B single urgent fact.", None),
     )
     .await
     .expect("retain tenant B job");
@@ -741,12 +1332,12 @@ async fn multi_tenant_claim_batch_starves_the_low_volume_tenant_red_baseline() {
         .await
         .expect("claim");
 
+    assert_eq!(claimed.len(), WORKER_BATCH, "a full batch is claimed");
     assert!(
-        !claimed.iter().any(|row| row.job.tenant_id == tenant_b),
-        "RED BASELINE FLIPPED: tenant B's job was claimed even though tenant A \
-         had a 50-job head-start backlog — a per-tenant fairness fix appears to \
-         have landed; flip this assertion to require inclusion (see the doc \
-         comment above) and rename the test to drop '_red_baseline'"
+        claimed.iter().any(|row| row.job.tenant_id == tenant_b),
+        "tenant B's single job must be claimed in the first batch despite tenant \
+         A's 50-job head-start backlog — per-tenant fair claiming interleaves by \
+         age rank, so B lands right behind A's oldest job"
     );
 }
 
@@ -757,8 +1348,8 @@ async fn stub_embeddings_persist_and_power_the_vector_channel() {
 
     let store = connect().await;
     let tenant = fresh_tenant(&store).await;
-    let scope = ScopeId::new();
-    let actor = ActorId::new();
+    let context = fresh_memory_context(&store, tenant).await;
+    let scope = context.scope_id;
     let svc = MemoryService::new(
         Arc::new(store.clone()),
         Arc::new(CLOCK),
@@ -767,20 +1358,23 @@ async fn stub_embeddings_persist_and_power_the_vector_channel() {
 
     retain_episode(
         svc.store(),
-        retain_request(tenant, scope, actor, "Release region is Taipei.", None),
+        &context,
+        retain_request(&context, "Release region is Taipei.", None),
     )
     .await
     .expect("retain");
-    svc.reflect(tenant, scope, None).await.expect("reflect");
+    svc.run_worker_tick_scoped(memphant_store_testkit::tenant_filter(&context), usize::MAX)
+        .await
+        .expect("reflect");
 
     let page = store
-        .scope_memory_page(tenant, scope, None, 100)
+        .scope_memory_page(&context, None, 100)
         .await
         .expect("page");
     assert!(!page.items.is_empty());
     let unit_ids: Vec<_> = page.items.iter().map(|unit| unit.id).collect();
     let rows = store
-        .fetch_embeddings(tenant, &unit_ids)
+        .fetch_embeddings(&context, &unit_ids)
         .await
         .expect("fetch embeddings");
     assert!(
@@ -791,30 +1385,28 @@ async fn stub_embeddings_persist_and_power_the_vector_channel() {
 
     let response = svc
         .recall(
-            tenant,
+            context.clone(),
             RecallHttpRequest {
-                tenant_id: tenant,
+                subject_id: context.data_subject_id,
                 scope_id: scope,
-                actor_id: actor,
-                allowed_scope_ids: Some(vec![scope]),
+                agent_node_id: context.agent_node_id,
+                subject_generation: context.subject_generation,
+                actor_id: context.actor_id,
                 query: "Release region is Taipei.".to_string(),
                 limit: Some(4),
                 budget_tokens: Some(256),
                 mode: None,
                 include_beliefs: None,
-                edge_expansion_enabled: None,
-                context_packing_abstention_enabled: None,
-                rerank_enabled: None,
-                query_decomposition_enabled: None,
-                procedure_recall_enabled: None,
-                decay_enabled: None,
+                transaction_as_of: None,
+                valid_at: None,
+                aggregation_window: None,
             },
         )
         .await
         .expect("recall");
     assert!(!response.items.is_empty());
     let trace = svc
-        .trace(tenant, response.trace_id)
+        .trace(&context, response.trace_id)
         .await
         .expect("trace fetch")
         .expect("trace stored");
@@ -842,8 +1434,7 @@ async fn vector_candidates_filter_by_embedding_profile() {
 
     let store = connect().await;
     let tenant = fresh_tenant(&store).await;
-    let scope = ScopeId::new();
-    let actor = ActorId::new();
+    let context = fresh_memory_context(&store, tenant).await;
     let svc = MemoryService::new(
         Arc::new(store.clone()),
         Arc::new(CLOCK),
@@ -852,14 +1443,17 @@ async fn vector_candidates_filter_by_embedding_profile() {
 
     retain_episode(
         svc.store(),
-        retain_request(tenant, scope, actor, "Release region is Taipei.", None),
+        &context,
+        retain_request(&context, "Release region is Taipei.", None),
     )
     .await
     .expect("retain");
-    svc.reflect(tenant, scope, None).await.expect("reflect");
+    svc.run_worker_tick_scoped(memphant_store_testkit::tenant_filter(&context), usize::MAX)
+        .await
+        .expect("reflect");
 
     let page = store
-        .scope_memory_page(tenant, scope, None, 100)
+        .scope_memory_page(&context, None, 100)
         .await
         .expect("page");
     assert!(!page.items.is_empty());
@@ -887,7 +1481,7 @@ async fn vector_candidates_filter_by_embedding_profile() {
         .expect("seed cross profile");
     store
         .upsert_embeddings(
-            tenant,
+            &context,
             vec![EmbeddingRow {
                 memory_unit_id: unit,
                 embedding_profile_id: other_profile.id,
@@ -907,11 +1501,10 @@ async fn vector_candidates_filter_by_embedding_profile() {
     // query succeeds and returns the unit. WITHOUT it, this call errors.
     let pairs = store
         .fetch_vector_candidates(
-            tenant,
-            &[scope],
-            &[],
+            &context,
             &query_vec,
             active_profile.id,
+            &test_recall_time(),
             VECTOR_CANDIDATE_LIMIT,
         )
         .await
@@ -925,11 +1518,10 @@ async fn vector_candidates_filter_by_embedding_profile() {
     // same unit via THAT profile's row — proving selection is by profile id.
     let other_pairs = store
         .fetch_vector_candidates(
-            tenant,
-            &[scope],
-            &[],
+            &context,
             &[0.1_f32, 0.2, 0.3, 0.4],
             other_profile.id,
+            &test_recall_time(),
             VECTOR_CANDIDATE_LIMIT,
         )
         .await
@@ -940,4 +1532,743 @@ async fn vector_candidates_filter_by_embedding_profile() {
             .any(|(candidate, _)| candidate.id == unit),
         "unit is reachable under the cross profile via its 4-dim embedding"
     );
+}
+
+/// R0 determinism guard: re-ingesting the same corpus into a fresh tenant mints
+/// new UUIDs, so any recall ordering point that breaks ties by insertion/heap
+/// order reshuffles run-to-run (the measured ±1-question docs-gate variance).
+/// The corpus is three token-PERMUTATIONS of the same words: distinct bodies
+/// (distinct dedup keys — `normalize_component` preserves word order) but an
+/// identical `StubEmbedding` vector, so they TIE exactly on vector distance.
+/// Ingested in NON-body order, a tie-cut that fell back to insertion/uuid order
+/// would diverge from the content order. The `<=>, unit.body` tie-break instead
+/// pins the vector candidates to body order, and the whole recall-candidate
+/// ordering is then identical across two independently-UUID'd tenants.
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn recall_ordering_is_content_stable_across_reingest() {
+    use memphant_core::{
+        EmbeddingProvider, StubEmbedding, VECTOR_CANDIDATE_LIMIT, embedding_profile_for,
+    };
+
+    // Inserted top-to-bottom; sorts bottom-to-top by body — insertion order is
+    // the reverse of the content order the tie-break must produce.
+    const CORPUS: [&str; 3] = [
+        "region alpha bravo",
+        "bravo region alpha",
+        "alpha bravo region",
+    ];
+    let mut sorted_bodies: Vec<String> = CORPUS.iter().map(|s| s.to_string()).collect();
+    sorted_bodies.sort();
+
+    let store = connect().await;
+    let stub = StubEmbedding::default();
+    let profile = embedding_profile_for(&stub);
+    let query_vec = stub
+        .embed(&["region".to_string()])
+        .expect("embed query")
+        .remove(0);
+
+    let only_corpus = |bodies: Vec<String>| -> Vec<String> {
+        bodies
+            .into_iter()
+            .filter(|b| CORPUS.contains(&b.as_str()))
+            .collect()
+    };
+
+    let mut per_tenant = Vec::new();
+    for _ in 0..2 {
+        let tenant = fresh_tenant(&store).await;
+        let context = fresh_memory_context(&store, tenant).await;
+        let svc = MemoryService::new(Arc::new(store.clone()), Arc::new(CLOCK), Arc::new(stub));
+        for body in CORPUS {
+            retain_episode(svc.store(), &context, retain_request(&context, body, None))
+                .await
+                .expect("retain");
+        }
+        svc.run_worker_tick_scoped(memphant_store_testkit::tenant_filter(&context), usize::MAX)
+            .await
+            .expect("reflect");
+
+        let vector_bodies = only_corpus(
+            store
+                .fetch_vector_candidates(
+                    &context,
+                    &query_vec,
+                    profile.id,
+                    &test_recall_time(),
+                    VECTOR_CANDIDATE_LIMIT,
+                )
+                .await
+                .expect("vector candidates")
+                .into_iter()
+                .map(|(unit, _)| unit.body)
+                .collect(),
+        );
+        assert_eq!(
+            vector_bodies, sorted_bodies,
+            "tied vector candidates must order by body, not insertion/uuid order"
+        );
+
+        let recall_bodies = only_corpus(
+            store
+                .fetch_recall_candidates(
+                    &context,
+                    &[],
+                    &["region".to_string()],
+                    &test_recall_time(),
+                    100,
+                )
+                .await
+                .expect("recall candidates")
+                .into_iter()
+                .map(|unit| unit.body)
+                .collect(),
+        );
+        per_tenant.push((vector_bodies, recall_bodies));
+    }
+
+    assert_eq!(
+        per_tenant[0], per_tenant[1],
+        "identical corpus recalls in identical order across a fresh-UUID re-ingest"
+    );
+}
+
+/// Sibling of the recall-ordering guard, for the degraded read-your-own-writes
+/// path: `fetch_episodes_for_scope` orders by `last_observed_at desc` and cuts
+/// at LIMIT. Every episode staged in one transaction shares `last_observed_at`
+/// (it is `now()`), so the recency key ties and the LIMIT boundary is decided
+/// by the `dedup_key` tie-break — a total, content-derived order. Without it the
+/// cut follows physical/insertion order and a fresh-UUID re-ingest surfaces a
+/// different subset as degraded citations.
+///
+/// The two tenants ingest the SAME corpus in OPPOSITE orders and then have every
+/// episode's `last_observed_at` collapsed to one instant: pre-fix the tied cut
+/// tracks insertion order and the two disagree; the content tie-break makes them
+/// agree. This is what makes the assertion a real guard rather than a
+/// coincidental pass.
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn episode_scope_cut_is_content_stable_across_reingest() {
+    const CORPUS: [&str; 5] = [
+        "Episode fact alpha.",
+        "Episode fact bravo.",
+        "Episode fact charlie.",
+        "Episode fact delta.",
+        "Episode fact echo.",
+    ];
+    let store = connect().await;
+
+    let mut per_tenant = Vec::new();
+    for order in [[0, 1, 2, 3, 4], [4, 3, 2, 1, 0]] {
+        let tenant = fresh_tenant(&store).await;
+        let context = fresh_memory_context(&store, tenant).await;
+        for index in order {
+            retain_episode(
+                &store,
+                &context,
+                retain_request(&context, CORPUS[index], None),
+            )
+            .await
+            .expect("retain episode");
+        }
+        // Collapse every episode onto one `last_observed_at` in a single
+        // statement (all rows get the same `now()`), forcing the recency tie the
+        // content key must resolve.
+        sqlx::query("update memphant.episode set last_observed_at = now() where tenant_id = $1")
+            .bind(tenant.as_uuid())
+            .execute(store.pool())
+            .await
+            .expect("collapse last_observed_at");
+
+        let bodies: Vec<String> = store
+            .fetch_episodes_for_scope(&context, 3)
+            .await
+            .expect("fetch episodes")
+            .into_iter()
+            .map(|episode| episode.body)
+            .collect();
+        per_tenant.push(bodies);
+    }
+
+    assert_eq!(per_tenant[0].len(), 3, "the cut returns the limit");
+    assert_eq!(
+        per_tenant[0], per_tenant[1],
+        "the recency LIMIT cut must be content-stable regardless of ingest order / fresh UUIDs"
+    );
+}
+
+/// Regression: a direct-unit retain into a scope with >1000 pre-existing units
+/// must return the just-created unit's id. The response id used to be recovered
+/// via `scope_memory_page`, which clamps to 1000 rows ordered by id, so a fresh
+/// (larger) unit id fell off the page and `unit_ids` came back empty. The id now
+/// comes straight from `reflect_recorded`, independent of scope size.
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn direct_unit_retain_returns_unit_id_past_scope_page_clamp() {
+    let store = connect().await;
+    let tenant = fresh_tenant(&store).await;
+    let context = fresh_memory_context(&store, tenant).await;
+    let scope = context.scope_id;
+    let actor = context.actor_id;
+
+    // Seed 1001 units in one reflect so the scope exceeds the 1000-row clamp.
+    let candidates: Vec<ReflectCandidate> = (0..1001)
+        .map(|i| ReflectCandidate {
+            source_kind: "user".to_string(),
+            trust_level: TrustLevel::TrustedUser,
+            actor_id: actor,
+            subject: Some(format!("seed-subject-{i}")),
+            predicate: Some("is".to_string()),
+            fact_key: None,
+            kind: Some(MemoryKind::Semantic),
+            body: format!("seed fact number {i} about widgets"),
+            confidence: None,
+            churn_class: None,
+            admission_hint: None,
+            target_unit_ids: None,
+            contextual_chunks: Vec::new(),
+            valid_from: None,
+            valid_to: None,
+        })
+        .collect();
+    reflect_recorded(
+        &store,
+        ReflectInput {
+            tenant_id: tenant,
+            data_subject_id: context.data_subject_id,
+            scope_id: scope,
+            agent_node_id: context.agent_node_id,
+            subject_generation: context.subject_generation,
+            actor_id: actor,
+            source_ref: "test:reflect".to_string(),
+            observed_at: CLOCK.0.to_string(),
+            source_body: None,
+            episode_id: None,
+            resource_id: None,
+            job_id: JobId::new(),
+            compiler_version: "compiler-pg-seed".to_string(),
+            candidates,
+        },
+        &NoopEmbedding,
+        &CLOCK,
+    )
+    .await
+    .expect("seed reflect succeeds");
+
+    // `has_more` past the 1000-row page clamp proves the scope is oversized.
+    let seeded = store
+        .scope_memory_page(&context, None, usize::MAX)
+        .await
+        .expect("count seeded units");
+    assert!(
+        seeded.has_more,
+        "scope must exceed the 1000-row page clamp, got {}",
+        seeded.items.len()
+    );
+
+    let direct_body = "direct unit past the clamp".to_string();
+    let response = service(store)
+        .retain(
+            &context,
+            "pg-contract-direct-clamp",
+            TrustLevel::TrustedUser,
+            RetainEpisodeHttpRequest {
+                subject_id: context.data_subject_id,
+                scope_id: scope,
+                actor_id: actor,
+                agent_node_id: context.agent_node_id,
+                subject_generation: context.subject_generation,
+                source_ref: "pg-contract:direct".to_string(),
+                observed_at: CLOCK.0.to_string(),
+                payload: RetainPayload::Unit(RetainUnitPayload {
+                    kind: MemoryKind::Semantic,
+                    fact_key: "direct-subject".to_string(),
+                    predicate: "records".to_string(),
+                    body: direct_body.clone(),
+                    confidence: 1.0,
+                    valid_from: None,
+                    valid_to: None,
+                }),
+            },
+        )
+        .await
+        .expect("direct unit retain succeeds");
+
+    let response: RetainEpisodeHttpResponse = serde_json::from_slice(response.body()).unwrap();
+    assert!(
+        !response.unit_ids.is_empty(),
+        "response must surface the created unit id regardless of scope size"
+    );
+    let store = connect().await;
+    let resolved = store
+        .fetch_units_by_ids(&context, &response.unit_ids)
+        .await
+        .expect("resolve returned unit ids");
+    assert!(
+        resolved.iter().any(|unit| unit.body == direct_body),
+        "a returned id must resolve to the just-created direct unit"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn bitemporal_correction_round_trips_through_postgres_and_forget_erases_history() {
+    use memphant_core::{
+        CorrectionWrite, EmbeddingProfileRow, EmbeddingRow, ForgetWrite, embedding_profile_for,
+    };
+    use memphant_types::{
+        CorrectSelector, CorrectionPayload, ForgetTarget, NewMemoryUnit, UnitState,
+    };
+
+    let store = connect().await;
+    let tenant = fresh_tenant(&store).await;
+    let context = fresh_memory_context(&store, tenant).await;
+    let scope = context.scope_id;
+    let actor = context.actor_id;
+    let mut tx = store.begin(&context).await.expect("begin");
+    let old_id = store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id: tenant,
+                data_subject_id: context.data_subject_id,
+                scope_id: scope,
+                agent_node_id: context.agent_node_id,
+                subject_generation: context.subject_generation,
+                kind: MemoryKind::Semantic,
+                state: UnitState::Active,
+                fact_key: Some("profile:city".to_string()),
+                predicate: None,
+                body: "lives in Oslo".to_string(),
+                confidence: None,
+                trust_level: TrustLevel::TrustedUser,
+                churn_class: None,
+                freshness_due_at: None,
+                actor_id: Some(actor),
+                source_kind: Some("pg-bitemporal-test".to_string()),
+                source_ref: "pg-contract:bitemporal".to_string(),
+                observed_at: CLOCK.0.to_string(),
+                source_episode_id: None,
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: Some("2025-01-01T00:00:00Z".to_string()),
+                valid_to: Some("2026-01-01T00:00:00Z".to_string()),
+                transaction_from: Some("2025-01-02T00:00:00Z".to_string()),
+                transaction_to: None,
+            },
+        )
+        .await
+        .expect("stage old unit");
+    store.commit(tx).await.expect("commit old unit");
+
+    let profile: EmbeddingProfileRow =
+        embedding_profile_for(&memphant_core::StubEmbedding::default());
+    store
+        .upsert_embedding_profile(tenant, profile.clone())
+        .await
+        .expect("profile");
+    store
+        .upsert_embeddings(
+            &context,
+            vec![EmbeddingRow {
+                memory_unit_id: old_id,
+                embedding_profile_id: profile.id,
+                vec: vec![0.5; profile.dimensions],
+            }],
+        )
+        .await
+        .expect("old embedding");
+
+    let correction_write = CorrectionWrite {
+        selector: CorrectSelector {
+            memory_unit_id: old_id,
+        },
+        correction: CorrectionPayload {
+            value: "lives in Lima".to_string(),
+            reason: "moved".to_string(),
+            source_ref: "pg-contract:correction".to_string(),
+            observed_at: CLOCK.0.to_string(),
+            valid_from: Some("2025-04-01T00:00:00Z".to_string()),
+            valid_to: Some("2025-07-01T00:00:00Z".to_string()),
+        },
+        source_ref: "pg-contract:correction".to_string(),
+        observed_at: CLOCK.0.to_string(),
+        now: "1900-01-01T00:00:00Z".to_string(),
+        embedding: Some((profile.clone(), vec![0.75; profile.dimensions])),
+    };
+    let mut dropped_correction = store.begin(&context).await.unwrap();
+    let dropped_created = store
+        .stage_correction(&mut dropped_correction, correction_write.clone())
+        .await
+        .unwrap()
+        .created;
+    drop(dropped_correction);
+    assert!(
+        store
+            .fetch_units_by_ids(&context, &dropped_created)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let corrected = store
+        .apply_correction(&context, correction_write)
+        .await
+        .expect("correct");
+    assert_eq!(
+        corrected.created.len(),
+        3,
+        "replacement plus two remainders"
+    );
+    let created_rows = store
+        .fetch_units_by_ids(&context, &corrected.created)
+        .await
+        .expect("created rows");
+    let correction_transaction_time = created_rows
+        .iter()
+        .find(|unit| unit.id == corrected.created[0])
+        .and_then(|unit| unit.transaction_from.clone())
+        .expect("replacement has database-assigned transaction time");
+    assert!(
+        created_rows.iter().all(|unit| {
+            unit.transaction_from
+                .as_deref()
+                .is_some_and(|stamp| stamp > "2020-01-01T00:00:00Z")
+        }),
+        "Postgres assigns transaction time; the skewed caller clock is ignored"
+    );
+
+    async fn snapshot(
+        store: &PgStore,
+        context: &ResolvedMemoryContext,
+        transaction_as_of: &str,
+        valid_at: &str,
+        query: &str,
+    ) -> memphant_types::RecallResponse {
+        recall(
+            store,
+            RecallRequest {
+                context: context.clone(),
+                query: query.to_string(),
+                k: 4,
+                budget_tokens: 128,
+                mode: RecallMode::Fast,
+                include_beliefs: true,
+                edge_expansion_enabled: true,
+                context_packing_abstention_enabled: false,
+                rerank_enabled: false,
+                learned_rerank_profile: None,
+                query_decomposition_enabled: false,
+                procedure_recall_enabled: true,
+                decay_enabled: false,
+                engine_version: "pg-bitemporal-test".to_string(),
+                transaction_as_of: Some(transaction_as_of.to_string()),
+                valid_at: Some(valid_at.to_string()),
+                aggregation_window: None,
+            },
+            None,
+            &FixedClock("2030-01-01T00:00:00Z"),
+        )
+        .await
+        .expect("snapshot recall")
+    }
+
+    let before = snapshot(
+        &store,
+        &context,
+        "2025-07-01T00:00:00Z",
+        "2025-04-01T00:00:00Z",
+        "Oslo",
+    )
+    .await;
+    assert_eq!(before.items[0].body, "lives in Oslo");
+    let boundary = snapshot(
+        &store,
+        &context,
+        "2029-09-01T00:00:00Z",
+        "2025-04-01T00:00:00Z",
+        "Lima",
+    )
+    .await;
+    assert_eq!(boundary.items[0].body, "lives in Lima");
+    let review = ReviewEvent {
+        tenant_id: tenant,
+        trace_id: boundary.trace_id,
+        caller_id: "bitemporal-review".to_string(),
+        used_ids: vec![corrected.created[0]],
+        outcome: MarkOutcome::Success,
+        recorded_at: "1900-01-01T00:00:00Z".to_string(),
+    };
+    let mut dropped_review = store.begin(&context).await.unwrap();
+    store
+        .stage_review_events(&mut dropped_review, vec![review.clone()])
+        .await
+        .unwrap();
+    drop(dropped_review);
+    let review_count: i64 = sqlx::query_scalar(
+        "select count(*) from memphant.review_event where tenant_id = $1 and caller_id = $2",
+    )
+    .bind(tenant.as_uuid())
+    .bind(&review.caller_id)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(review_count, 0);
+    store
+        .record_review_events(&context, vec![review])
+        .await
+        .expect("review event");
+    let before_review = RecallTime {
+        evaluated_at: "2030-01-01T00:00:00Z".to_string(),
+        transaction_as_of: "2000-01-01T00:00:00Z".to_string(),
+        valid_at: "2000-01-01T00:00:00Z".to_string(),
+    };
+    assert!(
+        store
+            .fetch_review_events(&context, &[corrected.created[0]], &before_review)
+            .await
+            .expect("historical reviews")
+            .is_empty(),
+        "database-assigned review time excludes feedback written after the snapshot"
+    );
+    let left = snapshot(
+        &store,
+        &context,
+        "2029-09-01T00:00:00Z",
+        "2025-03-31T23:59:59Z",
+        "Oslo",
+    )
+    .await;
+    assert_eq!(left.items[0].body, "lives in Oslo");
+    let right_boundary = snapshot(
+        &store,
+        &context,
+        "2029-09-01T00:00:00Z",
+        "2025-07-01T00:00:00Z",
+        "Oslo",
+    )
+    .await;
+    assert_eq!(right_boundary.items[0].body, "lives in Oslo");
+
+    let embeddings = store
+        .fetch_embeddings(&context, &corrected.created)
+        .await
+        .expect("created embeddings");
+    assert_eq!(
+        embeddings.len(),
+        3,
+        "fresh replacement plus copied remainders"
+    );
+    let after_time = RecallTime {
+        evaluated_at: "2030-01-01T00:00:00Z".to_string(),
+        transaction_as_of: correction_transaction_time,
+        valid_at: "2025-05-01T00:00:00Z".to_string(),
+    };
+    assert_eq!(
+        store
+            .fetch_edges(&context, &corrected.created, &after_time)
+            .await
+            .expect("current edges")
+            .len(),
+        3
+    );
+    let before_time = RecallTime {
+        transaction_as_of: "2025-07-01T00:00:00Z".to_string(),
+        ..after_time.clone()
+    };
+    let before_vector = store
+        .fetch_vector_candidates(
+            &context,
+            &vec![0.5; profile.dimensions],
+            profile.id,
+            &before_time,
+            10,
+        )
+        .await
+        .expect("historical vector");
+    assert_eq!(before_vector[0].0.id, old_id);
+    let after_vector = store
+        .fetch_vector_candidates(
+            &context,
+            &vec![0.75; profile.dimensions],
+            profile.id,
+            &after_time,
+            10,
+        )
+        .await
+        .expect("current vector");
+    assert_eq!(after_vector[0].0.id, corrected.created[0]);
+    assert!(
+        store
+            .fetch_edges(&context, &corrected.created, &before_time)
+            .await
+            .expect("historical edges")
+            .is_empty()
+    );
+
+    let forget_write = ForgetWrite {
+        target: ForgetTarget::MemoryUnit(corrected.created[0]),
+        now: "2025-10-01T00:00:00Z".to_string(),
+    };
+    let mut dropped_forget = store.begin(&context).await.unwrap();
+    store
+        .stage_forget(&mut dropped_forget, forget_write.clone())
+        .await
+        .unwrap();
+    drop(dropped_forget);
+    assert!(
+        store
+            .fetch_units_by_ids(&context, &[corrected.created[0]])
+            .await
+            .unwrap()
+            .iter()
+            .any(|unit| unit.state != UnitState::Deleted)
+    );
+    store
+        .apply_forget(&context, forget_write)
+        .await
+        .expect("forget old generation");
+    assert!(
+        snapshot(
+            &store,
+            &context,
+            "2025-07-01T00:00:00Z",
+            "2025-05-01T00:00:00Z",
+            "Oslo",
+        )
+        .await
+        .items
+        .is_empty(),
+        "forgetting the current generation erases its supersedes lineage from every snapshot"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn structured_exact_recurrence_replaces_every_overlapping_postgres_rectangle() {
+    let store = connect().await;
+    let tenant = fresh_tenant(&store).await;
+    let context = fresh_memory_context(&store, tenant).await;
+    let scope = context.scope_id;
+    let actor = context.actor_id;
+    let cases = [
+        (
+            "user: Oslo was my home city throughout 2025.",
+            "Oslo was my home city throughout 2025.",
+            "Oslo",
+            "2025-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+        ),
+        (
+            "user: Lima was my home city in spring 2025.",
+            "Lima was my home city in spring 2025.",
+            "Lima",
+            "2025-04-01T00:00:00Z",
+            "2025-07-01T00:00:00Z",
+        ),
+        (
+            "user: Oslo was my home city from March through July 2025.",
+            "Oslo was my home city from March through July 2025.",
+            "Oslo",
+            "2025-03-01T00:00:00Z",
+            "2025-08-01T00:00:00Z",
+        ),
+    ];
+
+    let mut second_generation_time = None;
+    let fact_key = derive_fact_key(scope.as_uuid(), Some("profile"), Some("home_city"), "");
+    for (index, (body, quote, value, valid_from, valid_to)) in cases.iter().enumerate() {
+        let svc = structured_service(
+            store.clone(),
+            vec![structured_upsert(body, quote, value, valid_from, valid_to)],
+        );
+        svc.retain(
+            &context,
+            &format!("pg-contract-structured-{index}"),
+            TrustLevel::TrustedUser,
+            RetainEpisodeHttpRequest {
+                subject_id: context.data_subject_id,
+                scope_id: scope,
+                actor_id: actor,
+                agent_node_id: context.agent_node_id,
+                subject_generation: context.subject_generation,
+                source_ref: "pg-contract:structured".to_string(),
+                observed_at: CLOCK.0.to_string(),
+                payload: RetainPayload::Episode(RetainEpisodePayload {
+                    source_kind: "user".to_string(),
+                    body: (*body).to_string(),
+                }),
+            },
+        )
+        .await
+        .expect("retain structured episode");
+        svc.run_worker_tick_scoped(memphant_store_testkit::tenant_filter(&context), usize::MAX)
+            .await
+            .expect("reflect structured episode");
+
+        if index == 1 {
+            second_generation_time = store
+                .fetch_scope_open_units(&context)
+                .await
+                .expect("fetch second generation")
+                .into_iter()
+                .find(|unit| {
+                    unit.fact_key.as_deref() == Some(&fact_key) && unit.body.contains("Lima")
+                })
+                .and_then(|unit| unit.transaction_from);
+        }
+    }
+
+    let current = store
+        .fetch_scope_open_units(&context)
+        .await
+        .expect("fetch current structured rectangles")
+        .into_iter()
+        .filter(|unit| unit.fact_key.as_deref() == Some(&fact_key))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        current.len(),
+        3,
+        "Postgres persists one replacement plus both surviving remainders"
+    );
+    assert!(current.iter().all(|unit| unit.state == UnitState::Active));
+    assert!(current.iter().all(|unit| !unit.body.contains("Lima")));
+    assert!(
+        current.iter().any(|unit| {
+            unit.body.contains("Oslo")
+                && unit.valid_from.as_deref() == Some("2025-01-01T00:00:00Z")
+                && unit.valid_to.as_deref() == Some("2025-03-01T00:00:00Z")
+        }),
+        "missing left remainder: {current:#?}"
+    );
+    assert!(
+        current.iter().any(|unit| {
+            unit.body.contains("Oslo")
+                && unit.valid_from.as_deref() == Some("2025-03-01T00:00:00Z")
+                && unit.valid_to.as_deref() == Some("2025-08-01T00:00:00Z")
+        }),
+        "missing replacement: {current:#?}"
+    );
+    assert!(
+        current.iter().any(|unit| {
+            unit.body.contains("Oslo")
+                && unit.valid_from.as_deref() == Some("2025-08-01T00:00:00Z")
+                && unit.valid_to.as_deref() == Some("2026-01-01T00:00:00Z")
+        }),
+        "missing right remainder: {current:#?}"
+    );
+
+    let mut historical_request = recall_request(&context, "profile home city");
+    historical_request.transaction_as_of =
+        Some(second_generation_time.expect("second generation has database transaction time"));
+    historical_request.valid_at = Some("2025-05-01T00:00:00Z".to_string());
+    historical_request.rerank_enabled = false;
+    historical_request.context_packing_abstention_enabled = false;
+    let historical = recall(&store, historical_request, None, &CLOCK)
+        .await
+        .expect("historical structured recall");
+    assert!(historical.items.iter().any(|item| {
+        item.body.starts_with("profile item home_city") && item.body.contains("Lima")
+    }));
 }

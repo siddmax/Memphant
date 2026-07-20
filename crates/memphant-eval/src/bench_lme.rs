@@ -33,12 +33,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use memphant_core::service::MemoryService;
-use memphant_core::{
-    CrossReranker, DEFAULT_CANDIDATE_POOL_SIZE, EmbeddingProvider, NoopEmbedding, SystemClock,
-};
+use memphant_core::{EmbeddingProvider, MemoryStore, NoopEmbedding, SystemClock};
 use memphant_store_postgres::PgStore;
 use memphant_types::{
-    ActorId, RecallHttpRequest, RecallMode, RetainEpisodeHttpRequest, ScopeId, TenantId, TrustLevel,
+    ContextBindingAgentRef, ContextBindingEntityRef, ContextBindingRequest, ContextBindingScopeRef,
+    RecallMode, RecallRequest, RetainEpisodeHttpRequest, RetainEpisodeHttpResponse,
+    RetainEpisodePayload, RetainPayload, TenantId, TrustLevel,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -105,9 +105,14 @@ pub struct BenchLmeOptions {
     pub turns_window: usize,
     /// Packing token budget threaded to the recall call.
     pub budget_tokens: usize,
-    /// Vector-channel candidate-pool size (`--pool`) threaded to the recall
-    /// service via `with_candidate_pool_size`. Default
-    /// `DEFAULT_CANDIDATE_POOL_SIZE` (32) reproduces today's ranking.
+    /// R1.5-T0 recall-pool-depth (`--pool`) threaded to the recall service
+    /// via `with_recall_pool_depth` — the ONE knob every internal
+    /// channel/fusion limit in the recall path derives from (vector-channel
+    /// KNN fan-out, packing scan window, rerank rescoring cap), never `k`.
+    /// The flag name is unchanged (pre-R1.5-T0 it only set the vector-channel
+    /// fan-out via `with_candidate_pool_size`); its semantics widened to the
+    /// unified knob so there is one honest pool concept, not two. Default
+    /// `DEFAULT_RECALL_POOL_DEPTH` (64).
     pub pool: usize,
     /// W4 sibling-gather packing lever (`--sibling-gather`, default off) threaded
     /// via `with_sibling_gather_enabled`. The measurement-campaign flag; off
@@ -243,11 +248,18 @@ pub struct BenchLmeReport {
     /// for pre-flag reports — see `default_budget_tokens`).
     #[serde(default = "default_budget_tokens")]
     pub budget_tokens: usize,
-    /// Vector-channel candidate-pool size (`--pool`) used for this run. Defaults
-    /// to `DEFAULT_CANDIDATE_POOL_SIZE` (32) — the historical vector KNN fan-out
-    /// — for pre-flag reports, via `default_candidate_pool_size`.
-    #[serde(default = "default_candidate_pool_size")]
-    pub candidate_pool_size: usize,
+    /// R1.5-T0 recall-pool-depth (`--pool`) used for this run — the ONE knob
+    /// every internal channel/fusion limit in the recall path derives from.
+    /// Renamed from `candidate_pool_size` (which pre-R1.5-T0 only set the
+    /// vector-channel KNN fan-out); `#[serde(alias)]` keeps old reports
+    /// (written under the old field name) parseable. Defaults, for reports
+    /// written before EITHER field existed, to 32 — the historical
+    /// vector-channel-only fan-out those runs actually used
+    /// (`VECTOR_CANDIDATE_LIMIT`, NOT today's `DEFAULT_RECALL_POOL_DEPTH` —
+    /// see `default_recall_pool_depth_for_legacy_reports`).
+    #[serde(alias = "candidate_pool_size")]
+    #[serde(default = "default_recall_pool_depth_for_legacy_reports")]
+    pub recall_pool_depth: usize,
     /// Whether the W4 sibling-gather packing lever was on for this run. The serde
     /// default is `false`: every report written before the lever existed was a
     /// sibling-gather-off run, so an absent field ⇒ off.
@@ -319,12 +331,14 @@ fn default_budget_tokens() -> usize {
     DEFAULT_BUDGET_TOKENS
 }
 
-/// Parsing default for pre-flag reports (no `candidate_pool_size` field). As
-/// with `default_budget_tokens`, this coincides with the historical value every
-/// such report used: the vector KNN fan-out of `DEFAULT_CANDIDATE_POOL_SIZE`
-/// (32).
-fn default_candidate_pool_size() -> usize {
-    DEFAULT_CANDIDATE_POOL_SIZE
+/// Parsing default for reports written before EITHER `candidate_pool_size`
+/// (pre-R1.5-T0) or `recall_pool_depth` (R1.5-T0+) existed. UNLIKE
+/// `default_budget_tokens`, this deliberately does NOT coincide with today's
+/// lane default (`DEFAULT_RECALL_POOL_DEPTH`, 64): every report old enough to
+/// be missing both fields predates this flag entirely and actually ran with
+/// the historical vector-channel-only fan-out, `VECTOR_CANDIDATE_LIMIT` (32).
+fn default_recall_pool_depth_for_legacy_reports() -> usize {
+    memphant_core::VECTOR_CANDIDATE_LIMIT
 }
 
 /// Parsing default for pre-flag reports (no `embed_model` field): every such
@@ -623,62 +637,16 @@ pub fn session_bodies(
         .collect()
 }
 
-#[cfg(feature = "fastembed")]
-fn build_fastembed(embed_model: &str) -> Result<Arc<dyn EmbeddingProvider>, String> {
-    let model = memphant_runtime::embeddings::FastEmbedModel::parse(embed_model)
-        .ok_or_else(|| format!("unknown --embed-model: {embed_model} (known: small, base)"))?;
-    memphant_runtime::embeddings::FastEmbedProvider::with_model(model)
-        .map(|provider| Arc::new(provider) as Arc<dyn EmbeddingProvider>)
-        .map_err(|error| format!("fastembed initialization failed: {error}"))
-}
-
-#[cfg(not(feature = "fastembed"))]
-fn build_fastembed(_embed_model: &str) -> Result<Arc<dyn EmbeddingProvider>, String> {
-    Err("bench-lme requires a binary built with --features fastembed (real embeddings are part of the benchmark contract)".to_string())
-}
-
-/// Builds the real cross-encoder reranker (bge-reranker-base), wrapped so each
-/// call reports its latency to stderr — the W8 `--cross-rerank` arm. A clear
-/// error when the fastembed feature is absent.
-#[cfg(feature = "fastembed")]
-fn build_cross_reranker() -> Result<Arc<dyn CrossReranker>, String> {
-    memphant_runtime::embeddings::FastEmbedCrossReranker::new()
-        .map(|reranker| {
-            Arc::new(TimedCrossReranker::new(Arc::new(reranker))) as Arc<dyn CrossReranker>
-        })
-        .map_err(|error| format!("cross-reranker initialization failed: {error}"))
-}
-
-#[cfg(not(feature = "fastembed"))]
-fn build_cross_reranker() -> Result<Arc<dyn CrossReranker>, String> {
-    Err("--cross-rerank requires a binary built with --features fastembed (the cross-encoder is a fastembed model)".to_string())
-}
-
-/// Wraps a cross-reranker so every `rerank` call prints its wall time and doc
-/// count to stderr — the campaign-cost visibility the W8 arm needs. Timing lives
-/// in the eval layer (a decorator), keeping the core stage and runtime provider
-/// free of measurement I/O.
-struct TimedCrossReranker {
-    inner: Arc<dyn CrossReranker>,
-}
-
-impl TimedCrossReranker {
-    fn new(inner: Arc<dyn CrossReranker>) -> Self {
-        Self { inner }
-    }
-}
-
-impl CrossReranker for TimedCrossReranker {
-    fn rerank(&self, query: &str, docs: &[&str]) -> Vec<f32> {
-        let started = std::time::Instant::now();
-        let scores = self.inner.rerank(query, docs);
-        eprintln!(
-            "bench-lme rerank ms={} docs={}",
-            started.elapsed().as_millis(),
-            docs.len()
-        );
-        scores
-    }
+/// Builds the `--embed-model` arm through the shared
+/// [`memphant_runtime::embedder_from_id`] grammar — the SAME single source of
+/// truth the runtime `MEMPHANT_EMBEDDINGS` env var resolves through, so a bench
+/// arm and a served arm are byte-identical for a given id (no longer
+/// fastembed-only, hence the rename from `build_fastembed`). It covers the local
+/// fastembed/qwen3 arms (cargo-feature gated: a clear build-instruction error
+/// when absent) and the R0-T2 hosted-API arms (always compiled: a clear
+/// missing-key error when the provider's env var is unset).
+fn build_embedder_arm(embed_model: &str) -> Result<Arc<dyn EmbeddingProvider>, String> {
+    memphant_runtime::embedder_from_id(embed_model)
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
@@ -723,7 +691,7 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
     // W8: derive the embedding arm ONCE and share it — ingest and recall must
     // embed under the same profile (id+dims), else the vector channel compares
     // incompatible spaces.
-    let embedder = build_fastembed(&options.embed_model)?;
+    let embedder = build_embedder_arm(&options.embed_model)?;
     // Effective runtime contextual-chunk state: default-on (the product path)
     // unless the control arm explicitly disables it. `--disable runtime_chunks`
     // forces the builder off; `--runtime-chunks` is redundant with the default
@@ -754,9 +722,11 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
     } else {
         ingest_service.clone()
     }
-    // W3 candidate-pool knob (`--pool`): widens the recall vector-channel KNN
-    // fan-out for the rerank pool. Recall-time only; ingestion is unaffected.
-    .with_candidate_pool_size(options.pool)
+    // R1.5-T0 recall-pool-depth knob (`--pool`): widens every internal
+    // channel/fusion limit in the recall path (vector KNN fan-out, packing
+    // scan window, rerank rescoring cap). Recall-time only; ingestion is
+    // unaffected.
+    .with_recall_pool_depth(options.pool)
     // W4 packing levers (`--sibling-gather` / `--session-quota`): recall-time
     // only; both default off so the campaign measures each independently.
     .with_sibling_gather_enabled(options.sibling_gather)
@@ -767,9 +737,17 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
     .with_temporal_grounding_enabled(options.temporal_grounding);
 
     // W8 cross-encoder rerank: recall-time only. When on, install the real
-    // fastembed reranker (timed) so it reorders the widened pool before packing.
+    // fastembed reranker so it reorders the widened pool before packing.
+    // R1.5-T1: routed through the SAME `memphant_runtime::build_cross_reranker`
+    // factory `build_service`'s `MEMPHANT_CROSS_RERANK` env wiring uses, so
+    // this bench arm and a served recall install byte-identical reranker
+    // construction (unified — this bench previously had its own private
+    // `build_cross_reranker`/`TimedCrossReranker`, and the server had NO
+    // wiring at all; per-call latency is now measured once, in
+    // `recall_with_pool` itself, landing in `RetrievalTrace::cross_rerank_ms`
+    // for both instead of only printing to bench's stderr).
     let recall_service = if options.cross_rerank {
-        recall_service.with_cross_reranker(build_cross_reranker()?)
+        recall_service.with_cross_reranker(memphant_runtime::build_cross_reranker()?)
     } else {
         recall_service
     };
@@ -830,8 +808,44 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
             .await
             .map_err(|error| format!("create_tenant: {error}"))?;
         let tenant = TenantId::from_u128(tenant_uuid.as_u128());
-        let scope = ScopeId::new();
-        let actor = ActorId::new();
+        let binding = store
+            .resolve_context_binding(
+                tenant,
+                format!("lme:{}", question.question_id),
+                ContextBindingRequest {
+                    subject: ContextBindingEntityRef {
+                        external_ref: format!("subject:{}", question.question_id),
+                        kind: "user".to_string(),
+                    },
+                    actor: ContextBindingEntityRef {
+                        external_ref: "actor:lme".to_string(),
+                        kind: "system".to_string(),
+                    },
+                    scope: ContextBindingScopeRef {
+                        external_ref: "scope:lme".to_string(),
+                        kind: "user_root".to_string(),
+                        parent_external_ref: None,
+                    },
+                    agent_node: ContextBindingAgentRef {
+                        external_ref: "agent:lme".to_string(),
+                        parent_external_ref: None,
+                    },
+                    access_policies: vec![],
+                },
+            )
+            .await
+            .map_err(|error| format!("bind context: {error}"))?;
+        let context = store
+            .resolve_memory_context(
+                tenant,
+                binding.subject_id,
+                binding.actor_id,
+                binding.scope_id,
+                binding.agent_node_id,
+            )
+            .await
+            .map_err(|error| format!("resolve context: {error}"))?;
+        let scope = context.scope_id;
 
         // Chronological ingestion: one episode per haystack session.
         let mut order: Vec<usize> = (0..question.haystack_sessions.len()).collect();
@@ -850,28 +864,35 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
                 &question.haystack_dates[session_index],
                 &question.haystack_sessions[session_index],
             );
-            for body in bodies {
+            for (turn_index, body) in bodies.into_iter().enumerate() {
                 let response = ingest_service
                     .retain(
-                        tenant,
+                        &context,
+                        &format!("lme:{session_id}:{turn_index}"),
+                        TrustLevel::TrustedUser,
                         RetainEpisodeHttpRequest {
-                            tenant_id: tenant,
+                            subject_id: context.data_subject_id,
                             scope_id: scope,
-                            actor_id: actor,
-                            source_kind: "user".to_string(),
-                            source_trust: TrustLevel::TrustedUser,
-                            subject_hint: Some(format!("session {session_id}")),
-                            subject: None,
-                            predicate: None,
-                            body: Some(body),
-                            resource: None,
-                            unit: None,
-                            compiler_version: None,
+                            actor_id: context.actor_id,
+                            agent_node_id: context.agent_node_id,
+                            subject_generation: context.subject_generation,
+                            source_ref: format!("longmemeval:session:{session_id}"),
+                            observed_at: format!(
+                                "{}T00:00:00Z",
+                                question.haystack_dates[session_index]
+                            ),
+                            payload: RetainPayload::Episode(RetainEpisodePayload {
+                                source_kind: "user".to_string(),
+                                body,
+                            }),
                         },
                     )
                     .await
                     .map_err(|error| format!("retain {session_id}: {error}"))?;
-                if let Some(episode_id) = response.episode_id {
+                let retained: RetainEpisodeHttpResponse =
+                    serde_json::from_slice(response.body())
+                        .map_err(|error| format!("retain {session_id}: {error}"))?;
+                if let Some(episode_id) = retained.episode_id {
                     episode_sessions
                         .entry(episode_id)
                         .or_insert_with(|| session_id.clone());
@@ -879,33 +900,35 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
             }
         }
 
-        // Reflect through the same claim/complete path the worker uses.
-        ingest_service
-            .reflect(tenant, scope, None)
+        // Each question has a fresh tenant above; drain only this scratch
+        // workload through the production worker surface.
+        while ingest_service
+            .run_worker_tick(usize::MAX)
             .await
-            .map_err(|error| format!("reflect: {error}"))?;
+            .map_err(|error| format!("reflect: {error}"))?
+            > 0
+        {}
 
         let response = recall_service
-            .recall(
-                tenant,
-                RecallHttpRequest {
-                    tenant_id: tenant,
-                    scope_id: scope,
-                    actor_id: actor,
-                    allowed_scope_ids: None,
-                    query: question.question.clone(),
-                    limit: Some(options.k),
-                    budget_tokens: Some(options.budget_tokens),
-                    mode: Some(options.mode),
-                    include_beliefs: Some(false),
-                    edge_expansion_enabled: Some(disable != Some("edge_expansion")),
-                    context_packing_abstention_enabled: Some(disable != Some("packing")),
-                    rerank_enabled: Some(disable != Some("rerank")),
-                    query_decomposition_enabled: Some(disable != Some("query_decomposition")),
-                    procedure_recall_enabled: Some(disable != Some("procedure_recall")),
-                    decay_enabled: Some(disable != Some("decay")),
-                },
-            )
+            .recall_internal(RecallRequest {
+                context: context.clone(),
+                query: question.question.clone(),
+                k: options.k,
+                budget_tokens: options.budget_tokens,
+                mode: options.mode,
+                include_beliefs: false,
+                edge_expansion_enabled: disable != Some("edge_expansion"),
+                context_packing_abstention_enabled: disable != Some("packing"),
+                rerank_enabled: disable != Some("rerank"),
+                learned_rerank_profile: None,
+                query_decomposition_enabled: disable != Some("query_decomposition"),
+                procedure_recall_enabled: disable != Some("procedure_recall"),
+                decay_enabled: disable != Some("decay"),
+                engine_version: "bench-lme".to_string(),
+                transaction_as_of: None,
+                valid_at: None,
+                aggregation_window: None,
+            })
             .await
             .map_err(|error| format!("recall: {error}"))?;
 
@@ -1048,7 +1071,7 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
         granularity: options.granularity.clone(),
         turns_window: options.turns_window,
         budget_tokens: options.budget_tokens,
-        candidate_pool_size: options.pool,
+        recall_pool_depth: options.pool,
         sibling_gather: options.sibling_gather,
         session_quota: options.session_quota,
         temporal_grounding: options.temporal_grounding,
@@ -1082,6 +1105,50 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
 #[cfg(test)]
 mod tests {
     use super::*;
+    use memphant_core::DEFAULT_RECALL_POOL_DEPTH;
+
+    /// R0-T1b feature-gated error path: `--embed-model qwen3` in a binary
+    /// built with `--features fastembed` but WITHOUT `--features qwen3` (the
+    /// shipped memphant-server/-worker default: `default = ["fastembed"]`,
+    /// `qwen3` is additive-only) must name the missing `qwen3` feature —
+    /// never silently fall back to another arm. This only compiles/runs
+    /// under exactly that feature combination (`fastembed` on, `qwen3`
+    /// off) — the default `cargo test -p memphant-eval --features fastembed`
+    /// invocation, not `--all-features` (which turns qwen3 on too).
+    #[cfg(all(feature = "fastembed", not(feature = "qwen3")))]
+    #[test]
+    fn embed_model_qwen3_without_qwen3_feature_names_the_missing_feature() {
+        // `Arc<dyn EmbeddingProvider>` isn't `Debug`, so `expect_err` (which
+        // needs `T: Debug` to format the Ok case) doesn't apply here.
+        let error = match build_embedder_arm("qwen3") {
+            Err(error) => error,
+            Ok(_) => panic!("qwen3 feature is not compiled in — expected an error"),
+        };
+        assert!(
+            error.contains("qwen3"),
+            "error must name the missing feature: {error}"
+        );
+        assert!(
+            error.contains("--features qwen3"),
+            "error must tell the caller how to fix it: {error}"
+        );
+    }
+
+    /// The other three T1 arms (and qwen3's own parse-through) keep working
+    /// via the unknown-model error message's known-arms list, regardless of
+    /// which of `fastembed`/`qwen3` are compiled in.
+    #[cfg(feature = "fastembed")]
+    #[test]
+    fn embed_model_unknown_selector_lists_qwen3_as_known() {
+        let error = match build_embedder_arm("nope") {
+            Err(error) => error,
+            Ok(_) => panic!("nope is not a known arm — expected an error"),
+        };
+        assert!(
+            error.contains("qwen3"),
+            "unknown-arm error must list qwen3 among known selectors: {error}"
+        );
+    }
 
     fn fixture_rows() -> Vec<QuestionResult> {
         // Synthetic 3-question fixture: one hit@5, one hit@10-only, one abstention.
@@ -1290,8 +1357,14 @@ mod tests {
     fn turn_window_and_budget_tokens_defaults_are_pinned() {
         assert_eq!(DEFAULT_TURNS_WINDOW, 4);
         assert_eq!(DEFAULT_BUDGET_TOKENS, 8192);
-        // W3: the candidate-pool default is the historical vector KNN fan-out.
-        assert_eq!(DEFAULT_CANDIDATE_POOL_SIZE, 32);
+        // R1.5-T0: the recall-pool-depth default is the ONE knob every
+        // internal channel/fusion limit in the recall path derives from —
+        // pre-registered at 64, up from the historical vector-only 32
+        // (`VECTOR_CANDIDATE_LIMIT`, unchanged, still used directly by tests
+        // that call `fetch_vector_candidates` without going through the
+        // service).
+        assert_eq!(DEFAULT_RECALL_POOL_DEPTH, 64);
+        assert_eq!(memphant_core::VECTOR_CANDIDATE_LIMIT, 32);
     }
 
     #[test]
@@ -1336,11 +1409,17 @@ mod tests {
         assert_eq!(report.budget_tokens, 8192);
         assert_eq!(report.turns_window, DEFAULT_TURNS_WINDOW);
         assert_eq!(report.budget_tokens, DEFAULT_BUDGET_TOKENS);
-        // W3: a report written before `candidate_pool_size` existed must parse
-        // with the field defaulting to the vector KNN fan-out (32) every such
-        // report actually ran.
-        assert_eq!(report.candidate_pool_size, 32);
-        assert_eq!(report.candidate_pool_size, DEFAULT_CANDIDATE_POOL_SIZE);
+        // R1.5-T0 (superseding the W3 note this replaces): a report written
+        // before EITHER `candidate_pool_size` or `recall_pool_depth` existed
+        // must parse with the field defaulting to the vector-only KNN
+        // fan-out (32) every such report actually ran — NOT today's 64
+        // default, which postdates every such report.
+        assert_eq!(report.recall_pool_depth, 32);
+        assert_eq!(
+            report.recall_pool_depth,
+            memphant_core::VECTOR_CANDIDATE_LIMIT
+        );
+        assert_ne!(report.recall_pool_depth, DEFAULT_RECALL_POOL_DEPTH);
         // The runtime_chunks report field serde default STAYS false even after
         // the write path was promoted to default-on: every pre-promotion report
         // was a chunks-off run, so an absent field must parse chunks-OFF and
@@ -1388,6 +1467,51 @@ mod tests {
         assert!(
             !report.cross_rerank,
             "absent cross_rerank must parse false (pre-flag runs were rerank-off)"
+        );
+    }
+
+    /// R1.5-T0: a report written under the OLD field name (`candidate_pool_size`,
+    /// present since W3, before this task's rename to `recall_pool_depth`) must
+    /// still parse — the `#[serde(alias)]` keeps those reports readable without
+    /// falling back to the (wrong, pre-W3) legacy default.
+    #[test]
+    fn old_candidate_pool_size_field_name_still_parses_via_alias() {
+        let json = r#"{
+            "benchmark": "longmemeval_retrieval_only",
+            "dataset_path": "data.json",
+            "dataset_sha256": "abc123",
+            "dataset_questions": 10,
+            "sample_seed": 20260710,
+            "sample_n": 1,
+            "k": 10,
+            "runtime": "postgres",
+            "retrieval_only": true,
+            "embeddings": "noop",
+            "ingestion": "one episode per haystack session",
+            "reflect": "MemoryService::reflect",
+            "mode": "fast",
+            "disabled": null,
+            "command": "bench-lme --sample 1 --seed 20260710 --pool 96",
+            "generated_at_unix": 0,
+            "candidate_pool_size": 96,
+            "overall": {
+                "question_type": "overall",
+                "n": 0,
+                "n_scored": 0,
+                "recall_at_5": null,
+                "recall_at_10": null,
+                "abstention_n": 0,
+                "abstention_correct": 0
+            },
+            "strata": [],
+            "per_question": [],
+            "paired_vs_baseline": null
+        }"#;
+        let report: BenchLmeReport =
+            serde_json::from_str(json).expect("old-field-name report parses");
+        assert_eq!(
+            report.recall_pool_depth, 96,
+            "the serde alias maps the old `candidate_pool_size` field onto `recall_pool_depth`"
         );
     }
 

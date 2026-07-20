@@ -26,7 +26,6 @@ No synonyms in the first public contract. The lifecycle concept is semantic revi
 
 ```text
 POST /v1/episodes
-POST /v1/memory
 POST /v1/recall
 POST /v1/reflect
 POST /v1/correct
@@ -111,8 +110,8 @@ Tenant/subject may come from auth context in hosted mode. They are explicit in e
 | `kinds` | string[] | `[episodic,semantic,procedural,resource]` | **`belief` excluded unless listed** (`05` §1.3) |
 | `mode` | `fast`\|`balanced`\|`exhaustive` | `fast` | `fast` may auto-escalate; `exhaustive` never auto |
 | `arg_risk` | `none`\|`high` | `none` | `high` ⇒ server hard-excludes `high_risk_arg:false` (`06` §4.2) |
-| `as_of` | RFC3339 | `now` | point-in-time recall (§3.1) |
-| `time_basis` | `valid`\|`transaction` | `valid` | which clock `as_of` reads (`04` §7.3) |
+| `transaction_as_of` | RFC3339 | request evaluation time | what the system knew at the task snapshot; future values are rejected (§3.1) |
+| `valid_at` | RFC3339 | resolved `transaction_as_of` | represented-world time to resolve inside that knowledge snapshot (§3.1) |
 | `include_superseded` | bool | `false` | include history; stays citable, no default priority |
 | `include_quarantined` | bool | `false` | analyst/admin only; ignored (not errored) otherwise |
 | `budget` | `{tokens?, max_items?}` | tier default | Stage-7 pack budget; over-budget → `dropped[]` |
@@ -123,18 +122,54 @@ Tenant/subject may come from auth context in hosted mode. They are explicit in e
 
 Unknown fields → `invalid_request` (422). There is no free-text `filters` escape hatch — every selector is a named, schema-checked field.
 
-### 3.1 Bitemporal Recall ("what did we believe as-of X")
+### 3.1 Bitemporal Recall ("what did we know, and when was it true?")
 
-The two-clock model (`04` §7.3) is only a contract if a caller can query either clock — and this is **`recall` parameters, not a new verb**:
+The two-clock model (`04` §7.3) is only a contract if callers can select both
+axes independently. They are **`recall` parameters, not a new verb**. The
+runtime resolves both once per request, normalizes them to UTC, echoes the
+resolved values plus `evaluated_at` in the response/trace, and applies the
+half-open predicates before every channel's top-N. The transaction-time
+predicate applies to **every** unit:
+
+`transaction_from <= transaction_as_of < transaction_to`
+
+The valid-time predicate applies **only to units that carry a represented-world
+window** — `semantic`/`belief` facts (`04` §7.3, the sole bitemporal kinds).
+Episodic, procedural, and resource units have null `valid_*` (`04` schema) and
+are matched on the transaction axis alone; `valid_at` never drops them:
+
+`valid_from <= valid_at < valid_to`
+
+A null bound is open and treated as −∞ (lower) / +∞ (upper) on **both** axes.
+This is load-bearing on the transaction axis: an *open generation* (current
+belief) is exactly `transaction_to IS NULL` (`04` §7.3a), so `transaction_to`
+resolves to +∞ and the default `transaction_as_of` = `evaluated_at` selects it —
+without this, `transaction_as_of < NULL` would be unsatisfiable and drop every
+active unit. Likewise a null `valid_from`/`valid_to` makes an open-ended window
+always contain `valid_at`.
 
 | Intent | Request | Semantics |
 |---|---|---|
-| Current truth (default) | `as_of` omitted | active units whose validity window contains `now` |
-| Point-in-time (represented world) | `as_of`, `time_basis: valid` | what was *true* then, even if later superseded |
-| Audit / replay | `as_of`, `time_basis: transaction` | what MemPhant *knew and would have returned* then — reproduces a past recall before any late correction (`04` §3.2) |
+| Current truth (default) | both omitted | open knowledge at request evaluation time whose validity window contains that same instant |
+| Point-in-time world state using current knowledge | `valid_at` only | what current knowledge says was true then, including retroactive corrections |
+| Audit / replay | `transaction_as_of` only | what MemPhant knew at that snapshot, resolved at the same represented-world instant |
+| Full bitemporal query | both fields | what MemPhant knew at `transaction_as_of` about the world at `valid_at` |
 | Fact history | `include_superseded: true` | active + superseded units on the `supersedes` chain, ordered by `valid_from` |
 
-`time_basis: transaction` is what makes an archived trace reproducible after a retroactive validity correction. Historical recall **still applies all Stage-0 gates** — a forgotten unit is gone from every `as_of`.
+`include_superseded: true` (Fact history) is the one mode that **relaxes both
+temporal gates**: it walks the `supersedes` chain and returns every generation
+in full — closed ones (`transaction_to` in the past) and those whose validity
+window does not contain `valid_at` — that a point-in-time snapshot would exclude.
+History traversal is not a snapshot query; only Stage-0 authorization and
+permanent forgetting still apply.
+
+There is deliberately no legacy single-timestamp-plus-clock-selector form: it
+cannot express both axes and makes replay ambiguous. Historical recall **still applies
+current Stage-0 authorization and permanent forgetting** — a forgotten unit is
+gone from every snapshot. A `transaction_as_of` after the request evaluation
+time is rejected (`invalid_request`, 422) — there is no knowledge snapshot for a
+future instant. The write-side transaction timestamp is database-assigned;
+clients cannot backdate writes.
 
 ## 4. Recall Result
 
@@ -154,6 +189,11 @@ The two-clock model (`04` §7.3) is only a contract if a caller can query either
     }
   ],
   "context": "compact context block",
+  "resolved_as_of": {
+    "transaction_as_of": "2026-07-14T12:00:00Z",
+    "valid_at": "2026-07-14T12:00:00Z",
+    "evaluated_at": "2026-07-14T12:00:00Z"
+  },
   "dropped": [{"id": "mem_...", "reason": "budget"}],
   "warnings": [{"type": "contradiction", "between": ["mem_a", "mem_b"]}],
   "degraded": false,
@@ -161,6 +201,8 @@ The two-clock model (`04` §7.3) is only a contract if a caller can query either
   "trace_ref": "trace_..."
 }
 ```
+
+`resolved_as_of` echoes the two axes the runtime resolved for this request (`transaction_as_of`, `valid_at`) plus `evaluated_at` (the request evaluation instant): an omitted `transaction_as_of` defaults to `evaluated_at`, and an omitted `valid_at` defaults to the resolved `transaction_as_of` — so a caller and an archived trace read back exactly which bitemporal snapshot produced the result (§3.1).
 
 `degraded: true` + a non-zero `consolidation_lag_ms` mean recall fell back to raw-episode/lexical retrieval because units were un-extracted (`02` §3.1) — the answer is honest about being stale rather than silently missing.
 
@@ -189,7 +231,10 @@ Citation payloads can omit snippets when tenant policy redacts content. IDs and 
 
 Every verb gets a worked request → response so the contract is unambiguous (not just `recall`).
 
-**`retain`** — `POST /v1/episodes` (raw) or `POST /v1/memory` (caller-supplied unit). Write returns fast; consolidation is async.
+**`retain`** — `POST /v1/episodes` with exactly one episode, resource, or
+direct-unit payload shape. Episode/resource writes return fast and consolidate
+asynchronously; a trusted direct unit is admitted synchronously through the
+same reflect policy.
 
 ```jsonc
 // request
@@ -204,7 +249,21 @@ Every verb gets a worked request → response so the contract is unambiguous (no
   "enqueued": ["extract_episode"], "trace_ref": "trace_w_..." }
 ```
 
-**`retain` has three payload shapes (one verb, dispatched by `target`):** `episode` (default; `POST /v1/episodes`, raw body → ground truth, async extract), `unit` (`POST /v1/memory`, caller-asserted `{kind,body,subject,predicate,payload}` → a `candidate`, never auto-`active`), `resource` (`POST /v1/episodes` with `resource:{uri,mime,content_hash,acl}` → `registered`, extractor FSM runs, `04` §6.1). **Trust hints are advisory:** `source_trust` in the request is a *hint*; the engine derives the real class from `source_kind`+provenance and **caps at the source ceiling** (`06` §3.2/§2.2) — a caller cannot retain `web_content` as `trusted_system`, and the response echoes the **assigned** trust (which may differ). **Batch:** `POST /v1/episodes:batch` (`{episodes:[...]}`, ≤ tier cap) is the streaming-ingest path, all-or-nothing per `Idempotency-Key`, per-item `idempotency_key` for fine-grained replay; dedup collapses re-arrivals inside the batch.
+**`retain` has three mutually exclusive payload shapes on one endpoint:**
+`episode` (default raw body → ground truth, async extract), `resource`
+(`resource:{uri,mime,content_hash,...}` → registered resource, extractor
+FSM runs; `04` §6.1), and trusted direct `unit`
+(`unit:{kind,body,subject,predicate,churn_class?,valid_from?,valid_to?}` →
+synchronous policy-checked reflect). Direct validity bounds are RFC3339 and
+half-open; if both are present `valid_from < valid_to`. They are accepted only
+for the bitemporal kinds that carry a represented-world window (`kind` in
+`semantic`/`belief`, `04` §7.3); supplying `valid_*` with any other `kind` is
+rejected (`invalid_request`, 422). They describe represented-world time
+only—transaction time is assigned by the server and is never caller-settable. **Trust hints are advisory:** `source_trust` in the
+request is capped by authenticated provenance (`06` §3.2/§2.2), and the
+response echoes the assigned trust. **Batch:** `POST /v1/episodes:batch`
+(`{episodes:[...]}`, ≤ tier cap) is the streaming-ingest path, all-or-nothing
+per `Idempotency-Key`, with per-item idempotency for fine-grained replay.
 
 **`reflect`** — `POST /v1/reflect`. Triggers/awaits consolidation for a scope; returns what it did (the §9 `04` contract made observable).
 
@@ -235,7 +294,7 @@ Every verb gets a worked request → response so the contract is unambiguous (no
   "trace_ref": "trace_c_..." }
 ```
 
-`correct` is **append-only** (`04` §7.3a): it closes `mem_old`'s open generation and INSERTs `mem_new` — the supersedes-chain response is the application-time view of those two physical rows, so the public shape is unchanged. A retroactive correction does **not** rewrite already-emitted citations of `mem_old` (they remain reproducible via `time_basis:transaction`).
+`correct` is **append-only** (`04` §7.3a): it closes `mem_old`'s open generation and INSERTs `mem_new` — the supersedes-chain response is the application-time view of those two physical rows, so the public shape is unchanged. A retroactive correction does **not** rewrite already-emitted citations of `mem_old` (they remain reproducible with the archived trace's `transaction_as_of` and `valid_at`).
 
 **Critical updates are read-back-confirmed, never fire-and-forget.** `correct` and `forget` confirm the new state by re-reading it before returning — the `superseded`/`created`/`invalidated` sets in the response are the *read-back*, not an optimistic echo. This closes the lost-write failure (Letta/MemGPT #689: a corrected fact reverts on the next turn because the write was never actually applied) — a write that didn't land is detected and surfaced as an error, not silently dropped. The mutation is a deterministic DB op (not an LLM tool-call the model can forget to make), so the confirmation is structural.
 

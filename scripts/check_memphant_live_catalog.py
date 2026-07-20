@@ -11,7 +11,9 @@ ROOT = Path(__file__).resolve().parents[1]
 REQUIRED_TABLES = {
     "tenant",
     "subject",
+    "subject_tombstone",
     "actor",
+    "context_binding",
     "agent_node",
     "scope",
     "scope_policy",
@@ -35,9 +37,12 @@ REQUIRED_TABLES = {
     "schema_migrations",
     "api_key",
     "forgotten_source",
+    "mutation_ledger",
 }
 
 TENANT_RLS_TABLES = REQUIRED_TABLES - {"schema_migrations"}
+VECTOR_CAPABILITIES = {"vector", "halfvec", "vector_cosine", "halfvec_cosine"}
+HNSW_INDEX = "memphant_embedding_hnsw_idx"
 
 
 def psql_json(database_url: str, sql: str) -> list[dict[str, object]]:
@@ -73,11 +78,28 @@ def semver_at_least(actual: str, minimum: str) -> bool:
     return parts(actual) >= parts(minimum)
 
 
+def vector_findings(
+    *, mode: str, version: str, capabilities: set[str], index_names: set[str]
+) -> list[str]:
+    findings = [
+        f"vector:missing_capability:{capability}"
+        for capability in sorted(VECTOR_CAPABILITIES - capabilities)
+    ]
+    if not semver_at_least(version, "0.8.0"):
+        findings.append(f"vector:exact_below_floor:{version}")
+    if mode == "hnsw":
+        if not semver_at_least(version, "0.8.4"):
+            findings.append(f"vector:hnsw_below_floor:{version}")
+        if HNSW_INDEX not in index_names:
+            findings.append(f"embedding:missing_hnsw_index:{HNSW_INDEX}")
+    return findings
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Check a live MemPhant Postgres catalog.")
     parser.add_argument("--database-url", required=True)
     parser.add_argument("--min-postgres-version", type=int, default=17)
-    parser.add_argument("--min-pgvector-version", default="0.8.4")
+    parser.add_argument("--vector-mode", choices=("exact", "hnsw"), default="exact")
     args = parser.parse_args()
 
     findings: list[str] = []
@@ -102,8 +124,25 @@ def main() -> int:
         if extension not in extensions:
             findings.append(f"{extension}:missing_extension")
     vector_version = str(extensions.get("vector", "0.0.0"))
-    if not semver_at_least(vector_version, args.min_pgvector_version):
-        findings.append(f"vector:below_floor:{vector_version}")
+    vector_capabilities = {
+        str(row["capability"])
+        for row in psql_json(
+            args.database_url,
+            """
+            select typname as capability
+            from pg_type
+            where typname in ('vector', 'halfvec')
+            union all
+            select case t.typname
+                     when 'vector' then 'vector_cosine'
+                     when 'halfvec' then 'halfvec_cosine'
+                   end as capability
+            from pg_operator o
+            join pg_type t on t.oid = o.oprleft and o.oprleft = o.oprright
+            where o.oprname = '<=>' and t.typname in ('vector', 'halfvec')
+            """,
+        )
+    }
 
     tables = {
         row["tablename"]
@@ -132,6 +171,54 @@ def main() -> int:
     for table in sorted(TENANT_RLS_TABLES - rls_tables):
         findings.append(f"{table}:missing_rls")
 
+    force_rls_tables = {
+        row["relname"]
+        for row in psql_json(
+            args.database_url,
+            """
+            select c.relname
+            from pg_class c
+            join pg_namespace n on n.oid = c.relnamespace
+            where n.nspname = 'memphant'
+              and c.relkind = 'r'
+              and c.relforcerowsecurity
+            """,
+        )
+    }
+    for table in sorted(TENANT_RLS_TABLES - force_rls_tables):
+        findings.append(f"{table}:missing_force_rls")
+
+    roles = {
+        row["rolname"]
+        for row in psql_json(
+            args.database_url,
+            """
+            select rolname from pg_roles where rolname in (
+              'memphant_owner','memphant_app','memphant_worker','memphant_authn',
+              'memphant_readonly','memphant_provisioner'
+            )
+            """,
+        )
+    }
+    for role in sorted({
+        "memphant_owner", "memphant_app", "memphant_worker", "memphant_authn",
+        "memphant_readonly", "memphant_provisioner",
+    } - roles):
+        findings.append(f"{role}:missing_capability_role")
+
+    wrong_owners = psql_json(
+        args.database_url,
+        """
+        select c.relname, pg_get_userbyid(c.relowner) as owner
+        from pg_class c
+        join pg_namespace n on n.oid = c.relnamespace
+        where n.nspname = 'memphant' and c.relkind in ('r','S')
+          and pg_get_userbyid(c.relowner) <> 'memphant_owner'
+        """,
+    )
+    for row in wrong_owners:
+        findings.append(f"{row['relname']}:wrong_owner:{row['owner']}")
+
     browser_grants = psql_json(
         args.database_url,
         """
@@ -153,14 +240,35 @@ def main() -> int:
         from pg_proc p
         join pg_namespace n on n.oid = p.pronamespace
         where n.nspname = 'memphant'
-          and p.proname in ('current_tenant_id','set_updated_at')
+          and p.proname in (
+            'current_tenant_id','bind_tenant','set_updated_at','authenticate_api_key',
+            'claim_reflect_jobs','dead_letter_count','provision_tenant','provision_api_key','revoke_api_key'
+          )
         """,
     )
     for row in function_search_path:
         if "search_path=memphant, pg_catalog" not in str(row["proconfig"]):
             findings.append(f"{row['proname']}:missing_search_path")
-    if len(function_search_path) != 2:
+    if len(function_search_path) != 9:
         findings.append("functions:missing_search_path_checked_functions")
+
+    security_definers = {
+        row["proname"]
+        for row in psql_json(
+            args.database_url,
+            """
+            select p.proname
+            from pg_proc p
+            join pg_namespace n on n.oid = p.pronamespace
+            where n.nspname = 'memphant' and p.prosecdef
+            """,
+        )
+    }
+    for function in sorted({
+        "authenticate_api_key", "claim_reflect_jobs", "dead_letter_count", "provision_tenant",
+        "provision_api_key", "revoke_api_key",
+    } - security_definers):
+        findings.append(f"{function}:missing_security_definer")
 
     tenant_indexes = {
         row["tablename"]
@@ -212,16 +320,26 @@ def main() -> int:
             "select indexname from pg_indexes where schemaname = 'memphant'",
         )
     }
-    # Migration 002 replaces tenant-wide open-subject uniqueness with
-    # scope-bound uniqueness; a silent `if exists` no-op must be caught here.
+    findings.extend(
+        vector_findings(
+            mode=args.vector_mode,
+            version=vector_version,
+            capabilities=vector_capabilities,
+            index_names=index_names,
+        )
+    )
+    # Current subject generations may coexist only across disjoint valid-time
+    # rectangles; the exclusion constraint owns its backing index.
     if "memphant_memory_unit_tenant_open_subject_idx" in index_names:
         findings.append(
             "memory_unit:stale_index:memphant_memory_unit_tenant_open_subject_idx"
         )
-    if "memphant_memory_unit_scope_subject_idx" not in index_names:
+    if "memphant_memory_unit_subject_valid_excl" not in index_names:
         findings.append(
-            "memory_unit:missing_index:memphant_memory_unit_scope_subject_idx"
+            "memory_unit:missing_index:memphant_memory_unit_subject_valid_excl"
         )
+    if "memphant_memory_unit_history_idx" not in index_names:
+        findings.append("memory_unit:missing_index:memphant_memory_unit_history_idx")
 
     migrations = psql_json(
         args.database_url,

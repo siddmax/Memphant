@@ -1,0 +1,675 @@
+{
+  "benchmark": "longmemeval_reader_qa",
+  "engine": "openrouter",
+  "reader": "openai/gpt-5.6-terra (openrouter chat/completions API)",
+  "judge": "containment+anthropic/claude-sonnet-5 (normalized containment first; one LLM judge call on non-match; abstention = exact 'I don't know' containment)",
+  "reader_model_id": "openai/gpt-5.6-terra",
+  "judge_model_id": "anthropic/claude-sonnet-5",
+  "prompt_version": 1,
+  "routing": null,
+  "reasoning_effort": null,
+  "runtime": "postgres",
+  "label": "r1-diag-k50-v1",
+  "evidence_path": "docs/build-log/artifacts/r1-docs/diag-k50/v1/evidence.jsonl",
+  "retrieval_report": null,
+  "command": "scripts/run_reader.py --engine openrouter --model openai/gpt-5.6-terra --judge-model anthropic/claude-sonnet-5 --evidence docs/build-log/artifacts/r1-docs/diag-k50/v1/evidence.jsonl --out docs/build-log/artifacts/r1-docs/diag-k50/v1/reader.json --label r1-diag-k50-v1 --cache-dir docs/build-log/artifacts/r0-embedder/reader-cache --max-calls 200",
+  "generated_at_unix": 1783879871,
+  "aborted": null,
+  "fresh_calls": 80,
+  "cached_calls": 13,
+  "overall": {
+    "n": 60,
+    "n_scored": 60,
+    "qa_accuracy": 0.2833333333333333
+  },
+  "strata": {
+    "contracts": {
+      "n": 1,
+      "n_scored": 1,
+      "qa_accuracy": 0.0
+    },
+    "decisions": {
+      "n": 2,
+      "n_scored": 2,
+      "qa_accuracy": 0.0
+    },
+    "multi-hop": {
+      "n": 12,
+      "n_scored": 12,
+      "qa_accuracy": 0.25
+    },
+    "ops": {
+      "n": 7,
+      "n_scored": 7,
+      "qa_accuracy": 0.14285714285714285
+    },
+    "plans": {
+      "n": 4,
+      "n_scored": 4,
+      "qa_accuracy": 0.25
+    },
+    "root": {
+      "n": 15,
+      "n_scored": 15,
+      "qa_accuracy": 0.3333333333333333
+    },
+    "runbooks": {
+      "n": 6,
+      "n_scored": 6,
+      "qa_accuracy": 0.3333333333333333
+    },
+    "specs": {
+      "n": 10,
+      "n_scored": 10,
+      "qa_accuracy": 0.4
+    },
+    "tools": {
+      "n": 3,
+      "n_scored": 3,
+      "qa_accuracy": 0.3333333333333333
+    }
+  },
+  "per_question": [
+    {
+      "question_id": "syndai_docs_s001_ops",
+      "question_type": "ops",
+      "is_abstention": false,
+      "gold_answer": "$50",
+      "reply": "$10 daily cost.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s002_plans",
+      "question_type": "plans",
+      "is_abstention": false,
+      "gold_answer": "v3.2",
+      "reply": "v3.2",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s003_root",
+      "question_type": "root",
+      "is_abstention": false,
+      "gold_answer": "Stripe and Payoneer",
+      "reply": "Stripe Connect and Payoneer.",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s004_specs",
+      "question_type": "specs",
+      "is_abstention": false,
+      "gold_answer": "pgvector",
+      "reply": "Vector similarity search using embeddings.",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s005_tools",
+      "question_type": "tools",
+      "is_abstention": false,
+      "gold_answer": "`name` + `description`",
+      "reply": "`name` and `description`",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s006_root",
+      "question_type": "root",
+      "is_abstention": false,
+      "gold_answer": "mobile-first continuity",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s007_specs",
+      "question_type": "specs",
+      "is_abstention": false,
+      "gold_answer": "\"DateTime\"",
+      "reply": "I don't know",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s008_ops",
+      "question_type": "ops",
+      "is_abstention": false,
+      "gold_answer": "low, sporadic",
+      "reply": "Real-device testing is opt-in only and expected at low volume.",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s009_root",
+      "question_type": "root",
+      "is_abstention": false,
+      "gold_answer": "Traditional chatbot pattern",
+      "reply": "User-initiated chat interaction",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s010_specs",
+      "question_type": "specs",
+      "is_abstention": false,
+      "gold_answer": "Feeling of accomplishment",
+      "reply": "Request feedback at a success moment, when the user has experienced value, while avoiding prompt fatigue.",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s011_tools",
+      "question_type": "tools",
+      "is_abstention": false,
+      "gold_answer": "a stable response envelope",
+      "reply": "Structured JSON matching the target schema.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s012_decisions",
+      "question_type": "decisions",
+      "is_abstention": false,
+      "gold_answer": "seed_router_evidence.py",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s013_ops",
+      "question_type": "ops",
+      "is_abstention": false,
+      "gold_answer": "Phase 17 Mobile Validation spec \u00a7 Real Device",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s014_root",
+      "question_type": "root",
+      "is_abstention": false,
+      "gold_answer": "Talk to 5 potential customers",
+      "reply": "Build an MVP to validate demand.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s015_contracts",
+      "question_type": "contracts",
+      "is_abstention": false,
+      "gold_answer": "coding_runs.validation_config",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s016_specs",
+      "question_type": "specs",
+      "is_abstention": false,
+      "gold_answer": "`babel`",
+      "reply": "shadcn (`shadcn@latest`)",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s017_tools",
+      "question_type": "tools",
+      "is_abstention": false,
+      "gold_answer": "reserved `can_` prefix",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s018_ops",
+      "question_type": "ops",
+      "is_abstention": false,
+      "gold_answer": "~$0.15",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s019_root",
+      "question_type": "root",
+      "is_abstention": false,
+      "gold_answer": "<500ms target",
+      "reply": "<10ms per rule check.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s020_ops",
+      "question_type": "ops",
+      "is_abstention": false,
+      "gold_answer": "Sentry",
+      "reply": "Grafana Cloud",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s021_specs",
+      "question_type": "specs",
+      "is_abstention": false,
+      "gold_answer": "TaskService",
+      "reply": "ToolRunnerFactory",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s022_root",
+      "question_type": "root",
+      "is_abstention": false,
+      "gold_answer": "agent creator defaults + task detection",
+      "reply": "Task type: exploration, transaction, building, or monitoring.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s023_root",
+      "question_type": "root",
+      "is_abstention": false,
+      "gold_answer": "SSE",
+      "reply": "Server-Sent Events (SSE)",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s024_specs",
+      "question_type": "specs",
+      "is_abstention": false,
+      "gold_answer": "Horizontal step sequence",
+      "reply": "Horizontal step sequence.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s025_ops",
+      "question_type": "ops",
+      "is_abstention": false,
+      "gold_answer": "service account, not user credentials",
+      "reply": "Username-and-key Basic authentication in the Appium provider URL.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s026_runbooks",
+      "question_type": "runbooks",
+      "is_abstention": false,
+      "gold_answer": "destroy()",
+      "reply": "`make coding-local-db-down`",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s027_ops",
+      "question_type": "ops",
+      "is_abstention": false,
+      "gold_answer": "$500/mo",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s028_plans",
+      "question_type": "plans",
+      "is_abstention": false,
+      "gold_answer": "tail risk",
+      "reply": "Production outcome correlation.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s029_root",
+      "question_type": "root",
+      "is_abstention": false,
+      "gold_answer": "Code execution isolation",
+      "reply": "Isolated sandboxed code execution for agents and tools.",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s030_specs",
+      "question_type": "specs",
+      "is_abstention": false,
+      "gold_answer": "LiteLLM",
+      "reply": "I don't know",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s031_root",
+      "question_type": "root",
+      "is_abstention": false,
+      "gold_answer": "MarketplaceListing",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s032_specs",
+      "question_type": "specs",
+      "is_abstention": false,
+      "gold_answer": "tree structure",
+      "reply": "Community summaries organized hierarchically by abstraction level.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s033_decisions",
+      "question_type": "decisions",
+      "is_abstention": false,
+      "gold_answer": "cost router inputs",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s034_root",
+      "question_type": "root",
+      "is_abstention": false,
+      "gold_answer": "isolated sandbox",
+      "reply": "Firecracker microVM isolated sandbox.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s035_specs",
+      "question_type": "specs",
+      "is_abstention": false,
+      "gold_answer": "Damped sine wave",
+      "reply": "A damped sine wave.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s036_root",
+      "question_type": "root",
+      "is_abstention": false,
+      "gold_answer": "Operational complexity",
+      "reply": "I don't know",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s037_root",
+      "question_type": "root",
+      "is_abstention": false,
+      "gold_answer": "any limits lift automatically.",
+      "reply": "Restrictions lift automatically after a verified fix.",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s038_runbooks",
+      "question_type": "runbooks",
+      "is_abstention": false,
+      "gold_answer": "validator-execution time",
+      "reply": "At validator-execution time.",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s039_plans",
+      "question_type": "plans",
+      "is_abstention": false,
+      "gold_answer": "_extract_todo_state",
+      "reply": "Task History component",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s040_root",
+      "question_type": "root",
+      "is_abstention": false,
+      "gold_answer": "CodeActRunner",
+      "reply": "ProcessingPipeline",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s041_runbooks",
+      "question_type": "runbooks",
+      "is_abstention": false,
+      "gold_answer": "validation_bootstrap scaffolder",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s042_plans",
+      "question_type": "plans",
+      "is_abstention": false,
+      "gold_answer": "CapSolverTaskError",
+      "reply": "LLMServiceUnavailableException",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s043_runbooks",
+      "question_type": "runbooks",
+      "is_abstention": false,
+      "gold_answer": "412",
+      "reply": "412",
+      "judge_method": "containment",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s044_root",
+      "question_type": "root",
+      "is_abstention": false,
+      "gold_answer": "Answer this query using ONLY the provided evidence.",
+      "reply": "Answer based on the context provided.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s045_specs",
+      "question_type": "specs",
+      "is_abstention": false,
+      "gold_answer": "OpenAI's expected format",
+      "reply": "Append the assistant `tool_calls` message, then one `role: \"tool\"` message per call with matching `tool_call_id` and output content.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s046_root",
+      "question_type": "root",
+      "is_abstention": false,
+      "gold_answer": "Providers, repositories, models",
+      "reply": "Claude Code executor, planner/test-spec gates, worktree orchestration, validation/repair loop, and review-governance routing.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s047_runbooks",
+      "question_type": "runbooks",
+      "is_abstention": false,
+      "gold_answer": "Syndai-INFRA failures only.",
+      "reply": "Emergency (abuse response)",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_s048_runbooks",
+      "question_type": "runbooks",
+      "is_abstention": false,
+      "gold_answer": "a timeout or ambiguity turns the\ndeploy pipeline red.",
+      "reply": "Expiration marks it expired and rejects it (410); release uncertainty fails closed\u2014investigate, then rerun the normal deploy.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_m001",
+      "question_type": "multi-hop",
+      "is_abstention": false,
+      "gold_answer": "uv run --project backend python backend/scripts/check_github_workflow_security.py",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_m002",
+      "question_type": "multi-hop",
+      "is_abstention": false,
+      "gold_answer": "higher quality_score",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_m003",
+      "question_type": "multi-hop",
+      "is_abstention": false,
+      "gold_answer": "~277 LoC",
+      "reply": "~277 lines of code.",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_m004",
+      "question_type": "multi-hop",
+      "is_abstention": false,
+      "gold_answer": "Scrollable, tappable, shows tool sequence",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_m005",
+      "question_type": "multi-hop",
+      "is_abstention": false,
+      "gold_answer": "Langfuse Python SDK operates independently of Sentry's OTEL integration.",
+      "reply": "Langfuse\u2019s Python SDK operates independently and coexists without conflict; no configuration changes are needed.",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_m006",
+      "question_type": "multi-hop",
+      "is_abstention": false,
+      "gold_answer": "Trading account, order, broker, fill, tax, and audit tables must not be directly writable by mobile clients.",
+      "reply": "Mobile never directly accesses domain database structures; it uses only Supabase JWT through the Litestar API.",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_m007",
+      "question_type": "multi-hop",
+      "is_abstention": false,
+      "gold_answer": "escalates instead of looping",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_m008",
+      "question_type": "multi-hop",
+      "is_abstention": false,
+      "gold_answer": "`/usr/local/bin`",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_m009",
+      "question_type": "multi-hop",
+      "is_abstention": false,
+      "gold_answer": "Ruby, Elixir, .NET, PHP",
+      "reply": "Ruby, Elixir, .NET, and PHP.",
+      "judge_method": "llm_judge",
+      "correct": true,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_m010",
+      "question_type": "multi-hop",
+      "is_abstention": false,
+      "gold_answer": "backend/src/features/coding/validation/mobile/firebase_test_lab.py",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_m011",
+      "question_type": "multi-hop",
+      "is_abstention": false,
+      "gold_answer": "FORCE_LOCALE works for UI + network",
+      "reply": "I don't know.",
+      "judge_method": "containment",
+      "correct": false,
+      "reader_error": null
+    },
+    {
+      "question_id": "syndai_docs_m012",
+      "question_type": "multi-hop",
+      "is_abstention": false,
+      "gold_answer": "`coding_runs.validation_config`",
+      "reply": "`coding_repositories.validation_manifest`",
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null
+    }
+  ],
+  "paired_vs_baseline": null
+}

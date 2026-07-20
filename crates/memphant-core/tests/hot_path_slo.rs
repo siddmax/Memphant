@@ -2,8 +2,8 @@ use std::time::{Duration, Instant};
 
 use memphant_core::{FixedClock, InMemoryStore, MemoryStore, recall};
 use memphant_types::{
-    ActorId, ENGINE_VERSION, MemoryKind, NewEpisode, NewMemoryUnit, RecallMode, RecallRequest,
-    ScopeId, TenantId, TrustLevel, UnitState,
+    ENGINE_VERSION, MemoryKind, NewEpisode, NewMemoryUnit, RecallMode, RecallRequest,
+    ResolvedMemoryContext, TenantId, TrustLevel, UnitState,
 };
 
 const CLOCK: FixedClock = FixedClock("2026-07-03T00:00:00Z");
@@ -15,28 +15,16 @@ fn tenant(value: u128) -> TenantId {
     TenantId::from_u128(value)
 }
 
-fn scope(value: u128) -> ScopeId {
-    ScopeId::from_u128(value)
-}
-
-fn actor(value: u128) -> ActorId {
-    ActorId::from_u128(value)
-}
-
 #[tokio::test]
 async fn fast_mode_recall_holds_release_hot_path_slo() {
     let store = InMemoryStore::default();
     let tenant_id = tenant(86_000);
-    let scope_id = scope(86_001);
-    let actor_id = actor(86_002);
+    let context = memphant_store_testkit::bind_context(&store, tenant_id).await;
 
-    seed_reference_corpus(&store, tenant_id, scope_id, actor_id).await;
+    seed_reference_corpus(&store, &context).await;
 
     let request = RecallRequest {
-        tenant_id,
-        scope_id,
-        actor_id,
-        allowed_scope_ids: vec![scope_id],
+        context: context.clone(),
         query: "release owner for atlas rollback".to_string(),
         k: 5,
         budget_tokens: 512,
@@ -50,6 +38,9 @@ async fn fast_mode_recall_holds_release_hot_path_slo() {
         procedure_recall_enabled: false,
         decay_enabled: false,
         engine_version: ENGINE_VERSION.to_string(),
+        transaction_as_of: None,
+        valid_at: None,
+        aggregation_window: None,
     };
 
     for _ in 0..5 {
@@ -91,20 +82,15 @@ fn percentile(samples: &[Duration], quantile: f64) -> Duration {
     samples[index]
 }
 
-async fn seed_reference_corpus(
-    store: &InMemoryStore,
-    tenant_id: TenantId,
-    scope_id: ScopeId,
-    actor_id: ActorId,
-) {
-    let mut tx = store.begin().await;
+async fn seed_reference_corpus(store: &InMemoryStore, context: &ResolvedMemoryContext) {
+    let mut tx = store.begin(context).await.expect("begin transaction");
     for index in 0..240 {
         let body = if index == 121 {
             "Atlas rollback release owner is platform on-call; cite runbook RB-77."
         } else {
             "Routine release note for an unrelated service shard."
         };
-        let subject_key = if index == 121 {
+        let fact_key = if index == 121 {
             "release_owner:atlas_rollback".to_string()
         } else {
             format!("release_note:shard_{index}")
@@ -113,10 +99,15 @@ async fn seed_reference_corpus(
             .stage_episode(
                 &mut tx,
                 NewEpisode {
-                    tenant_id,
-                    scope_id,
-                    actor_id,
+                    tenant_id: context.tenant_id,
+                    data_subject_id: context.data_subject_id,
+                    scope_id: context.scope_id,
+                    agent_node_id: context.agent_node_id,
+                    subject_generation: context.subject_generation,
+                    actor_id: context.actor_id,
                     source_kind: "reference-corpus".to_string(),
+                    source_ref: "test:fixture".to_string(),
+                    observed_at: "2026-07-09T00:00:00Z".to_string(),
                     source_trust: TrustLevel::TrustedSystem,
                     dedup_key: format!("hot_path_slo:{index}"),
                     body: body.to_string(),
@@ -128,17 +119,24 @@ async fn seed_reference_corpus(
             .stage_memory_unit(
                 &mut tx,
                 NewMemoryUnit {
-                    tenant_id,
-                    scope_id,
+                    tenant_id: context.tenant_id,
+                    data_subject_id: context.data_subject_id,
+                    scope_id: context.scope_id,
+                    agent_node_id: context.agent_node_id,
+                    subject_generation: context.subject_generation,
                     kind: MemoryKind::Semantic,
                     state: UnitState::Active,
-                    subject_key: Some(subject_key),
+                    fact_key: Some(fact_key),
+                    predicate: None,
                     body: body.to_string(),
+                    confidence: Some(1.0),
                     trust_level: TrustLevel::TrustedSystem,
                     churn_class: None,
                     freshness_due_at: None,
-                    actor_id: Some(actor_id),
+                    actor_id: Some(context.actor_id),
                     source_kind: Some("reference-corpus".to_string()),
+                    source_ref: "test:fixture".to_string(),
+                    observed_at: "2026-07-09T00:00:00Z".to_string(),
                     source_episode_id: Some(episode.episode_id),
                     source_resource_id: None,
                     deletion_generation: None,

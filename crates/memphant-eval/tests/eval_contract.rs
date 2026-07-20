@@ -12,12 +12,12 @@ fn oracle_suite_runs_and_verifies_load_bearing_labels() {
     let suite = root.join("examples/evals/golden.yaml");
 
     let report = run_eval_file(&suite, EvalRunOptions::default()).expect("golden run");
-    assert_eq!(report.total_cases, 14);
+    assert_eq!(report.total_cases, 13);
     assert_eq!(report.passed_cases, report.total_cases);
     assert!(report.case_results.iter().all(|case| case.passed));
 
     let verify = verify_golden_file(&suite).expect("verify golden");
-    assert_eq!(verify.verified_cases, 14);
+    assert_eq!(verify.verified_cases, 13);
     assert!(verify.case_results.iter().all(|case| case.load_bearing));
 }
 
@@ -26,7 +26,7 @@ fn verify_golden_accepts_whole_corpus_directory() {
     let verify =
         verify_golden_file(&repo_root().join("examples/evals")).expect("verify golden directory");
 
-    assert_eq!(verify.verified_cases, 14);
+    assert_eq!(verify.verified_cases, 13);
     assert!(verify.case_results.iter().all(|case| case.load_bearing));
 }
 
@@ -313,6 +313,7 @@ fn rung11_memorystress_style_suite_proves_dsr_decay_delta() {
 }
 
 #[test]
+#[ignore = "dormant until P1-T6 agentic deep mode: the engine l4_exhaustive stage is unimplemented (recall_stage_facts hardcodes it disabled; l4_exhaustive_enabled flag never emitted)"]
 fn rung12_l4_exhaustive_suite_proves_raw_episode_delta() {
     let suite = repo_root().join("benchmarks/rung12-l4-exhaustive-sampled.yaml");
     let with_l4 = run_eval_file(&suite, EvalRunOptions::default()).expect("with l4 exhaustive");

@@ -1,0 +1,586 @@
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path
+import socket
+import sys
+import types
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "scripts/run_longmemeval_v2.py"
+LOCK = ROOT / "benchmarks/manifests/longmemeval_v2.lock.json"
+EVOMEM_AUDIT = ROOT / "benchmarks/manifests/evomembench.release-audit.json"
+MEMPHANT_ADAPTER = ROOT / "benchmarks/longmemeval_v2/memphant_memory.py"
+MEMPHANT_CONFIG = ROOT / "benchmarks/longmemeval_v2/memphant.memory.json"
+MEMPHANT_BOOTSTRAP = ROOT / "benchmarks/longmemeval_v2/harness_bootstrap.py"
+MATERIALIZER = ROOT / "scripts/materialize_longmemeval_v2_runtime.py"
+MEMPHANT_ADAPTER_LOCK = (
+    ROOT / "benchmarks/manifests/longmemeval_v2_memphant_adapter.lock.json"
+)
+
+
+def load_adapter():
+    spec = importlib.util.spec_from_file_location("run_longmemeval_v2", SCRIPT)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_longmemeval_v2_release_is_immutably_pinned_and_native_scored():
+    lock = json.loads(LOCK.read_text())
+
+    assert lock["code"]["commit"] == "be15ea6e995462f3391c1a610892df3f67dfa7bd"
+    assert lock["dataset"]["revision"] == "f152293e235517d504809563c833d7190b8c713b"
+    assert lock["code"]["license"] == lock["dataset"]["license"] == "Apache-2.0"
+    assert lock["protocol"]["generation_and_scoring"] == (
+        "official evaluation/harness.py at code.commit"
+    )
+    assert lock["dataset"]["files"]["trajectories.jsonl"]["bytes"] == 1_195_604_539
+    assert lock["dataset"]["files"]["trajectory_screenshots/web_screenshots.tar.gz"][
+        "bytes"
+    ] == 2_562_302_847
+
+
+def test_release_urls_are_revision_pinned():
+    adapter = load_adapter()
+    lock = json.loads(LOCK.read_text())
+
+    urls = adapter.release_urls(lock)
+
+    assert lock["code"]["commit"] in urls["code_archive"]
+    assert lock["dataset"]["revision"] in urls["dataset_revision"]
+    assert "/resolve/main/" not in urls["dataset_revision"]
+
+
+def test_verify_dataset_fails_closed_on_any_locked_file_drift(tmp_path):
+    adapter = load_adapter()
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "checksums.sha256").write_text("abc  questions.jsonl\n")
+    (data / "questions.jsonl").write_text("drift")
+    expected = {
+        "checksums_file": {"path": "checksums.sha256", "sha256": "0" * 64},
+        "files": {},
+    }
+
+    with pytest.raises(RuntimeError, match="checksums file sha256 mismatch"):
+        adapter.verify_dataset(data, expected)
+
+
+def test_native_command_delegates_generation_and_scoring_to_official_harness(tmp_path):
+    adapter = load_adapter()
+    official = tmp_path / "official"
+    for relative in (
+        "evaluation/harness.py",
+        "evaluation/qa_eval_metrics.py",
+        "memory_modules/memory.py",
+    ):
+        path = official / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("fixture")
+
+    command = adapter.native_harness_command(
+        official_dir=official,
+        domain="web",
+        questions_path=tmp_path / "questions.json",
+        haystack_path=tmp_path / "haystack.json",
+        trajectories_path=tmp_path / "trajectories.jsonl",
+        memory_config_path=tmp_path / "memory.json",
+        output_dir=tmp_path / "out",
+        reader_model="reader",
+        reader_base_url="http://reader/v1",
+        evaluator_model="judge",
+        evaluator_base_url="http://judge/v1",
+        python="python3",
+    )
+
+    assert command[:2] == ["python3", str(official / "evaluation/harness.py")]
+    assert "--memory-config-path" in command
+    assert command[command.index("--memory-context-max-tokens") + 1] == "32768"
+    assert "--model" in command and "reader" in command
+    assert "--evaluator-model" in command and "judge" in command
+    assert not any("run_longmemeval_v2.py" in part for part in command)
+
+
+def test_evomembench_is_fail_closed_until_repo_level_license_exists():
+    audit = json.loads(EVOMEM_AUDIT.read_text())
+
+    assert audit["code"]["commit"] == "aa4cea8fd936b76b2d3591d3ef897030617dc43a"
+    assert audit["public_execution_ready"] is False
+    assert audit["blockers"]["repository_license"] == "missing"
+    assert audit["decision"] == "do_not_acquire_or_integrate"
+
+
+def load_memphant_adapter(monkeypatch):
+    registry = {}
+
+    class Memory:
+        def __init__(self, memory_params):
+            self.memory_params = memory_params
+            self._context = {}
+
+        def set_query_context(self, **kwargs):
+            self._context = kwargs
+
+        def get_query_context(self):
+            return dict(self._context)
+
+        def clear_query_context(self):
+            self._context = {}
+
+    def register_memory(cls):
+        registry[cls.memory_type] = cls
+        return cls
+
+    package = types.ModuleType("memory_modules")
+    memory_module = types.ModuleType("memory_modules.memory")
+    memory_module.Memory = Memory
+    memory_module.MemoryContextItem = dict
+    memory_module.register_memory = register_memory
+    monkeypatch.setitem(sys.modules, "memory_modules", package)
+    monkeypatch.setitem(sys.modules, "memory_modules.memory", memory_module)
+    spec = importlib.util.spec_from_file_location("fixture_memphant_memory", MEMPHANT_ADAPTER)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module, registry
+
+
+def test_memphant_memory_uses_isolated_rest_scope_and_emits_trace_proof(
+    monkeypatch, tmp_path
+):
+    adapter, registry = load_memphant_adapter(monkeypatch)
+    monkeypatch.setenv("MEMPHANT_SCRATCH_ACTIVE", "1")
+    monkeypatch.setenv("MEMPHANT_TEST_DATABASE_URL", "postgres://fixture")
+    monkeypatch.setenv("MEMPHANT_LME_SERVER_URL", "http://fixture")
+    monkeypatch.setenv("MEMPHANT_LME_PROOF_DIR", str(tmp_path / "proof"))
+    cli_bin = tmp_path / "memphant-cli"
+    server_bin = tmp_path / "memphant-server"
+    cli_bin.write_bytes(b"fixture-cli")
+    server_bin.write_bytes(b"fixture-server")
+    monkeypatch.setenv("MEMPHANT_CLI_BIN", str(cli_bin))
+    monkeypatch.setenv("MEMPHANT_LME_SERVER_BIN", str(server_bin))
+    monkeypatch.setenv("MEMPHANT_LME_RUN_ID", "fixture-run")
+
+    class Completed:
+        returncode = 0
+        stderr = ""
+
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    cli_calls = []
+
+    def fake_run(command, **kwargs):
+        cli_calls.append(command)
+        if "create-tenant" in command:
+            return Completed("tenant_created id=00000000-0000-0000-0000-000000000101\n")
+        return Completed("mk_fixture_key\n")
+
+    monkeypatch.setattr(adapter.subprocess, "run", fake_run)
+    requests = []
+    episode_count = 0
+
+    def fake_request(method, path, payload=None):
+        nonlocal episode_count
+        requests.append((method, path, payload))
+        if path == "/v1/episodes":
+            episode_count += 1
+            return {"episode_id": f"episode-{episode_count}", "enqueued": ["reflect"]}
+        if path == "/v1/reflect":
+            return {
+                "reflect_id": "reflect-1",
+                "episodes_consumed": episode_count,
+                "candidates_created": episode_count,
+            }
+        if path == "/v1/recall":
+            return {
+                "trace_id": "00000000-0000-0000-0000-000000000404",
+                "items": [
+                    {
+                        "unit_id": "unit-1",
+                        "body": "The retained answer evidence.",
+                        "kind": "episode",
+                        "derived_by": "fixture",
+                        "inclusion_reason": "ranked",
+                        "suppression_labels": [],
+                    }
+                ],
+                "citations": [{"unit_id": "unit-1", "episode_id": "episode-1"}],
+                "candidate_whitelist": ["unit-1"],
+                "abstention": False,
+                "degraded": False,
+                "suppression_labels": [],
+            }
+        assert method == "GET"
+        return {
+            "id": "00000000-0000-0000-0000-000000000404",
+            "tenant_id": "00000000-0000-0000-0000-000000000101",
+            "scope_id": memory.scope_id,
+            "actor_id": memory.actor_id,
+            "query_hash": "native-query-hash",
+            "context_items": [
+                {
+                    "unit_id": "unit-1",
+                    "body": "The retained answer evidence.",
+                    "kind": "episode",
+                    "derived_by": "fixture",
+                    "inclusion_reason": "ranked",
+                    "suppression_labels": [],
+                }
+            ],
+            "citations": [{"unit_id": "unit-1", "episode_id": "episode-1"}],
+        }
+
+    monkeypatch.setattr(adapter._JsonClient, "request", lambda self, *a, **k: fake_request(*a, **k))
+    config = json.loads(MEMPHANT_CONFIG.read_text())["memory_params"]
+    memory = registry["memphant"](config)
+    memory.insert(
+        {
+            "id": "trajectory-1",
+            "goal": "Find the setting",
+            "outcome": "success",
+            "start_url": "https://example.test",
+            "states": [
+                {
+                    "url": "https://example.test/one",
+                    "action": "click settings",
+                    "thought": "look for the control",
+                    "accessibility_tree": "Settings page",
+                    "screenshot": "screenshots/one.png",
+                },
+                {
+                    "url": "https://example.test/two",
+                    "action": "read value",
+                    "thought": None,
+                    "accessibility_tree": "Value is retained",
+                    "screenshot": "screenshots/two.png",
+                },
+            ],
+        }
+    )
+    memory.set_query_context(
+        question_id="question-1",
+        question_item={"answer": "GOLD MUST NOT LEAK", "eval_function": "secret"},
+    )
+    context = memory.query("What value was retained?")
+    metadata = memory.post_query_hook(
+        query="What value was retained?", query_image=None, memory_context=context
+    )
+
+    assert context == [{"type": "text", "value": "The retained answer evidence."}]
+    retain_payloads = [payload for _, path, payload in requests if path == "/v1/episodes"]
+    assert len(retain_payloads) == 2
+    assert all(payload["tenant_id"] == memory.tenant_id for payload in retain_payloads)
+    assert all(payload["scope_id"] == memory.scope_id for payload in retain_payloads)
+    assert "GOLD MUST NOT LEAK" not in json.dumps(requests)
+    recall = next(payload for _, path, payload in requests if path == "/v1/recall")
+    assert recall["limit"] == 20
+    assert recall["budget_tokens"] == 32768
+    assert "allowed_scope_ids" not in recall
+    assert metadata["trace_id"] == "00000000-0000-0000-0000-000000000404"
+    assert len(metadata["trace_sha256"]) == len(metadata["context_sha256"]) == 64
+    proof = json.loads(next((tmp_path / "proof").glob("*.json")).read_text())
+    assert proof["pairing"]["trajectory_count"] == 1
+    assert proof["pairing"]["episode_count"] == 2
+    assert proof["query"]["question_id"] == "question-1"
+    assert proof["query"]["trace_sha256"] == metadata["trace_sha256"]
+    assert set(proof["contract"]["binaries"]) == {"server", "cli"}
+    assert proof["contract"]["binaries"]["server"]["sha256"] == hashlib.sha256(
+        b"fixture-server"
+    ).hexdigest()
+    assert any("create-tenant" in call for call in cli_calls)
+
+
+def test_memphant_memory_fails_closed_when_reflection_pairing_is_incomplete(
+    monkeypatch, tmp_path
+):
+    adapter, registry = load_memphant_adapter(monkeypatch)
+    cli_bin = tmp_path / "cli"
+    server_bin = tmp_path / "server"
+    cli_bin.write_bytes(b"fixture-cli")
+    server_bin.write_bytes(b"fixture-server")
+    for key, value in {
+        "MEMPHANT_SCRATCH_ACTIVE": "1",
+        "MEMPHANT_TEST_DATABASE_URL": "postgres://fixture",
+        "MEMPHANT_LME_SERVER_URL": "http://fixture",
+        "MEMPHANT_LME_PROOF_DIR": str(tmp_path),
+        "MEMPHANT_CLI_BIN": str(cli_bin),
+        "MEMPHANT_LME_SERVER_BIN": str(server_bin),
+        "MEMPHANT_LME_RUN_ID": "fixture",
+    }.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(
+        adapter,
+        "_provision_tenant",
+        lambda **kwargs: ("00000000-0000-0000-0000-000000000111", "mk_key"),
+    )
+    memory = registry["memphant"](json.loads(MEMPHANT_CONFIG.read_text())["memory_params"])
+    monkeypatch.setattr(
+        memory.client,
+        "request",
+        lambda method, path, payload=None: (
+            {"episode_id": "episode", "enqueued": ["reflect"]}
+            if path == "/v1/episodes"
+            else {"reflect_id": "reflect", "episodes_consumed": 0, "candidates_created": 0}
+        ),
+    )
+    memory.insert(
+        {
+            "id": "trajectory",
+            "goal": "goal",
+            "outcome": None,
+            "start_url": "https://example.test",
+            "states": [
+                {
+                    "url": "https://example.test",
+                    "action": None,
+                    "thought": None,
+                    "accessibility_tree": "state",
+                    "screenshot": "unused.png",
+                }
+            ],
+        }
+    )
+    memory.set_query_context(question_id="q", question_item={"answer": "secret"})
+
+    with pytest.raises(RuntimeError, match="reflection pairing incomplete"):
+        memory.query("query")
+
+
+def test_memphant_harness_command_bootstraps_adapter_without_patching_upstream(tmp_path):
+    adapter = load_adapter()
+    command = adapter.memphant_harness_command(
+        official_dir=tmp_path / "official",
+        domain="enterprise",
+        questions_path=tmp_path / "questions.json",
+        haystack_path=tmp_path / "haystack.json",
+        trajectories_path=tmp_path / "trajectories.jsonl",
+        memory_config_path=MEMPHANT_CONFIG,
+        output_dir=tmp_path / "out",
+        reader_model="reader",
+        reader_base_url="http://reader/v1",
+        evaluator_model="judge",
+        evaluator_base_url="http://judge/v1",
+        python="python3",
+    )
+
+    assert command[:2] == ["python3", str(MEMPHANT_BOOTSTRAP)]
+    assert command[command.index("--official-dir") + 1] == str(tmp_path / "official")
+    assert command[command.index("--memory-config-path") + 1] == str(MEMPHANT_CONFIG)
+    assert command[command.index("--memory-context-max-tokens") + 1] == "32768"
+
+
+def test_execution_matrix_requires_complete_paired_domains_tiers_and_binary_proof():
+    adapter = load_adapter()
+    digest = "a" * 64
+    runs = []
+    for domain in ("web", "enterprise"):
+        for tier in ("small", "medium"):
+            for arm in ("memphant", "no_retrieval"):
+                row = {
+                    "domain": domain,
+                    "tier": tier,
+                    "arm": arm,
+                    "question_count": 10,
+                    "completed_questions": 10,
+                    "error_count": 0,
+                    "question_ids_sha256": digest,
+                    "reader_contract_sha256": digest,
+                    "judge_contract_sha256": digest,
+                    "memory_context_max_tokens": 32768,
+                    "output_sha256": digest,
+                }
+                if arm == "memphant":
+                    row["binaries"] = {
+                        "server": {"path": "/bin/server", "bytes": 1, "sha256": digest},
+                        "cli": {"path": "/bin/cli", "bytes": 1, "sha256": digest},
+                    }
+                runs.append(row)
+    matrix = {
+        "schema_version": 1,
+        "benchmark": "LongMemEval-V2",
+        "upstream_release_lock_sha256": hashlib.sha256(LOCK.read_bytes()).hexdigest(),
+        "runs": runs,
+    }
+
+    assert adapter.verify_execution_matrix(matrix) == {"runs": 8, "paired_cells": 4}
+    incomplete = json.loads(json.dumps(matrix))
+    incomplete["runs"].pop()
+    with pytest.raises(RuntimeError, match="incomplete"):
+        adapter.verify_execution_matrix(incomplete)
+    drifted = json.loads(json.dumps(matrix))
+    drifted["runs"][0]["reader_contract_sha256"] = "b" * 64
+    with pytest.raises(RuntimeError, match="not paired|reader contract drift"):
+        adapter.verify_execution_matrix(drifted)
+
+
+def test_memphant_adapter_artifacts_match_immutable_contract():
+    lock = json.loads(MEMPHANT_ADAPTER_LOCK.read_text())
+    for relative, expected in lock["files"].items():
+        assert hashlib.sha256((ROOT / relative).read_bytes()).hexdigest() == expected
+    assert hashlib.sha256(
+        (ROOT / "benchmarks/manifests/longmemeval_v2.lock.json").read_bytes()
+    ).hexdigest() == lock["upstream_release_lock_sha256"]
+    assert hashlib.sha256((ROOT / "openapi/memphant.v1.json").read_bytes()).hexdigest() == lock[
+        "openapi_sha256"
+    ]
+    assert lock["paid_models_run"] is False
+
+
+def test_runtime_materializer_uses_official_selection_and_proves_complete_pairing(
+    tmp_path
+):
+    official = tmp_path / "official"
+    data_package = official / "data"
+    data_package.mkdir(parents=True)
+    (data_package / "__init__.py").write_text("")
+    (data_package / "public_data.py").write_text(
+        """
+import json
+
+def materialize_runtime_questions(*, data_root, domain, question_ids, limit, output_path):
+    assert question_ids == ["q1"] and limit is None
+    rows = [{"id": "q1", "domain": domain, "question": "query", "answer": "SECRET_REFERENCE_VALUE"}]
+    output_path.write_text(json.dumps(rows))
+    return rows
+
+def materialize_runtime_haystack(*, data_root, tier, selected_questions, output_path):
+    value = {"q1": ["t1", "t2"]}
+    output_path.write_text(json.dumps(value))
+    return value
+""".strip()
+        + "\n"
+    )
+    data_root = tmp_path / "dataset"
+    data_root.mkdir()
+    (data_root / "trajectories.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"id": "t1", "domain": "web", "states": [{}]}),
+                json.dumps({"id": "t2", "domain": "web", "states": [{}]}),
+            ]
+        )
+        + "\n"
+    )
+    manifest = tmp_path / "fixture.lock.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "code": {"commit": "fixture", "files": {}},
+                "dataset": {
+                    "revision": "fixture",
+                    "files": {
+                        "trajectories.jsonl": {
+                            "bytes": (data_root / "trajectories.jsonl").stat().st_size,
+                            "sha256": hashlib.sha256(
+                                (data_root / "trajectories.jsonl").read_bytes()
+                            ).hexdigest(),
+                        }
+                    },
+                },
+            }
+        )
+    )
+    output = tmp_path / "runtime"
+    result = os.spawnv(
+        os.P_WAIT,
+        sys.executable,
+        [
+            sys.executable,
+            str(MATERIALIZER),
+            "--official-dir",
+            str(official),
+            "--data-root",
+            str(data_root),
+            "--domain",
+            "web",
+            "--tier",
+            "small",
+            "--question-id",
+            "q1",
+            "--output-dir",
+            str(output),
+            "--manifest",
+            str(manifest),
+        ],
+    )
+
+    assert result == 0
+    pairing = json.loads((output / "pairing.json").read_text())
+    assert pairing["question_id"] == "q1"
+    assert pairing["trajectory_count"] == 2
+    assert [row["trajectory_id"] for row in pairing["trajectories"]] == ["t1", "t2"]
+    assert "SECRET_REFERENCE_VALUE" not in json.dumps(pairing)
+    assert json.loads((output / "memory_config.json").read_text()) == json.loads(
+        MEMPHANT_CONFIG.read_text()
+    )
+
+
+@pytest.mark.skipif(
+    os.environ.get("MEMPHANT_LME_PACKAGED_INTEGRATION") != "1",
+    reason="requires packaged binaries and an ephemeral migrated Postgres database",
+)
+def test_memphant_memory_tiny_packaged_rest_dry_run(monkeypatch, tmp_path):
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import gate_runtime
+
+    database_url = os.environ["MEMPHANT_TEST_DATABASE_URL"]
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    server = gate_runtime.Server(
+        str(ROOT / "target/debug/memphant-server"),
+        database_url,
+        port,
+        log_path=tmp_path / "server.log",
+    )
+    server.start()
+    try:
+        adapter, registry = load_memphant_adapter(monkeypatch)
+        monkeypatch.setenv("MEMPHANT_SCRATCH_ACTIVE", "1")
+        monkeypatch.setenv("MEMPHANT_LME_SERVER_URL", f"http://127.0.0.1:{port}")
+        monkeypatch.setenv("MEMPHANT_LME_PROOF_DIR", str(tmp_path / "proof"))
+        monkeypatch.setenv("MEMPHANT_CLI_BIN", str(ROOT / "target/debug/memphant-cli"))
+        monkeypatch.setenv(
+            "MEMPHANT_LME_SERVER_BIN", str(ROOT / "target/debug/memphant-server")
+        )
+        monkeypatch.setenv("MEMPHANT_LME_RUN_ID", "packaged-dry-run")
+        memory = registry["memphant"](
+            json.loads(MEMPHANT_CONFIG.read_text())["memory_params"]
+        )
+        memory.insert(
+            {
+                "id": "fixture-trajectory",
+                "goal": "Remember the launch code",
+                "outcome": "success",
+                "start_url": "https://example.test",
+                "states": [
+                    {
+                        "url": "https://example.test/code",
+                        "action": "read launch code",
+                        "thought": "store the exact value",
+                        "accessibility_tree": "The launch code is ORCHID-17.",
+                        "screenshot": "not-consumed.png",
+                    }
+                ],
+            }
+        )
+        memory.set_query_context(
+            question_id="fixture-question",
+            question_item={"answer": "ORCHID-17", "eval_function": "exact"},
+        )
+        context = memory.query("What is the launch code?")
+        metadata = memory.post_query_hook(
+            query="What is the launch code?", query_image=None, memory_context=context
+        )
+        assert context and "ORCHID-17" in context[0]["value"]
+        assert metadata["trace_id"]
+        assert next((tmp_path / "proof").glob("*.json")).is_file()
+    finally:
+        server.stop()

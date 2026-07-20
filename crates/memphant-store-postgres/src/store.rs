@@ -4,31 +4,56 @@
 //! `forgotten_source` tombstones and `api_key.max_trust` ceilings.
 
 use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
 
 use memphant_core::{
-    ApiKeyRow, CompiledWrite, CorrectOutcome, CorrectionWrite, EmbeddingProfileRow, EmbeddingRow,
-    ForgetOutcome, ForgetWrite, JobFilter, MemoryStore, ReflectJobRow, ReviewEventRow, ScopePage,
-    StoreError,
+    ApiKeyRow, ClaimMutationOutcome, CompiledWrite, CorrectOutcome, CorrectionWrite,
+    EmbeddingProfileRow, EmbeddingRow, ForgetOutcome, ForgetWrite, JOB_DEAD_LETTER_ATTEMPTS,
+    JobFilter, MemoryStore, MutationClaim, MutationClaimOutcome, MutationLedgerStore,
+    MutationResponse, ReflectJobRow, ResolvedMemoryContext, ReviewEventRow, ScopePage, StoreError,
+    SubjectErasureReceipt, correction_rectangles,
 };
 use memphant_types::{
-    ActorId, ContextualChunk, CorrectResult, EdgeId, EpisodeId, ForgetTarget, JobId, MemoryKind,
-    NewEpisode, NewMemoryEdge, NewMemoryUnit, NewResource, QueuedReflectJob, ReflectJob,
-    ReflectJobKind, ReflectTrace, ResourceId, RetainOutcome, RetrievalTrace, ScopeId,
-    StoredEpisode, StoredMemoryEdge, StoredMemoryUnit, StoredResource, TenantId, TraceId,
-    TrustLevel, UnitId,
+    ActorId, AgentNodeId, CitationSpan, ContextBindingAccessPolicy, ContextBindingPolicyMode,
+    ContextBindingRequest, ContextBindingResponse, ContextualChunk, CorrectResult, EdgeId,
+    EpisodeId, ForgetTarget, JobId, MemoryKind, NewEpisode, NewMemoryEdge, NewMemoryUnit,
+    NewResource, QueuedReflectJob, RecallTime, RecordMaterial, ReflectJob, ReflectJobKind,
+    ReflectTrace, ResolvedMemorySource, ResourceId, RetainOutcome, RetrievalTrace, ScopeId,
+    StoredCitation, StoredEpisode, StoredMemoryEdge, StoredMemoryUnit, StoredResource, SubjectId,
+    TenantId, TraceId, TrustLevel, UnitId, agent_level_allows_memory_kind,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use sqlx::postgres::{PgPoolOptions, PgRow};
+use sha2::{Digest, Sha256};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgRow};
 use sqlx::{AssertSqlSafe, PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 /// RFC 3339 UTC projection used for every timestamptz read; writes bind RFC
 /// 3339 strings and cast `::timestamptz`.
 const TS_FMT: &str = r#"'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'"#;
+const TRANSACTION_POOLER_ERROR: &str = "persistent Postgres connections cannot use transaction pooler port 6543; use direct or session port 5432";
 
 fn ts(column: &str) -> String {
     format!("to_char({column} at time zone 'utc', {TS_FMT})")
+}
+
+fn canonical_timestamp(value: Option<String>) -> Option<String> {
+    value.map(|mut value| {
+        if value.ends_with('Z')
+            && let Some(dot) = value.rfind('.')
+        {
+            let fraction_end = value.len() - 1;
+            let trimmed_end = value[dot + 1..fraction_end].trim_end_matches('0').len() + dot + 1;
+            if trimmed_end == dot + 1 {
+                value.truncate(dot);
+            } else {
+                value.truncate(trimmed_end);
+            }
+            value.push('Z');
+        }
+        value
+    })
 }
 
 fn backend(error: sqlx::Error) -> StoreError {
@@ -75,6 +100,26 @@ fn vec_literal(vec: &[f32]) -> String {
     out
 }
 
+fn source_kind_triples(
+    context: &ResolvedMemoryContext,
+    kinds: &[MemoryKind],
+) -> (Vec<Uuid>, Vec<Uuid>, Vec<String>) {
+    let mut scopes = Vec::new();
+    let mut agents = Vec::new();
+    let mut kind_names = Vec::new();
+    for (kind, sources) in &context.sources_by_kind {
+        if !kinds.is_empty() && !kinds.contains(kind) {
+            continue;
+        }
+        for source in sources {
+            scopes.push(source.scope_id.as_uuid());
+            agents.push(source.agent_node_id.as_uuid());
+            kind_names.push(enum_str(kind));
+        }
+    }
+    (scopes, agents, kind_names)
+}
+
 /// Owned bind values for dynamically assembled queries.
 enum Bind {
     Uuid(Uuid),
@@ -88,44 +133,200 @@ enum Bind {
 #[derive(Clone)]
 pub struct PgStore {
     pool: PgPool,
+    auth_pool: Option<PgPool>,
+    provision_pool: Option<PgPool>,
 }
 
 pub struct PgTxn {
     tx: Transaction<'static, Postgres>,
+    context: ResolvedMemoryContext,
+    mutation: Option<PgMutationState>,
+    has_subject_writes: bool,
+}
+
+enum PgMutationState {
+    Execute {
+        claim: MutationClaim,
+        response_staged: bool,
+    },
+    Replay {
+        claim: MutationClaim,
+        response: MutationResponse,
+    },
 }
 
 impl PgStore {
     /// Connects and pings; refuses to construct against an unreachable
     /// database.
     pub async fn connect(database_url: &str) -> Result<Self, StoreError> {
+        Self::connect_with_capabilities(database_url, database_url, database_url).await
+    }
+
+    pub async fn connect_app(
+        database_url: &str,
+        auth_database_url: &str,
+    ) -> Result<Self, StoreError> {
+        Self::connect_pools(database_url, Some(auth_database_url), None).await
+    }
+
+    pub async fn connect_worker(database_url: &str) -> Result<Self, StoreError> {
+        Self::connect_pools(database_url, None, None).await
+    }
+
+    pub async fn connect_provisioner(database_url: &str) -> Result<Self, StoreError> {
+        Self::connect_pools(database_url, None, Some(database_url)).await
+    }
+
+    pub async fn connect_with_capabilities(
+        database_url: &str,
+        auth_database_url: &str,
+        provision_database_url: &str,
+    ) -> Result<Self, StoreError> {
+        Self::connect_pools(
+            database_url,
+            Some(auth_database_url),
+            Some(provision_database_url),
+        )
+        .await
+    }
+
+    async fn connect_pools(
+        database_url: &str,
+        auth_database_url: Option<&str>,
+        provision_database_url: Option<&str>,
+    ) -> Result<Self, StoreError> {
+        let database_options = Self::persistent_connect_options(database_url)?;
+        let auth_options = auth_database_url
+            .map(Self::persistent_connect_options)
+            .transpose()?;
+        let provision_options = provision_database_url
+            .map(Self::persistent_connect_options)
+            .transpose()?;
+        let pool = Self::connect_pool(database_options).await?;
+        let auth_pool = match (auth_database_url, auth_options) {
+            (Some(url), _) if url == database_url => Some(pool.clone()),
+            (Some(_), Some(options)) => Some(Self::connect_pool(options).await?),
+            (None, None) => None,
+            _ => unreachable!("auth URL and parsed options must match"),
+        };
+        let provision_pool = match (provision_database_url, provision_options) {
+            (Some(url), _) if url == database_url => Some(pool.clone()),
+            (Some(_), Some(options)) => Some(Self::connect_pool(options).await?),
+            (None, None) => None,
+            _ => unreachable!("provision URL and parsed options must match"),
+        };
+        Ok(Self {
+            pool,
+            auth_pool,
+            provision_pool,
+        })
+    }
+
+    fn persistent_connect_options(database_url: &str) -> Result<PgConnectOptions, StoreError> {
+        let options = PgConnectOptions::from_str(database_url).map_err(backend)?;
+        if options.get_port() == 6543 {
+            return Err(StoreError::Backend(TRANSACTION_POOLER_ERROR.to_string()));
+        }
+        Ok(options)
+    }
+
+    async fn connect_pool(options: PgConnectOptions) -> Result<PgPool, StoreError> {
         let pool = PgPoolOptions::new()
             .max_connections(8)
-            .connect(database_url)
+            .after_connect(|connection, _| {
+                Box::pin(async move {
+                    sqlx::query(
+                        "select pg_catalog.set_config(
+                           'search_path',
+                           (select pg_catalog.string_agg(pg_catalog.format('%I', schema_name), ',')
+                            from (
+                              select 'memphant'::text as schema_name
+                              union
+                              select namespace.nspname
+                              from pg_catalog.pg_extension extension
+                              join pg_catalog.pg_namespace namespace
+                                on namespace.oid = extension.extnamespace
+                              where extension.extname in ('vector','pg_trgm','ltree','btree_gist')
+                            ) schemas) || ',pg_catalog',
+                           false)",
+                    )
+                    .execute(connection)
+                    .await?;
+                    Ok(())
+                })
+            })
+            .connect_with(options)
             .await
             .map_err(backend)?;
         sqlx::query("select 1")
             .execute(&pool)
             .await
             .map_err(backend)?;
-        Ok(Self { pool })
+        Ok(pool)
     }
 
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
 
+    async fn tenant_tx(
+        &self,
+        tenant: TenantId,
+    ) -> Result<Transaction<'static, Postgres>, StoreError> {
+        let mut tx = self.pool.begin().await.map_err(backend)?;
+        sqlx::query("select memphant.bind_tenant($1)")
+            .bind(tenant.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .map_err(backend)?;
+        Ok(tx)
+    }
+
+    /// Physically removes at most `limit` expired idempotency receipts for one
+    /// tenant. Callers can repeat this bounded maintenance operation until it
+    /// returns zero; `skip locked` keeps it from blocking active mutations.
+    pub async fn purge_expired_mutation_receipts(
+        &self,
+        tenant: TenantId,
+        limit: u32,
+    ) -> Result<u64, StoreError> {
+        if limit == 0 {
+            return Ok(0);
+        }
+        let mut tx = self.tenant_tx(tenant).await?;
+        let result = sqlx::query(
+            "with expired as (
+               select ctid
+               from memphant.mutation_ledger
+               where tenant_id = $1 and expires_at <= statement_timestamp()
+               order by expires_at
+               limit $2
+               for update skip locked
+             )
+             delete from memphant.mutation_ledger ledger
+             using expired
+             where ledger.ctid = expired.ctid and ledger.tenant_id = $1",
+        )
+        .bind(tenant.as_uuid())
+        .bind(i64::from(limit))
+        .execute(&mut *tx)
+        .await
+        .map_err(backend)?;
+        tx.commit().await.map_err(backend)?;
+        Ok(result.rows_affected())
+    }
+
     // ---- Admin surface (tenants + API keys; used by `memphant admin`). ----
 
     pub async fn create_tenant(&self, name: &str) -> Result<Uuid, StoreError> {
-        let id = Uuid::now_v7();
-        sqlx::query(
-            "insert into memphant.tenant (id, slug, plan, region) values ($1, $2, 'dev', 'local')",
-        )
-        .bind(id)
-        .bind(name)
-        .execute(&self.pool)
-        .await
-        .map_err(backend)?;
+        let pool = self.provision_pool.as_ref().ok_or_else(|| {
+            StoreError::Backend("store has no provisioner capability".to_string())
+        })?;
+        let id: Uuid = sqlx::query_scalar("select memphant.provision_tenant($1, 'dev', 'local')")
+            .bind(name)
+            .fetch_one(pool)
+            .await
+            .map_err(backend)?;
         Ok(id)
     }
 
@@ -135,93 +336,114 @@ impl PgStore {
         key_hash: &str,
         label: &str,
         max_trust: TrustLevel,
+        scoped_context: Option<&ResolvedMemoryContext>,
     ) -> Result<Uuid, StoreError> {
-        let id = Uuid::now_v7();
-        sqlx::query(
-            "insert into memphant.api_key (id, tenant_id, key_hash, label, max_trust)
-             values ($1, $2, $3, $4, $5)",
+        let pool = self.provision_pool.as_ref().ok_or_else(|| {
+            StoreError::Backend("store has no provisioner capability".to_string())
+        })?;
+        if scoped_context.is_some_and(|context| context.tenant_id.as_uuid() != tenant) {
+            return Err(StoreError::PolicyDenied(
+                "API key context does not match tenant".to_string(),
+            ));
+        }
+        let id: Uuid = sqlx::query_scalar(
+            "select memphant.provision_api_key($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
-        .bind(id)
         .bind(tenant)
         .bind(key_hash)
         .bind(label)
         .bind(enum_str(&max_trust))
-        .execute(&self.pool)
+        .bind(scoped_context.map(|context| context.data_subject_id.as_uuid()))
+        .bind(scoped_context.map(|context| context.subject_generation as i64))
+        .bind(scoped_context.map(|context| context.actor_id.as_uuid()))
+        .bind(scoped_context.map(|context| context.scope_id.as_uuid()))
+        .bind(scoped_context.map(|context| context.agent_node_id.as_uuid()))
+        .fetch_one(pool)
         .await
         .map_err(backend)?;
         Ok(id)
     }
 
     pub async fn revoke_api_key(&self, id: Uuid) -> Result<bool, StoreError> {
-        let result = sqlx::query(
-            "update memphant.api_key set revoked_at = now() where id = $1 and revoked_at is null",
-        )
-        .bind(id)
-        .execute(&self.pool)
-        .await
-        .map_err(backend)?;
-        Ok(result.rows_affected() > 0)
+        let pool = self.provision_pool.as_ref().ok_or_else(|| {
+            StoreError::Backend("store has no provisioner capability".to_string())
+        })?;
+        let revoked: Option<bool> = sqlx::query_scalar("select memphant.revoke_api_key($1)")
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .map_err(backend)?;
+        Ok(revoked.unwrap_or(false))
     }
 
-    // ---- Provisioning upserts (client-supplied scope/actor UUIDs never
-    //      require pre-registration; rows are minted on first write). ----
+    // Context-owned rows are provisioned only by resolve_context_binding.
 
-    async fn ensure_tenant(
+    async fn validate_episode_context(
         tx: &mut Transaction<'static, Postgres>,
-        tenant: TenantId,
+        episode: &NewEpisode,
     ) -> Result<(), StoreError> {
-        sqlx::query(
-            "insert into memphant.tenant (id, slug, plan, region)
-             values ($1, $1::text, 'dev', 'local')
-             on conflict (id) do nothing",
+        let valid = sqlx::query_scalar::<_, bool>(
+            "select exists (
+               select 1 from memphant.context_binding binding
+               join memphant.subject subject
+                 on subject.tenant_id = binding.tenant_id
+                and subject.id = binding.data_subject_id
+              where binding.tenant_id = $1 and binding.data_subject_id = $2
+                and binding.actor_id = $3 and binding.scope_id = $4
+                and binding.agent_node_id = $5 and subject.generation = $6
+             )",
         )
-        .bind(tenant.as_uuid())
-        .execute(&mut **tx)
+        .bind(episode.tenant_id.as_uuid())
+        .bind(episode.data_subject_id.as_uuid())
+        .bind(episode.actor_id.as_uuid())
+        .bind(episode.scope_id.as_uuid())
+        .bind(episode.agent_node_id.as_uuid())
+        .bind(episode.subject_generation as i64)
+        .fetch_one(&mut **tx)
         .await
         .map_err(backend)?;
-        Ok(())
+        if valid {
+            Ok(())
+        } else {
+            Err(StoreError::NotFound("memory context"))
+        }
     }
 
-    async fn ensure_scope(
+    async fn validate_resource_context(
         tx: &mut Transaction<'static, Postgres>,
-        tenant: TenantId,
-        scope: ScopeId,
+        resource: &NewResource,
     ) -> Result<(), StoreError> {
-        sqlx::query(
-            "insert into memphant.scope (id, tenant_id, kind, external_ref, materialized_path, scope_depth)
-             values ($1, $2, 'external', $1::text, text2ltree(replace($1::text, '-', '_')), 1)
-             on conflict (tenant_id, id) do nothing",
+        let valid = sqlx::query_scalar::<_, bool>(
+            "select exists (
+               select 1 from memphant.context_binding binding
+               join memphant.subject subject
+                 on subject.tenant_id = binding.tenant_id
+                and subject.id = binding.data_subject_id
+              where binding.tenant_id = $1 and binding.data_subject_id = $2
+                and binding.actor_id = $3 and binding.scope_id = $4
+                and binding.agent_node_id = $5 and subject.generation = $6
+             )",
         )
-        .bind(scope.as_uuid())
-        .bind(tenant.as_uuid())
-        .execute(&mut **tx)
+        .bind(resource.tenant_id.as_uuid())
+        .bind(resource.data_subject_id.as_uuid())
+        .bind(resource.actor_id.as_uuid())
+        .bind(resource.scope_id.as_uuid())
+        .bind(resource.agent_node_id.as_uuid())
+        .bind(resource.subject_generation as i64)
+        .fetch_one(&mut **tx)
         .await
         .map_err(backend)?;
-        Ok(())
-    }
-
-    async fn ensure_actor(
-        tx: &mut Transaction<'static, Postgres>,
-        tenant: TenantId,
-        actor: ActorId,
-    ) -> Result<(), StoreError> {
-        sqlx::query(
-            "insert into memphant.actor (id, tenant_id, kind, external_ref, trust_level)
-             values ($1, $2, 'agent', $1::text, 'unverified_tool')
-             on conflict (tenant_id, id) do nothing",
-        )
-        .bind(actor.as_uuid())
-        .bind(tenant.as_uuid())
-        .execute(&mut **tx)
-        .await
-        .map_err(backend)?;
-        Ok(())
+        valid
+            .then_some(())
+            .ok_or(StoreError::NotFound("memory context"))
     }
 
     fn unit_select(where_clause: &str, tail: &str) -> String {
         format!(
-            "select id, scope_id, kind, state, subject_key, body, trust_level, churn_class,
-                    {freshness} as freshness_due_at, actor_id, source_kind, source_episode_id,
+            "select id, data_subject_id, scope_id, agent_node_id, subject_generation,
+                    kind, state, fact_key, predicate, body, confidence, trust_level, churn_class,
+                    {freshness} as freshness_due_at, actor_id, source_kind, source_ref,
+                    {observed_at} as observed_at, source_episode_id,
                     source_resource_id, deletion_generation, payload,
                     {valid_from} as valid_from, {valid_to} as valid_to,
                     {tx_from} as transaction_from, {tx_to} as transaction_to,
@@ -234,6 +456,7 @@ impl PgStore {
             tx_from = ts("transaction_from"),
             tx_to = ts("transaction_to"),
             reinforced = ts("last_reinforced_at"),
+            observed_at = ts("observed_at"),
         )
     }
 
@@ -253,27 +476,49 @@ impl PgStore {
                     .map_err(backend)?
                     .as_u128(),
             ),
+            data_subject_id: SubjectId::from_u128(
+                row.try_get::<Uuid, _>("data_subject_id")
+                    .map_err(backend)?
+                    .as_u128(),
+            ),
             scope_id: ScopeId::from_u128(
                 row.try_get::<Uuid, _>("scope_id")
                     .map_err(backend)?
                     .as_u128(),
             ),
+            agent_node_id: AgentNodeId::from_u128(
+                row.try_get::<Uuid, _>("agent_node_id")
+                    .map_err(backend)?
+                    .as_u128(),
+            ),
+            subject_generation: row
+                .try_get::<i64, _>("subject_generation")
+                .map_err(backend)? as u64,
             kind: enum_from_str(row.try_get::<String, _>("kind").map_err(backend)?.as_str())?,
             state: enum_from_str(row.try_get::<String, _>("state").map_err(backend)?.as_str())?,
-            subject_key: row.try_get("subject_key").map_err(backend)?,
+            fact_key: row.try_get("fact_key").map_err(backend)?,
+            predicate: row.try_get("predicate").map_err(backend)?,
             body: row.try_get("body").map_err(backend)?,
+            confidence: row.try_get("confidence").map_err(backend)?,
             trust_level: enum_from_str(
                 row.try_get::<String, _>("trust_level")
                     .map_err(backend)?
                     .as_str(),
             )?,
             churn_class: row.try_get("churn_class").map_err(backend)?,
-            freshness_due_at: row.try_get("freshness_due_at").map_err(backend)?,
+            freshness_due_at: canonical_timestamp(
+                row.try_get("freshness_due_at").map_err(backend)?,
+            ),
             actor_id: row
                 .try_get::<Option<Uuid>, _>("actor_id")
                 .map_err(backend)?
                 .map(|id| ActorId::from_u128(id.as_u128())),
             source_kind: row.try_get("source_kind").map_err(backend)?,
+            source_ref: row.try_get("source_ref").map_err(backend)?,
+            observed_at: canonical_timestamp(row.try_get("observed_at").map_err(backend)?)
+                .ok_or_else(|| {
+                    StoreError::Backend("memory unit observed_at is null".to_string())
+                })?,
             source_episode_id: row
                 .try_get::<Option<Uuid>, _>("source_episode_id")
                 .map_err(backend)?
@@ -287,13 +532,17 @@ impl PgStore {
                 .map_err(backend)?
                 .map(|generation| generation as u64),
             contextual_chunks,
-            valid_from: row.try_get("valid_from").map_err(backend)?,
-            valid_to: row.try_get("valid_to").map_err(backend)?,
-            transaction_from: row.try_get("transaction_from").map_err(backend)?,
-            transaction_to: row.try_get("transaction_to").map_err(backend)?,
+            valid_from: canonical_timestamp(row.try_get("valid_from").map_err(backend)?),
+            valid_to: canonical_timestamp(row.try_get("valid_to").map_err(backend)?),
+            transaction_from: canonical_timestamp(
+                row.try_get("transaction_from").map_err(backend)?,
+            ),
+            transaction_to: canonical_timestamp(row.try_get("transaction_to").map_err(backend)?),
             difficulty: row.try_get("difficulty").map_err(backend)?,
             stability_days: row.try_get("stability_days").map_err(backend)?,
-            last_reinforced_at: row.try_get("last_reinforced_at").map_err(backend)?,
+            last_reinforced_at: canonical_timestamp(
+                row.try_get("last_reinforced_at").map_err(backend)?,
+            ),
             reinforcement_count: row
                 .try_get::<i32, _>("reinforcement_count")
                 .map_err(backend)? as u32,
@@ -308,6 +557,11 @@ impl PgStore {
                     .map_err(backend)?
                     .as_u128(),
             ),
+            data_subject_id: SubjectId::from_u128(
+                row.try_get::<Uuid, _>("data_subject_id")
+                    .map_err(backend)?
+                    .as_u128(),
+            ),
             scope_id: ScopeId::from_u128(
                 row.try_get::<Uuid, _>("scope_id")
                     .map_err(backend)?
@@ -318,7 +572,16 @@ impl PgStore {
                     .map_err(backend)?
                     .as_u128(),
             ),
+            agent_node_id: AgentNodeId::from_u128(
+                row.try_get::<Uuid, _>("agent_node_id")
+                    .map_err(backend)?
+                    .as_u128(),
+            ),
+            subject_generation: row
+                .try_get::<i64, _>("subject_generation")
+                .map_err(backend)? as u64,
             source_kind: row.try_get("source_kind").map_err(backend)?,
+            source_ref: row.try_get("source_ref").map_err(backend)?,
             source_trust: enum_from_str(
                 row.try_get::<String, _>("source_trust")
                     .map_err(backend)?
@@ -332,6 +595,14 @@ impl PgStore {
             observation_count: row
                 .try_get::<i32, _>("observation_count")
                 .map_err(backend)? as u32,
+            first_observed_at: canonical_timestamp(
+                row.try_get("first_observed_at").map_err(backend)?,
+            )
+            .ok_or_else(|| StoreError::Backend("episode first_observed_at is null".to_string()))?,
+            last_observed_at: canonical_timestamp(
+                row.try_get("last_observed_at").map_err(backend)?,
+            )
+            .ok_or_else(|| StoreError::Backend("episode last_observed_at is null".to_string()))?,
         })
     }
 
@@ -339,28 +610,61 @@ impl PgStore {
         tx: &mut Transaction<'static, Postgres>,
         unit: &StoredMemoryUnit,
     ) -> Result<(), StoreError> {
-        Self::ensure_scope(tx, unit.tenant_id, unit.scope_id).await?;
+        let Some(actor_id) = unit.actor_id else {
+            return Err(StoreError::NotFound("memory context"));
+        };
+        let valid: bool = sqlx::query_scalar(
+            "select exists (
+               select 1
+               from memphant.context_binding binding
+               join memphant.subject subject
+                 on subject.tenant_id = binding.tenant_id
+                and subject.id = binding.data_subject_id
+              where binding.tenant_id = $1 and binding.data_subject_id = $2
+                and binding.actor_id = $3 and binding.scope_id = $4
+                and binding.agent_node_id = $5 and subject.generation = $6
+             )",
+        )
+        .bind(unit.tenant_id.as_uuid())
+        .bind(unit.data_subject_id.as_uuid())
+        .bind(actor_id.as_uuid())
+        .bind(unit.scope_id.as_uuid())
+        .bind(unit.agent_node_id.as_uuid())
+        .bind(unit.subject_generation as i64)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(backend)?;
+        if !valid {
+            return Err(StoreError::NotFound("memory context"));
+        }
         let payload = serde_json::json!({ "contextual_chunks": unit.contextual_chunks });
         sqlx::query(
             "insert into memphant.memory_unit
-               (id, tenant_id, scope_id, kind, state, subject_key, body, payload, trust_level,
+               (id, tenant_id, data_subject_id, scope_id, agent_node_id, subject_generation,
+                kind, state, fact_key, predicate, body, payload, confidence, trust_level,
                 valid_from, valid_to, transaction_from, transaction_to, difficulty,
                 stability_days, last_reinforced_at, reinforcement_count, freshness_due_at,
-                deletion_generation, actor_id, source_kind, source_episode_id,
+                deletion_generation, actor_id, source_kind, source_ref, observed_at,
+                source_episode_id,
                 source_resource_id, churn_class)
-             values ($1, $2, $3, $4, $5, $6, $7, $8, $9,
-                     $10::timestamptz, $11::timestamptz, coalesce($12::timestamptz, now()),
-                     $13::timestamptz, $14, $15, $16::timestamptz, $17, $18::timestamptz,
-                     $19, $20, $21, $22, $23, $24)",
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                     $15::timestamptz, $16::timestamptz, coalesce($17::timestamptz, now()),
+                     $18::timestamptz, $19, $20, $21::timestamptz, $22, $23::timestamptz,
+                     $24, $25, $26, $27, $28::timestamptz, $29, $30, $31)",
         )
         .bind(unit.id.as_uuid())
         .bind(unit.tenant_id.as_uuid())
+        .bind(unit.data_subject_id.as_uuid())
         .bind(unit.scope_id.as_uuid())
+        .bind(unit.agent_node_id.as_uuid())
+        .bind(unit.subject_generation as i64)
         .bind(enum_str(&unit.kind))
         .bind(enum_str(&unit.state))
-        .bind(&unit.subject_key)
+        .bind(&unit.fact_key)
+        .bind(&unit.predicate)
         .bind(&unit.body)
         .bind(payload)
+        .bind(unit.confidence)
         .bind(enum_str(&unit.trust_level))
         .bind(&unit.valid_from)
         .bind(&unit.valid_to)
@@ -374,6 +678,8 @@ impl PgStore {
         .bind(unit.deletion_generation.map(|generation| generation as i64))
         .bind(unit.actor_id.map(|id| id.as_uuid()))
         .bind(&unit.source_kind)
+        .bind(&unit.source_ref)
+        .bind(&unit.observed_at)
         .bind(unit.source_episode_id.map(|id| id.as_uuid()))
         .bind(unit.source_resource_id.map(|id| id.as_uuid()))
         .bind(&unit.churn_class)
@@ -385,19 +691,86 @@ impl PgStore {
 
     async fn insert_edge(
         tx: &mut Transaction<'static, Postgres>,
+        context: &ResolvedMemoryContext,
         edge: &StoredMemoryEdge,
     ) -> Result<(), StoreError> {
         sqlx::query(
-            "insert into memphant.memory_edge (id, tenant_id, scope_id, src_id, dst_id, kind)
-             values ($1, $2, $3, $4, $5, $6)
-             on conflict (tenant_id, src_id, dst_id, kind) do nothing",
+            "insert into memphant.memory_edge
+               (id, tenant_id, data_subject_id, scope_id, agent_node_id, subject_generation,
+                src_id, dst_id, kind, transaction_from, transaction_to)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+                     coalesce($10::timestamptz, now()), $11::timestamptz)
+             on conflict do nothing",
         )
         .bind(edge.id.as_uuid())
         .bind(edge.tenant_id.as_uuid())
+        .bind(context.data_subject_id.as_uuid())
         .bind(edge.scope_id.as_uuid())
+        .bind(context.agent_node_id.as_uuid())
+        .bind(context.subject_generation as i64)
         .bind(edge.src_id.as_uuid())
         .bind(edge.dst_id.as_uuid())
         .bind(enum_str(&edge.kind))
+        .bind(&edge.transaction_from)
+        .bind(&edge.transaction_to)
+        .execute(&mut **tx)
+        .await
+        .map_err(backend)?;
+        Ok(())
+    }
+
+    /// Idempotently seed an embedding profile inside a caller-owned tx.
+    async fn upsert_embedding_profile_tx(
+        tx: &mut Transaction<'static, Postgres>,
+        tenant: TenantId,
+        profile: &EmbeddingProfileRow,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "insert into memphant.embedding_profile
+               (id, tenant_id, provider, model, dimensions, distance, version, index_strategy)
+             values ($1, $2, $3, $4, $5, $6, $7, $8)
+             on conflict (tenant_id, id) do nothing",
+        )
+        .bind(profile.id)
+        .bind(tenant.as_uuid())
+        .bind(&profile.provider)
+        .bind(&profile.model)
+        .bind(profile.dimensions as i32)
+        .bind(&profile.distance)
+        .bind(&profile.version)
+        .bind(&profile.index_strategy)
+        .execute(&mut **tx)
+        .await
+        .map_err(backend)?;
+        Ok(())
+    }
+
+    /// Upsert one embedding row inside a caller-owned tx. Empty vectors are a
+    /// no-op so callers can pass unfiltered rows.
+    async fn insert_embedding_tx(
+        tx: &mut Transaction<'static, Postgres>,
+        context: &ResolvedMemoryContext,
+        row: &EmbeddingRow,
+    ) -> Result<(), StoreError> {
+        if row.vec.is_empty() {
+            return Ok(());
+        }
+        sqlx::query(
+            "insert into memphant.embedding
+               (tenant_id, data_subject_id, scope_id, agent_node_id, subject_generation,
+                memory_unit_id, embedding_profile_id, vec)
+             values ($1, $2, $3, $4, $5, $6, $7, $8::halfvec)
+             on conflict (tenant_id, memory_unit_id, embedding_profile_id)
+               do update set vec = excluded.vec",
+        )
+        .bind(context.tenant_id.as_uuid())
+        .bind(context.data_subject_id.as_uuid())
+        .bind(context.scope_id.as_uuid())
+        .bind(context.agent_node_id.as_uuid())
+        .bind(context.subject_generation as i64)
+        .bind(row.memory_unit_id.as_uuid())
+        .bind(row.embedding_profile_id)
+        .bind(vec_literal(&row.vec))
         .execute(&mut **tx)
         .await
         .map_err(backend)?;
@@ -405,7 +778,7 @@ impl PgStore {
     }
 
     async fn fetch_units_where(
-        &self,
+        tx: &mut Transaction<'static, Postgres>,
         where_clause: &str,
         tail: &str,
         binds: Vec<Bind>,
@@ -422,7 +795,7 @@ impl PgStore {
                 Bind::I64(value) => query.bind(value),
             };
         }
-        let rows = query.fetch_all(&self.pool).await.map_err(backend)?;
+        let rows = query.fetch_all(&mut **tx).await.map_err(backend)?;
         rows.iter().map(Self::unit_from_row).collect()
     }
 
@@ -430,21 +803,33 @@ impl PgStore {
     /// returns the ids transitioned.
     async fn delete_composed_dependents(
         tx: &mut Transaction<'static, Postgres>,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         source_ids: &[Uuid],
         generation: i64,
+        now: &str,
     ) -> Result<Vec<UnitId>, StoreError> {
         let rows = sqlx::query(
-            "update memphant.memory_unit set state = 'deleted', deletion_generation = $3,
-                    transaction_to = now()
-             where tenant_id = $1 and state <> 'deleted' and source_kind = 'composition'
+            "update memphant.memory_unit set state = 'deleted', deletion_generation = $8,
+                    transaction_to = $9::timestamptz
+             where tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+               and scope_id = $4 and agent_node_id = $5 and actor_id = $6
+               and state <> 'deleted' and source_kind = 'composition'
                and id in (select src_id from memphant.memory_edge
-                          where tenant_id = $1 and kind = 'derived_from' and dst_id = any($2))
+                          where tenant_id = $1 and data_subject_id = $2
+                            and subject_generation = $3 and scope_id = $4
+                            and agent_node_id = $5 and kind = 'derived_from'
+                            and dst_id = any($7))
              returning id",
         )
-        .bind(tenant.as_uuid())
+        .bind(context.tenant_id.as_uuid())
+        .bind(context.data_subject_id.as_uuid())
+        .bind(context.subject_generation as i64)
+        .bind(context.scope_id.as_uuid())
+        .bind(context.agent_node_id.as_uuid())
+        .bind(context.actor_id.as_uuid())
         .bind(source_ids)
         .bind(generation)
+        .bind(now)
         .fetch_all(&mut **tx)
         .await
         .map_err(backend)?;
@@ -456,19 +841,641 @@ impl PgStore {
             })
             .collect()
     }
+
+    async fn replace_context_policies(
+        tx: &mut Transaction<'_, Postgres>,
+        tenant: TenantId,
+        subject_id: Uuid,
+        grantee_scope_id: Uuid,
+        grantee_agent_node_id: Uuid,
+        agent_level: u8,
+        policies: &[ContextBindingAccessPolicy],
+    ) -> Result<(), StoreError> {
+        let mut seen = HashSet::new();
+        for policy in policies {
+            let key = (
+                policy.source_scope_external_ref().to_string(),
+                policy.source_agent_node_external_ref().to_string(),
+                policy.kind(),
+            );
+            if !seen.insert(key) {
+                return Err(StoreError::Conflict("duplicate access policy".to_string()));
+            }
+        }
+        sqlx::query(
+            "delete from memphant.scope_policy
+              where tenant_id = $1 and data_subject_id = $2
+                and grantee_scope_id = $3 and grantee_agent_node_id = $4",
+        )
+        .bind(tenant.as_uuid())
+        .bind(subject_id)
+        .bind(grantee_scope_id)
+        .bind(grantee_agent_node_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(backend)?;
+
+        for policy in policies {
+            let kind = policy.kind();
+            if !agent_level_allows_memory_kind(agent_level, kind) {
+                return Err(StoreError::Conflict(
+                    "memory kind is not allowed for the grantee agent level".to_string(),
+                ));
+            }
+            let source = sqlx::query(
+                "select source_scope.id as source_scope_id,
+                          source_agent.id as source_agent_node_id,
+                          (source_scope.materialized_path @> grantee_scope.materialized_path
+                            and source_scope.id <> grantee_scope.id) as scope_ancestor
+                     from memphant.scope source_scope
+                     join memphant.agent_node source_agent
+                       on source_agent.tenant_id = source_scope.tenant_id
+                      and source_agent.data_subject_id = source_scope.data_subject_id
+                      and source_agent.scope_id = source_scope.id
+                     join memphant.scope grantee_scope
+                       on grantee_scope.tenant_id = source_scope.tenant_id
+                      and grantee_scope.data_subject_id = source_scope.data_subject_id
+                      and grantee_scope.id = $4
+                    where source_scope.tenant_id = $1
+                      and source_scope.data_subject_id = $2
+                      and source_scope.external_ref = $6
+                      and source_agent.external_ref = $7",
+            )
+            .bind(tenant.as_uuid())
+            .bind(subject_id)
+            .bind(grantee_scope_id)
+            .bind(grantee_scope_id)
+            .bind(grantee_agent_node_id)
+            .bind(policy.source_scope_external_ref())
+            .bind(policy.source_agent_node_external_ref())
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(backend)?
+            .ok_or(StoreError::NotFound("access policy source context"))?;
+            let source_scope_id: Uuid = source.try_get("source_scope_id").map_err(backend)?;
+            let source_agent_node_id: Uuid =
+                source.try_get("source_agent_node_id").map_err(backend)?;
+            match policy {
+                ContextBindingAccessPolicy::Inherit { .. } => {
+                    let scope_ancestor: bool = source.try_get("scope_ancestor").map_err(backend)?;
+                    if agent_level != 0
+                        || !matches!(
+                            kind,
+                            MemoryKind::Episodic | MemoryKind::Semantic | MemoryKind::Belief
+                        )
+                        || !scope_ancestor
+                    {
+                        return Err(StoreError::Conflict(
+                            "inherit source must be a strict same-subject ancestor root-memory context"
+                                .to_string(),
+                        ));
+                    }
+                }
+                ContextBindingAccessPolicy::Grant { .. }
+                    if source_scope_id == grantee_scope_id
+                        && source_agent_node_id == grantee_agent_node_id =>
+                {
+                    return Err(StoreError::Conflict(
+                        "grant source must differ from the grantee context".to_string(),
+                    ));
+                }
+                ContextBindingAccessPolicy::Grant { .. } => {}
+            }
+            sqlx::query(
+                "insert into memphant.scope_policy
+                   (id, tenant_id, data_subject_id, source_scope_id,
+                    source_agent_node_id, grantee_scope_id, grantee_agent_node_id,
+                    kind, mode)
+                 values ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            )
+            .bind(Uuid::now_v7())
+            .bind(tenant.as_uuid())
+            .bind(subject_id)
+            .bind(source_scope_id)
+            .bind(source_agent_node_id)
+            .bind(grantee_scope_id)
+            .bind(grantee_agent_node_id)
+            .bind(enum_str(&kind))
+            .bind(match policy.mode() {
+                ContextBindingPolicyMode::Inherit => "inherit",
+                ContextBindingPolicyMode::Grant => "grant",
+            })
+            .execute(&mut **tx)
+            .await
+            .map_err(backend)?;
+        }
+        Ok(())
+    }
+}
+
+impl PgTxn {
+    fn validate_identity(
+        &self,
+        tenant_id: TenantId,
+        data_subject_id: SubjectId,
+        subject_generation: u64,
+        scope_id: ScopeId,
+        agent_node_id: AgentNodeId,
+        actor_id: Option<ActorId>,
+    ) -> Result<(), StoreError> {
+        if tenant_id != self.context.tenant_id
+            || data_subject_id != self.context.data_subject_id
+            || subject_generation != self.context.subject_generation
+            || scope_id != self.context.scope_id
+            || agent_node_id != self.context.agent_node_id
+            || actor_id != Some(self.context.actor_id)
+        {
+            return Err(StoreError::Conflict(
+                "write does not match transaction context".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl MutationLedgerStore for PgStore {
+    async fn stage_mutation_claim(
+        &self,
+        tx: &mut Self::Txn,
+        claim: MutationClaim,
+    ) -> Result<MutationClaimOutcome, StoreError> {
+        if claim.subject_generation() != tx.context.subject_generation {
+            return Err(StoreError::StaleSubjectGeneration);
+        }
+        if claim.tenant_id() != tx.context.tenant_id
+            || claim.data_subject_id() != tx.context.data_subject_id
+        {
+            return Err(StoreError::IdempotencyConflict);
+        }
+        if let Some(staged) = &tx.mutation {
+            return match staged {
+                PgMutationState::Execute {
+                    claim: staged_claim,
+                    ..
+                } if staged_claim == &claim => Ok(MutationClaimOutcome::Execute),
+                PgMutationState::Replay {
+                    claim: staged_claim,
+                    response,
+                } if staged_claim == &claim => Ok(MutationClaimOutcome::Replay(response.clone())),
+                PgMutationState::Execute { .. } | PgMutationState::Replay { .. } => {
+                    Err(StoreError::IdempotencyConflict)
+                }
+            };
+        }
+
+        let generation = i64::try_from(claim.subject_generation())
+            .map_err(|_| StoreError::StaleSubjectGeneration)?;
+        let subject_lock_sql = if claim.verb() == memphant_core::MutationVerb::EraseSubject {
+            "select generation from memphant.subject
+             where tenant_id = $1 and id = $2 for update"
+        } else {
+            "select generation from memphant.subject
+             where tenant_id = $1 and id = $2 for share"
+        };
+        let current_generation: Option<i64> = sqlx::query_scalar(AssertSqlSafe(subject_lock_sql))
+            .bind(claim.tenant_id().as_uuid())
+            .bind(claim.data_subject_id().as_uuid())
+            .fetch_optional(&mut *tx.tx)
+            .await
+            .map_err(backend)?;
+        match current_generation {
+            None if claim.verb() == memphant_core::MutationVerb::EraseSubject => {
+                let receipt = sqlx::query(
+                    "select data_subject_id, subject_generation, request_hash, state,
+                            response_status, response_body
+                     from memphant.mutation_ledger
+                     where tenant_id = $1 and verb = 'erase_subject'
+                       and idempotency_key = $2
+                       and expires_at > statement_timestamp()
+                     for update",
+                )
+                .bind(claim.tenant_id().as_uuid())
+                .bind(claim.idempotency_key())
+                .fetch_optional(&mut *tx.tx)
+                .await
+                .map_err(backend)?;
+                let Some(receipt) = receipt else {
+                    let tombstoned: bool = sqlx::query_scalar(
+                        "select exists(
+                           select 1 from memphant.subject_tombstone
+                           where tenant_id = $1 and erased_subject_id = $2
+                         )",
+                    )
+                    .bind(claim.tenant_id().as_uuid())
+                    .bind(claim.data_subject_id().as_uuid())
+                    .fetch_one(&mut *tx.tx)
+                    .await
+                    .map_err(backend)?;
+                    return Err(if tombstoned {
+                        StoreError::SubjectErased
+                    } else {
+                        StoreError::NotFound("memory context")
+                    });
+                };
+                let stored_subject: Uuid = receipt.try_get("data_subject_id").map_err(backend)?;
+                let stored_generation: i64 =
+                    receipt.try_get("subject_generation").map_err(backend)?;
+                let stored_hash: Vec<u8> = receipt.try_get("request_hash").map_err(backend)?;
+                if stored_subject != claim.data_subject_id().as_uuid()
+                    || stored_generation != generation
+                    || stored_hash.as_slice() != claim.request_hash()
+                {
+                    return Err(StoreError::IdempotencyConflict);
+                }
+                let state: String = receipt.try_get("state").map_err(backend)?;
+                if state != "completed" {
+                    return Err(StoreError::Backend(
+                        "committed erasure receipt has no response".to_string(),
+                    ));
+                }
+                let status: i16 = receipt.try_get("response_status").map_err(backend)?;
+                let body: Vec<u8> = receipt.try_get("response_body").map_err(backend)?;
+                let response = MutationResponse::success(
+                    u16::try_from(status).map_err(|_| {
+                        StoreError::Backend("stored erasure response status is invalid".to_string())
+                    })?,
+                    body,
+                )?;
+                tx.mutation = Some(PgMutationState::Replay {
+                    claim,
+                    response: response.clone(),
+                });
+                return Ok(MutationClaimOutcome::Replay(response));
+            }
+            None => {
+                let tombstoned: bool = sqlx::query_scalar(
+                    "select exists(
+                       select 1 from memphant.subject_tombstone
+                       where tenant_id = $1 and erased_subject_id = $2
+                     )",
+                )
+                .bind(claim.tenant_id().as_uuid())
+                .bind(claim.data_subject_id().as_uuid())
+                .fetch_one(&mut *tx.tx)
+                .await
+                .map_err(backend)?;
+                return Err(if tombstoned {
+                    StoreError::SubjectErased
+                } else {
+                    StoreError::NotFound("memory context")
+                });
+            }
+            Some(current) if current != generation => {
+                return Err(StoreError::StaleSubjectGeneration);
+            }
+            Some(_) => {}
+        }
+
+        let inserted = sqlx::query_scalar::<_, bool>(
+            "insert into memphant.mutation_ledger
+               (tenant_id, verb, idempotency_key, data_subject_id,
+                subject_generation, request_hash, state)
+             values ($1, $2, $3, $4, $5, $6, 'pending')
+             on conflict (tenant_id, verb, idempotency_key) do nothing
+             returning true",
+        )
+        .bind(claim.tenant_id().as_uuid())
+        .bind(claim.verb().as_str())
+        .bind(claim.idempotency_key())
+        .bind(claim.data_subject_id().as_uuid())
+        .bind(generation)
+        .bind(claim.request_hash().as_slice())
+        .fetch_optional(&mut *tx.tx)
+        .await
+        .map_err(backend)?
+        .unwrap_or(false);
+
+        let row = sqlx::query(
+            "select data_subject_id, subject_generation, request_hash, state,
+                    response_status, response_body,
+                    expires_at <= statement_timestamp() as expired
+             from memphant.mutation_ledger
+             where tenant_id = $1 and verb = $2 and idempotency_key = $3
+             for update",
+        )
+        .bind(claim.tenant_id().as_uuid())
+        .bind(claim.verb().as_str())
+        .bind(claim.idempotency_key())
+        .fetch_one(&mut *tx.tx)
+        .await
+        .map_err(backend)?;
+
+        if inserted {
+            tx.mutation = Some(PgMutationState::Execute {
+                claim,
+                response_staged: false,
+            });
+            return Ok(MutationClaimOutcome::Execute);
+        }
+
+        let expired: bool = row.try_get("expired").map_err(backend)?;
+        if expired {
+            sqlx::query(
+                "update memphant.mutation_ledger
+                 set data_subject_id = $4, subject_generation = $5, request_hash = $6,
+                     state = 'pending', response_status = null, response_body = null,
+                     created_at = statement_timestamp(),
+                     expires_at = statement_timestamp() + interval '24 hours'
+                 where tenant_id = $1 and verb = $2 and idempotency_key = $3",
+            )
+            .bind(claim.tenant_id().as_uuid())
+            .bind(claim.verb().as_str())
+            .bind(claim.idempotency_key())
+            .bind(claim.data_subject_id().as_uuid())
+            .bind(generation)
+            .bind(claim.request_hash().as_slice())
+            .execute(&mut *tx.tx)
+            .await
+            .map_err(backend)?;
+            tx.mutation = Some(PgMutationState::Execute {
+                claim,
+                response_staged: false,
+            });
+            return Ok(MutationClaimOutcome::Execute);
+        }
+
+        let stored_subject: Uuid = row.try_get("data_subject_id").map_err(backend)?;
+        let stored_generation: i64 = row.try_get("subject_generation").map_err(backend)?;
+        let stored_hash: Vec<u8> = row.try_get("request_hash").map_err(backend)?;
+        if stored_subject != claim.data_subject_id().as_uuid()
+            || stored_generation != generation
+            || stored_hash.as_slice() != claim.request_hash()
+        {
+            return Err(StoreError::IdempotencyConflict);
+        }
+
+        let state: String = row.try_get("state").map_err(backend)?;
+        if state != "completed" {
+            return Err(StoreError::Backend(
+                "committed mutation ledger row has no response".to_string(),
+            ));
+        }
+        let status: i16 = row.try_get("response_status").map_err(backend)?;
+        let body: Vec<u8> = row.try_get("response_body").map_err(backend)?;
+        let status = u16::try_from(status).map_err(|_| {
+            StoreError::Backend("stored mutation response status is invalid".to_string())
+        })?;
+        let response = MutationResponse::success(status, body)?;
+        tx.mutation = Some(PgMutationState::Replay {
+            claim,
+            response: response.clone(),
+        });
+        Ok(MutationClaimOutcome::Replay(response))
+    }
+
+    async fn stage_mutation_response(
+        &self,
+        tx: &mut Self::Txn,
+        response: MutationResponse,
+    ) -> Result<(), StoreError> {
+        let claim = match tx.mutation.as_ref() {
+            Some(PgMutationState::Execute { claim, .. }) => claim,
+            Some(PgMutationState::Replay { .. }) => {
+                return Err(StoreError::Conflict(
+                    "replayed mutation cannot stage a new response".to_string(),
+                ));
+            }
+            None => {
+                return Err(StoreError::Conflict(
+                    "mutation claim must be staged before its response".to_string(),
+                ));
+            }
+        };
+        if claim.verb() == memphant_core::MutationVerb::EraseSubject {
+            return Err(StoreError::Conflict(
+                "subject erasure response is generated by the store".to_string(),
+            ));
+        }
+        let generation = i64::try_from(claim.subject_generation())
+            .map_err(|_| StoreError::StaleSubjectGeneration)?;
+        let result = sqlx::query(
+            "update memphant.mutation_ledger
+             set state = 'completed', response_status = $7, response_body = $8
+             where tenant_id = $1 and verb = $2 and idempotency_key = $3
+               and data_subject_id = $4 and subject_generation = $5
+               and request_hash = $6 and state = 'pending'",
+        )
+        .bind(claim.tenant_id().as_uuid())
+        .bind(claim.verb().as_str())
+        .bind(claim.idempotency_key())
+        .bind(claim.data_subject_id().as_uuid())
+        .bind(generation)
+        .bind(claim.request_hash().as_slice())
+        .bind(i16::try_from(response.status()).map_err(|_| {
+            StoreError::Backend("mutation response status exceeds smallint".to_string())
+        })?)
+        .bind(response.body())
+        .execute(&mut *tx.tx)
+        .await
+        .map_err(backend)?;
+        if result.rows_affected() != 1 {
+            return Err(StoreError::Backend(
+                "mutation ledger response did not match its pending claim".to_string(),
+            ));
+        }
+        if let Some(PgMutationState::Execute {
+            response_staged, ..
+        }) = tx.mutation.as_mut()
+        {
+            *response_staged = true;
+        }
+        Ok(())
+    }
+
+    async fn stage_subject_erasure(
+        &self,
+        tx: &mut Self::Txn,
+    ) -> Result<SubjectErasureReceipt, StoreError> {
+        if tx.has_subject_writes {
+            return Err(StoreError::Conflict(
+                "subject erasure requires an otherwise empty transaction".to_string(),
+            ));
+        }
+        let claim = match tx.mutation.as_ref() {
+            Some(PgMutationState::Execute {
+                claim,
+                response_staged: false,
+            }) if claim.verb() == memphant_core::MutationVerb::EraseSubject => claim.clone(),
+            Some(PgMutationState::Execute { .. }) | Some(PgMutationState::Replay { .. }) => {
+                return Err(StoreError::Conflict(
+                    "subject erasure requires an executable erase_subject claim".to_string(),
+                ));
+            }
+            None => {
+                return Err(StoreError::Conflict(
+                    "erasure claim must be staged first".to_string(),
+                ));
+            }
+        };
+        let old_generation = i64::try_from(claim.subject_generation())
+            .map_err(|_| StoreError::StaleSubjectGeneration)?;
+        let new_generation = old_generation
+            .checked_add(1)
+            .ok_or_else(|| StoreError::Conflict("subject generation overflow".to_string()))?;
+
+        let locked_generation: Option<i64> = sqlx::query_scalar(
+            "select generation from memphant.subject
+             where tenant_id = $1 and id = $2 for update",
+        )
+        .bind(claim.tenant_id().as_uuid())
+        .bind(claim.data_subject_id().as_uuid())
+        .fetch_optional(&mut *tx.tx)
+        .await
+        .map_err(backend)?;
+        match locked_generation {
+            None => return Err(StoreError::SubjectErased),
+            Some(generation) if generation != old_generation => {
+                return Err(StoreError::StaleSubjectGeneration);
+            }
+            Some(_) => {}
+        }
+
+        let updated = sqlx::query(
+            "update memphant.subject set generation = $3, updated_at = statement_timestamp()
+             where tenant_id = $1 and id = $2 and generation = $4",
+        )
+        .bind(claim.tenant_id().as_uuid())
+        .bind(claim.data_subject_id().as_uuid())
+        .bind(new_generation)
+        .bind(old_generation)
+        .execute(&mut *tx.tx)
+        .await
+        .map_err(backend)?;
+        if updated.rows_affected() != 1 {
+            return Err(StoreError::StaleSubjectGeneration);
+        }
+
+        sqlx::query(
+            "delete from memphant.mutation_ledger
+             where tenant_id = $1 and data_subject_id = $2
+               and not (verb = 'erase_subject' and idempotency_key = $3)",
+        )
+        .bind(claim.tenant_id().as_uuid())
+        .bind(claim.data_subject_id().as_uuid())
+        .bind(claim.idempotency_key())
+        .execute(&mut *tx.tx)
+        .await
+        .map_err(backend)?;
+
+        let erased_at: String = sqlx::query_scalar(
+            "insert into memphant.subject_tombstone
+               (tenant_id, erased_subject_id, generation, erased_at)
+             values ($1, $2, $3, statement_timestamp())
+             returning to_char(
+               erased_at at time zone 'utc',
+               'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'
+             )",
+        )
+        .bind(claim.tenant_id().as_uuid())
+        .bind(claim.data_subject_id().as_uuid())
+        .bind(new_generation)
+        .fetch_one(&mut *tx.tx)
+        .await
+        .map_err(backend)?;
+        let erased_at = canonical_timestamp(Some(erased_at)).ok_or_else(|| {
+            StoreError::Backend("subject tombstone omitted erasure timestamp".to_string())
+        })?;
+
+        let deleted = sqlx::query(
+            "delete from memphant.subject
+             where tenant_id = $1 and id = $2 and generation = $3",
+        )
+        .bind(claim.tenant_id().as_uuid())
+        .bind(claim.data_subject_id().as_uuid())
+        .bind(new_generation)
+        .execute(&mut *tx.tx)
+        .await
+        .map_err(backend)?;
+        if deleted.rows_affected() != 1 {
+            return Err(StoreError::Backend(
+                "subject erasure did not delete its locked subject".to_string(),
+            ));
+        }
+
+        let receipt = SubjectErasureReceipt {
+            generation: u64::try_from(new_generation).map_err(|_| {
+                StoreError::Backend("subject erasure generation is invalid".to_string())
+            })?,
+            erased_at,
+        };
+        let body =
+            serde_json::to_vec(&receipt).map_err(|error| StoreError::Backend(error.to_string()))?;
+        let response = MutationResponse::success(200, body)?;
+        let stored = sqlx::query(
+            "update memphant.mutation_ledger
+             set state = 'completed', response_status = $7, response_body = $8
+             where tenant_id = $1 and verb = $2 and idempotency_key = $3
+               and data_subject_id = $4 and subject_generation = $5
+               and request_hash = $6 and state = 'pending'",
+        )
+        .bind(claim.tenant_id().as_uuid())
+        .bind(claim.verb().as_str())
+        .bind(claim.idempotency_key())
+        .bind(claim.data_subject_id().as_uuid())
+        .bind(old_generation)
+        .bind(claim.request_hash().as_slice())
+        .bind(i16::try_from(response.status()).map_err(|_| {
+            StoreError::Backend("erasure response status exceeds smallint".to_string())
+        })?)
+        .bind(response.body())
+        .execute(&mut *tx.tx)
+        .await
+        .map_err(backend)?;
+        if stored.rows_affected() != 1 {
+            return Err(StoreError::Backend(
+                "subject erasure receipt did not match its pending claim".to_string(),
+            ));
+        }
+        if let Some(PgMutationState::Execute {
+            response_staged, ..
+        }) = tx.mutation.as_mut()
+        {
+            *response_staged = true;
+        }
+        Ok(receipt)
+    }
 }
 
 impl MemoryStore for PgStore {
     type Txn = PgTxn;
 
-    async fn begin(&self) -> Self::Txn {
-        PgTxn {
-            tx: self.pool.begin().await.expect("begin postgres transaction"),
-        }
+    async fn begin(&self, context: &ResolvedMemoryContext) -> Result<Self::Txn, StoreError> {
+        let mut tx = self.pool.begin().await.map_err(backend)?;
+        sqlx::query("select memphant.bind_tenant($1)")
+            .bind(context.tenant_id.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .map_err(backend)?;
+        Ok(PgTxn {
+            tx,
+            context: context.clone(),
+            mutation: None,
+            has_subject_writes: false,
+        })
     }
 
     async fn commit(&self, tx: Self::Txn) -> Result<(), StoreError> {
-        tx.tx.commit().await.map_err(backend)
+        match tx.mutation.as_ref() {
+            Some(PgMutationState::Execute {
+                response_staged: false,
+                ..
+            }) => {
+                tx.tx.rollback().await.map_err(backend)?;
+                Err(StoreError::Conflict(
+                    "successful mutation response must be staged before commit".to_string(),
+                ))
+            }
+            Some(PgMutationState::Replay { .. }) => tx.tx.rollback().await.map_err(backend),
+            Some(PgMutationState::Execute {
+                response_staged: true,
+                ..
+            })
+            | None => tx.tx.commit().await.map_err(backend),
+        }
+    }
+
+    async fn rollback(&self, tx: Self::Txn) -> Result<(), StoreError> {
+        tx.tx.rollback().await.map_err(backend)
     }
 
     async fn stage_episode(
@@ -476,31 +1483,47 @@ impl MemoryStore for PgStore {
         tx: &mut Self::Txn,
         episode: NewEpisode,
     ) -> Result<RetainOutcome, StoreError> {
-        Self::ensure_tenant(&mut tx.tx, episode.tenant_id).await?;
-        Self::ensure_scope(&mut tx.tx, episode.tenant_id, episode.scope_id).await?;
-        Self::ensure_actor(&mut tx.tx, episode.tenant_id, episode.actor_id).await?;
+        tx.validate_identity(
+            episode.tenant_id,
+            episode.data_subject_id,
+            episode.subject_generation,
+            episode.scope_id,
+            episode.agent_node_id,
+            Some(episode.actor_id),
+        )?;
+        Self::validate_episode_context(&mut tx.tx, &episode).await?;
         let row = sqlx::query(
             "insert into memphant.episode
-               (id, tenant_id, scope_id, actor_id, source_kind, source_trust, dedup_key, body,
+               (id, tenant_id, data_subject_id, scope_id, actor_id, agent_node_id,
+                subject_generation, source_kind, source_ref, source_trust, dedup_key, body,
                 first_observed_at, last_observed_at)
-             values ($1, $2, $3, $4, $5, $6, $7, $8, now(), now())
-             on conflict (tenant_id, scope_id, dedup_key) do update
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                     $13::timestamptz, $13::timestamptz)
+             on conflict (tenant_id, data_subject_id, subject_generation, scope_id,
+                          agent_node_id, actor_id, dedup_key) do update
                set observation_count = memphant.episode.observation_count + 1,
-                   last_observed_at = now()
+                   first_observed_at = least(memphant.episode.first_observed_at, excluded.first_observed_at),
+                   last_observed_at = greatest(memphant.episode.last_observed_at, excluded.last_observed_at)
              returning id, observation_count, (xmax = 0) as inserted",
         )
         .bind(Uuid::now_v7())
         .bind(episode.tenant_id.as_uuid())
+        .bind(episode.data_subject_id.as_uuid())
         .bind(episode.scope_id.as_uuid())
         .bind(episode.actor_id.as_uuid())
+        .bind(episode.agent_node_id.as_uuid())
+        .bind(episode.subject_generation as i64)
         .bind(&episode.source_kind)
+        .bind(&episode.source_ref)
         .bind(enum_str(&episode.source_trust))
         .bind(&episode.dedup_key)
         .bind(&episode.body)
+        .bind(&episode.observed_at)
         .fetch_one(&mut *tx.tx)
         .await
         .map_err(backend)?;
         let inserted: bool = row.try_get("inserted").map_err(backend)?;
+        tx.has_subject_writes = true;
         Ok(RetainOutcome {
             episode_id: EpisodeId::from_u128(
                 row.try_get::<Uuid, _>("id").map_err(backend)?.as_u128(),
@@ -519,21 +1542,35 @@ impl MemoryStore for PgStore {
         tx: &mut Self::Txn,
         unit: NewMemoryUnit,
     ) -> Result<UnitId, StoreError> {
-        Self::ensure_tenant(&mut tx.tx, unit.tenant_id).await?;
+        tx.validate_identity(
+            unit.tenant_id,
+            unit.data_subject_id,
+            unit.subject_generation,
+            unit.scope_id,
+            unit.agent_node_id,
+            unit.actor_id,
+        )?;
         let id = UnitId::new();
         let stored = StoredMemoryUnit {
             id,
             tenant_id: unit.tenant_id,
+            data_subject_id: unit.data_subject_id,
             scope_id: unit.scope_id,
+            agent_node_id: unit.agent_node_id,
+            subject_generation: unit.subject_generation,
             kind: unit.kind,
             state: unit.state,
-            subject_key: unit.subject_key,
+            fact_key: unit.fact_key,
+            predicate: unit.predicate,
             body: unit.body,
+            confidence: unit.confidence,
             trust_level: unit.trust_level,
             churn_class: unit.churn_class,
             freshness_due_at: unit.freshness_due_at,
             actor_id: unit.actor_id,
             source_kind: unit.source_kind,
+            source_ref: unit.source_ref,
+            observed_at: unit.observed_at,
             source_episode_id: unit.source_episode_id,
             source_resource_id: unit.source_resource_id,
             deletion_generation: unit.deletion_generation,
@@ -548,6 +1585,7 @@ impl MemoryStore for PgStore {
             reinforcement_count: 0,
         };
         Self::insert_unit(&mut tx.tx, &stored).await?;
+        tx.has_subject_writes = true;
         Ok(id)
     }
 
@@ -556,21 +1594,34 @@ impl MemoryStore for PgStore {
         tx: &mut Self::Txn,
         resource: NewResource,
     ) -> Result<ResourceId, StoreError> {
-        Self::ensure_tenant(&mut tx.tx, resource.tenant_id).await?;
-        Self::ensure_scope(&mut tx.tx, resource.tenant_id, resource.scope_id).await?;
-        Self::ensure_actor(&mut tx.tx, resource.tenant_id, resource.actor_id).await?;
+        tx.validate_identity(
+            resource.tenant_id,
+            resource.data_subject_id,
+            resource.subject_generation,
+            resource.scope_id,
+            resource.agent_node_id,
+            Some(resource.actor_id),
+        )?;
+        Self::validate_resource_context(&mut tx.tx, &resource).await?;
         let id = ResourceId::new();
         sqlx::query(
             "insert into memphant.resource
-               (id, tenant_id, scope_id, kind, uri, content_hash, actor_id, mime_type,
-                revision, body, source_trust)
-             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+               (id, tenant_id, data_subject_id, scope_id, agent_node_id, subject_generation,
+                kind, uri, source_ref, observed_at, content_hash, actor_id, mime_type, revision,
+                body, source_trust)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::timestamptz, $11,
+                     $12, $13, $14, $15, $16)",
         )
         .bind(id.as_uuid())
         .bind(resource.tenant_id.as_uuid())
+        .bind(resource.data_subject_id.as_uuid())
         .bind(resource.scope_id.as_uuid())
+        .bind(resource.agent_node_id.as_uuid())
+        .bind(resource.subject_generation as i64)
         .bind(enum_str(&resource.kind))
         .bind(&resource.uri)
+        .bind(&resource.source_ref)
+        .bind(&resource.observed_at)
         .bind(&resource.content_hash)
         .bind(resource.actor_id.as_uuid())
         .bind(&resource.mime_type)
@@ -580,6 +1631,7 @@ impl MemoryStore for PgStore {
         .execute(&mut *tx.tx)
         .await
         .map_err(backend)?;
+        tx.has_subject_writes = true;
         Ok(id)
     }
 
@@ -588,9 +1640,37 @@ impl MemoryStore for PgStore {
         tx: &mut Self::Txn,
         edge: NewMemoryEdge,
     ) -> Result<EdgeId, StoreError> {
+        if edge.tenant_id != tx.context.tenant_id || edge.scope_id != tx.context.scope_id {
+            return Err(StoreError::Conflict(
+                "memory edge does not match transaction context".to_string(),
+            ));
+        }
+        let endpoint_count: i64 = sqlx::query_scalar(
+            "select count(*) from memphant.memory_unit
+             where tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+               and scope_id = $4 and agent_node_id = $5 and actor_id = $6
+               and id = any($7)",
+        )
+        .bind(tx.context.tenant_id.as_uuid())
+        .bind(tx.context.data_subject_id.as_uuid())
+        .bind(tx.context.subject_generation as i64)
+        .bind(tx.context.scope_id.as_uuid())
+        .bind(tx.context.agent_node_id.as_uuid())
+        .bind(tx.context.actor_id.as_uuid())
+        .bind(vec![edge.src_id.as_uuid(), edge.dst_id.as_uuid()])
+        .fetch_one(&mut *tx.tx)
+        .await
+        .map_err(backend)?;
+        let expected = if edge.src_id == edge.dst_id { 1 } else { 2 };
+        if endpoint_count != expected {
+            return Err(StoreError::Conflict(
+                "memory edge endpoints must belong to the transaction context".to_string(),
+            ));
+        }
         let id = EdgeId::new();
         Self::insert_edge(
             &mut tx.tx,
+            &tx.context,
             &StoredMemoryEdge {
                 id,
                 tenant_id: edge.tenant_id,
@@ -598,9 +1678,12 @@ impl MemoryStore for PgStore {
                 src_id: edge.src_id,
                 dst_id: edge.dst_id,
                 kind: edge.kind,
+                transaction_from: None,
+                transaction_to: None,
             },
         )
         .await?;
+        tx.has_subject_writes = true;
         Ok(id)
     }
 
@@ -609,55 +1692,146 @@ impl MemoryStore for PgStore {
         tx: &mut Self::Txn,
         job: ReflectJob,
     ) -> Result<JobId, StoreError> {
+        tx.validate_identity(
+            job.tenant_id,
+            job.data_subject_id,
+            job.subject_generation,
+            job.scope_id,
+            job.agent_node_id,
+            Some(job.actor_id),
+        )?;
         let id = JobId::new();
         let (job_type, target) = match job.kind {
-            ReflectJobKind::ReflectEpisode => (
+            ReflectJobKind::ReflectEpisode if job.resource_id.is_none() => (
                 "reflect_episode",
                 job.episode_id.map(|episode| episode.as_uuid()),
             ),
-            ReflectJobKind::ReflectResource => (
+            ReflectJobKind::ReflectResource if job.episode_id.is_none() => (
                 "reflect_resource",
                 job.resource_id.map(|resource| resource.as_uuid()),
             ),
+            ReflectJobKind::ReflectScope
+                if job.episode_id.is_none() && job.resource_id.is_none() =>
+            {
+                ("reflect_scope", Some(id.as_uuid()))
+            }
+            _ => {
+                return Err(StoreError::Conflict(
+                    "reflect job source identifiers must exactly match its kind".to_string(),
+                ));
+            }
         };
-        let target = target.ok_or(StoreError::NotFound("reflect job target"))?;
-        sqlx::query(
+        let target = target.ok_or_else(|| {
+            StoreError::Conflict(
+                "reflect job source identifiers must exactly match its kind".to_string(),
+            )
+        })?;
+        let target_query = match job.kind {
+            ReflectJobKind::ReflectEpisode => Some(
+                "select exists(select 1 from memphant.episode
+                 where tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+                   and scope_id = $4 and agent_node_id = $5 and actor_id = $6 and id = $7)",
+            ),
+            ReflectJobKind::ReflectResource => Some(
+                "select exists(select 1 from memphant.resource
+                 where tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+                   and scope_id = $4 and agent_node_id = $5 and actor_id = $6 and id = $7)",
+            ),
+            ReflectJobKind::ReflectScope => None,
+        };
+        if let Some(query) = target_query {
+            let target_matches: bool = sqlx::query_scalar(query)
+                .bind(tx.context.tenant_id.as_uuid())
+                .bind(tx.context.data_subject_id.as_uuid())
+                .bind(tx.context.subject_generation as i64)
+                .bind(tx.context.scope_id.as_uuid())
+                .bind(tx.context.agent_node_id.as_uuid())
+                .bind(tx.context.actor_id.as_uuid())
+                .bind(target)
+                .fetch_one(&mut *tx.tx)
+                .await
+                .map_err(backend)?;
+            if !target_matches {
+                return Err(StoreError::Conflict(
+                    "reflect job target must belong to the transaction context".to_string(),
+                ));
+            }
+        }
+        let persisted_id: Option<Uuid> = sqlx::query_scalar(
             "insert into memphant.job_state
-               (id, tenant_id, job_type, target_id, compiler_version, state, scope_id,
-                subject, predicate)
-             values ($1, $2, $3, $4, $5, 'queued', $6, $7, $8)
-             on conflict (tenant_id, job_type, target_id, compiler_version) do update
-               set state = case when memphant.job_state.state in ('done', 'dead')
-                                then 'queued' else memphant.job_state.state end,
-                   run_after = now()",
+               (id, tenant_id, data_subject_id, actor_id, agent_node_id, subject_generation,
+                job_type, target_id, compiler_version, state, scope_id, subject, predicate)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'queued', $10, $11, $12)
+             on conflict (tenant_id, data_subject_id, subject_generation, scope_id, agent_node_id,
+                          actor_id, job_type, target_id, compiler_version) do nothing
+             returning id",
         )
         .bind(id.as_uuid())
         .bind(job.tenant_id.as_uuid())
+        .bind(job.data_subject_id.as_uuid())
+        .bind(job.actor_id.as_uuid())
+        .bind(job.agent_node_id.as_uuid())
+        .bind(job.subject_generation as i64)
         .bind(job_type)
         .bind(target)
         .bind(&job.compiler_version)
         .bind(job.scope_id.as_uuid())
         .bind(&job.subject)
         .bind(&job.predicate)
-        .execute(&mut *tx.tx)
+        .fetch_optional(&mut *tx.tx)
         .await
         .map_err(backend)?;
-        Ok(id)
+        let persisted_id = match persisted_id {
+            Some(id) => id,
+            None => sqlx::query_scalar(
+                "select id from memphant.job_state
+                 where tenant_id = $1 and data_subject_id = $2 and actor_id = $3
+                   and agent_node_id = $4 and subject_generation = $5
+                   and job_type = $6 and target_id = $7 and compiler_version = $8
+                   and scope_id = $9",
+            )
+            .bind(job.tenant_id.as_uuid())
+            .bind(job.data_subject_id.as_uuid())
+            .bind(job.actor_id.as_uuid())
+            .bind(job.agent_node_id.as_uuid())
+            .bind(job.subject_generation as i64)
+            .bind(job_type)
+            .bind(target)
+            .bind(&job.compiler_version)
+            .bind(job.scope_id.as_uuid())
+            .fetch_one(&mut *tx.tx)
+            .await
+            .map_err(backend)?,
+        };
+        tx.has_subject_writes = true;
+        Ok(JobId::from_u128(persisted_id.as_u128()))
     }
 
     async fn fetch_recall_candidates(
         &self,
-        tenant: TenantId,
-        scopes: &[ScopeId],
+        context: &ResolvedMemoryContext,
         kinds: &[MemoryKind],
         query_terms: &[String],
+        time: &RecallTime,
         limit: usize,
     ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
-        let scope_uuids: Vec<Uuid> = scopes.iter().map(|scope| scope.as_uuid()).collect();
+        let mut tx = self.tenant_tx(context.tenant_id).await?;
+        let (scope_uuids, agent_uuids, allowed_kind_strs) = source_kind_triples(context, kinds);
         let kind_strs: Vec<String> = kinds.iter().map(enum_str).collect();
-        let base = "tenant_id = $1 and scope_id = any($2)
-                    and (cardinality($3::text[]) = 0 or kind = any($3))
-                    and transaction_to is null";
+        let base = "tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+                    and exists (
+                      select 1 from unnest($4::uuid[], $5::uuid[], $6::text[])
+                        allowed(scope_id, agent_node_id, kind)
+                      where allowed.scope_id = memphant.memory_unit.scope_id
+                        and allowed.agent_node_id = memphant.memory_unit.agent_node_id
+                        and allowed.kind = memphant.memory_unit.kind
+                    )
+                    and (cardinality($7::text[]) = 0 or kind = any($7))
+                    and deletion_generation is null and state <> 'deleted'
+                    and coalesce(transaction_from, '-infinity'::timestamptz) <= $8::timestamptz
+                    and $8::timestamptz < coalesce(transaction_to, 'infinity'::timestamptz)
+                    and coalesce(valid_from, '-infinity'::timestamptz) <= $9::timestamptz
+                    and $9::timestamptz < coalesce(valid_to, 'infinity'::timestamptz)";
         let mut seen: HashSet<Uuid> = HashSet::new();
         let mut units = Vec::new();
         let mut extend = |fetched: Vec<StoredMemoryUnit>| {
@@ -671,16 +1845,25 @@ impl MemoryStore for PgStore {
         // Family 1: FTS top-N over body_tsv (websearch, OR-joined terms).
         if !query_terms.is_empty() {
             let websearch = query_terms.join(" or ");
-            let fetched = self
-                .fetch_units_where(
+            let fetched = Self::fetch_units_where(
+                    &mut tx,
                     &format!(
-                        "{base} and body_tsv @@ websearch_to_tsquery('english', $4)"
+                        "{base} and body_tsv @@ websearch_to_tsquery('english', $10)"
                     ),
-                    "order by ts_rank_cd(body_tsv, websearch_to_tsquery('english', $4)) desc limit 200",
+                    // `, body` is a content-derived tie-break: keeps the top-200
+                    // cut deterministic when ts_rank ties, so a re-ingest with
+                    // fresh UUIDs ranks the same corpus identically.
+                    "order by ts_rank_cd(body_tsv, websearch_to_tsquery('english', $10)) desc, body limit 200",
                     vec![
-                        Bind::Uuid(tenant.as_uuid()),
+                        Bind::Uuid(context.tenant_id.as_uuid()),
+                        Bind::Uuid(context.data_subject_id.as_uuid()),
+                        Bind::I64(context.subject_generation as i64),
                         Bind::UuidVec(scope_uuids.clone()),
+                        Bind::UuidVec(agent_uuids.clone()),
+                        Bind::TextVec(allowed_kind_strs.clone()),
                         Bind::TextVec(kind_strs.clone()),
+                        Bind::Text(time.transaction_as_of.clone()),
+                        Bind::Text(time.valid_at.clone()),
                         Bind::Text(websearch.clone()),
                     ],
                 )
@@ -689,39 +1872,55 @@ impl MemoryStore for PgStore {
         }
 
         // Family 2: most-recent-M per scope.
-        for scope in &scope_uuids {
-            let fetched = self
-                .fetch_units_where(
-                    &base.replace("scope_id = any($2)", "scope_id = $2"),
-                    "order by transaction_from desc limit 100",
-                    vec![
-                        Bind::Uuid(tenant.as_uuid()),
-                        Bind::Uuid(*scope),
-                        Bind::TextVec(kind_strs.clone()),
-                    ],
-                )
-                .await?;
+        let mut unique_scopes = scope_uuids.clone();
+        unique_scopes.sort_unstable();
+        unique_scopes.dedup();
+        for scope in &unique_scopes {
+            let fetched = Self::fetch_units_where(
+                &mut tx,
+                &format!("{base} and scope_id = $10"),
+                "order by transaction_from desc, body limit 100",
+                vec![
+                    Bind::Uuid(context.tenant_id.as_uuid()),
+                    Bind::Uuid(context.data_subject_id.as_uuid()),
+                    Bind::I64(context.subject_generation as i64),
+                    Bind::UuidVec(scope_uuids.clone()),
+                    Bind::UuidVec(agent_uuids.clone()),
+                    Bind::TextVec(allowed_kind_strs.clone()),
+                    Bind::TextVec(kind_strs.clone()),
+                    Bind::Text(time.transaction_as_of.clone()),
+                    Bind::Text(time.valid_at.clone()),
+                    Bind::Uuid(*scope),
+                ],
+            )
+            .await?;
             extend(fetched);
         }
 
         // Family 3: exact-subject matches.
         if !query_terms.is_empty() {
-            let fetched = self
-                .fetch_units_where(
-                    &format!(
-                        "{base} and subject_key is not null
-                         and exists (select 1 from unnest($4::text[]) term
-                                     where memphant.memory_unit.subject_key ilike '%' || term || '%')"
-                    ),
-                    "limit 200",
-                    vec![
-                        Bind::Uuid(tenant.as_uuid()),
-                        Bind::UuidVec(scope_uuids.clone()),
-                        Bind::TextVec(kind_strs.clone()),
-                        Bind::TextVec(query_terms.to_vec()),
-                    ],
-                )
-                .await?;
+            let fetched = Self::fetch_units_where(
+                &mut tx,
+                &format!(
+                    "{base} and fact_key is not null
+                         and exists (select 1 from unnest($10::text[]) term
+                                     where memphant.memory_unit.fact_key ilike '%' || term || '%')"
+                ),
+                "order by body limit 200",
+                vec![
+                    Bind::Uuid(context.tenant_id.as_uuid()),
+                    Bind::Uuid(context.data_subject_id.as_uuid()),
+                    Bind::I64(context.subject_generation as i64),
+                    Bind::UuidVec(scope_uuids.clone()),
+                    Bind::UuidVec(agent_uuids.clone()),
+                    Bind::TextVec(allowed_kind_strs.clone()),
+                    Bind::TextVec(kind_strs.clone()),
+                    Bind::Text(time.transaction_as_of.clone()),
+                    Bind::Text(time.valid_at.clone()),
+                    Bind::TextVec(query_terms.to_vec()),
+                ],
+            )
+            .await?;
             extend(fetched);
         }
 
@@ -733,45 +1932,95 @@ impl MemoryStore for PgStore {
         Ok(units)
     }
 
+    async fn fetch_scope_open_units(
+        &self,
+        context: &ResolvedMemoryContext,
+    ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
+        // ponytail: full-scope scan — the write compiler needs completeness, and
+        // it's index-backed (tenant_id, scope_id) filtered to open rows. If a
+        // scope ever grows large enough that per-write scans hurt, narrow to the
+        // incoming candidates' fact_keys (dedup/supersede only touch those).
+        let mut tx = self.tenant_tx(context.tenant_id).await?;
+        let kinds: Vec<String> = MemoryKind::ALL
+            .into_iter()
+            .filter(|kind| context.allows(*kind, context.scope_id, context.agent_node_id))
+            .map(|kind| enum_str(&kind).to_string())
+            .collect();
+        Self::fetch_units_where(
+            &mut tx,
+            "tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+             and scope_id = $4 and agent_node_id = $5 and kind = any($6)
+             and transaction_to is null",
+            "order by id",
+            vec![
+                Bind::Uuid(context.tenant_id.as_uuid()),
+                Bind::Uuid(context.data_subject_id.as_uuid()),
+                Bind::I64(context.subject_generation as i64),
+                Bind::Uuid(context.scope_id.as_uuid()),
+                Bind::Uuid(context.agent_node_id.as_uuid()),
+                Bind::TextVec(kinds),
+            ],
+        )
+        .await
+    }
+
     async fn fetch_vector_candidates(
         &self,
-        tenant: TenantId,
-        scopes: &[ScopeId],
-        kinds: &[MemoryKind],
+        context: &ResolvedMemoryContext,
         query_vec: &[f32],
         profile_id: Uuid,
+        time: &RecallTime,
         limit: usize,
     ) -> Result<Vec<(StoredMemoryUnit, f32)>, StoreError> {
         if query_vec.is_empty() {
             return Ok(Vec::new());
         }
-        let scope_uuids: Vec<Uuid> = scopes.iter().map(|scope| scope.as_uuid()).collect();
-        let kind_strs: Vec<String> = kinds.iter().map(enum_str).collect();
-        let base = "tenant_id = $1 and scope_id = any($2)
-                    and (cardinality($3::text[]) = 0 or kind = any($3))
-                    and transaction_to is null";
-        // The `embedding_profile_id = $5` predicate is mandatory (spec 03): it
+        let mut tx = self.tenant_tx(context.tenant_id).await?;
+        let (scope_uuids, agent_uuids, allowed_kind_strs) = source_kind_triples(context, &[]);
+        let base = "tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+                    and exists (
+                      select 1 from unnest($4::uuid[], $5::uuid[], $6::text[])
+                        allowed(scope_id, agent_node_id, kind)
+                      where allowed.scope_id = memphant.memory_unit.scope_id
+                        and allowed.agent_node_id = memphant.memory_unit.agent_node_id
+                        and allowed.kind = memphant.memory_unit.kind
+                    )
+                    and deletion_generation is null and state <> 'deleted'
+                    and coalesce(transaction_from, '-infinity'::timestamptz) <= $7::timestamptz
+                    and $7::timestamptz < coalesce(transaction_to, 'infinity'::timestamptz)
+                    and coalesce(valid_from, '-infinity'::timestamptz) <= $8::timestamptz
+                    and $8::timestamptz < coalesce(valid_to, 'infinity'::timestamptz)";
+        // The embedding-profile predicate is mandatory (spec 03): it
         // hits the per-profile partial index and keeps `<=>` from comparing
         // vectors of different dimensions/models across profiles. `$4` is the
         // query vector; the distance rides back as `<=>` (cosine distance).
         let sql = format!(
-            "select unit.*, (embedding.vec <=> $4::halfvec) as vector_distance
+            "select unit.*, (embedding.vec <=> $9::halfvec) as vector_distance
              from ({inner}) unit
              join memphant.embedding embedding
                on embedding.tenant_id = $1
+              and embedding.data_subject_id = $2
+              and embedding.subject_generation = $3
+              and embedding.scope_id = unit.scope_id
+              and embedding.agent_node_id = unit.agent_node_id
               and embedding.memory_unit_id = unit.id
-              and embedding.embedding_profile_id = $5
-             order by embedding.vec <=> $4::halfvec limit {limit}",
+              and embedding.embedding_profile_id = $10
+             order by embedding.vec <=> $9::halfvec, unit.body limit {limit}",
             inner = Self::unit_select(base, ""),
             limit = limit.min(1_000),
         );
         let rows = sqlx::query(AssertSqlSafe(sql.as_str()))
-            .bind(tenant.as_uuid())
+            .bind(context.tenant_id.as_uuid())
+            .bind(context.data_subject_id.as_uuid())
+            .bind(context.subject_generation as i64)
             .bind(scope_uuids)
-            .bind(kind_strs)
+            .bind(agent_uuids)
+            .bind(allowed_kind_strs)
+            .bind(&time.transaction_as_of)
+            .bind(&time.valid_at)
             .bind(vec_literal(query_vec))
             .bind(profile_id)
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *tx)
             .await
             .map_err(backend)?;
         rows.iter()
@@ -785,34 +2034,78 @@ impl MemoryStore for PgStore {
 
     async fn fetch_units_by_ids(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         ids: &[UnitId],
     ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
         let uuids: Vec<Uuid> = ids.iter().map(|id| id.as_uuid()).collect();
-        self.fetch_units_where(
-            "tenant_id = $1 and id = any($2)",
+        let mut tx = self.tenant_tx(context.tenant_id).await?;
+        let (scope_uuids, agent_uuids, allowed_kind_strs) = source_kind_triples(context, &[]);
+        Self::fetch_units_where(
+            &mut tx,
+            "tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+             and id = any($4)
+             and exists (
+               select 1 from unnest($5::uuid[], $6::uuid[], $7::text[])
+                 allowed(scope_id, agent_node_id, kind)
+               where allowed.scope_id = memphant.memory_unit.scope_id
+                 and allowed.agent_node_id = memphant.memory_unit.agent_node_id
+                 and allowed.kind = memphant.memory_unit.kind
+             )",
             "",
-            vec![Bind::Uuid(tenant.as_uuid()), Bind::UuidVec(uuids)],
+            vec![
+                Bind::Uuid(context.tenant_id.as_uuid()),
+                Bind::Uuid(context.data_subject_id.as_uuid()),
+                Bind::I64(context.subject_generation as i64),
+                Bind::UuidVec(uuids),
+                Bind::UuidVec(scope_uuids),
+                Bind::UuidVec(agent_uuids),
+                Bind::TextVec(allowed_kind_strs),
+            ],
         )
         .await
     }
 
     async fn fetch_edges(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         unit_ids: &[UnitId],
+        time: &RecallTime,
     ) -> Result<Vec<StoredMemoryEdge>, StoreError> {
-        let uuids: Vec<Uuid> = unit_ids.iter().map(|id| id.as_uuid()).collect();
+        let allowed = self.fetch_units_by_ids(context, unit_ids).await?;
+        let uuids: Vec<Uuid> = allowed.iter().map(|unit| unit.id.as_uuid()).collect();
+        let scope_uuids: Vec<Uuid> = allowed.iter().map(|unit| unit.scope_id.as_uuid()).collect();
+        let agent_uuids: Vec<Uuid> = allowed
+            .iter()
+            .map(|unit| unit.agent_node_id.as_uuid())
+            .collect();
+        let mut tx = self.tenant_tx(context.tenant_id).await?;
         let rows = sqlx::query(
-            "select id, tenant_id, scope_id, src_id, dst_id, kind from memphant.memory_edge
-             where tenant_id = $1 and (src_id = any($2) or dst_id = any($2))",
+                r#"select id, tenant_id, scope_id, src_id, dst_id, kind,
+                        to_char(transaction_from at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as transaction_from,
+                        to_char(transaction_to at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as transaction_to
+                 from memphant.memory_edge
+                 where tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+                   and exists (
+                     select 1 from unnest($4::uuid[], $5::uuid[]) allowed(scope_id, agent_node_id)
+                     where allowed.scope_id = memphant.memory_edge.scope_id
+                       and allowed.agent_node_id = memphant.memory_edge.agent_node_id
+                   )
+                   and (src_id = any($6) or dst_id = any($6))
+                   and transaction_from <= $7::timestamptz
+                   and $7::timestamptz < coalesce(transaction_to, 'infinity'::timestamptz)"#,
         )
-        .bind(tenant.as_uuid())
+        .bind(context.tenant_id.as_uuid())
+        .bind(context.data_subject_id.as_uuid())
+        .bind(context.subject_generation as i64)
+        .bind(scope_uuids)
+        .bind(agent_uuids)
         .bind(uuids)
-        .fetch_all(&self.pool)
+        .bind(&time.transaction_as_of)
+        .fetch_all(&mut *tx)
         .await
         .map_err(backend)?;
-        rows.iter()
+        let edges: Vec<StoredMemoryEdge> = rows
+            .iter()
             .map(|row| {
                 Ok(StoredMemoryEdge {
                     id: EdgeId::from_u128(row.try_get::<Uuid, _>("id").map_err(backend)?.as_u128()),
@@ -835,37 +2128,168 @@ impl MemoryStore for PgStore {
                     kind: enum_from_str(
                         row.try_get::<String, _>("kind").map_err(backend)?.as_str(),
                     )?,
+                    transaction_from: row.try_get("transaction_from").map_err(backend)?,
+                    transaction_to: row.try_get("transaction_to").map_err(backend)?,
                 })
             })
-            .collect()
+            .collect::<Result<_, StoreError>>()?;
+        let endpoint_ids: Vec<UnitId> = edges
+            .iter()
+            .flat_map(|edge| [edge.src_id, edge.dst_id])
+            .collect();
+        let authorized_ids: HashSet<UnitId> = self
+            .fetch_units_by_ids(context, &endpoint_ids)
+            .await?
+            .into_iter()
+            .map(|unit| unit.id)
+            .collect();
+        Ok(edges
+            .into_iter()
+            .filter(|edge| {
+                authorized_ids.contains(&edge.src_id) && authorized_ids.contains(&edge.dst_id)
+            })
+            .collect())
+    }
+
+    async fn fetch_record_material(
+        &self,
+        context: &ResolvedMemoryContext,
+        ids: &[UnitId],
+        time: &RecallTime,
+    ) -> Result<Vec<RecordMaterial>, StoreError> {
+        let units = self.fetch_units_by_ids(context, ids).await?;
+        let by_id: HashMap<UnitId, StoredMemoryUnit> = units
+            .into_iter()
+            .filter(|unit| memphant_core::unit_is_recallable_at(unit, time))
+            .map(|unit| (unit.id, unit))
+            .collect();
+        let allowed_ids: Vec<UnitId> = ids
+            .iter()
+            .copied()
+            .filter(|id| by_id.contains_key(id))
+            .collect();
+        let edges = self.fetch_edges(context, &allowed_ids, time).await?;
+        let uuids: Vec<Uuid> = allowed_ids.iter().map(|id| id.as_uuid()).collect();
+        let mut tx = self.tenant_tx(context.tenant_id).await?;
+        let rows = sqlx::query(
+            "select id, memory_unit_id, episode_id, resource_id, span, quote_hash
+             from memphant.citation
+             where tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+               and memory_unit_id = any($4)",
+        )
+        .bind(context.tenant_id.as_uuid())
+        .bind(context.data_subject_id.as_uuid())
+        .bind(context.subject_generation as i64)
+        .bind(uuids)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(backend)?;
+        let citations: Vec<StoredCitation> = rows
+            .iter()
+            .map(|row| {
+                let span = row
+                    .try_get::<Option<serde_json::Value>, _>("span")
+                    .map_err(backend)?
+                    .map(serde_json::from_value::<CitationSpan>)
+                    .transpose()
+                    .map_err(|error| StoreError::Backend(error.to_string()))?;
+                Ok(StoredCitation {
+                    id: row.try_get("id").map_err(backend)?,
+                    tenant_id: context.tenant_id,
+                    data_subject_id: context.data_subject_id,
+                    scope_id: context.scope_id,
+                    agent_node_id: context.agent_node_id,
+                    subject_generation: context.subject_generation,
+                    memory_unit_id: UnitId::from_u128(
+                        row.try_get::<Uuid, _>("memory_unit_id")
+                            .map_err(backend)?
+                            .as_u128(),
+                    ),
+                    episode_id: row
+                        .try_get::<Option<Uuid>, _>("episode_id")
+                        .map_err(backend)?
+                        .map(|id| EpisodeId::from_u128(id.as_u128())),
+                    resource_id: row
+                        .try_get::<Option<Uuid>, _>("resource_id")
+                        .map_err(backend)?
+                        .map(|id| ResourceId::from_u128(id.as_u128())),
+                    span,
+                    quote_hash: row.try_get("quote_hash").map_err(backend)?,
+                })
+            })
+            .collect::<Result<_, StoreError>>()?;
+        Ok(allowed_ids
+            .into_iter()
+            .filter_map(|id| by_id.get(&id))
+            .map(|unit| RecordMaterial {
+                unit: unit.clone(),
+                citations: citations
+                    .iter()
+                    .filter(|citation| citation.memory_unit_id == unit.id)
+                    .cloned()
+                    .collect(),
+                lineage: edges
+                    .iter()
+                    .filter(|edge| edge.src_id == unit.id || edge.dst_id == unit.id)
+                    .filter(|edge| {
+                        matches!(
+                            edge.kind,
+                            memphant_types::MemoryEdgeKind::Supersedes
+                                | memphant_types::MemoryEdgeKind::Contradicts
+                                | memphant_types::MemoryEdgeKind::DerivedFrom
+                                | memphant_types::MemoryEdgeKind::Cites
+                        )
+                    })
+                    .cloned()
+                    .collect(),
+            })
+            .collect())
     }
 
     async fn fetch_review_events(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         unit_ids: &[UnitId],
+        time: &RecallTime,
     ) -> Result<Vec<ReviewEventRow>, StoreError> {
-        let uuids: Vec<Uuid> = unit_ids.iter().map(|id| id.as_uuid()).collect();
+        let allowed = self.fetch_units_by_ids(context, unit_ids).await?;
+        let uuids: Vec<Uuid> = allowed.iter().map(|unit| unit.id.as_uuid()).collect();
+        let mut tx = self.tenant_tx(context.tenant_id).await?;
         let rows = sqlx::query(
             "select event.id, event.trace_id, event.caller_id, event.outcome,
+                    to_char(event.created_at at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') as recorded_at,
                     coalesce(array_agg(unit.memory_unit_id)
-                             filter (where unit.memory_unit_id is not null), '{}') as used_ids
+                             filter (where unit.memory_unit_id is not null
+                                       and unit.memory_unit_id = any($7)), '{}') as used_ids
              from memphant.review_event event
-             left join memphant.review_event_unit unit on unit.review_event_id = event.id
-             where event.tenant_id = $1
-             group by event.id, event.trace_id, event.caller_id, event.outcome
+             join memphant.retrieval_trace trace
+               on trace.tenant_id = event.tenant_id and trace.id = event.trace_id
+             left join memphant.review_event_unit unit
+               on unit.tenant_id = event.tenant_id and unit.review_event_id = event.id
+             where event.tenant_id = $1 and trace.data_subject_id = $2
+               and trace.subject_generation = $3
+               and trace.scope_id = $4 and trace.actor_id = $5
+               and trace.agent_node_id = $6
+               and event.created_at <= $8::timestamptz
+             group by event.id, event.trace_id, event.caller_id, event.outcome, event.created_at
              having count(unit.memory_unit_id) = 0
-                 or bool_or(unit.memory_unit_id = any($2))",
+                 or bool_or(unit.memory_unit_id = any($7))",
         )
-        .bind(tenant.as_uuid())
+        .bind(context.tenant_id.as_uuid())
+        .bind(context.data_subject_id.as_uuid())
+        .bind(context.subject_generation as i64)
+        .bind(context.scope_id.as_uuid())
+        .bind(context.actor_id.as_uuid())
+        .bind(context.agent_node_id.as_uuid())
         .bind(uuids)
-        .fetch_all(&self.pool)
+        .bind(&time.transaction_as_of)
+        .fetch_all(&mut *tx)
         .await
         .map_err(backend)?;
         rows.iter()
             .map(|row| {
                 Ok(ReviewEventRow {
-                    tenant_id: tenant,
+                    tenant_id: context.tenant_id,
                     trace_id: TraceId::from_u128(
                         row.try_get::<Uuid, _>("trace_id")
                             .map_err(backend)?
@@ -883,6 +2307,7 @@ impl MemoryStore for PgStore {
                             .map_err(backend)?
                             .as_str(),
                     )?,
+                    recorded_at: row.try_get("recorded_at").map_err(backend)?,
                 })
             })
             .collect()
@@ -890,21 +2315,56 @@ impl MemoryStore for PgStore {
 
     async fn fetch_episodes_for_scope(
         &self,
-        tenant: TenantId,
-        scope: ScopeId,
+        context: &ResolvedMemoryContext,
         limit: usize,
     ) -> Result<Vec<StoredEpisode>, StoreError> {
+        let mut tx = self.tenant_tx(context.tenant_id).await?;
+        let episodic_sources = context
+            .sources_by_kind
+            .get(&MemoryKind::Episodic)
+            .cloned()
+            .unwrap_or_default();
+        let scope_ids: Vec<Uuid> = episodic_sources
+            .iter()
+            .map(|source| source.scope_id.as_uuid())
+            .collect();
+        let agent_ids: Vec<Uuid> = episodic_sources
+            .iter()
+            .map(|source| source.agent_node_id.as_uuid())
+            .collect();
         let rows = sqlx::query(
-            "select id, tenant_id, scope_id, actor_id, source_kind, source_trust, dedup_key,
-                    body, observation_count
+            "select id, tenant_id, data_subject_id, scope_id, actor_id, agent_node_id,
+                    subject_generation, source_kind, source_ref, source_trust, dedup_key, body,
+                    observation_count,
+                    to_char(first_observed_at at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') as first_observed_at,
+                    to_char(last_observed_at at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') as last_observed_at
              from memphant.episode
-             where tenant_id = $1 and scope_id = $2 and deletion_generation is null
-             order by last_observed_at desc limit $3",
+             where tenant_id = $1 and data_subject_id = $2
+               and exists (
+                 select 1 from unnest($3::uuid[], $4::uuid[])
+                   allowed(scope_id, agent_node_id)
+                 where allowed.scope_id = memphant.episode.scope_id
+                   and allowed.agent_node_id = memphant.episode.agent_node_id
+               )
+               and subject_generation = $5 and deletion_generation is null
+             -- `dedup_key` breaks `last_observed_at` ties (identical for every
+             -- episode staged in one transaction, since it is now()) with a
+             -- total, content-derived key — unique per (tenant, scope) — so the
+             -- LIMIT cut selects the same episodes across a fresh-UUID re-ingest.
+             order by last_observed_at desc, dedup_key limit $6",
         )
-        .bind(tenant.as_uuid())
-        .bind(scope.as_uuid())
-        .bind(limit.min(1_000) as i64)
-        .fetch_all(&self.pool)
+        .bind(context.tenant_id.as_uuid())
+        .bind(context.data_subject_id.as_uuid())
+        .bind(scope_ids)
+        .bind(agent_ids)
+        .bind(context.subject_generation as i64)
+        // The caller's `limit` is authoritative — no silent store-side cap. The
+        // `usize::MAX` sentinel (Exhaustive recall wants the whole scope) can't
+        // become a bound i64 (it wraps to -1, an invalid LIMIT), so it saturates
+        // to i64::MAX = effectively LIMIT ALL. Both stores now honor the limit,
+        // so Exhaustive recall is not silently truncated on Postgres.
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+        .fetch_all(&mut *tx)
         .await
         .map_err(backend)?;
         rows.iter().map(Self::episode_from_row).collect()
@@ -912,16 +2372,21 @@ impl MemoryStore for PgStore {
 
     async fn pending_job_count(
         &self,
-        tenant: TenantId,
-        scope: ScopeId,
+        context: &ResolvedMemoryContext,
     ) -> Result<usize, StoreError> {
+        let mut tx = self.tenant_tx(context.tenant_id).await?;
         let count: i64 = sqlx::query_scalar(
             "select count(*) from memphant.job_state
-             where tenant_id = $1 and scope_id = $2 and state in ('queued', 'running')",
+             where tenant_id = $1 and data_subject_id = $2 and scope_id = $3
+               and agent_node_id = $4 and subject_generation = $5
+               and state in ('queued', 'running')",
         )
-        .bind(tenant.as_uuid())
-        .bind(scope.as_uuid())
-        .fetch_one(&self.pool)
+        .bind(context.tenant_id.as_uuid())
+        .bind(context.data_subject_id.as_uuid())
+        .bind(context.scope_id.as_uuid())
+        .bind(context.agent_node_id.as_uuid())
+        .bind(context.subject_generation as i64)
+        .fetch_one(&mut *tx)
         .await
         .map_err(backend)?;
         Ok(count as usize)
@@ -929,18 +2394,29 @@ impl MemoryStore for PgStore {
 
     async fn fetch_episode(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         id: EpisodeId,
     ) -> Result<Option<StoredEpisode>, StoreError> {
+        let mut tx = self.tenant_tx(context.tenant_id).await?;
         let row = sqlx::query(
-            "select id, tenant_id, scope_id, actor_id, source_kind, source_trust, dedup_key,
-                    body, observation_count
+            "select id, tenant_id, data_subject_id, scope_id, actor_id, agent_node_id,
+                    subject_generation, source_kind, source_ref, source_trust, dedup_key, body,
+                    observation_count,
+                    to_char(first_observed_at at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') as first_observed_at,
+                    to_char(last_observed_at at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') as last_observed_at
              from memphant.episode
-             where tenant_id = $1 and id = $2 and deletion_generation is null",
+             where tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+               and scope_id = $4 and agent_node_id = $5 and actor_id = $6
+               and id = $7 and deletion_generation is null",
         )
-        .bind(tenant.as_uuid())
+        .bind(context.tenant_id.as_uuid())
+        .bind(context.data_subject_id.as_uuid())
+        .bind(context.subject_generation as i64)
+        .bind(context.scope_id.as_uuid())
+        .bind(context.agent_node_id.as_uuid())
+        .bind(context.actor_id.as_uuid())
         .bind(id.as_uuid())
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(backend)?;
         row.as_ref().map(Self::episode_from_row).transpose()
@@ -948,17 +2424,28 @@ impl MemoryStore for PgStore {
 
     async fn fetch_resource(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         id: ResourceId,
     ) -> Result<Option<StoredResource>, StoreError> {
+        let mut tx = self.tenant_tx(context.tenant_id).await?;
         let row = sqlx::query(
-            "select id, tenant_id, scope_id, coalesce(actor_id, tenant_id) as actor_id, kind,
-                    uri, content_hash, mime_type, revision, body, source_trust, extractor_state
-             from memphant.resource where tenant_id = $1 and id = $2",
+            "select id, tenant_id, data_subject_id, scope_id, actor_id, agent_node_id,
+                    subject_generation, kind, uri, source_ref,
+                    to_char(observed_at at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') as observed_at,
+                    content_hash,
+                    mime_type, revision, body, source_trust, extractor_state
+             from memphant.resource
+             where tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+               and scope_id = $4 and agent_node_id = $5 and actor_id = $6 and id = $7",
         )
-        .bind(tenant.as_uuid())
+        .bind(context.tenant_id.as_uuid())
+        .bind(context.data_subject_id.as_uuid())
+        .bind(context.subject_generation as i64)
+        .bind(context.scope_id.as_uuid())
+        .bind(context.agent_node_id.as_uuid())
+        .bind(context.actor_id.as_uuid())
         .bind(id.as_uuid())
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(backend)?;
         let Some(row) = row else { return Ok(None) };
@@ -966,6 +2453,11 @@ impl MemoryStore for PgStore {
             id: ResourceId::from_u128(row.try_get::<Uuid, _>("id").map_err(backend)?.as_u128()),
             tenant_id: TenantId::from_u128(
                 row.try_get::<Uuid, _>("tenant_id")
+                    .map_err(backend)?
+                    .as_u128(),
+            ),
+            data_subject_id: SubjectId::from_u128(
+                row.try_get::<Uuid, _>("data_subject_id")
                     .map_err(backend)?
                     .as_u128(),
             ),
@@ -979,7 +2471,18 @@ impl MemoryStore for PgStore {
                     .map_err(backend)?
                     .as_u128(),
             ),
+            agent_node_id: AgentNodeId::from_u128(
+                row.try_get::<Uuid, _>("agent_node_id")
+                    .map_err(backend)?
+                    .as_u128(),
+            ),
+            subject_generation: row
+                .try_get::<i64, _>("subject_generation")
+                .map_err(backend)? as u64,
             uri: row.try_get("uri").map_err(backend)?,
+            source_ref: row.try_get("source_ref").map_err(backend)?,
+            observed_at: canonical_timestamp(row.try_get("observed_at").map_err(backend)?)
+                .ok_or_else(|| StoreError::Backend("resource observed_at is null".to_string()))?,
             kind: enum_from_str(row.try_get::<String, _>("kind").map_err(backend)?.as_str())
                 .unwrap_or_default(),
             content_hash: row.try_get("content_hash").map_err(backend)?,
@@ -1003,22 +2506,43 @@ impl MemoryStore for PgStore {
         }))
     }
 
-    async fn apply_correction(
+    async fn stage_correction(
         &self,
-        tenant: TenantId,
+        txn: &mut Self::Txn,
         correction: CorrectionWrite,
     ) -> Result<CorrectOutcome, StoreError> {
-        let mut tx = self.pool.begin().await.map_err(backend)?;
+        let context = txn.context.clone();
+        txn.has_subject_writes = true;
+        let tx = &mut txn.tx;
+        let transaction_time: String = sqlx::query_scalar(
+            "select to_char(transaction_timestamp() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')",
+        )
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(backend)?;
         let old_id = correction.selector.memory_unit_id;
+        // Only the OPEN generation is correctable (`transaction_to is null`).
+        // With the `for update` lock this makes a repeated (or concurrent)
+        // correction of the same id re-read the now-superseded row, fail the
+        // predicate, and return NotFound instead of minting a second live unit
+        // — the partial unique scope-subject index only masked this for
+        // `semantic` kinds; resource/belief/procedural had no guard.
         let sql = Self::unit_select(
-            "tenant_id = $1 and id = $2 and scope_id = $3 and state <> 'deleted'",
+            "tenant_id = $1 and id = $2 and data_subject_id = $3
+             and subject_generation = $4 and scope_id = $5 and agent_node_id = $6
+             and actor_id = $7 and state <> 'deleted'
+             and transaction_to is null",
             "for update",
         );
         let row = sqlx::query(AssertSqlSafe(sql.as_str()))
-            .bind(tenant.as_uuid())
+            .bind(context.tenant_id.as_uuid())
             .bind(old_id.as_uuid())
-            .bind(correction.scope_id.as_uuid())
-            .fetch_optional(&mut *tx)
+            .bind(context.data_subject_id.as_uuid())
+            .bind(context.subject_generation as i64)
+            .bind(context.scope_id.as_uuid())
+            .bind(context.agent_node_id.as_uuid())
+            .bind(context.actor_id.as_uuid())
+            .fetch_optional(&mut **tx)
             .await
             .map_err(backend)?
             .ok_or(StoreError::NotFound("memory_unit"))?;
@@ -1027,140 +2551,355 @@ impl MemoryStore for PgStore {
             correction.correction.valid_from.is_some() || correction.correction.valid_to.is_some();
 
         sqlx::query(
-            "update memphant.memory_unit set state = 'superseded', transaction_to = $3::timestamptz
-             where tenant_id = $1 and id = $2",
+            "update memphant.memory_unit set state = 'superseded', transaction_to = $8::timestamptz
+             where tenant_id = $1 and id = $2 and data_subject_id = $3
+               and subject_generation = $4 and scope_id = $5 and agent_node_id = $6
+               and actor_id = $7",
         )
-        .bind(tenant.as_uuid())
+        .bind(context.tenant_id.as_uuid())
         .bind(old_id.as_uuid())
-        .bind(&correction.now)
-        .execute(&mut *tx)
+        .bind(context.data_subject_id.as_uuid())
+        .bind(context.subject_generation as i64)
+        .bind(context.scope_id.as_uuid())
+        .bind(context.agent_node_id.as_uuid())
+        .bind(context.actor_id.as_uuid())
+        .bind(&transaction_time)
+        .execute(&mut **tx)
         .await
         .map_err(backend)?;
 
-        let new_id = UnitId::new();
-        let mut replacement = old_unit.clone();
-        replacement.id = new_id;
-        replacement.body = correction.correction.value.clone();
-        replacement.state = memphant_types::UnitState::Active;
-        replacement.actor_id = Some(correction.actor_id);
-        replacement.deletion_generation = None;
-        replacement.valid_from = correction.correction.valid_from.clone();
-        replacement.valid_to = correction.correction.valid_to.clone();
-        replacement.transaction_from = Some(correction.now.clone());
-        replacement.transaction_to = None;
-        Self::ensure_actor(&mut tx, tenant, correction.actor_id).await?;
-        Self::insert_unit(&mut tx, &replacement).await?;
-        Self::insert_edge(
-            &mut tx,
-            &StoredMemoryEdge {
-                id: EdgeId::new(),
-                tenant_id: tenant,
-                scope_id: correction.scope_id,
-                src_id: new_id,
-                dst_id: old_id,
-                kind: memphant_types::MemoryEdgeKind::Supersedes,
-            },
-        )
-        .await?;
+        let (replacement, remainders) = correction_rectangles(
+            &old_unit,
+            &correction.correction,
+            &correction.source_ref,
+            &correction.observed_at,
+            context.actor_id,
+            &transaction_time,
+        )?;
+        let new_id = replacement.id;
+        let remainder_ids: Vec<UnitId> = remainders.iter().map(|unit| unit.id).collect();
+        Self::insert_unit(tx, &replacement).await?;
+        for remainder in &remainders {
+            Self::insert_unit(tx, remainder).await?;
+        }
+        for created_id in std::iter::once(new_id).chain(remainder_ids.iter().copied()) {
+            Self::insert_edge(
+                tx,
+                &context,
+                &StoredMemoryEdge {
+                    id: EdgeId::new(),
+                    tenant_id: context.tenant_id,
+                    scope_id: context.scope_id,
+                    src_id: created_id,
+                    dst_id: old_id,
+                    kind: memphant_types::MemoryEdgeKind::Supersedes,
+                    transaction_from: Some(transaction_time.clone()),
+                    transaction_to: None,
+                },
+            )
+            .await?;
+        }
+
+        for remainder_id in &remainder_ids {
+            sqlx::query(
+                "insert into memphant.embedding
+                   (tenant_id, data_subject_id, scope_id, agent_node_id, subject_generation,
+                    memory_unit_id, embedding_profile_id, vec)
+                 select tenant_id, data_subject_id, scope_id, agent_node_id, subject_generation,
+                        $3, embedding_profile_id, vec
+                 from memphant.embedding
+                 where tenant_id = $1 and data_subject_id = $4 and subject_generation = $5
+                   and scope_id = $6 and agent_node_id = $7 and memory_unit_id = $2",
+            )
+            .bind(context.tenant_id.as_uuid())
+            .bind(old_id.as_uuid())
+            .bind(remainder_id.as_uuid())
+            .bind(context.data_subject_id.as_uuid())
+            .bind(context.subject_generation as i64)
+            .bind(context.scope_id.as_uuid())
+            .bind(context.agent_node_id.as_uuid())
+            .execute(&mut **tx)
+            .await
+            .map_err(backend)?;
+        }
+        for created_id in std::iter::once(new_id).chain(remainder_ids.iter().copied()) {
+            sqlx::query(
+                "insert into memphant.citation
+                   (id, tenant_id, data_subject_id, scope_id, agent_node_id, subject_generation,
+                    memory_unit_id, episode_id, resource_id, span, quote_hash)
+                 select gen_random_uuid(), tenant_id, data_subject_id, scope_id, agent_node_id,
+                        subject_generation, $3, episode_id, resource_id, span, quote_hash
+                 from memphant.citation
+                 where tenant_id = $1 and data_subject_id = $4 and subject_generation = $5
+                   and scope_id = $6 and agent_node_id = $7 and memory_unit_id = $2",
+            )
+            .bind(context.tenant_id.as_uuid())
+            .bind(old_id.as_uuid())
+            .bind(created_id.as_uuid())
+            .bind(context.data_subject_id.as_uuid())
+            .bind(context.subject_generation as i64)
+            .bind(context.scope_id.as_uuid())
+            .bind(context.agent_node_id.as_uuid())
+            .execute(&mut **tx)
+            .await
+            .map_err(backend)?;
+        }
 
         // Expire composition-derived dependents of the superseded unit.
         sqlx::query(
-            "update memphant.memory_unit set state = 'expired', transaction_to = $3::timestamptz
-             where tenant_id = $1 and state <> 'deleted' and transaction_to is null
+            "update memphant.memory_unit set state = 'expired', transaction_to = $8::timestamptz
+             where tenant_id = $1 and data_subject_id = $3 and subject_generation = $4
+               and scope_id = $5 and agent_node_id = $6 and actor_id = $7
+               and state <> 'deleted' and transaction_to is null
                and source_kind = 'composition'
                and id in (select src_id from memphant.memory_edge
-                          where tenant_id = $1 and kind = 'derived_from' and dst_id = $2)",
+                          where tenant_id = $1 and data_subject_id = $3
+                            and subject_generation = $4 and scope_id = $5
+                            and agent_node_id = $6 and kind = 'derived_from' and dst_id = $2)",
         )
-        .bind(tenant.as_uuid())
+        .bind(context.tenant_id.as_uuid())
         .bind(old_id.as_uuid())
-        .bind(&correction.now)
-        .execute(&mut *tx)
+        .bind(context.data_subject_id.as_uuid())
+        .bind(context.subject_generation as i64)
+        .bind(context.scope_id.as_uuid())
+        .bind(context.agent_node_id.as_uuid())
+        .bind(context.actor_id.as_uuid())
+        .bind(&transaction_time)
+        .execute(&mut **tx)
         .await
         .map_err(backend)?;
 
-        tx.commit().await.map_err(backend)?;
-        Ok(CorrectResult {
+        // Embed the replacement unit in the SAME transaction as its supersedes
+        // edge so corrected truth is vector-visible at once (read-your-writes).
+        if let Some((profile, vec)) = &correction.embedding {
+            Self::upsert_embedding_profile_tx(tx, context.tenant_id, profile).await?;
+            Self::insert_embedding_tx(
+                tx,
+                &context,
+                &EmbeddingRow {
+                    memory_unit_id: new_id,
+                    embedding_profile_id: profile.id,
+                    vec: vec.clone(),
+                },
+            )
+            .await?;
+        }
+
+        let mut created = vec![new_id];
+        created.extend(remainder_ids);
+        let result = CorrectResult {
             correction_id: format!("cor_{}", new_id.as_uuid()),
             superseded: vec![old_id],
-            created: vec![new_id],
+            created,
             correction_kind: if is_retroactive {
                 "retroactive".to_string()
             } else {
                 "current".to_string()
             },
             trace_ref: None,
-        })
+        };
+        Ok(result)
     }
 
-    async fn apply_forget(
+    async fn stage_forget(
         &self,
-        tenant: TenantId,
+        txn: &mut Self::Txn,
         forget: ForgetWrite,
     ) -> Result<ForgetOutcome, StoreError> {
-        let mut tx = self.pool.begin().await.map_err(backend)?;
-        Self::ensure_tenant(&mut tx, tenant).await?;
-        Self::ensure_scope(&mut tx, tenant, forget.scope_id).await?;
-        Self::ensure_actor(&mut tx, tenant, forget.actor_id).await?;
-
-        let (source_kind, source_id, unit_filter) = match forget.target {
-            ForgetTarget::MemoryUnit(id) => ("memory_unit", id.as_uuid(), "id = $4"),
-            ForgetTarget::Episode(id) => ("episode", id.as_uuid(), "source_episode_id = $4"),
-            ForgetTarget::Resource(id) => ("resource", id.as_uuid(), "source_resource_id = $4"),
+        let context = txn.context.clone();
+        txn.has_subject_writes = true;
+        let tx = &mut txn.tx;
+        let transaction_time: String = sqlx::query_scalar(
+            "select to_char(transaction_timestamp() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')",
+        )
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(backend)?;
+        let (source_kind, source_id) = match forget.target {
+            ForgetTarget::MemoryUnit(id) => ("memory_unit", id.as_uuid()),
+            ForgetTarget::Episode(id) => ("episode", id.as_uuid()),
+            ForgetTarget::Resource(id) => ("resource", id.as_uuid()),
         };
+
+        let table = match forget.target {
+            ForgetTarget::MemoryUnit(_) => "memory_unit",
+            ForgetTarget::Episode(_) => "episode",
+            ForgetTarget::Resource(_) => "resource",
+        };
+        let authorized: bool = sqlx::query_scalar(AssertSqlSafe(
+            format!(
+                "select exists (select 1 from memphant.{table}
+                 where tenant_id = $1 and id = $2 and data_subject_id = $3
+                   and subject_generation = $4 and scope_id = $5 and agent_node_id = $6
+                   and actor_id = $7)"
+            )
+            .as_str(),
+        ))
+        .bind(context.tenant_id.as_uuid())
+        .bind(source_id)
+        .bind(context.data_subject_id.as_uuid())
+        .bind(context.subject_generation as i64)
+        .bind(context.scope_id.as_uuid())
+        .bind(context.agent_node_id.as_uuid())
+        .bind(context.actor_id.as_uuid())
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(backend)?;
+        if !authorized {
+            return Err(StoreError::NotFound("forget target"));
+        }
 
         // Durable tombstone: blocks re-derivation in persist_compiled_units.
         sqlx::query(
-            "insert into memphant.forgotten_source (tenant_id, source_kind, source_id)
-             values ($1, $2, $3) on conflict do nothing",
+            "insert into memphant.forgotten_source
+               (tenant_id, data_subject_id, scope_id, agent_node_id, subject_generation,
+                source_kind, source_id)
+             values ($1, $2, $3, $4, $5, $6, $7) on conflict do nothing",
         )
-        .bind(tenant.as_uuid())
+        .bind(context.tenant_id.as_uuid())
+        .bind(context.data_subject_id.as_uuid())
+        .bind(context.scope_id.as_uuid())
+        .bind(context.agent_node_id.as_uuid())
+        .bind(context.subject_generation as i64)
         .bind(source_kind)
         .bind(source_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(backend)?;
 
         let generation: i64 = sqlx::query_scalar(
             "insert into memphant.deletion_generation
-               (tenant_id, scope_id, requested_by, state, completed_at)
-             values ($1, $2, $3, 'completed', now()) returning id",
+               (tenant_id, data_subject_id, scope_id, agent_node_id, subject_generation,
+                requested_by, state, completed_at)
+             values ($1, $2, $3, $4, $5, $6, 'completed', now()) returning id",
         )
-        .bind(tenant.as_uuid())
-        .bind(forget.scope_id.as_uuid())
-        .bind(forget.actor_id.as_uuid())
-        .fetch_one(&mut *tx)
+        .bind(context.tenant_id.as_uuid())
+        .bind(context.data_subject_id.as_uuid())
+        .bind(context.scope_id.as_uuid())
+        .bind(context.agent_node_id.as_uuid())
+        .bind(context.subject_generation as i64)
+        .bind(context.actor_id.as_uuid())
+        .fetch_one(&mut **tx)
         .await
         .map_err(backend)?;
 
         if let ForgetTarget::Episode(episode_id) = forget.target {
             sqlx::query(
-                "update memphant.episode set deletion_generation = $3
-                 where tenant_id = $1 and id = $2",
+                "update memphant.episode set deletion_generation = $8
+                 where tenant_id = $1 and id = $2 and data_subject_id = $3
+                   and subject_generation = $4 and scope_id = $5 and agent_node_id = $6
+                   and actor_id = $7",
             )
-            .bind(tenant.as_uuid())
+            .bind(context.tenant_id.as_uuid())
             .bind(episode_id.as_uuid())
+            .bind(context.data_subject_id.as_uuid())
+            .bind(context.subject_generation as i64)
+            .bind(context.scope_id.as_uuid())
+            .bind(context.agent_node_id.as_uuid())
+            .bind(context.actor_id.as_uuid())
             .bind(generation)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
             .map_err(backend)?;
         }
 
-        let rows = sqlx::query(AssertSqlSafe(
-            format!(
-                "update memphant.memory_unit
-             set state = 'deleted', deletion_generation = $3, transaction_to = now()
-             where tenant_id = $1 and scope_id = $2 and state <> 'deleted' and {unit_filter}
-             returning id"
-            )
-            .as_str(),
-        ))
-        .bind(tenant.as_uuid())
-        .bind(forget.scope_id.as_uuid())
-        .bind(generation)
-        .bind(source_id)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(backend)?;
+        let rows = match forget.target {
+            ForgetTarget::MemoryUnit(_) => {
+                let lineage: Vec<Uuid> = sqlx::query_scalar(
+                    "with recursive lineage(id) as (
+                       values ($2::uuid)
+                       union
+                       select case when edge.src_id = lineage.id then edge.dst_id else edge.src_id end
+                       from memphant.memory_edge edge join lineage
+                         on edge.src_id = lineage.id or edge.dst_id = lineage.id
+                       where edge.tenant_id = $1 and edge.data_subject_id = $3
+                         and edge.subject_generation = $4 and edge.scope_id = $5
+                         and edge.agent_node_id = $6 and edge.kind = 'supersedes'
+                     ) select id from lineage",
+                )
+                .bind(context.tenant_id.as_uuid())
+                .bind(source_id)
+                .bind(context.data_subject_id.as_uuid())
+                .bind(context.subject_generation as i64)
+                .bind(context.scope_id.as_uuid())
+                .bind(context.agent_node_id.as_uuid())
+                .fetch_all(&mut **tx)
+                .await
+                .map_err(backend)?;
+                sqlx::query(
+                    "update memphant.memory_unit
+                     set state = 'deleted', deletion_generation = $8,
+                         transaction_to = $9::timestamptz
+                     where tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+                       and scope_id = $4 and agent_node_id = $5 and actor_id = $6
+                       and state <> 'deleted' and id = any($7)
+                     returning id",
+                )
+                .bind(context.tenant_id.as_uuid())
+                .bind(context.data_subject_id.as_uuid())
+                .bind(context.subject_generation as i64)
+                .bind(context.scope_id.as_uuid())
+                .bind(context.agent_node_id.as_uuid())
+                .bind(context.actor_id.as_uuid())
+                .bind(lineage)
+                .bind(generation)
+                .bind(&transaction_time)
+                .fetch_all(&mut **tx)
+                .await
+                .map_err(backend)?
+            }
+            target => {
+                let column = match target {
+                    ForgetTarget::Episode(_) => "source_episode_id",
+                    ForgetTarget::Resource(_) => "source_resource_id",
+                    ForgetTarget::MemoryUnit(_) => unreachable!(),
+                };
+                // Cascade from the source-column matches to supersedes
+                // DESCENDANTS: a correction replacement carries correction
+                // provenance (source_episode_id = null, pinned by
+                // correction_provenance.rs), so without the lineage walk the
+                // corrected content survives the episode's erasure. Descendants
+                // only (dst -> src) — ancestors came from other sources.
+                sqlx::query(AssertSqlSafe(
+                    format!(
+                        "with recursive lineage(id) as (
+                           select id from memphant.memory_unit
+                           where tenant_id = $1 and data_subject_id = $2
+                             and subject_generation = $3 and scope_id = $4
+                             and agent_node_id = $5 and actor_id = $6
+                             and {column} = $7
+                           union
+                           select edge.src_id
+                           from memphant.memory_edge edge join lineage
+                             on edge.dst_id = lineage.id
+                           where edge.tenant_id = $1 and edge.data_subject_id = $2
+                             and edge.subject_generation = $3 and edge.scope_id = $4
+                             and edge.agent_node_id = $5 and edge.kind = 'supersedes'
+                         )
+                         update memphant.memory_unit
+                         set state = 'deleted', deletion_generation = $8,
+                             transaction_to = $9::timestamptz
+                         where tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+                           and scope_id = $4 and agent_node_id = $5 and actor_id = $6
+                           and state <> 'deleted' and id in (select id from lineage)
+                         returning id"
+                    )
+                    .as_str(),
+                ))
+                .bind(context.tenant_id.as_uuid())
+                .bind(context.data_subject_id.as_uuid())
+                .bind(context.subject_generation as i64)
+                .bind(context.scope_id.as_uuid())
+                .bind(context.agent_node_id.as_uuid())
+                .bind(context.actor_id.as_uuid())
+                .bind(source_id)
+                .bind(generation)
+                .bind(&transaction_time)
+                .fetch_all(&mut **tx)
+                .await
+                .map_err(backend)?
+            }
+        };
         let mut invalidated: Vec<UnitId> = rows
             .iter()
             .map(|row| {
@@ -1172,84 +2911,181 @@ impl MemoryStore for PgStore {
 
         let invalidated_uuids: Vec<Uuid> = invalidated.iter().map(|id| id.as_uuid()).collect();
         invalidated.extend(
-            Self::delete_composed_dependents(&mut tx, tenant, &invalidated_uuids, generation)
-                .await?,
+            Self::delete_composed_dependents(
+                tx,
+                &context,
+                &invalidated_uuids,
+                generation,
+                &transaction_time,
+            )
+            .await?,
         );
 
         // Forgotten embeddings are hard-deleted with their units.
         let all_uuids: Vec<Uuid> = invalidated.iter().map(|id| id.as_uuid()).collect();
         sqlx::query(
-            "delete from memphant.embedding where tenant_id = $1 and memory_unit_id = any($2)",
+            "delete from memphant.embedding
+             where tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+               and scope_id = $4 and agent_node_id = $5 and memory_unit_id = any($6)",
         )
-        .bind(tenant.as_uuid())
+        .bind(context.tenant_id.as_uuid())
+        .bind(context.data_subject_id.as_uuid())
+        .bind(context.subject_generation as i64)
+        .bind(context.scope_id.as_uuid())
+        .bind(context.agent_node_id.as_uuid())
         .bind(all_uuids)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(backend)?;
 
-        tx.commit().await.map_err(backend)?;
-        Ok(ForgetOutcome {
+        let outcome = ForgetOutcome {
             deletion_generation: generation as u64,
             invalidated_units: invalidated,
-        })
+        };
+        Ok(outcome)
     }
 
-    async fn record_review_events(
+    async fn stage_review_events(
         &self,
-        tenant: TenantId,
+        txn: &mut Self::Txn,
         events: Vec<ReviewEventRow>,
     ) -> Result<(), StoreError> {
-        let mut tx = self.pool.begin().await.map_err(backend)?;
-        Self::ensure_tenant(&mut tx, tenant).await?;
+        let context = txn.context.clone();
+        txn.has_subject_writes = true;
+        let tx = &mut txn.tx;
         for event in events {
+            if event.tenant_id != context.tenant_id {
+                return Err(StoreError::NotFound("retrieval trace review context"));
+            }
+            let authorized = sqlx::query_scalar::<_, bool>(
+                "select exists (
+                   select 1 from memphant.retrieval_trace trace
+                   where trace.tenant_id = $1 and trace.data_subject_id = $2
+                     and trace.subject_generation = $3 and trace.scope_id = $4
+                     and trace.actor_id = $5 and trace.agent_node_id = $6
+                     and trace.id = $7
+                     and not exists (
+                       select 1 from unnest($8::uuid[]) requested(id)
+                       where not exists (
+                         select 1 from jsonb_array_elements(coalesce(trace.trace->'context_items', '[]'::jsonb)) item
+                         where item->>'unit_id' = requested.id::text
+                            or coalesce(item->'derived_from_unit_ids', '[]'::jsonb) ? requested.id::text
+                       )
+                     )
+                 )",
+            )
+            .bind(context.tenant_id.as_uuid())
+            .bind(context.data_subject_id.as_uuid())
+            .bind(context.subject_generation as i64)
+            .bind(context.scope_id.as_uuid())
+            .bind(context.actor_id.as_uuid())
+            .bind(context.agent_node_id.as_uuid())
+            .bind(event.trace_id.as_uuid())
+            .bind(event.used_ids.iter().map(|id| id.as_uuid()).collect::<Vec<_>>())
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(backend)?;
+            if !authorized {
+                return Err(StoreError::NotFound("retrieval trace review whitelist"));
+            }
             let inserted: Option<Uuid> = sqlx::query_scalar(
-                "insert into memphant.review_event (tenant_id, trace_id, caller_id, outcome)
-                 values ($1, $2, $3, $4)
-                 on conflict (trace_id, caller_id) do nothing
+                "insert into memphant.review_event
+                   (tenant_id, data_subject_id, subject_generation, scope_id,
+                    actor_id, agent_node_id, trace_id, caller_id, outcome, created_at)
+                 values ($1, $2, $3, $4, $5, $6, $7, $8, $9, transaction_timestamp())
+                 on conflict (tenant_id, trace_id, caller_id) do nothing
                  returning id",
             )
-            .bind(tenant.as_uuid())
+            .bind(context.tenant_id.as_uuid())
+            .bind(context.data_subject_id.as_uuid())
+            .bind(context.subject_generation as i64)
+            .bind(context.scope_id.as_uuid())
+            .bind(context.actor_id.as_uuid())
+            .bind(context.agent_node_id.as_uuid())
             .bind(event.trace_id.as_uuid())
             .bind(&event.caller_id)
             .bind(enum_str(&event.outcome))
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await
             .map_err(backend)?;
             if let Some(event_id) = inserted {
                 for unit_id in &event.used_ids {
                     sqlx::query(
                         "insert into memphant.review_event_unit
-                           (review_event_id, tenant_id, memory_unit_id)
-                         values ($1, $2, $3) on conflict do nothing",
+                           (review_event_id, tenant_id, data_subject_id, subject_generation,
+                            scope_id, actor_id, agent_node_id, memory_unit_id)
+                         values ($1, $2, $3, $4, $5, $6, $7, $8) on conflict do nothing",
                     )
                     .bind(event_id)
-                    .bind(tenant.as_uuid())
+                    .bind(context.tenant_id.as_uuid())
+                    .bind(context.data_subject_id.as_uuid())
+                    .bind(context.subject_generation as i64)
+                    .bind(context.scope_id.as_uuid())
+                    .bind(context.actor_id.as_uuid())
+                    .bind(context.agent_node_id.as_uuid())
                     .bind(unit_id.as_uuid())
-                    .execute(&mut *tx)
+                    .execute(&mut **tx)
                     .await
                     .map_err(backend)?;
                 }
             }
         }
-        tx.commit().await.map_err(backend)
+        Ok(())
     }
 
-    async fn store_trace(&self, tenant: TenantId, trace: RetrievalTrace) -> Result<(), StoreError> {
-        let mut tx = self.pool.begin().await.map_err(backend)?;
-        Self::ensure_tenant(&mut tx, tenant).await?;
-        Self::ensure_scope(&mut tx, tenant, trace.scope_id).await?;
+    async fn store_trace(
+        &self,
+        context: &ResolvedMemoryContext,
+        trace: RetrievalTrace,
+    ) -> Result<(), StoreError> {
+        if trace.tenant_id != context.tenant_id
+            || trace.data_subject_id != context.data_subject_id
+            || trace.subject_generation != context.subject_generation
+            || trace.scope_id != context.scope_id
+            || trace.actor_id != context.actor_id
+            || trace.agent_node_id != context.agent_node_id
+            || trace.policy_revision != context.policy_revision
+        {
+            return Err(StoreError::Conflict("trace context mismatch".to_string()));
+        }
+        let mut tx = self.tenant_tx(context.tenant_id).await?;
         let document =
             serde_json::to_value(&trace).map_err(|error| StoreError::Backend(error.to_string()))?;
-        sqlx::query(
+        let result = sqlx::query(
             "insert into memphant.retrieval_trace
-               (id, tenant_id, scope_id, query_hash, mode, channels, candidates, dropped,
+               (id, tenant_id, data_subject_id, scope_id, actor_id, agent_node_id,
+                subject_generation, policy_revision,
+                query_hash, mode, channels, candidates, dropped,
                 citations, filter_selectivity, consolidation_lag_ms, config_hash, trace)
-             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-             on conflict (tenant_id, id) do nothing",
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                     $14, $15, $16, $17, $18)
+             on conflict (tenant_id, id) do update set
+               query_hash = excluded.query_hash,
+               mode = excluded.mode,
+               channels = excluded.channels,
+               candidates = excluded.candidates,
+               dropped = excluded.dropped,
+               citations = excluded.citations,
+               filter_selectivity = excluded.filter_selectivity,
+               consolidation_lag_ms = excluded.consolidation_lag_ms,
+               config_hash = excluded.config_hash,
+               trace = excluded.trace,
+               updated_at = now()
+             where retrieval_trace.data_subject_id = excluded.data_subject_id
+               and retrieval_trace.scope_id = excluded.scope_id
+               and retrieval_trace.actor_id = excluded.actor_id
+               and retrieval_trace.agent_node_id = excluded.agent_node_id
+               and retrieval_trace.subject_generation = excluded.subject_generation
+               and retrieval_trace.policy_revision = excluded.policy_revision",
         )
         .bind(trace.id.as_uuid())
-        .bind(tenant.as_uuid())
+        .bind(context.tenant_id.as_uuid())
+        .bind(context.data_subject_id.as_uuid())
         .bind(trace.scope_id.as_uuid())
+        .bind(context.actor_id.as_uuid())
+        .bind(context.agent_node_id.as_uuid())
+        .bind(context.subject_generation as i64)
+        .bind(&context.policy_revision)
         .bind(&trace.query_hash)
         .bind(enum_str(&trace.mode_executed))
         .bind(serde_json::to_value(&trace.channel_runs).unwrap_or_default())
@@ -1263,20 +3099,31 @@ impl MemoryStore for PgStore {
         .execute(&mut *tx)
         .await
         .map_err(backend)?;
+        if result.rows_affected() != 1 {
+            return Err(StoreError::Conflict("trace context mismatch".to_string()));
+        }
         tx.commit().await.map_err(backend)
     }
 
     async fn trace_by_id(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         id: TraceId,
     ) -> Result<Option<RetrievalTrace>, StoreError> {
+        let mut tx = self.tenant_tx(context.tenant_id).await?;
         let document: Option<serde_json::Value> = sqlx::query_scalar(
-            "select trace from memphant.retrieval_trace where tenant_id = $1 and id = $2",
+            "select trace from memphant.retrieval_trace
+             where tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+               and scope_id = $4 and actor_id = $5 and agent_node_id = $6 and id = $7",
         )
-        .bind(tenant.as_uuid())
+        .bind(context.tenant_id.as_uuid())
+        .bind(context.data_subject_id.as_uuid())
+        .bind(context.subject_generation as i64)
+        .bind(context.scope_id.as_uuid())
+        .bind(context.actor_id.as_uuid())
+        .bind(context.agent_node_id.as_uuid())
         .bind(id.as_uuid())
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(backend)?;
         document
@@ -1287,24 +3134,40 @@ impl MemoryStore for PgStore {
 
     async fn scope_memory_page(
         &self,
-        tenant: TenantId,
-        scope: ScopeId,
+        context: &ResolvedMemoryContext,
         cursor: Option<UnitId>,
         limit: usize,
     ) -> Result<ScopePage, StoreError> {
         let limit = limit.clamp(1, 1_000);
-        let fetched = self
-            .fetch_units_where(
-                "tenant_id = $1 and scope_id = $2 and ($3::uuid is null or id > $3)",
-                "order by id limit $4",
-                vec![
-                    Bind::Uuid(tenant.as_uuid()),
-                    Bind::Uuid(scope.as_uuid()),
-                    Bind::UuidOpt(cursor.map(|cursor| cursor.as_uuid())),
-                    Bind::I64((limit + 1) as i64),
-                ],
-            )
-            .await?;
+        let mut tx = self.tenant_tx(context.tenant_id).await?;
+        let (scope_uuids, agent_uuids, allowed_kind_strs) = source_kind_triples(context, &[]);
+        let fetched = Self::fetch_units_where(
+            &mut tx,
+            "tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+             and exists (
+               select 1 from unnest($4::uuid[], $5::uuid[], $6::text[])
+                 allowed(scope_id, agent_node_id, kind)
+               where allowed.scope_id = memphant.memory_unit.scope_id
+                 and allowed.agent_node_id = memphant.memory_unit.agent_node_id
+                 and allowed.kind = memphant.memory_unit.kind
+             )
+             and scope_id = $7 and agent_node_id = $8
+             and ($9::uuid is null or id > $9)",
+            "order by id limit $10",
+            vec![
+                Bind::Uuid(context.tenant_id.as_uuid()),
+                Bind::Uuid(context.data_subject_id.as_uuid()),
+                Bind::I64(context.subject_generation as i64),
+                Bind::UuidVec(scope_uuids),
+                Bind::UuidVec(agent_uuids),
+                Bind::TextVec(allowed_kind_strs),
+                Bind::Uuid(context.scope_id.as_uuid()),
+                Bind::Uuid(context.agent_node_id.as_uuid()),
+                Bind::UuidOpt(cursor.map(|cursor| cursor.as_uuid())),
+                Bind::I64((limit + 1) as i64),
+            ],
+        )
+        .await?;
         let has_more = fetched.len() > limit;
         let mut items = fetched;
         items.truncate(limit);
@@ -1321,35 +3184,17 @@ impl MemoryStore for PgStore {
         filter: JobFilter,
         limit: usize,
     ) -> Result<Vec<ReflectJobRow>, StoreError> {
-        // Dead-letter sweep first: exhausted jobs are never re-claimed.
-        sqlx::query(
-            "update memphant.job_state set state = 'dead'
-             where state not in ('done', 'dead') and attempts >= 5",
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(backend)?;
-
         let rows = sqlx::query(
-            "update memphant.job_state job
-             set state = 'running', claimed_at = now(), attempts = job.attempts + 1
-             where (job.tenant_id, job.id) in (
-               select tenant_id, id from memphant.job_state
-               where state in ('queued', 'running') and attempts < 5
-                 and run_after <= now()
-                 and (claimed_at is null or claimed_at < now() - interval '5 minutes')
-                 and ($1::uuid is null or tenant_id = $1)
-                 and ($2::uuid is null or scope_id = $2)
-                 and scope_id is not null
-               order by created_at
-               for update skip locked
-               limit $3)
-             returning job.id, job.tenant_id, job.scope_id, job.job_type, job.target_id,
-                       job.compiler_version, job.subject, job.predicate, job.attempts",
+            "select id, tenant_id, data_subject_id, scope_id, actor_id, agent_node_id,
+                    subject_generation, job_type, target_id, compiler_version,
+                    subject, predicate, attempts, claim_generation, queue_order
+             from memphant.claim_reflect_jobs($1, $2, $3, $4)
+             order by queue_order",
         )
+        .bind(limit.min(1_000) as i32)
         .bind(filter.tenant.map(|tenant| tenant.as_uuid()))
         .bind(filter.scope.map(|scope| scope.as_uuid()))
-        .bind(limit.min(1_000) as i64)
+        .bind(JOB_DEAD_LETTER_ATTEMPTS as i32)
         .fetch_all(&self.pool)
         .await
         .map_err(backend)?;
@@ -1359,16 +3204,26 @@ impl MemoryStore for PgStore {
                 let job_type: String = row.try_get("job_type").map_err(backend)?;
                 let target: Uuid = row.try_get("target_id").map_err(backend)?;
                 let (kind, episode_id, resource_id) = match job_type.as_str() {
+                    "reflect_episode" => (
+                        ReflectJobKind::ReflectEpisode,
+                        Some(EpisodeId::from_u128(target.as_u128())),
+                        None,
+                    ),
                     "reflect_resource" => (
                         ReflectJobKind::ReflectResource,
                         None,
                         Some(ResourceId::from_u128(target.as_u128())),
                     ),
-                    _ => (
-                        ReflectJobKind::ReflectEpisode,
-                        Some(EpisodeId::from_u128(target.as_u128())),
-                        None,
-                    ),
+                    "reflect_scope"
+                        if target == row.try_get::<Uuid, _>("id").map_err(backend)? =>
+                    {
+                        (ReflectJobKind::ReflectScope, None, None)
+                    }
+                    other => {
+                        return Err(StoreError::Backend(format!(
+                            "invalid persisted reflect job type or target: {other}"
+                        )));
+                    }
                 };
                 Ok(ReflectJobRow {
                     job: QueuedReflectJob {
@@ -1380,11 +3235,29 @@ impl MemoryStore for PgStore {
                                 .map_err(backend)?
                                 .as_u128(),
                         ),
+                        data_subject_id: SubjectId::from_u128(
+                            row.try_get::<Uuid, _>("data_subject_id")
+                                .map_err(backend)?
+                                .as_u128(),
+                        ),
                         scope_id: ScopeId::from_u128(
                             row.try_get::<Uuid, _>("scope_id")
                                 .map_err(backend)?
                                 .as_u128(),
                         ),
+                        actor_id: ActorId::from_u128(
+                            row.try_get::<Uuid, _>("actor_id")
+                                .map_err(backend)?
+                                .as_u128(),
+                        ),
+                        agent_node_id: AgentNodeId::from_u128(
+                            row.try_get::<Uuid, _>("agent_node_id")
+                                .map_err(backend)?
+                                .as_u128(),
+                        ),
+                        subject_generation: row
+                            .try_get::<i64, _>("subject_generation")
+                            .map_err(backend)? as u64,
                         episode_id,
                         resource_id,
                         kind,
@@ -1393,67 +3266,379 @@ impl MemoryStore for PgStore {
                         predicate: row.try_get("predicate").map_err(backend)?,
                     },
                     attempts: row.try_get::<i32, _>("attempts").map_err(backend)? as u32,
+                    claim_generation: row.try_get::<i64, _>("claim_generation").map_err(backend)?
+                        as u64,
                 })
             })
             .collect()
     }
 
-    async fn complete_reflect_job(&self, id: JobId) -> Result<(), StoreError> {
-        sqlx::query("update memphant.job_state set state = 'done' where id = $1")
-            .bind(id.as_uuid())
-            .execute(&self.pool)
-            .await
-            .map_err(backend)?;
-        Ok(())
-    }
-
-    async fn persist_compiled_units(
+    async fn complete_reflect_job(
         &self,
-        tenant: TenantId,
-        write: CompiledWrite,
-    ) -> Result<(), StoreError> {
-        let mut tx = self.pool.begin().await.map_err(backend)?;
-        Self::ensure_tenant(&mut tx, tenant).await?;
-        Self::ensure_scope(&mut tx, tenant, write.scope_id).await?;
-
-        // Idempotency: one compilation per (job_id, compiler_version).
-        let already: Option<serde_json::Value> = sqlx::query_scalar(
-            "select result from memphant.job_state
-             where tenant_id = $1 and id = $2 and compiler_version = $3 and result is not null",
+        claim: &ReflectJobRow,
+    ) -> Result<ClaimMutationOutcome, StoreError> {
+        let tenant = claim.job.tenant_id;
+        let mut tx = self.tenant_tx(tenant).await?;
+        let updated = sqlx::query(
+            "update memphant.job_state set state = 'done'
+             where tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+               and scope_id = $4 and agent_node_id = $5 and actor_id = $6
+               and id = $7 and compiler_version = $8 and attempts = $9
+               and claim_generation = $10 and state = 'running'",
         )
         .bind(tenant.as_uuid())
-        .bind(write.job_id.as_uuid())
-        .bind(&write.compiler_version)
-        .fetch_optional(&mut *tx)
+        .bind(claim.job.data_subject_id.as_uuid())
+        .bind(claim.job.subject_generation as i64)
+        .bind(claim.job.scope_id.as_uuid())
+        .bind(claim.job.agent_node_id.as_uuid())
+        .bind(claim.job.actor_id.as_uuid())
+        .bind(claim.job.id.as_uuid())
+        .bind(&claim.job.compiler_version)
+        .bind(claim.attempts as i32)
+        .bind(claim.claim_generation as i64)
+        .execute(&mut *tx)
         .await
         .map_err(backend)?;
-        if already.is_some() {
-            tx.commit().await.map_err(backend)?;
-            return Ok(());
+        let applied = updated.rows_affected() == 1
+            || sqlx::query_scalar::<_, bool>(
+                "select exists (
+                   select 1 from memphant.job_state
+                   where tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+                     and scope_id = $4 and agent_node_id = $5 and actor_id = $6
+                     and id = $7 and compiler_version = $8 and attempts = $9
+                     and claim_generation = $10 and state = 'done' and result is not null
+                 )",
+            )
+            .bind(tenant.as_uuid())
+            .bind(claim.job.data_subject_id.as_uuid())
+            .bind(claim.job.subject_generation as i64)
+            .bind(claim.job.scope_id.as_uuid())
+            .bind(claim.job.agent_node_id.as_uuid())
+            .bind(claim.job.actor_id.as_uuid())
+            .bind(claim.job.id.as_uuid())
+            .bind(&claim.job.compiler_version)
+            .bind(claim.attempts as i32)
+            .bind(claim.claim_generation as i64)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(backend)?;
+        tx.commit().await.map_err(backend)?;
+        Ok(if applied {
+            ClaimMutationOutcome::Applied
+        } else {
+            ClaimMutationOutcome::Stale
+        })
+    }
+
+    async fn fetch_prepared_structured_state(
+        &self,
+        claim: &ReflectJobRow,
+    ) -> Result<Option<Vec<memphant_core::ProjectedStructuredState>>, StoreError> {
+        let tenant = claim.job.tenant_id;
+        let mut tx = self.tenant_tx(tenant).await?;
+        // `queued` is included so a valid release does not lose the paid
+        // preparation: the releasing owner's token still matches on attempts +
+        // claim_generation (both bump on reclaim, so stale/forged tokens miss).
+        let value: Option<serde_json::Value> = sqlx::query_scalar(
+            "select result from memphant.job_state
+             where tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+               and scope_id = $4 and agent_node_id = $5 and actor_id = $6
+               and id = $7 and compiler_version = $8 and attempts = $9
+               and claim_generation = $10 and state in ('running', 'queued')",
+        )
+        .bind(tenant.as_uuid())
+        .bind(claim.job.data_subject_id.as_uuid())
+        .bind(claim.job.subject_generation as i64)
+        .bind(claim.job.scope_id.as_uuid())
+        .bind(claim.job.agent_node_id.as_uuid())
+        .bind(claim.job.actor_id.as_uuid())
+        .bind(claim.job.id.as_uuid())
+        .bind(&claim.job.compiler_version)
+        .bind(claim.attempts as i32)
+        .bind(claim.claim_generation as i64)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(backend)?
+        .flatten();
+        tx.commit().await.map_err(backend)?;
+        match value
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| StoreError::Backend(format!("invalid reflect job result: {error}")))?
+        {
+            Some(memphant_core::ReflectJobResult::Prepared { projections }) => {
+                Ok(Some(projections))
+            }
+            Some(memphant_core::ReflectJobResult::Completed { .. }) | None => Ok(None),
+        }
+    }
+
+    async fn store_prepared_structured_state(
+        &self,
+        claim: &ReflectJobRow,
+        projections: Vec<memphant_core::ProjectedStructuredState>,
+    ) -> Result<(), StoreError> {
+        let value = serde_json::to_value(memphant_core::ReflectJobResult::Prepared { projections })
+            .map_err(|error| StoreError::Backend(error.to_string()))?;
+        let tenant = claim.job.tenant_id;
+        let mut tx = self.tenant_tx(tenant).await?;
+        sqlx::query(
+            "update memphant.job_state set result = $11, updated_at = now()
+             where tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+               and scope_id = $4 and agent_node_id = $5 and actor_id = $6
+               and id = $7 and compiler_version = $8 and attempts = $9
+               and claim_generation = $10
+               and state = 'running' and result is null",
+        )
+        .bind(tenant.as_uuid())
+        .bind(claim.job.data_subject_id.as_uuid())
+        .bind(claim.job.subject_generation as i64)
+        .bind(claim.job.scope_id.as_uuid())
+        .bind(claim.job.agent_node_id.as_uuid())
+        .bind(claim.job.actor_id.as_uuid())
+        .bind(claim.job.id.as_uuid())
+        .bind(&claim.job.compiler_version)
+        .bind(claim.attempts as i32)
+        .bind(claim.claim_generation as i64)
+        .bind(value)
+        .execute(&mut *tx)
+        .await
+        .map_err(backend)?;
+        tx.commit().await.map_err(backend)
+    }
+
+    async fn release_reflect_job(
+        &self,
+        claim: &ReflectJobRow,
+        retry_after_seconds: u64,
+        error: String,
+    ) -> Result<(), StoreError> {
+        let tenant = claim.job.tenant_id;
+        let mut tx = self.tenant_tx(tenant).await?;
+        sqlx::query(
+            "update memphant.job_state
+             set state = 'queued', claimed_at = null,
+                 run_after = now() + make_interval(secs => $11::double precision),
+                 last_error = $12, updated_at = now()
+             where tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+               and scope_id = $4 and agent_node_id = $5 and actor_id = $6
+               and id = $7 and compiler_version = $8 and attempts = $9
+               and claim_generation = $10 and state = 'running'",
+        )
+        .bind(tenant.as_uuid())
+        .bind(claim.job.data_subject_id.as_uuid())
+        .bind(claim.job.subject_generation as i64)
+        .bind(claim.job.scope_id.as_uuid())
+        .bind(claim.job.agent_node_id.as_uuid())
+        .bind(claim.job.actor_id.as_uuid())
+        .bind(claim.job.id.as_uuid())
+        .bind(&claim.job.compiler_version)
+        .bind(claim.attempts as i32)
+        .bind(claim.claim_generation as i64)
+        .bind(retry_after_seconds as f64)
+        .bind(error)
+        .execute(&mut *tx)
+        .await
+        .map_err(backend)?;
+        tx.commit().await.map_err(backend)
+    }
+
+    async fn fail_reflect_job(
+        &self,
+        claim: &ReflectJobRow,
+        error: String,
+    ) -> Result<(), StoreError> {
+        let tenant = claim.job.tenant_id;
+        let mut tx = self.tenant_tx(tenant).await?;
+        sqlx::query(
+            "update memphant.job_state
+             set state = 'dead', claimed_at = null, last_error = $11, updated_at = now()
+             where tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+               and scope_id = $4 and agent_node_id = $5 and actor_id = $6
+               and id = $7 and compiler_version = $8 and attempts = $9
+               and claim_generation = $10 and state = 'running'",
+        )
+        .bind(tenant.as_uuid())
+        .bind(claim.job.data_subject_id.as_uuid())
+        .bind(claim.job.subject_generation as i64)
+        .bind(claim.job.scope_id.as_uuid())
+        .bind(claim.job.agent_node_id.as_uuid())
+        .bind(claim.job.actor_id.as_uuid())
+        .bind(claim.job.id.as_uuid())
+        .bind(&claim.job.compiler_version)
+        .bind(claim.attempts as i32)
+        .bind(claim.claim_generation as i64)
+        .bind(error)
+        .execute(&mut *tx)
+        .await
+        .map_err(backend)?;
+        tx.commit().await.map_err(backend)
+    }
+
+    async fn stage_compiled_units(
+        &self,
+        txn: &mut Self::Txn,
+        claim: Option<&ReflectJobRow>,
+        write: CompiledWrite,
+    ) -> Result<ClaimMutationOutcome, StoreError> {
+        let context = txn.context.clone();
+        txn.has_subject_writes = true;
+        if let Some(claim) = claim
+            && (claim.job.tenant_id != context.tenant_id
+                || claim.job.data_subject_id != context.data_subject_id
+                || claim.job.subject_generation != context.subject_generation
+                || claim.job.scope_id != context.scope_id
+                || claim.job.agent_node_id != context.agent_node_id
+                || claim.job.actor_id != context.actor_id
+                || claim.job.id != write.job_id
+                || claim.job.compiler_version != write.compiler_version)
+        {
+            return Err(StoreError::Conflict(
+                "reflect claim does not match memory context".to_string(),
+            ));
+        }
+        if write.new_units.iter().any(|unit| {
+            unit.tenant_id != context.tenant_id
+                || unit.data_subject_id != context.data_subject_id
+                || unit.subject_generation != context.subject_generation
+                || unit.scope_id != context.scope_id
+                || unit.agent_node_id != context.agent_node_id
+                || unit.actor_id != Some(context.actor_id)
+        }) || write
+            .new_edges
+            .iter()
+            .any(|edge| edge.tenant_id != context.tenant_id || edge.scope_id != context.scope_id)
+        {
+            return Err(StoreError::Conflict(
+                "compiled output does not match memory context".to_string(),
+            ));
+        }
+        let tenant = context.tenant_id;
+        let tx = &mut txn.tx;
+        if claim.is_none() {
+            sqlx::query(
+                "insert into memphant.job_state
+                   (id, tenant_id, data_subject_id, actor_id, agent_node_id, subject_generation,
+                    job_type, target_id, compiler_version, state, scope_id)
+                 values ($1, $2, $3, $4, $5, $6, 'direct', $1, $7, 'running', $8)
+                 on conflict do nothing",
+            )
+            .bind(write.job_id.as_uuid())
+            .bind(tenant.as_uuid())
+            .bind(context.data_subject_id.as_uuid())
+            .bind(context.actor_id.as_uuid())
+            .bind(context.agent_node_id.as_uuid())
+            .bind(context.subject_generation as i64)
+            .bind(&write.compiler_version)
+            .bind(context.scope_id.as_uuid())
+            .execute(&mut **tx)
+            .await
+            .map_err(backend)?;
+        }
+        let transaction_time: String = sqlx::query_scalar(
+            "select to_char(transaction_timestamp() at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')",
+        )
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(backend)?;
+        // Idempotency: one compilation per (job_id, compiler_version). Lock the
+        // job_state row (`for update`) so a reclaimed re-compile serializes HERE
+        // rather than racing: a second writer blocks until the first commits,
+        // then sees `result` set and no-ops. Without the lock both writers pass
+        // this check at READ COMMITTED and each inserts — semantic units roll
+        // back on the partial unique scope-subject index, but resource-kind
+        // units have no such guard and would double-insert. The row may not
+        // exist yet (direct writes mint it below), so the lock is best-effort;
+        // that path is single-writer per job_id.
+        let existing = sqlx::query_as::<_, (Option<serde_json::Value>, i32, String, i64, String)>(
+            "select result, attempts, state, claim_generation, job_type from memphant.job_state
+             where tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+               and scope_id = $4 and agent_node_id = $5 and actor_id = $6
+               and id = $7 and compiler_version = $8
+             for update",
+        )
+        .bind(tenant.as_uuid())
+        .bind(context.data_subject_id.as_uuid())
+        .bind(context.subject_generation as i64)
+        .bind(context.scope_id.as_uuid())
+        .bind(context.agent_node_id.as_uuid())
+        .bind(context.actor_id.as_uuid())
+        .bind(write.job_id.as_uuid())
+        .bind(&write.compiler_version)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(backend)?;
+        if existing.is_none() {
+            return Err(StoreError::Conflict(
+                "reflect job identity belongs to another memory context".to_string(),
+            ));
+        }
+        if claim.is_none() && existing.as_ref().is_some_and(|row| row.4 != "direct") {
+            return Err(StoreError::Conflict(
+                "direct compilation id belongs to a worker job".to_string(),
+            ));
+        }
+        if let Some(expected_claim) = claim
+            && existing
+                .as_ref()
+                .is_none_or(|(_, attempts, state, generation, _)| {
+                    *attempts != expected_claim.attempts as i32
+                        || *generation != expected_claim.claim_generation as i64
+                        || state != "running"
+                })
+        {
+            return Ok(ClaimMutationOutcome::Stale);
+        }
+        if let Some(value) = existing.and_then(|(result, _, _, _, _)| result) {
+            let result: memphant_core::ReflectJobResult =
+                serde_json::from_value(value).map_err(|error| {
+                    StoreError::Backend(format!("invalid reflect job result: {error}"))
+                })?;
+            if matches!(result, memphant_core::ReflectJobResult::Completed { .. }) {
+                return Ok(ClaimMutationOutcome::Applied);
+            }
         }
 
         // Apply state transitions BEFORE inserts so the partial unique
         // scope-subject index never sees two open semantic generations.
         for update in &write.unit_updates {
-            sqlx::query(
+            let updated = sqlx::query(
                 "update memphant.memory_unit set state = $3, transaction_to = $4::timestamptz
-                 where tenant_id = $1 and id = $2",
+                 where tenant_id = $1 and id = $2 and data_subject_id = $5
+                   and subject_generation = $6 and scope_id = $7 and agent_node_id = $8
+                   and actor_id = $9",
             )
             .bind(tenant.as_uuid())
             .bind(update.id.as_uuid())
             .bind(enum_str(&update.state))
-            .bind(&update.transaction_to)
-            .execute(&mut *tx)
+            .bind(&transaction_time)
+            .bind(context.data_subject_id.as_uuid())
+            .bind(context.subject_generation as i64)
+            .bind(context.scope_id.as_uuid())
+            .bind(context.agent_node_id.as_uuid())
+            .bind(context.actor_id.as_uuid())
+            .execute(&mut **tx)
             .await
             .map_err(backend)?;
+            if updated.rows_affected() != 1 {
+                return Err(StoreError::Conflict(
+                    "compiled update does not match memory context".to_string(),
+                ));
+            }
         }
 
         // Forgotten-source tombstones durably block re-derivation.
         let tombstones: Vec<(String, Uuid)> = sqlx::query(
-            "select source_kind, source_id from memphant.forgotten_source where tenant_id = $1",
+            "select source_kind, source_id from memphant.forgotten_source
+             where tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+               and scope_id = $4 and agent_node_id = $5",
         )
         .bind(tenant.as_uuid())
-        .fetch_all(&mut *tx)
+        .bind(context.data_subject_id.as_uuid())
+        .bind(context.subject_generation as i64)
+        .bind(context.scope_id.as_uuid())
+        .bind(context.agent_node_id.as_uuid())
+        .fetch_all(&mut **tx)
         .await
         .map_err(backend)?
         .iter()
@@ -1482,13 +3667,54 @@ impl MemoryStore for PgStore {
             if is_forgotten(unit) {
                 continue;
             }
-            let mut actors: Vec<ActorId> = unit.actor_id.into_iter().collect();
-            actors.dedup();
-            for actor in actors {
-                Self::ensure_actor(&mut tx, tenant, actor).await?;
-            }
-            Self::insert_unit(&mut tx, unit).await?;
+            let mut unit = unit.clone();
+            unit.transaction_from = Some(transaction_time.clone());
+            unit.transaction_to = None;
+            Self::insert_unit(tx, &unit).await?;
             admitted_ids.insert(unit.id);
+        }
+        for citation in &write.citations {
+            if !admitted_ids.contains(&citation.memory_unit_id) {
+                continue;
+            }
+            if citation.tenant_id != context.tenant_id
+                || citation.data_subject_id != context.data_subject_id
+                || citation.subject_generation != context.subject_generation
+                || citation.scope_id != context.scope_id
+                || citation.agent_node_id != context.agent_node_id
+                || (citation.episode_id.is_some() && citation.resource_id.is_some())
+            {
+                return Err(StoreError::Conflict(
+                    "compiled citation does not match memory context".to_string(),
+                ));
+            }
+            sqlx::query(
+                "insert into memphant.citation
+                   (id, tenant_id, data_subject_id, scope_id, agent_node_id,
+                    subject_generation, memory_unit_id, episode_id, resource_id, span, quote_hash)
+                 values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+            )
+            .bind(citation.id)
+            .bind(citation.tenant_id.as_uuid())
+            .bind(citation.data_subject_id.as_uuid())
+            .bind(citation.scope_id.as_uuid())
+            .bind(citation.agent_node_id.as_uuid())
+            .bind(citation.subject_generation as i64)
+            .bind(citation.memory_unit_id.as_uuid())
+            .bind(citation.episode_id.map(|id| id.as_uuid()))
+            .bind(citation.resource_id.map(|id| id.as_uuid()))
+            .bind(
+                citation
+                    .span
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()
+                    .map_err(|error| StoreError::Backend(error.to_string()))?,
+            )
+            .bind(&citation.quote_hash)
+            .execute(&mut **tx)
+            .await
+            .map_err(backend)?;
         }
 
         // Edges may only reference admitted or pre-existing units.
@@ -1503,11 +3729,19 @@ impl MemoryStore for PgStore {
                     Some(known) => *known,
                     None => {
                         let found: Option<Uuid> = sqlx::query_scalar(
-                            "select id from memphant.memory_unit where tenant_id = $1 and id = $2",
+                            "select id from memphant.memory_unit
+                             where tenant_id = $1 and data_subject_id = $2
+                               and subject_generation = $3 and scope_id = $4
+                               and agent_node_id = $5 and actor_id = $6 and id = $7",
                         )
                         .bind(tenant.as_uuid())
+                        .bind(context.data_subject_id.as_uuid())
+                        .bind(context.subject_generation as i64)
+                        .bind(context.scope_id.as_uuid())
+                        .bind(context.agent_node_id.as_uuid())
+                        .bind(context.actor_id.as_uuid())
                         .bind(endpoint.as_uuid())
-                        .fetch_optional(&mut *tx)
+                        .fetch_optional(&mut **tx)
                         .await
                         .map_err(backend)?;
                         let known = found.is_some();
@@ -1520,95 +3754,117 @@ impl MemoryStore for PgStore {
                     break;
                 }
             }
-            if endpoints_ok {
-                Self::insert_edge(&mut tx, edge).await?;
+            if !endpoints_ok {
+                return Err(StoreError::Conflict(
+                    "compiled edge does not match memory context".to_string(),
+                ));
             }
+            let mut edge = edge.clone();
+            edge.transaction_from = Some(transaction_time.clone());
+            edge.transaction_to = None;
+            Self::insert_edge(tx, &context, &edge).await?;
         }
 
-        // Store the compiled trace as the idempotency record on the job row
-        // (insert a synthetic row for direct writes with no queued job).
-        let trace_json = serde_json::to_value(&write.trace)
-            .map_err(|error| StoreError::Backend(error.to_string()))?;
+        // Store the compiled trace as the idempotency record on the row locked
+        // before any unit mutation.
+        let trace_json = serde_json::to_value(memphant_core::ReflectJobResult::Completed {
+            trace: write.trace.clone(),
+        })
+        .map_err(|error| StoreError::Backend(error.to_string()))?;
         let updated = sqlx::query(
-            "update memphant.job_state set result = $4
-             where tenant_id = $1 and id = $2 and compiler_version = $3",
+            "update memphant.job_state
+             set result = $11, state = 'done', claimed_at = null, updated_at = now()
+             where tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+               and scope_id = $4 and agent_node_id = $5 and actor_id = $6
+               and id = $7 and compiler_version = $8
+               and ($9::integer is null or attempts = $9)
+               and claim_generation = $10 and state = 'running'",
         )
         .bind(tenant.as_uuid())
+        .bind(context.data_subject_id.as_uuid())
+        .bind(context.subject_generation as i64)
+        .bind(context.scope_id.as_uuid())
+        .bind(context.agent_node_id.as_uuid())
+        .bind(context.actor_id.as_uuid())
         .bind(write.job_id.as_uuid())
         .bind(&write.compiler_version)
+        .bind(claim.map(|claim| claim.attempts as i32))
+        .bind(claim.map_or(0, |claim| claim.claim_generation) as i64)
         .bind(&trace_json)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(backend)?;
         if updated.rows_affected() == 0 {
-            sqlx::query(
-                "insert into memphant.job_state
-                   (id, tenant_id, job_type, target_id, compiler_version, state, scope_id, result)
-                 values ($1, $2, 'direct', $1, $3, 'done', $4, $5)
-                 on conflict (tenant_id, job_type, target_id, compiler_version) do update
-                   set result = excluded.result",
-            )
-            .bind(write.job_id.as_uuid())
-            .bind(tenant.as_uuid())
-            .bind(&write.compiler_version)
-            .bind(write.scope_id.as_uuid())
-            .bind(&trace_json)
-            .execute(&mut *tx)
-            .await
-            .map_err(backend)?;
+            return Ok(ClaimMutationOutcome::Stale);
         }
 
-        tx.commit().await.map_err(backend)
+        // Embedding write-through in the SAME transaction as the units they
+        // describe, for admitted units only (forgotten-source units were
+        // skipped above), so the vector channel can never reference a unit this
+        // write tombstoned out. Empty for noop providers.
+        if let Some(profile) = &write.embedding_profile {
+            let rows: Vec<&EmbeddingRow> = write
+                .embeddings
+                .iter()
+                .filter(|row| admitted_ids.contains(&row.memory_unit_id))
+                .collect();
+            if !rows.is_empty() {
+                Self::upsert_embedding_profile_tx(tx, tenant, profile).await?;
+                for row in rows {
+                    Self::insert_embedding_tx(tx, &context, row).await?;
+                }
+            }
+        }
+
+        Ok(ClaimMutationOutcome::Applied)
     }
 
     async fn fetch_reflect_trace(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         job_id: JobId,
         compiler_version: &str,
     ) -> Result<Option<ReflectTrace>, StoreError> {
+        let tenant = context.tenant_id;
+        let mut tx = self.tenant_tx(tenant).await?;
         let document: Option<serde_json::Value> = sqlx::query_scalar(
             "select result from memphant.job_state
-             where tenant_id = $1 and id = $2 and compiler_version = $3 and result is not null",
+             where tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+               and scope_id = $4 and agent_node_id = $5 and actor_id = $6
+               and id = $7 and compiler_version = $8 and result is not null",
         )
         .bind(tenant.as_uuid())
+        .bind(context.data_subject_id.as_uuid())
+        .bind(context.subject_generation as i64)
+        .bind(context.scope_id.as_uuid())
+        .bind(context.agent_node_id.as_uuid())
+        .bind(context.actor_id.as_uuid())
         .bind(job_id.as_uuid())
         .bind(compiler_version)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(backend)?;
-        document
+        match document
             .map(serde_json::from_value)
             .transpose()
-            .map_err(|error| StoreError::Backend(error.to_string()))
+            .map_err(|error| StoreError::Backend(format!("invalid reflect job result: {error}")))?
+        {
+            Some(memphant_core::ReflectJobResult::Completed { trace }) => Ok(Some(trace)),
+            Some(memphant_core::ReflectJobResult::Prepared { .. }) | None => Ok(None),
+        }
     }
 
     async fn upsert_embeddings(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         rows: Vec<EmbeddingRow>,
     ) -> Result<(), StoreError> {
         if rows.is_empty() {
             return Ok(());
         }
-        let mut tx = self.pool.begin().await.map_err(backend)?;
-        for row in rows {
-            if row.vec.is_empty() {
-                continue;
-            }
-            sqlx::query(
-                "insert into memphant.embedding (tenant_id, memory_unit_id, embedding_profile_id, vec)
-                 values ($1, $2, $3, $4::halfvec)
-                 on conflict (tenant_id, memory_unit_id, embedding_profile_id)
-                   do update set vec = excluded.vec",
-            )
-            .bind(tenant.as_uuid())
-            .bind(row.memory_unit_id.as_uuid())
-            .bind(row.embedding_profile_id)
-            .bind(vec_literal(&row.vec))
-            .execute(&mut *tx)
-            .await
-            .map_err(backend)?;
+        let mut tx = self.tenant_tx(context.tenant_id).await?;
+        for row in &rows {
+            Self::insert_embedding_tx(&mut tx, context, row).await?;
         }
         tx.commit().await.map_err(backend)
     }
@@ -1618,40 +3874,31 @@ impl MemoryStore for PgStore {
         tenant: TenantId,
         profile: EmbeddingProfileRow,
     ) -> Result<(), StoreError> {
-        sqlx::query(
-            "insert into memphant.embedding_profile
-               (id, tenant_id, provider, model, dimensions, distance, version, index_strategy)
-             values ($1, $2, $3, $4, $5, $6, $7, $8)
-             on conflict (tenant_id, id) do nothing",
-        )
-        .bind(profile.id)
-        .bind(tenant.as_uuid())
-        .bind(&profile.provider)
-        .bind(&profile.model)
-        .bind(profile.dimensions as i32)
-        .bind(&profile.distance)
-        .bind(&profile.version)
-        .bind(&profile.index_strategy)
-        .execute(&self.pool)
-        .await
-        .map_err(backend)?;
-        Ok(())
+        let mut tx = self.tenant_tx(tenant).await?;
+        Self::upsert_embedding_profile_tx(&mut tx, tenant, &profile).await?;
+        tx.commit().await.map_err(backend)
     }
 
     async fn fetch_embeddings(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         unit_ids: &[UnitId],
     ) -> Result<Vec<EmbeddingRow>, StoreError> {
+        let mut tx = self.tenant_tx(context.tenant_id).await?;
         let uuids: Vec<Uuid> = unit_ids.iter().map(|id| id.as_uuid()).collect();
         let rows = sqlx::query(
             "select memory_unit_id, embedding_profile_id, vec::text as vec
              from memphant.embedding
-             where tenant_id = $1 and memory_unit_id = any($2)",
+             where tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+               and scope_id = $4 and agent_node_id = $5 and memory_unit_id = any($6)",
         )
-        .bind(tenant.as_uuid())
+        .bind(context.tenant_id.as_uuid())
+        .bind(context.data_subject_id.as_uuid())
+        .bind(context.subject_generation as i64)
+        .bind(context.scope_id.as_uuid())
+        .bind(context.agent_node_id.as_uuid())
         .bind(uuids)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await
         .map_err(backend)?;
         rows.iter()
@@ -1675,12 +3922,17 @@ impl MemoryStore for PgStore {
     }
 
     async fn lookup_api_key(&self, key_hash: &str) -> Result<Option<ApiKeyRow>, StoreError> {
+        let pool = self
+            .auth_pool
+            .as_ref()
+            .ok_or_else(|| StoreError::Backend("store has no authn capability".to_string()))?;
         let row = sqlx::query(
-            "select id, tenant_id, key_hash, label, max_trust, (revoked_at is not null) as revoked
-             from memphant.api_key where key_hash = $1",
+            "select id, tenant_id, key_hash, label, max_trust, data_subject_id,
+                    subject_generation, actor_id, scope_id, agent_node_id, revoked
+             from memphant.authenticate_api_key($1)",
         )
         .bind(key_hash)
-        .fetch_optional(&self.pool)
+        .fetch_optional(pool)
         .await
         .map_err(backend)?;
         let Some(row) = row else { return Ok(None) };
@@ -1698,8 +3950,561 @@ impl MemoryStore for PgStore {
                     .map_err(backend)?
                     .as_str(),
             )?,
+            data_subject_id: row
+                .try_get::<Option<Uuid>, _>("data_subject_id")
+                .map_err(backend)?
+                .map(|id| SubjectId::from_u128(id.as_u128())),
+            subject_generation: row
+                .try_get::<Option<i64>, _>("subject_generation")
+                .map_err(backend)?
+                .map(|generation| generation as u64),
+            actor_id: row
+                .try_get::<Option<Uuid>, _>("actor_id")
+                .map_err(backend)?
+                .map(|id| ActorId::from_u128(id.as_u128())),
+            scope_id: row
+                .try_get::<Option<Uuid>, _>("scope_id")
+                .map_err(backend)?
+                .map(|id| ScopeId::from_u128(id.as_u128())),
+            agent_node_id: row
+                .try_get::<Option<Uuid>, _>("agent_node_id")
+                .map_err(backend)?
+                .map(|id| AgentNodeId::from_u128(id.as_u128())),
             revoked: row.try_get("revoked").map_err(backend)?,
         }))
+    }
+
+    async fn resolve_context_binding(
+        &self,
+        tenant: TenantId,
+        client_ref: String,
+        request: ContextBindingRequest,
+    ) -> Result<ContextBindingResponse, StoreError> {
+        let mut canonical_policies = request.access_policies.clone();
+        canonical_policies.sort_by_key(|policy| serde_json::to_string(policy).unwrap_or_default());
+        let policy_bytes = serde_json::to_vec(&canonical_policies)
+            .map_err(|error| StoreError::Backend(error.to_string()))?;
+        let fingerprint: String = Sha256::digest(policy_bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let mut identity = request.clone();
+        identity.access_policies.clear();
+        let identity_bytes = serde_json::to_vec(&identity)
+            .map_err(|error| StoreError::Backend(error.to_string()))?;
+        let identity_fingerprint: String = Sha256::digest(identity_bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let mut tx = self.pool.begin().await.map_err(backend)?;
+        sqlx::query("select memphant.bind_tenant($1)")
+            .bind(tenant.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .map_err(backend)?;
+        sqlx::query("select pg_advisory_xact_lock(hashtextextended($1, 0))")
+            // Context provisioning is low-frequency. A tenant-wide lock keeps
+            // different client refs that share subject/scope/actor refs from
+            // racing through SELECT -> INSERT and surfacing a unique violation
+            // as a spurious backend outage.
+            .bind(tenant.as_uuid().to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(backend)?;
+
+        if let Some(row) = sqlx::query(
+            "select binding.identity_fingerprint, binding.policy_revision,
+                    binding.data_subject_id as subject_id, binding.actor_id,
+                    binding.scope_id, binding.agent_node_id,
+                    subject.generation, agent_node.level
+               from memphant.context_binding binding
+               join memphant.subject subject
+                 on subject.tenant_id = binding.tenant_id
+                and subject.id = binding.data_subject_id
+               join memphant.agent_node agent_node
+                 on agent_node.tenant_id = binding.tenant_id and agent_node.id = binding.agent_node_id
+                and agent_node.data_subject_id = binding.data_subject_id
+               join memphant.scope scope
+                 on scope.tenant_id = binding.tenant_id and scope.id = binding.scope_id
+                and scope.data_subject_id = binding.data_subject_id
+              where binding.tenant_id = $1 and binding.client_ref = $2",
+        )
+        .bind(tenant.as_uuid())
+        .bind(&client_ref)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(backend)?
+        {
+            let existing: String = row.try_get("policy_revision").map_err(backend)?;
+            let existing_identity: String =
+                row.try_get("identity_fingerprint").map_err(backend)?;
+            if existing_identity != identity_fingerprint {
+                return Err(StoreError::Conflict(
+                    "context binding identity, kind, and parent are immutable".to_string(),
+                ));
+            }
+            let mut response = ContextBindingResponse {
+                subject_id: SubjectId::from_u128(
+                    row.try_get::<Uuid, _>("subject_id").map_err(backend)?.as_u128(),
+                ),
+                actor_id: ActorId::from_u128(
+                    row.try_get::<Uuid, _>("actor_id").map_err(backend)?.as_u128(),
+                ),
+                scope_id: ScopeId::from_u128(
+                    row.try_get::<Uuid, _>("scope_id").map_err(backend)?.as_u128(),
+                ),
+                agent_node_id: AgentNodeId::from_u128(
+                    row.try_get::<Uuid, _>("agent_node_id")
+                        .map_err(backend)?
+                        .as_u128(),
+                ),
+                agent_level: row.try_get::<i16, _>("level").map_err(backend)? as u8,
+                policy_revision: row.try_get("policy_revision").map_err(backend)?,
+                subject_generation: row.try_get::<i64, _>("generation").map_err(backend)? as u64,
+            };
+            if existing != fingerprint {
+                Self::replace_context_policies(
+                    &mut tx,
+                    tenant,
+                    response.subject_id.as_uuid(),
+                    response.scope_id.as_uuid(),
+                    response.agent_node_id.as_uuid(),
+                    response.agent_level,
+                    &canonical_policies,
+                )
+                .await?;
+                sqlx::query(
+                    "update memphant.context_binding
+                        set request_fingerprint = $6, policy_revision = $6
+                      where tenant_id = $1 and data_subject_id = $2 and scope_id = $3
+                        and agent_node_id = $4 and client_ref = $5",
+                )
+                .bind(tenant.as_uuid())
+                .bind(response.subject_id.as_uuid())
+                .bind(response.scope_id.as_uuid())
+                .bind(response.agent_node_id.as_uuid())
+                .bind(&client_ref)
+                .bind(&fingerprint)
+                .execute(&mut *tx)
+                .await
+                .map_err(backend)?;
+                response.policy_revision = fingerprint.clone();
+            }
+            tx.commit().await.map_err(backend)?;
+            return Ok(response);
+        }
+
+        let (subject_id, subject_generation) = if let Some(row) = sqlx::query(
+            "select id, kind, generation from memphant.subject
+              where tenant_id = $1 and external_ref = $2",
+        )
+        .bind(tenant.as_uuid())
+        .bind(&request.subject.external_ref)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(backend)?
+        {
+            let kind: String = row.try_get("kind").map_err(backend)?;
+            if kind != request.subject.kind {
+                return Err(StoreError::Conflict(
+                    "subject kind is immutable".to_string(),
+                ));
+            }
+            (
+                row.try_get::<Uuid, _>("id").map_err(backend)?,
+                row.try_get::<i64, _>("generation").map_err(backend)? as u64,
+            )
+        } else {
+            let id = Uuid::now_v7();
+            sqlx::query(
+                "insert into memphant.subject (id, tenant_id, external_ref, kind)
+                 values ($1, $2, $3, $4)",
+            )
+            .bind(id)
+            .bind(tenant.as_uuid())
+            .bind(&request.subject.external_ref)
+            .bind(&request.subject.kind)
+            .execute(&mut *tx)
+            .await
+            .map_err(backend)?;
+            (id, 0)
+        };
+
+        let actor_id = if let Some(row) = sqlx::query(
+            "select id, kind from memphant.actor
+              where tenant_id = $1 and data_subject_id = $2 and external_ref = $3",
+        )
+        .bind(tenant.as_uuid())
+        .bind(subject_id)
+        .bind(&request.actor.external_ref)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(backend)?
+        {
+            let kind: String = row.try_get("kind").map_err(backend)?;
+            if kind != request.actor.kind {
+                return Err(StoreError::Conflict("actor kind is immutable".to_string()));
+            }
+            row.try_get::<Uuid, _>("id").map_err(backend)?
+        } else {
+            let id = Uuid::now_v7();
+            let trust = memphant_types::actor_kind_trust(&request.actor.kind);
+            sqlx::query(
+                "insert into memphant.actor
+                   (id, tenant_id, data_subject_id, kind, external_ref, trust_level)
+                 values ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(id)
+            .bind(tenant.as_uuid())
+            .bind(subject_id)
+            .bind(&request.actor.kind)
+            .bind(&request.actor.external_ref)
+            .bind(enum_str(&trust))
+            .execute(&mut *tx)
+            .await
+            .map_err(backend)?;
+            id
+        };
+
+        let (parent_scope_id, parent_path, scope_depth) =
+            if let Some(parent_ref) = request.scope.parent_external_ref.as_deref() {
+                let row = sqlx::query(
+                    "select id, materialized_path::text as materialized_path, scope_depth
+                       from memphant.scope
+                      where tenant_id = $1 and data_subject_id = $2 and external_ref = $3",
+                )
+                .bind(tenant.as_uuid())
+                .bind(subject_id)
+                .bind(parent_ref)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(backend)?
+                .ok_or(StoreError::NotFound("parent scope"))?;
+                (
+                    Some(row.try_get::<Uuid, _>("id").map_err(backend)?),
+                    Some(
+                        row.try_get::<String, _>("materialized_path")
+                            .map_err(backend)?,
+                    ),
+                    row.try_get::<i16, _>("scope_depth").map_err(backend)? + 1,
+                )
+            } else {
+                (None, None, 0)
+            };
+        let scope_id = if let Some(row) = sqlx::query(
+            "select id, kind, parent_scope_id from memphant.scope
+              where tenant_id = $1 and data_subject_id = $2 and external_ref = $3",
+        )
+        .bind(tenant.as_uuid())
+        .bind(subject_id)
+        .bind(&request.scope.external_ref)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(backend)?
+        {
+            let kind: String = row.try_get("kind").map_err(backend)?;
+            let existing_parent: Option<Uuid> = row.try_get("parent_scope_id").map_err(backend)?;
+            if kind != request.scope.kind || existing_parent != parent_scope_id {
+                return Err(StoreError::Conflict(
+                    "scope kind or parent is immutable".to_string(),
+                ));
+            }
+            row.try_get::<Uuid, _>("id").map_err(backend)?
+        } else {
+            let id = Uuid::now_v7();
+            let label = id.to_string().replace('-', "_");
+            let path = parent_path
+                .map(|parent| format!("{parent}.{label}"))
+                .unwrap_or(label);
+            sqlx::query(
+                "insert into memphant.scope
+                   (id, tenant_id, data_subject_id, parent_scope_id, kind, external_ref,
+                    materialized_path, scope_depth)
+                 values ($1, $2, $3, $4, $5, $6, $7::ltree, $8)",
+            )
+            .bind(id)
+            .bind(tenant.as_uuid())
+            .bind(subject_id)
+            .bind(parent_scope_id)
+            .bind(&request.scope.kind)
+            .bind(&request.scope.external_ref)
+            .bind(path)
+            .bind(scope_depth)
+            .execute(&mut *tx)
+            .await
+            .map_err(backend)?;
+            id
+        };
+
+        let (parent_agent_node_id, agent_level) =
+            if let Some(parent_ref) = request.agent_node.parent_external_ref.as_deref() {
+                let row = sqlx::query(
+                    "select id, level from memphant.agent_node
+                      where tenant_id = $1 and data_subject_id = $2 and external_ref = $3",
+                )
+                .bind(tenant.as_uuid())
+                .bind(subject_id)
+                .bind(parent_ref)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(backend)?
+                .ok_or(StoreError::NotFound("parent agent node"))?;
+                (
+                    Some(row.try_get::<Uuid, _>("id").map_err(backend)?),
+                    row.try_get::<i16, _>("level").map_err(backend)? + 1,
+                )
+            } else {
+                (None, 0)
+            };
+        let agent_node_id = if let Some(row) = sqlx::query(
+            "select id, scope_id, parent_agent_node_id, level from memphant.agent_node
+              where tenant_id = $1 and data_subject_id = $2 and external_ref = $3",
+        )
+        .bind(tenant.as_uuid())
+        .bind(subject_id)
+        .bind(&request.agent_node.external_ref)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(backend)?
+        {
+            let existing_scope: Uuid = row.try_get("scope_id").map_err(backend)?;
+            let existing_parent: Option<Uuid> =
+                row.try_get("parent_agent_node_id").map_err(backend)?;
+            let existing_level: i16 = row.try_get("level").map_err(backend)?;
+            if existing_scope != scope_id
+                || existing_parent != parent_agent_node_id
+                || existing_level != agent_level
+            {
+                return Err(StoreError::Conflict(
+                    "agent node parent or scope is immutable".to_string(),
+                ));
+            }
+            row.try_get::<Uuid, _>("id").map_err(backend)?
+        } else {
+            let id = Uuid::now_v7();
+            sqlx::query(
+                "insert into memphant.agent_node
+                   (id, tenant_id, data_subject_id, scope_id, parent_agent_node_id, level,
+                    external_ref)
+                 values ($1, $2, $3, $4, $5, $6, $7)",
+            )
+            .bind(id)
+            .bind(tenant.as_uuid())
+            .bind(subject_id)
+            .bind(scope_id)
+            .bind(parent_agent_node_id)
+            .bind(agent_level)
+            .bind(&request.agent_node.external_ref)
+            .execute(&mut *tx)
+            .await
+            .map_err(backend)?;
+            id
+        };
+
+        if let Some(existing_client_ref) = sqlx::query_scalar::<_, String>(
+            "select client_ref from memphant.context_binding
+              where tenant_id = $1 and data_subject_id = $2 and agent_node_id = $3",
+        )
+        .bind(tenant.as_uuid())
+        .bind(subject_id)
+        .bind(agent_node_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(backend)?
+        {
+            return Err(StoreError::Conflict(format!(
+                "context identity is already registered as {existing_client_ref}"
+            )));
+        }
+
+        Self::replace_context_policies(
+            &mut tx,
+            tenant,
+            subject_id,
+            scope_id,
+            agent_node_id,
+            agent_level as u8,
+            &canonical_policies,
+        )
+        .await?;
+
+        sqlx::query(
+            "insert into memphant.context_binding
+               (tenant_id, data_subject_id, client_ref, identity_fingerprint,
+                request_fingerprint, actor_id, scope_id, agent_node_id, policy_revision)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
+        .bind(tenant.as_uuid())
+        .bind(subject_id)
+        .bind(&client_ref)
+        .bind(&identity_fingerprint)
+        .bind(&fingerprint)
+        .bind(actor_id)
+        .bind(scope_id)
+        .bind(agent_node_id)
+        .bind(&fingerprint)
+        .execute(&mut *tx)
+        .await
+        .map_err(backend)?;
+        tx.commit().await.map_err(backend)?;
+
+        Ok(ContextBindingResponse {
+            subject_id: SubjectId::from_u128(subject_id.as_u128()),
+            actor_id: ActorId::from_u128(actor_id.as_u128()),
+            scope_id: ScopeId::from_u128(scope_id.as_u128()),
+            agent_node_id: AgentNodeId::from_u128(agent_node_id.as_u128()),
+            agent_level: agent_level as u8,
+            policy_revision: fingerprint,
+            subject_generation,
+        })
+    }
+
+    async fn resolve_memory_context(
+        &self,
+        tenant: TenantId,
+        subject_id: SubjectId,
+        actor_id: ActorId,
+        scope_id: ScopeId,
+        agent_node_id: AgentNodeId,
+    ) -> Result<ResolvedMemoryContext, StoreError> {
+        let mut tx = self.pool.begin().await.map_err(backend)?;
+        sqlx::query("select memphant.bind_tenant($1)")
+            .bind(tenant.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .map_err(backend)?;
+        let row = sqlx::query(
+            "select subject.generation, agent_node.level, binding.policy_revision,
+                    actor.trust_level
+               from memphant.context_binding binding
+               join memphant.subject subject
+                 on subject.tenant_id = binding.tenant_id
+                and subject.id = binding.data_subject_id
+               join memphant.agent_node agent_node
+                 on agent_node.tenant_id = binding.tenant_id
+                and agent_node.id = binding.agent_node_id
+                and agent_node.data_subject_id = binding.data_subject_id
+               join memphant.actor actor
+                 on actor.tenant_id = binding.tenant_id
+                and actor.id = binding.actor_id
+                and actor.data_subject_id = binding.data_subject_id
+              where binding.tenant_id = $1 and binding.data_subject_id = $2
+                and binding.actor_id = $3 and binding.scope_id = $4
+                and binding.agent_node_id = $5",
+        )
+        .bind(tenant.as_uuid())
+        .bind(subject_id.as_uuid())
+        .bind(actor_id.as_uuid())
+        .bind(scope_id.as_uuid())
+        .bind(agent_node_id.as_uuid())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(backend)?;
+        let Some(row) = row else {
+            let tombstoned: bool = sqlx::query_scalar(
+                "select exists(
+                   select 1 from memphant.subject_tombstone
+                   where tenant_id = $1 and erased_subject_id = $2
+                 )",
+            )
+            .bind(tenant.as_uuid())
+            .bind(subject_id.as_uuid())
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(backend)?;
+            return Err(if tombstoned {
+                StoreError::SubjectErased
+            } else {
+                StoreError::NotFound("memory context")
+            });
+        };
+        let agent_level = row.try_get::<i16, _>("level").map_err(backend)? as u8;
+        let subject_generation = row.try_get::<i64, _>("generation").map_err(backend)? as u64;
+        let policy_revision: String = row.try_get("policy_revision").map_err(backend)?;
+        let actor_trust =
+            enum_from_str(&row.try_get::<String, _>("trust_level").map_err(backend)?)?;
+
+        let mut sources_by_kind = std::collections::BTreeMap::new();
+        for kind in [
+            MemoryKind::Episodic,
+            MemoryKind::Semantic,
+            MemoryKind::Procedural,
+            MemoryKind::Belief,
+            MemoryKind::Resource,
+        ] {
+            let exact_allowed = agent_level_allows_memory_kind(agent_level, kind);
+            sources_by_kind.insert(
+                kind,
+                if exact_allowed {
+                    vec![ResolvedMemorySource {
+                        scope_id,
+                        agent_node_id,
+                    }]
+                } else {
+                    Vec::new()
+                },
+            );
+        }
+        let admitted = sqlx::query(
+            "select distinct policy.kind, policy.source_scope_id,
+                    policy.source_agent_node_id
+               from memphant.scope_policy policy
+              where policy.tenant_id = $1 and policy.data_subject_id = $2
+                and policy.grantee_scope_id = $3
+                and policy.grantee_agent_node_id = $4",
+        )
+        .bind(tenant.as_uuid())
+        .bind(subject_id.as_uuid())
+        .bind(scope_id.as_uuid())
+        .bind(agent_node_id.as_uuid())
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(backend)?;
+        for admitted_row in admitted {
+            let kind: MemoryKind = enum_from_str(
+                admitted_row
+                    .try_get::<String, _>("kind")
+                    .map_err(backend)?
+                    .as_str(),
+            )?;
+            let source_scope = ScopeId::from_u128(
+                admitted_row
+                    .try_get::<Uuid, _>("source_scope_id")
+                    .map_err(backend)?
+                    .as_u128(),
+            );
+            let source_agent = AgentNodeId::from_u128(
+                admitted_row
+                    .try_get::<Uuid, _>("source_agent_node_id")
+                    .map_err(backend)?
+                    .as_u128(),
+            );
+            sources_by_kind
+                .entry(kind)
+                .or_default()
+                .push(ResolvedMemorySource {
+                    scope_id: source_scope,
+                    agent_node_id: source_agent,
+                });
+        }
+        for sources in sources_by_kind.values_mut() {
+            sources
+                .sort_by_key(|source| (source.scope_id.as_uuid(), source.agent_node_id.as_uuid()));
+            sources.dedup();
+        }
+        tx.commit().await.map_err(backend)?;
+        Ok(ResolvedMemoryContext {
+            tenant_id: tenant,
+            data_subject_id: subject_id,
+            actor_id,
+            actor_trust,
+            scope_id,
+            agent_node_id,
+            agent_level,
+            subject_generation,
+            policy_revision,
+            sources_by_kind,
+        })
     }
 
     async fn ping(&self) -> Result<(), StoreError> {
@@ -1711,11 +4516,66 @@ impl MemoryStore for PgStore {
     }
 
     async fn dead_letter_count(&self) -> Result<u64, StoreError> {
-        let count: i64 =
-            sqlx::query_scalar("select count(*) from memphant.job_state where state = 'dead'")
-                .fetch_one(&self.pool)
-                .await
-                .map_err(backend)?;
+        let count: i64 = sqlx::query_scalar("select memphant.dead_letter_count()")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(backend)?;
         Ok(count as u64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PgStore, StoreError, TRANSACTION_POOLER_ERROR, canonical_timestamp};
+
+    #[test]
+    fn persistent_connect_options_accepts_5432_forms_and_rejects_6543() {
+        for (label, url) in [
+            (
+                "implicit default",
+                "postgresql://memphant:secret@localhost/memphant",
+            ),
+            (
+                "explicit direct",
+                "postgresql://memphant:secret@localhost:5432/memphant",
+            ),
+            (
+                "supabase direct",
+                "postgresql://postgres:secret@db.example.supabase.co:5432/postgres",
+            ),
+            (
+                "supabase session pooler",
+                "postgresql://postgres.example:secret@aws-0-us-east-1.pooler.supabase.com:5432/postgres",
+            ),
+            (
+                "ipv6 direct",
+                "postgresql://memphant:secret@[::1]:5432/memphant",
+            ),
+        ] {
+            let options = PgStore::persistent_connect_options(url)
+                .unwrap_or_else(|error| panic!("{label} URL was rejected: {error}"));
+            assert_eq!(options.get_port(), 5432, "{label}");
+        }
+
+        match PgStore::persistent_connect_options(
+            "postgresql://postgres.example:secret@aws-0-us-east-1.pooler.supabase.com:6543/postgres",
+        )
+        .expect_err("transaction pooler must be rejected")
+        {
+            StoreError::Backend(message) => assert_eq!(message, TRANSACTION_POOLER_ERROR),
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn timestamp_projection_uses_minimal_rfc3339_fraction() {
+        assert_eq!(
+            canonical_timestamp(Some("2025-03-01T00:00:00.000000Z".to_string())).as_deref(),
+            Some("2025-03-01T00:00:00Z")
+        );
+        assert_eq!(
+            canonical_timestamp(Some("2025-03-01T00:00:00.123000Z".to_string())).as_deref(),
+            Some("2025-03-01T00:00:00.123Z")
+        );
     }
 }

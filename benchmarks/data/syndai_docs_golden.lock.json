@@ -1,6 +1,6 @@
 {
   "golden_path": "benchmarks/data/syndai_docs_golden.jsonl",
-  "sha256": "c424b08f02608510445007a5d75dcf5903c8ac34d31c073c629717db9a0f0c83",
+  "sha256": "c30230f2130f536e3f6479905aee4fd544f0f2af661940d5b69599e3f07d7d5c",
   "bytes": 51502,
   "count": 60,
   "multi_hop_count": 12,

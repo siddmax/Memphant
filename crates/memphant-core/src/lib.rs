@@ -1,30 +1,46 @@
 #![allow(async_fn_in_trait)]
 
+mod mutation_contract;
 pub mod service;
+mod structured_state;
+
+pub use memphant_types::ResolvedMemoryContext;
+pub use mutation_contract::{canonical_mutation_request_hash, validate_idempotency_key};
+pub use structured_state::{
+    ActiveStructuredState, ProjectedStructuredState, QuantityEvent, StructuredStateOp,
+    StructuredStateOperation, StructuredStateProvider, StructuredStateProviderError,
+    StructuredStateProviderIdentity, StructuredStateRequest, active_structured_state,
+    ground_user_evidence_quote, project_structured_state, quantity_event_from_body,
+    quantity_event_from_fields, structured_compiler_identity, user_evidence_turns,
+};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use fsrs::{FSRS, FSRS6_DEFAULT_DECAY, MemoryState, current_retrievability};
+use futures::lock::{Mutex as AsyncMutex, OwnedMutexGuard};
 use memphant_types::{
-    ActorId, AdmissionAction, ContextualChunk, CorrectRequest, CorrectResult, CorrectSelector,
-    CorrectionPayload, DedupOutcome, EdgeId, EpisodeId, ForgetRequest, ForgetResult, ForgetTarget,
-    JobId, LearnedRerankProfile, MarkOutcome, MarkRequest, MarkResult, MemoryEdgeKind, MemoryKind,
-    NewEpisode, NewMemoryEdge, NewMemoryUnit, ProcedureTraceFact, QueuedReflectJob,
-    RecallCandidateTrace, RecallChannel, RecallCitation, RecallContextItem, RecallDropReason,
-    RecallDroppedItem, RecallMode, RecallPolicyFilter, RecallRequest, RecallResponse, ReflectInput,
-    ReflectJob, ReflectJobKind, ReflectStageFact, ReflectTrace, RetainInput, RetainOutcome,
-    RetainRequest, RetainResourceOutcome, RetainResourceRequest, RetainResult, RetrievalTrace,
-    ReviewEvent, ScopeId, StoredEpisode, StoredMemoryEdge, StoredMemoryUnit, StoredResource,
-    TenantId, TraceId, TrustLevel, UnitId, UnitState,
+    ActorId, AdmissionAction, AgentNodeId, AggregationWindow, CitationSource,
+    ContextBindingAccessPolicy, ContextBindingRequest, ContextBindingResponse, ContextualChunk,
+    CorrectRequest, CorrectResult, CorrectSelector, CorrectionPayload, CrossRerankFailure,
+    CrossRerankTrace, DedupOutcome, EdgeId, EpisodeId, ForgetRequest, ForgetResult, ForgetTarget,
+    JobId, LearnedRerankProfile, LineageRelation, MarkOutcome, MarkRequest, MarkResult,
+    MemoryCitation, MemoryEdgeKind, MemoryKind, MemoryLineage, MemoryRecord, NewEpisode,
+    NewMemoryEdge, NewMemoryUnit, ProcedureTraceFact, QueuedReflectJob, RecallCandidateTrace,
+    RecallChannel, RecallCitation, RecallContextItem, RecallDropReason, RecallDroppedItem,
+    RecallMode, RecallPolicyFilter, RecallRequest, RecallResponse, RecallTime, RecordMaterial,
+    ReflectInput, ReflectJob, ReflectJobKind, ReflectStageFact, ReflectTrace, ResolvedMemorySource,
+    RetainInput, RetainOutcome, RetainRequest, RetainResourceOutcome, RetainResourceRequest,
+    RetainResult, RetrievalTrace, ReviewEvent, ScopeId, StoredCitation, StoredEpisode,
+    StoredMemoryEdge, StoredMemoryUnit, StoredResource, SubjectId, TenantId, TraceId, TrustLevel,
+    UnitId, UnitState, agent_level_allows_memory_kind,
 };
 use memphant_types::{NewResource, ResourceExtractorState, ResourceId};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 const DECAY_MODEL_ID: &str = "fixed-prior-dsr-v1";
-const L4_SANDBOX_ID: &str = "deterministic-local-l4-v1";
 const DEFAULT_STABILITY_DAYS: f32 = 7.0;
 const DEFAULT_DIFFICULTY: f32 = 5.0;
 /// Jobs whose claim attempts reach this count are dead-lettered and never
@@ -83,6 +99,56 @@ pub fn cmp_rfc3339(left: &str, right: &str) -> std::cmp::Ordering {
     }
 }
 
+pub fn resolve_recall_time(
+    transaction_as_of: Option<&str>,
+    valid_at: Option<&str>,
+    now: jiff::Timestamp,
+) -> Result<RecallTime, CoreError> {
+    let transaction = match transaction_as_of {
+        Some(value) => value
+            .parse::<jiff::Timestamp>()
+            .map_err(|_| CoreError::Invalid("transaction_as_of must be RFC3339".to_string()))?,
+        None => now,
+    };
+    if transaction > now {
+        return Err(CoreError::Invalid(
+            "transaction_as_of cannot be in the future".to_string(),
+        ));
+    }
+    let valid = match valid_at {
+        Some(value) => value
+            .parse::<jiff::Timestamp>()
+            .map_err(|_| CoreError::Invalid("valid_at must be RFC3339".to_string()))?,
+        None => transaction,
+    };
+    Ok(RecallTime {
+        evaluated_at: fmt_rfc3339(now),
+        transaction_as_of: fmt_rfc3339(transaction),
+        valid_at: fmt_rfc3339(valid),
+    })
+}
+
+pub fn validate_valid_interval(
+    valid_from: Option<&str>,
+    valid_to: Option<&str>,
+) -> Result<(), CoreError> {
+    for (name, value) in [("valid_from", valid_from), ("valid_to", valid_to)] {
+        if let Some(value) = value {
+            value
+                .parse::<jiff::Timestamp>()
+                .map_err(|_| CoreError::Invalid(format!("{name} must be RFC3339")))?;
+        }
+    }
+    if let (Some(from), Some(to)) = (valid_from, valid_to)
+        && cmp_rfc3339(from, to) != std::cmp::Ordering::Less
+    {
+        return Err(CoreError::Invalid(
+            "valid_from must be before valid_to".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum EmbedError {
     #[error("embedding provider unavailable: {0}")]
@@ -93,6 +159,17 @@ pub enum EmbedError {
 /// case the recall `vector` channel is traced as disabled rather than faked.
 pub trait EmbeddingProvider: Send + Sync {
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError>;
+
+    /// Embeds `texts` as recall QUERIES rather than documents. Default =
+    /// `embed`, so `NoopEmbedding`, `StubEmbedding`, and any provider whose
+    /// model has no query/document distinction are unchanged. Providers whose
+    /// underlying model applies different conventions for queries vs
+    /// documents (e.g. a nomic-style `search_query:`/`search_document:`
+    /// prefix pair) override this to apply the query-side convention.
+    fn embed_query(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
+        self.embed(texts)
+    }
+
     fn dimensions(&self) -> usize;
     fn id(&self) -> &str;
 }
@@ -119,16 +196,35 @@ impl EmbeddingProvider for NoopEmbedding {
 /// a widened candidate pool AFTER fusion and BEFORE packing — the highest-ROI
 /// retrieval layer, distinct from the retired deterministic heuristic rerank.
 ///
-/// Contract: `rerank` returns exactly one score per input doc, IN INPUT ORDER
-/// (higher = more relevant). Any other length (including the empty vec) is read
-/// by the recall stage as "no-op — leave the fused order unchanged", so a real
-/// backend that fails inference degrades to the pre-rerank order rather than
-/// erroring the whole recall. Inference is expected to be deterministic (same
-/// inputs → same scores), which the recall stage relies on for stable ordering.
+/// Contract: `rerank` returns exactly one finite score per input doc, IN INPUT
+/// ORDER (higher = more relevant). For non-empty input, errors, empty output,
+/// invalid lengths, and non-finite scores fail open to the pre-rerank order
+/// and are recorded on the retrieval trace. A configured zero-candidate run
+/// performs no inference and is not itself an inference failure. Inference is
+/// expected to be deterministic (same inputs → same scores), which the recall
+/// stage relies on for stable ordering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrossRerankerConfig {
+    pub provider: String,
+    pub model: String,
+    pub candidate_limit: usize,
+    pub max_length: usize,
+    pub batch_size: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CrossRerankCandidateSelection {
+    #[default]
+    FusedHead,
+    VectorLexicalBalanced,
+}
+
 pub trait CrossReranker: Send + Sync {
+    fn config(&self) -> CrossRerankerConfig;
+
     /// Scores each `(query, docs[i])` pair; result `i` is the score for
     /// `docs[i]`. See the trait contract for the length/no-op rule.
-    fn rerank(&self, query: &str, docs: &[&str]) -> Vec<f32>;
+    fn rerank(&self, query: &str, docs: &[&str]) -> Result<Vec<f32>, String>;
 }
 
 /// Deterministic hash-bucket embedding for tests: each token is hashed into a
@@ -196,24 +292,35 @@ pub fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
     dot / (norm_left * norm_right)
 }
 
-/// The nearest-neighbour fan-out for the recall vector channel: how many
-/// units the store's vector query returns per recall. Matches the historical
-/// pgvector `<=>` top-K.
+/// The historical pgvector `<=>` top-K used directly by tests that call
+/// `fetch_vector_candidates` without going through the service. No longer the
+/// service's pool default (see [`DEFAULT_RECALL_POOL_DEPTH`]) — kept as a
+/// named literal so those direct store-level call sites stay self-documenting.
 pub const VECTOR_CANDIDATE_LIMIT: usize = 32;
 
-/// Default candidate-pool size for the recall vector channel — the historical
-/// vector KNN fan-out.
+/// Default depth of `MemoryService`'s ONE recall pool knob (R1.5-T0).
 ///
-/// THE POOL MAPPING (W3): the single `candidate_pool_size` construction-time
-/// service knob (see [`crate::service::MemoryService::with_candidate_pool_size`])
-/// sets the vector-channel KNN fetch limit DIRECTLY; this default reproduces
-/// today's ranking exactly. The lexical/recent/subject families are fetched via
-/// `fetch_recall_candidates` with no core-side cap (the store applies its own
-/// internal per-family caps — 200 FTS / 100 recent / 200 subject — already far
-/// wider than any cross-encoder rerank pool), so they are NOT the pool that
-/// gates rerank; the knob widens the one historically-narrow family — vector —
-/// that the W8 rerank arm needs at 64–128. Measured-tunable, not sacred.
-pub const DEFAULT_CANDIDATE_POOL_SIZE: usize = VECTOR_CANDIDATE_LIMIT;
+/// THE POOL MAPPING (R1.5-T0, superseding the W3 note this replaces): D1
+/// proved the recall pipeline's internal fan-out scaled with the CALLER'S
+/// requested `k` — a k=50 request changed even the top-5 ordering vs a k=10
+/// request over the identical corpus/query (R@5 0.067→0.167, same
+/// `docs/build-log/2026-07-12-r1-docs-gate.md` run). That conflates a
+/// presentation concern (`k`, how many items the caller gets back) with an
+/// engine concern (how many candidates the engine considers internally before
+/// ranking down to `k`). `recall_pool_depth` is the single construction-time
+/// knob every internal channel/fusion limit in the recall path now derives
+/// from INSTEAD of `k`: the vector-channel KNN fetch
+/// ([`crate::service::MemoryService::with_recall_pool_depth`]), the
+/// Fast/Balanced packing scan window and the Exhaustive scan multiplier
+/// (`recall_pack_scan_limit`), and the rerank rescoring cap
+/// (`rerank_input_cap`). Returned items still stop at exactly `k`
+/// (`PackCtx::output_limit`) — only the CONSIDERATION window widens/narrows
+/// with this knob, never with `k`. Also the target of bench-lme's `--pool`
+/// flag and the `MEMPHANT_RECALL_POOL_DEPTH` env override — one honest knob,
+/// not two pool concepts. Pre-registered at 64: at prosumer scale (≤100k
+/// units, exact scans) that is latency-trivial. Do not tune without a fresh
+/// measurement campaign.
+pub const DEFAULT_RECALL_POOL_DEPTH: usize = 64;
 
 /// Recommended per-`source_episode_id` diversity cap (W4 session-quota lever).
 ///
@@ -226,7 +333,7 @@ pub const DEFAULT_CANDIDATE_POOL_SIZE: usize = VECTOR_CANDIDATE_LIMIT;
 pub const DEFAULT_SESSION_DIVERSITY_QUOTA: usize = 2;
 
 /// W4 packing levers, threaded construction-time exactly like
-/// `candidate_pool_size` — no `RecallRequest`/wire/OpenAPI field (item 4). BOTH
+/// `recall_pool_depth` — no `RecallRequest`/wire/OpenAPI field (item 4). BOTH
 /// default OFF ([`PackLevers::default`]); with both off the packer is
 /// byte-identical to today. The service builders
 /// [`crate::service::MemoryService::with_sibling_gather_enabled`] and
@@ -304,8 +411,148 @@ pub enum StoreError {
     Poisoned,
     #[error("not found: {0}")]
     NotFound(&'static str),
+    #[error("conflict: {0}")]
+    Conflict(String),
+    #[error("policy denied: {0}")]
+    PolicyDenied(String),
+    #[error("idempotency key conflicts with a different mutation")]
+    IdempotencyConflict,
+    #[error("subject generation is stale")]
+    StaleSubjectGeneration,
+    #[error("subject has been erased")]
+    SubjectErased,
     #[error("backend error: {0}")]
     Backend(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MutationVerb {
+    Retain,
+    Reflect,
+    Correct,
+    Forget,
+    Mark,
+    EraseSubject,
+}
+
+impl MutationVerb {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Retain => "retain",
+            Self::Reflect => "reflect",
+            Self::Correct => "correct",
+            Self::Forget => "forget",
+            Self::Mark => "mark",
+            Self::EraseSubject => "erase_subject",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubjectErasureReceipt {
+    pub generation: u64,
+    pub erased_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutationClaim {
+    tenant_id: TenantId,
+    verb: MutationVerb,
+    idempotency_key: String,
+    data_subject_id: SubjectId,
+    subject_generation: u64,
+    request_hash: [u8; 32],
+}
+
+impl MutationClaim {
+    pub fn new(
+        context: &ResolvedMemoryContext,
+        verb: MutationVerb,
+        idempotency_key: impl Into<String>,
+        request_hash: [u8; 32],
+    ) -> Result<Self, StoreError> {
+        let idempotency_key = idempotency_key.into();
+        validate_idempotency_key(&idempotency_key)?;
+        Ok(Self {
+            tenant_id: context.tenant_id,
+            verb,
+            idempotency_key,
+            data_subject_id: context.data_subject_id,
+            subject_generation: context.subject_generation,
+            request_hash,
+        })
+    }
+
+    pub fn tenant_id(&self) -> TenantId {
+        self.tenant_id
+    }
+
+    pub fn verb(&self) -> MutationVerb {
+        self.verb
+    }
+
+    pub fn idempotency_key(&self) -> &str {
+        &self.idempotency_key
+    }
+
+    pub fn data_subject_id(&self) -> SubjectId {
+        self.data_subject_id
+    }
+
+    pub fn subject_generation(&self) -> u64 {
+        self.subject_generation
+    }
+
+    pub fn request_hash(&self) -> &[u8; 32] {
+        &self.request_hash
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutationResponse {
+    status: u16,
+    body: Vec<u8>,
+}
+
+impl MutationResponse {
+    pub fn success(status: u16, body: Vec<u8>) -> Result<Self, StoreError> {
+        if !(200..300).contains(&status) {
+            return Err(StoreError::Conflict(
+                "only successful mutation responses may be recorded".to_string(),
+            ));
+        }
+        Ok(Self { status, body })
+    }
+
+    pub fn status(&self) -> u16 {
+        self.status
+    }
+
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MutationClaimOutcome {
+    Execute,
+    Replay(MutationResponse),
+}
+
+fn context_policy_revision(policies: &[ContextBindingAccessPolicy]) -> Result<String, StoreError> {
+    let mut canonical = policies.to_vec();
+    canonical.sort_by_key(|policy| serde_json::to_string(policy).unwrap_or_default());
+    let policy_json =
+        serde_json::to_vec(&canonical).map_err(|error| StoreError::Backend(error.to_string()))?;
+    Ok(Sha256::digest(policy_json)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+fn canonicalize_access_policies(policies: &mut [ContextBindingAccessPolicy]) {
+    policies.sort_by_key(|policy| serde_json::to_string(policy).unwrap_or_default());
 }
 
 /// Review-event row shape shared by the store seam; identical to the public
@@ -325,34 +572,208 @@ pub struct JobFilter {
 pub struct ReflectJobRow {
     pub job: QueuedReflectJob,
     pub attempts: u32,
+    pub claim_generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimMutationOutcome {
+    Applied,
+    Stale,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReflectJobResult {
+    Prepared {
+        projections: Vec<ProjectedStructuredState>,
+    },
+    Completed {
+        trace: ReflectTrace,
+    },
 }
 
 /// A correction applied through the store seam. `now` is the injected clock's
 /// canonical instant — stores never consult wall time for bitemporal stamps.
 #[derive(Debug, Clone)]
 pub struct CorrectionWrite {
-    pub scope_id: ScopeId,
-    pub actor_id: ActorId,
     pub selector: CorrectSelector,
     pub correction: CorrectionPayload,
+    pub source_ref: String,
+    pub observed_at: String,
     pub now: String,
+    /// Embedding for the replacement unit, computed before the correction
+    /// transaction and written inside it so corrected truth is vector-visible.
+    pub embedding: Option<(EmbeddingProfileRow, Vec<f32>)>,
 }
 
 pub type CorrectOutcome = CorrectResult;
 
 /// A forget applied through the store seam; exactly one target, validated
 /// upstream via `ForgetSelector::exactly_one_target`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ForgetWrite {
-    pub scope_id: ScopeId,
-    pub actor_id: ActorId,
     pub target: ForgetTarget,
+    pub now: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForgetOutcome {
     pub deletion_generation: u64,
     pub invalidated_units: Vec<UnitId>,
+}
+
+pub fn correction_rectangles(
+    old: &StoredMemoryUnit,
+    correction: &CorrectionPayload,
+    source_ref: &str,
+    observed_at: &str,
+    actor_id: ActorId,
+    now: &str,
+) -> Result<(StoredMemoryUnit, Vec<StoredMemoryUnit>), StoreError> {
+    let current_correction = correction.valid_from.is_none() && correction.valid_to.is_none();
+    let start = if current_correction {
+        Some(now.to_string())
+    } else {
+        correction
+            .valid_from
+            .clone()
+            .or_else(|| old.valid_from.clone())
+    };
+    let end = correction.valid_to.clone().or_else(|| old.valid_to.clone());
+    for value in [start.as_deref(), end.as_deref()].into_iter().flatten() {
+        value.parse::<jiff::Timestamp>().map_err(|_| {
+            StoreError::Backend("correction valid bounds must be RFC3339".to_string())
+        })?;
+    }
+    if !interval_nonempty(start.as_deref(), end.as_deref())
+        || !intervals_overlap(
+            old.valid_from.as_deref(),
+            old.valid_to.as_deref(),
+            start.as_deref(),
+            end.as_deref(),
+        )
+    {
+        return Err(StoreError::Backend(
+            "correction valid interval must overlap the selected unit".to_string(),
+        ));
+    }
+
+    let generation = |source: &StoredMemoryUnit,
+                      id: UnitId,
+                      body: String,
+                      valid_from: Option<String>,
+                      valid_to: Option<String>| {
+        let mut unit = source.clone();
+        unit.id = id;
+        unit.body = body;
+        unit.state = UnitState::Active;
+        unit.actor_id = Some(actor_id);
+        unit.deletion_generation = None;
+        unit.valid_from = valid_from;
+        unit.valid_to = valid_to;
+        unit.transaction_from = Some(now.to_string());
+        unit.transaction_to = None;
+        unit
+    };
+    let mut replacement = generation(
+        old,
+        UnitId::new(),
+        correction.value.clone(),
+        start.clone(),
+        end.clone(),
+    );
+    replacement.source_ref = source_ref.to_string();
+    replacement.observed_at = observed_at.to_string();
+    replacement.source_kind = Some("correction".to_string());
+    replacement.source_episode_id = None;
+    replacement.source_resource_id = None;
+    let mut remainders = Vec::new();
+    if start_lt(old.valid_from.as_deref(), start.as_deref()) {
+        remainders.push(generation(
+            old,
+            UnitId::new(),
+            old.body.clone(),
+            old.valid_from.clone(),
+            start.clone(),
+        ));
+    }
+    if end_lt(end.as_deref(), old.valid_to.as_deref()) {
+        remainders.push(generation(
+            old,
+            UnitId::new(),
+            old.body.clone(),
+            end,
+            old.valid_to.clone(),
+        ));
+    }
+    Ok((replacement, remainders))
+}
+
+fn interval_nonempty(start: Option<&str>, end: Option<&str>) -> bool {
+    match (start, end) {
+        (Some(start), Some(end)) => cmp_rfc3339(start, end) == std::cmp::Ordering::Less,
+        _ => true,
+    }
+}
+
+fn intervals_overlap(
+    left_start: Option<&str>,
+    left_end: Option<&str>,
+    right_start: Option<&str>,
+    right_end: Option<&str>,
+) -> bool {
+    start_before_end(left_start, right_end) && start_before_end(right_start, left_end)
+}
+
+fn interval_intersection(
+    left_start: Option<&str>,
+    left_end: Option<&str>,
+    right_start: Option<&str>,
+    right_end: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let start = match (left_start, right_start) {
+        (Some(left), Some(right)) => Some(if cmp_rfc3339(left, right).is_lt() {
+            right
+        } else {
+            left
+        }),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    };
+    let end = match (left_end, right_end) {
+        (Some(left), Some(right)) => Some(if cmp_rfc3339(left, right).is_gt() {
+            right
+        } else {
+            left
+        }),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    };
+    (start.map(str::to_string), end.map(str::to_string))
+}
+
+fn start_before_end(start: Option<&str>, end: Option<&str>) -> bool {
+    match (start, end) {
+        (Some(start), Some(end)) => cmp_rfc3339(start, end) == std::cmp::Ordering::Less,
+        _ => true,
+    }
+}
+
+fn start_lt(left: Option<&str>, right: Option<&str>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => cmp_rfc3339(left, right) == std::cmp::Ordering::Less,
+        (None, Some(_)) => true,
+        _ => false,
+    }
+}
+
+fn end_lt(left: Option<&str>, right: Option<&str>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => cmp_rfc3339(left, right) == std::cmp::Ordering::Less,
+        (Some(_), None) => true,
+        (None, None) => false,
+        (None, Some(_)) => false,
+    }
 }
 
 /// A state transition for an existing memory unit, produced by the pure
@@ -369,13 +790,18 @@ pub struct UnitUpdate {
 /// forgotten episodes/resources/units.
 #[derive(Debug, Clone)]
 pub struct CompiledWrite {
-    pub scope_id: ScopeId,
     pub job_id: JobId,
     pub compiler_version: String,
     pub new_units: Vec<StoredMemoryUnit>,
     pub new_edges: Vec<StoredMemoryEdge>,
+    pub citations: Vec<StoredCitation>,
     pub unit_updates: Vec<UnitUpdate>,
     pub trace: ReflectTrace,
+    /// Embeddings for `new_units`, computed before the persist transaction and
+    /// written inside it (admitted units only) so the vector channel never
+    /// drifts from the units it describes. `None`/empty for noop providers.
+    pub embedding_profile: Option<EmbeddingProfileRow>,
+    pub embeddings: Vec<EmbeddingRow>,
 }
 
 /// One page of a tenant-bound scope memory export.
@@ -402,6 +828,11 @@ pub struct ApiKeyRow {
     pub key_hash: String,
     pub label: String,
     pub max_trust: TrustLevel,
+    pub data_subject_id: Option<SubjectId>,
+    pub subject_generation: Option<u64>,
+    pub actor_id: Option<ActorId>,
+    pub scope_id: Option<ScopeId>,
+    pub agent_node_id: Option<AgentNodeId>,
     pub revoked: bool,
 }
 
@@ -415,6 +846,10 @@ pub enum CoreError {
     Invalid(String),
     #[error("policy denied: {0}")]
     PolicyDenied(String),
+    #[error("structured-state provider unavailable after provider-owned retries: {0}")]
+    ProviderUnavailable(String),
+    #[error("structured-state provider returned terminal invalid output: {0}")]
+    ProviderInvalid(String),
     #[error(transparent)]
     Store(#[from] StoreError),
 }
@@ -430,14 +865,87 @@ pub fn retain(input: RetainInput) -> Result<RetainResult, CoreError> {
     })
 }
 
+pub fn project_memory_record(material: RecordMaterial) -> MemoryRecord {
+    let unit = material.unit;
+    let citations = material
+        .citations
+        .into_iter()
+        .map(|citation| MemoryCitation {
+            source_ref: unit.source_ref.clone(),
+            source: match (citation.episode_id, citation.resource_id) {
+                (Some(id), None) => Some(CitationSource::Episode { id }),
+                (None, Some(id)) => Some(CitationSource::Resource { id }),
+                _ => None,
+            },
+            span: citation.span,
+            quote_hash: citation.quote_hash,
+        })
+        .collect();
+    let lineage = material
+        .lineage
+        .into_iter()
+        .filter_map(|edge| {
+            let (relation, unit_id) = if edge.src_id == unit.id {
+                (
+                    match edge.kind {
+                        MemoryEdgeKind::Supersedes => LineageRelation::Supersedes,
+                        MemoryEdgeKind::Contradicts => LineageRelation::Contradicts,
+                        MemoryEdgeKind::DerivedFrom => LineageRelation::DerivedFrom,
+                        MemoryEdgeKind::Cites => LineageRelation::Cites,
+                        MemoryEdgeKind::SameSubject | MemoryEdgeKind::DependsOn => return None,
+                    },
+                    edge.dst_id,
+                )
+            } else if edge.dst_id == unit.id {
+                (
+                    match edge.kind {
+                        MemoryEdgeKind::Supersedes => LineageRelation::SupersededBy,
+                        MemoryEdgeKind::Contradicts => LineageRelation::Contradicts,
+                        MemoryEdgeKind::DerivedFrom => LineageRelation::DerivationSourceFor,
+                        MemoryEdgeKind::Cites => LineageRelation::CitedBy,
+                        MemoryEdgeKind::SameSubject | MemoryEdgeKind::DependsOn => return None,
+                    },
+                    edge.src_id,
+                )
+            } else {
+                return None;
+            };
+            Some(MemoryLineage { relation, unit_id })
+        })
+        .collect();
+    MemoryRecord {
+        id: unit.id,
+        scope_id: unit.scope_id,
+        kind: unit.kind,
+        state: unit.state,
+        fact_key: unit.fact_key,
+        predicate: unit.predicate,
+        body: unit.body,
+        confidence: unit.confidence,
+        trust: unit.trust_level,
+        source_ref: unit.source_ref,
+        observed_at: unit.observed_at,
+        citations,
+        lineage,
+        valid_from: unit.valid_from,
+        valid_to: unit.valid_to,
+        transaction_from: unit.transaction_from,
+        transaction_to: unit.transaction_to,
+    }
+}
+
 /// The full repository seam. Native AFIT: not object-safe by design —
 /// dispatch statically (`MemoryService<S: MemoryStore>` / an `AnyStore` enum).
 pub trait MemoryStore: Send + Sync {
     type Txn: Send;
 
     // Staged-write API.
-    fn begin(&self) -> impl Future<Output = Self::Txn> + Send;
+    fn begin(
+        &self,
+        context: &ResolvedMemoryContext,
+    ) -> impl Future<Output = Result<Self::Txn, StoreError>> + Send;
     fn commit(&self, tx: Self::Txn) -> impl Future<Output = Result<(), StoreError>> + Send;
+    fn rollback(&self, tx: Self::Txn) -> impl Future<Output = Result<(), StoreError>> + Send;
     fn stage_episode(
         &self,
         tx: &mut Self::Txn,
@@ -471,11 +979,20 @@ pub trait MemoryStore: Send + Sync {
     // in-scope units.
     fn fetch_recall_candidates(
         &self,
-        tenant: TenantId,
-        scopes: &[ScopeId],
+        context: &ResolvedMemoryContext,
         kinds: &[MemoryKind],
         query_terms: &[String],
+        time: &RecallTime,
         limit: usize,
+    ) -> impl Future<Output = Result<Vec<StoredMemoryUnit>, StoreError>> + Send;
+    /// The WRITE seam: every open (`transaction_to is null`) unit in one scope,
+    /// unbounded. The reflect compiler needs the COMPLETE scope to dedup and
+    /// supersede correctly — a ranked/bounded recall pool would silently miss
+    /// units and let duplicate subjects slip in. Distinct from
+    /// `fetch_recall_candidates`, which is deliberately a bounded ranked pool.
+    fn fetch_scope_open_units(
+        &self,
+        context: &ResolvedMemoryContext,
     ) -> impl Future<Output = Result<Vec<StoredMemoryUnit>, StoreError>> + Send;
     /// The recall vector family: the nearest units to `query_vec` under the
     /// ACTIVE embedding profile, each with its cosine DISTANCE (pgvector `<=>`;
@@ -485,81 +1002,120 @@ pub trait MemoryStore: Send + Sync {
     /// profiles/dimensions is incoherent (spec 03).
     fn fetch_vector_candidates(
         &self,
-        tenant: TenantId,
-        scopes: &[ScopeId],
-        kinds: &[MemoryKind],
+        context: &ResolvedMemoryContext,
         query_vec: &[f32],
         profile_id: Uuid,
+        time: &RecallTime,
         limit: usize,
     ) -> impl Future<Output = Result<Vec<(StoredMemoryUnit, f32)>, StoreError>> + Send;
     fn fetch_units_by_ids(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         ids: &[UnitId],
     ) -> impl Future<Output = Result<Vec<StoredMemoryUnit>, StoreError>> + Send;
     fn fetch_edges(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         unit_ids: &[UnitId],
+        time: &RecallTime,
     ) -> impl Future<Output = Result<Vec<StoredMemoryEdge>, StoreError>> + Send;
+    fn fetch_record_material(
+        &self,
+        context: &ResolvedMemoryContext,
+        ids: &[UnitId],
+        time: &RecallTime,
+    ) -> impl Future<Output = Result<Vec<RecordMaterial>, StoreError>> + Send;
     fn fetch_review_events(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         unit_ids: &[UnitId],
+        time: &RecallTime,
     ) -> impl Future<Output = Result<Vec<ReviewEventRow>, StoreError>> + Send;
     fn fetch_episodes_for_scope(
         &self,
-        tenant: TenantId,
-        scope: ScopeId,
+        context: &ResolvedMemoryContext,
         limit: usize,
     ) -> impl Future<Output = Result<Vec<StoredEpisode>, StoreError>> + Send;
     fn pending_job_count(
         &self,
-        tenant: TenantId,
-        scope: ScopeId,
+        context: &ResolvedMemoryContext,
     ) -> impl Future<Output = Result<usize, StoreError>> + Send;
     fn fetch_episode(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         id: EpisodeId,
     ) -> impl Future<Output = Result<Option<StoredEpisode>, StoreError>> + Send;
     fn fetch_resource(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         id: ResourceId,
     ) -> impl Future<Output = Result<Option<StoredResource>, StoreError>> + Send;
 
     // Mutation seam.
-    fn apply_correction(
+    fn stage_correction(
         &self,
-        tenant: TenantId,
+        tx: &mut Self::Txn,
         correction: CorrectionWrite,
     ) -> impl Future<Output = Result<CorrectOutcome, StoreError>> + Send;
-    fn apply_forget(
+    fn apply_correction(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
+        correction: CorrectionWrite,
+    ) -> impl Future<Output = Result<CorrectOutcome, StoreError>> + Send {
+        async move {
+            let mut tx = self.begin(context).await?;
+            let outcome = self.stage_correction(&mut tx, correction).await?;
+            self.commit(tx).await?;
+            Ok(outcome)
+        }
+    }
+    fn stage_forget(
+        &self,
+        tx: &mut Self::Txn,
         forget: ForgetWrite,
     ) -> impl Future<Output = Result<ForgetOutcome, StoreError>> + Send;
-    fn record_review_events(
+    fn apply_forget(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
+        forget: ForgetWrite,
+    ) -> impl Future<Output = Result<ForgetOutcome, StoreError>> + Send {
+        async move {
+            let mut tx = self.begin(context).await?;
+            let outcome = self.stage_forget(&mut tx, forget).await?;
+            self.commit(tx).await?;
+            Ok(outcome)
+        }
+    }
+    fn stage_review_events(
+        &self,
+        tx: &mut Self::Txn,
         events: Vec<ReviewEventRow>,
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
+    fn record_review_events(
+        &self,
+        context: &ResolvedMemoryContext,
+        events: Vec<ReviewEventRow>,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send {
+        async move {
+            let mut tx = self.begin(context).await?;
+            self.stage_review_events(&mut tx, events).await?;
+            self.commit(tx).await
+        }
+    }
     fn store_trace(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         trace: RetrievalTrace,
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
     /// TENANT-BOUND: a trace id from another tenant resolves to `None`.
     fn trace_by_id(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         id: TraceId,
     ) -> impl Future<Output = Result<Option<RetrievalTrace>, StoreError>> + Send;
     fn scope_memory_page(
         &self,
-        tenant: TenantId,
-        scope: ScopeId,
+        context: &ResolvedMemoryContext,
         cursor: Option<UnitId>,
         limit: usize,
     ) -> impl Future<Output = Result<ScopePage, StoreError>> + Send;
@@ -572,27 +1128,64 @@ pub trait MemoryStore: Send + Sync {
     ) -> impl Future<Output = Result<Vec<ReflectJobRow>, StoreError>> + Send;
     fn complete_reflect_job(
         &self,
-        id: JobId,
+        claim: &ReflectJobRow,
+    ) -> impl Future<Output = Result<ClaimMutationOutcome, StoreError>> + Send;
+    fn fetch_prepared_structured_state(
+        &self,
+        claim: &ReflectJobRow,
+    ) -> impl Future<Output = Result<Option<Vec<ProjectedStructuredState>>, StoreError>> + Send;
+    fn store_prepared_structured_state(
+        &self,
+        claim: &ReflectJobRow,
+        projections: Vec<ProjectedStructuredState>,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+    fn release_reflect_job(
+        &self,
+        claim: &ReflectJobRow,
+        retry_after_seconds: u64,
+        error: String,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+    fn fail_reflect_job(
+        &self,
+        claim: &ReflectJobRow,
+        error: String,
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
     /// Persists one reflect compilation. MUST consult forgotten-source
     /// tombstones and refuse re-derivation of units from forgotten sources.
+    fn stage_compiled_units(
+        &self,
+        tx: &mut Self::Txn,
+        claim: Option<&ReflectJobRow>,
+        write: CompiledWrite,
+    ) -> impl Future<Output = Result<ClaimMutationOutcome, StoreError>> + Send;
     fn persist_compiled_units(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
+        claim: Option<&ReflectJobRow>,
         write: CompiledWrite,
-    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+    ) -> impl Future<Output = Result<ClaimMutationOutcome, StoreError>> + Send {
+        async move {
+            let mut tx = self.begin(context).await?;
+            let outcome = self.stage_compiled_units(&mut tx, claim, write).await?;
+            if outcome == ClaimMutationOutcome::Stale {
+                return Ok(outcome);
+            }
+            self.commit(tx).await?;
+            Ok(outcome)
+        }
+    }
     /// Idempotency lookup for reflect compilations keyed by
     /// (job_id, compiler_version).
     fn fetch_reflect_trace(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         job_id: JobId,
         compiler_version: &str,
     ) -> impl Future<Output = Result<Option<ReflectTrace>, StoreError>> + Send;
 
     fn upsert_embeddings(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         rows: Vec<EmbeddingRow>,
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
     /// Idempotently seeds the `embedding_profile` row every embedding FKs.
@@ -604,13 +1197,27 @@ pub trait MemoryStore: Send + Sync {
     /// Embedding rows for the given units (all profiles).
     fn fetch_embeddings(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         unit_ids: &[UnitId],
     ) -> impl Future<Output = Result<Vec<EmbeddingRow>, StoreError>> + Send;
     fn lookup_api_key(
         &self,
         key_hash: &str,
     ) -> impl Future<Output = Result<Option<ApiKeyRow>, StoreError>> + Send;
+    fn resolve_context_binding(
+        &self,
+        tenant: TenantId,
+        client_ref: String,
+        request: ContextBindingRequest,
+    ) -> impl Future<Output = Result<ContextBindingResponse, StoreError>> + Send;
+    fn resolve_memory_context(
+        &self,
+        tenant: TenantId,
+        subject_id: SubjectId,
+        actor_id: ActorId,
+        scope_id: ScopeId,
+        agent_node_id: AgentNodeId,
+    ) -> impl Future<Output = Result<ResolvedMemoryContext, StoreError>> + Send;
 
     /// Backend liveness probe (`select 1` in Postgres; always healthy for the
     /// in-memory store).
@@ -619,16 +1226,42 @@ pub trait MemoryStore: Send + Sync {
     fn dead_letter_count(&self) -> impl Future<Output = Result<u64, StoreError>> + Send;
 }
 
+/// Capability seam for stores that can atomically commit an idempotency claim,
+/// its successful response, and the mutation's staged writes.
+pub trait MutationLedgerStore: MemoryStore {
+    fn stage_mutation_claim(
+        &self,
+        tx: &mut Self::Txn,
+        claim: MutationClaim,
+    ) -> impl Future<Output = Result<MutationClaimOutcome, StoreError>> + Send;
+    fn stage_mutation_response(
+        &self,
+        tx: &mut Self::Txn,
+        response: MutationResponse,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
+    fn stage_subject_erasure(
+        &self,
+        tx: &mut Self::Txn,
+    ) -> impl Future<Output = Result<SubjectErasureReceipt, StoreError>> + Send;
+}
+
 #[derive(Clone, Default)]
 pub struct InMemoryStore {
     inner: Arc<Mutex<InMemoryState>>,
+    mutation_locks: Arc<Mutex<HashMap<MutationLockKey, Weak<AsyncMutex<()>>>>>,
+    #[cfg(test)]
+    fail_next_mutation_response: Arc<std::sync::atomic::AtomicBool>,
 }
+
+type MutationLockKey = (TenantId, MutationVerb, [u8; 32]);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct JobMeta {
     attempts: u32,
+    claim_generation: u64,
     claimed: bool,
     completed: bool,
+    terminal: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -638,29 +1271,506 @@ enum SourceKindKey {
     MemoryUnit,
 }
 
-#[derive(Default)]
+#[derive(Clone, PartialEq, Eq)]
+struct MutationLedgerEntry {
+    claim: MutationClaim,
+    response: MutationResponse,
+    expires_at_second: i64,
+}
+
+struct StagedMutation {
+    claim: MutationClaim,
+    response: Option<MutationResponse>,
+    replay: bool,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct SubjectTombstone {
+    generation: u64,
+    erased_at: String,
+}
+
+/// `(tenant, job, compiler_version)` key identifying a reflect trace owner.
+type ReflectOwnerKey = (TenantId, JobId, String);
+/// The resolved context that owns a reflect trace.
+type ReflectOwnerValue = (SubjectId, u64, ScopeId, AgentNodeId, ActorId);
+
+#[derive(Clone, Default)]
 struct InMemoryState {
     episodes: HashMap<TenantId, Vec<StoredEpisode>>,
     resources: HashMap<TenantId, Vec<StoredResource>>,
     memory_units: HashMap<TenantId, Vec<StoredMemoryUnit>>,
     memory_edges: HashMap<TenantId, Vec<StoredMemoryEdge>>,
+    citations: HashMap<TenantId, Vec<StoredCitation>>,
     reflect_jobs: HashMap<TenantId, Vec<QueuedReflectJob>>,
     reflect_traces: HashMap<TenantId, Vec<ReflectTrace>>,
+    reflect_trace_owners: HashMap<ReflectOwnerKey, ReflectOwnerValue>,
     retrieval_traces: HashMap<TenantId, Vec<RetrievalTrace>>,
     review_events: HashMap<TenantId, Vec<ReviewEvent>>,
-    forgotten_sources: HashSet<(TenantId, SourceKindKey, Uuid)>,
+    forgotten_sources: HashSet<(
+        TenantId,
+        SubjectId,
+        u64,
+        ScopeId,
+        AgentNodeId,
+        SourceKindKey,
+        Uuid,
+    )>,
     api_keys: Vec<ApiKeyRow>,
+    context_bindings: HashMap<(TenantId, String), (ContextBindingRequest, ContextBindingResponse)>,
     embeddings: HashMap<TenantId, Vec<EmbeddingRow>>,
     embedding_profiles: HashMap<TenantId, Vec<EmbeddingProfileRow>>,
     job_meta: HashMap<JobId, JobMeta>,
+    prepared_structured_state: HashMap<(TenantId, JobId), Vec<ProjectedStructuredState>>,
+    mutation_ledger: HashMap<(TenantId, MutationVerb, String), MutationLedgerEntry>,
+    subject_tombstones: HashMap<(TenantId, SubjectId), SubjectTombstone>,
+    deletion_generation: HashMap<(TenantId, SubjectId), u64>,
+}
+
+#[derive(Clone, PartialEq)]
+struct InMemoryContextState {
+    episodes: Vec<StoredEpisode>,
+    resources: Vec<StoredResource>,
+    units: Vec<StoredMemoryUnit>,
+    edges: Vec<StoredMemoryEdge>,
+    citations: Vec<StoredCitation>,
+    jobs: Vec<QueuedReflectJob>,
+    reflect_traces: Vec<ReflectTrace>,
+    reflect_owners: Vec<(ReflectOwnerKey, ReflectOwnerValue)>,
+    retrieval_traces: Vec<RetrievalTrace>,
+    review_events: Vec<ReviewEvent>,
+    forgotten_sources: Vec<(
+        TenantId,
+        SubjectId,
+        u64,
+        ScopeId,
+        AgentNodeId,
+        SourceKindKey,
+        Uuid,
+    )>,
+    embeddings: Vec<EmbeddingRow>,
+    embedding_profiles: Vec<EmbeddingProfileRow>,
+    job_meta: Vec<(JobId, JobMeta)>,
+    prepared: Vec<((TenantId, JobId), Vec<ProjectedStructuredState>)>,
     deletion_generation: u64,
 }
 
+impl InMemoryContextState {
+    fn capture(state: &InMemoryState, context: &ResolvedMemoryContext) -> Self {
+        let owned_unit = |unit: &&StoredMemoryUnit| unit_matches_context(unit, context);
+        let units: Vec<_> = state
+            .memory_units
+            .get(&context.tenant_id)
+            .into_iter()
+            .flatten()
+            .filter(owned_unit)
+            .cloned()
+            .collect();
+        let unit_ids: HashSet<_> = units.iter().map(|unit| unit.id).collect();
+        let owned_job = |job: &&QueuedReflectJob| {
+            job.tenant_id == context.tenant_id
+                && job.data_subject_id == context.data_subject_id
+                && job.subject_generation == context.subject_generation
+                && job.scope_id == context.scope_id
+                && job.agent_node_id == context.agent_node_id
+                && job.actor_id == context.actor_id
+        };
+        let jobs: Vec<_> = state
+            .reflect_jobs
+            .get(&context.tenant_id)
+            .into_iter()
+            .flatten()
+            .filter(owned_job)
+            .cloned()
+            .collect();
+        let mut job_ids: HashSet<_> = jobs.iter().map(|job| job.id).collect();
+        let owner = (
+            context.data_subject_id,
+            context.subject_generation,
+            context.scope_id,
+            context.agent_node_id,
+            context.actor_id,
+        );
+        let mut reflect_owners: Vec<_> = state
+            .reflect_trace_owners
+            .iter()
+            .filter(|((tenant, _, _), value)| *tenant == context.tenant_id && **value == owner)
+            .map(|(key, value)| (key.clone(), *value))
+            .collect();
+        reflect_owners.sort_by_key(|(key, _)| (key.1.as_uuid(), key.2.clone()));
+        job_ids.extend(reflect_owners.iter().map(|(key, _)| key.1));
+        let retrieval_traces: Vec<_> = state
+            .retrieval_traces
+            .get(&context.tenant_id)
+            .into_iter()
+            .flatten()
+            .filter(|trace| {
+                trace.data_subject_id == context.data_subject_id
+                    && trace.subject_generation == context.subject_generation
+                    && trace.scope_id == context.scope_id
+                    && trace.agent_node_id == context.agent_node_id
+                    && trace.actor_id == context.actor_id
+            })
+            .cloned()
+            .collect();
+        let trace_ids: HashSet<_> = retrieval_traces.iter().map(|trace| trace.id).collect();
+        let mut job_meta: Vec<_> = state
+            .job_meta
+            .iter()
+            .filter(|(id, _)| job_ids.contains(id))
+            .map(|(id, meta)| (*id, *meta))
+            .collect();
+        job_meta.sort_by_key(|(id, _)| id.as_uuid());
+        let mut prepared: Vec<_> = state
+            .prepared_structured_state
+            .iter()
+            .filter(|((tenant, id), _)| *tenant == context.tenant_id && job_ids.contains(id))
+            .map(|(key, value)| (*key, value.clone()))
+            .collect();
+        prepared.sort_by_key(|(key, _)| key.1.as_uuid());
+        Self {
+            episodes: state
+                .episodes
+                .get(&context.tenant_id)
+                .into_iter()
+                .flatten()
+                .filter(|row| {
+                    row.data_subject_id == context.data_subject_id
+                        && row.subject_generation == context.subject_generation
+                        && row.scope_id == context.scope_id
+                        && row.agent_node_id == context.agent_node_id
+                        && row.actor_id == context.actor_id
+                })
+                .cloned()
+                .collect(),
+            resources: state
+                .resources
+                .get(&context.tenant_id)
+                .into_iter()
+                .flatten()
+                .filter(|row| {
+                    row.data_subject_id == context.data_subject_id
+                        && row.subject_generation == context.subject_generation
+                        && row.scope_id == context.scope_id
+                        && row.agent_node_id == context.agent_node_id
+                        && row.actor_id == context.actor_id
+                })
+                .cloned()
+                .collect(),
+            edges: state
+                .memory_edges
+                .get(&context.tenant_id)
+                .into_iter()
+                .flatten()
+                .filter(|edge| unit_ids.contains(&edge.src_id) && unit_ids.contains(&edge.dst_id))
+                .cloned()
+                .collect(),
+            citations: state
+                .citations
+                .get(&context.tenant_id)
+                .into_iter()
+                .flatten()
+                .filter(|citation| unit_ids.contains(&citation.memory_unit_id))
+                .cloned()
+                .collect(),
+            reflect_traces: state
+                .reflect_traces
+                .get(&context.tenant_id)
+                .into_iter()
+                .flatten()
+                .filter(|trace| job_ids.contains(&trace.job_id))
+                .cloned()
+                .collect(),
+            review_events: state
+                .review_events
+                .get(&context.tenant_id)
+                .into_iter()
+                .flatten()
+                .filter(|event| trace_ids.contains(&event.trace_id))
+                .cloned()
+                .collect(),
+            forgotten_sources: state
+                .forgotten_sources
+                .iter()
+                .filter(|entry| {
+                    entry.0 == context.tenant_id
+                        && entry.1 == context.data_subject_id
+                        && entry.2 == context.subject_generation
+                        && entry.3 == context.scope_id
+                        && entry.4 == context.agent_node_id
+                })
+                .cloned()
+                .collect(),
+            embeddings: state
+                .embeddings
+                .get(&context.tenant_id)
+                .into_iter()
+                .flatten()
+                .filter(|row| unit_ids.contains(&row.memory_unit_id))
+                .cloned()
+                .collect(),
+            embedding_profiles: state
+                .embedding_profiles
+                .get(&context.tenant_id)
+                .cloned()
+                .unwrap_or_default(),
+            deletion_generation: state
+                .deletion_generation
+                .get(&(context.tenant_id, context.data_subject_id))
+                .copied()
+                .unwrap_or_default(),
+            units,
+            jobs,
+            reflect_owners,
+            retrieval_traces,
+            job_meta,
+            prepared,
+        }
+    }
+
+    fn into_scratch(
+        self,
+        source: &InMemoryState,
+        context: &ResolvedMemoryContext,
+    ) -> InMemoryState {
+        let mut state = InMemoryState::default();
+        state.episodes.insert(context.tenant_id, self.episodes);
+        state.resources.insert(context.tenant_id, self.resources);
+        state.memory_units.insert(context.tenant_id, self.units);
+        state.memory_edges.insert(context.tenant_id, self.edges);
+        state.citations.insert(context.tenant_id, self.citations);
+        state.reflect_jobs.insert(context.tenant_id, self.jobs);
+        state
+            .reflect_traces
+            .insert(context.tenant_id, self.reflect_traces);
+        state.reflect_trace_owners.extend(self.reflect_owners);
+        state
+            .retrieval_traces
+            .insert(context.tenant_id, self.retrieval_traces);
+        state
+            .review_events
+            .insert(context.tenant_id, self.review_events);
+        state.forgotten_sources.extend(self.forgotten_sources);
+        state.embeddings.insert(context.tenant_id, self.embeddings);
+        state
+            .embedding_profiles
+            .insert(context.tenant_id, self.embedding_profiles);
+        state.job_meta.extend(self.job_meta);
+        state.prepared_structured_state.extend(self.prepared);
+        state.deletion_generation.insert(
+            (context.tenant_id, context.data_subject_id),
+            self.deletion_generation,
+        );
+        state.context_bindings.extend(
+            source
+                .context_bindings
+                .iter()
+                .filter(|((tenant, _), (_, binding))| {
+                    *tenant == context.tenant_id && binding.subject_id == context.data_subject_id
+                })
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
+        state
+    }
+
+    fn replace_in(self, state: &mut InMemoryState, context: &ResolvedMemoryContext) {
+        let old = Self::capture(state, context);
+        let old_units: HashSet<_> = old.units.iter().map(|unit| unit.id).collect();
+        let old_jobs: HashSet<_> = old
+            .jobs
+            .iter()
+            .map(|job| job.id)
+            .chain(old.reflect_owners.iter().map(|(key, _)| key.1))
+            .collect();
+        let old_traces: HashSet<_> = old.retrieval_traces.iter().map(|trace| trace.id).collect();
+        state
+            .episodes
+            .entry(context.tenant_id)
+            .or_default()
+            .retain(|row| !old.episodes.iter().any(|owned| owned.id == row.id));
+        state
+            .episodes
+            .entry(context.tenant_id)
+            .or_default()
+            .extend(self.episodes);
+        state
+            .resources
+            .entry(context.tenant_id)
+            .or_default()
+            .retain(|row| !old.resources.iter().any(|owned| owned.id == row.id));
+        state
+            .resources
+            .entry(context.tenant_id)
+            .or_default()
+            .extend(self.resources);
+        state
+            .memory_units
+            .entry(context.tenant_id)
+            .or_default()
+            .retain(|row| !old_units.contains(&row.id));
+        state
+            .memory_units
+            .entry(context.tenant_id)
+            .or_default()
+            .extend(self.units);
+        state
+            .memory_edges
+            .entry(context.tenant_id)
+            .or_default()
+            .retain(|edge| !old_units.contains(&edge.src_id) || !old_units.contains(&edge.dst_id));
+        state
+            .memory_edges
+            .entry(context.tenant_id)
+            .or_default()
+            .extend(self.edges);
+        state
+            .citations
+            .entry(context.tenant_id)
+            .or_default()
+            .retain(|citation| !old_units.contains(&citation.memory_unit_id));
+        state
+            .citations
+            .entry(context.tenant_id)
+            .or_default()
+            .extend(self.citations);
+        state
+            .reflect_jobs
+            .entry(context.tenant_id)
+            .or_default()
+            .retain(|job| !old_jobs.contains(&job.id));
+        state
+            .reflect_jobs
+            .entry(context.tenant_id)
+            .or_default()
+            .extend(self.jobs);
+        state
+            .reflect_traces
+            .entry(context.tenant_id)
+            .or_default()
+            .retain(|trace| !old_jobs.contains(&trace.job_id));
+        state
+            .reflect_traces
+            .entry(context.tenant_id)
+            .or_default()
+            .extend(self.reflect_traces);
+        state
+            .reflect_trace_owners
+            .retain(|key, _| !old_jobs.contains(&key.1));
+        state.reflect_trace_owners.extend(self.reflect_owners);
+        state
+            .retrieval_traces
+            .entry(context.tenant_id)
+            .or_default()
+            .retain(|trace| !old_traces.contains(&trace.id));
+        state
+            .retrieval_traces
+            .entry(context.tenant_id)
+            .or_default()
+            .extend(self.retrieval_traces);
+        state
+            .review_events
+            .entry(context.tenant_id)
+            .or_default()
+            .retain(|event| !old_traces.contains(&event.trace_id));
+        state
+            .review_events
+            .entry(context.tenant_id)
+            .or_default()
+            .extend(self.review_events);
+        state.forgotten_sources.retain(|entry| {
+            !(entry.0 == context.tenant_id
+                && entry.1 == context.data_subject_id
+                && entry.2 == context.subject_generation
+                && entry.3 == context.scope_id
+                && entry.4 == context.agent_node_id)
+        });
+        state.forgotten_sources.extend(self.forgotten_sources);
+        state
+            .embeddings
+            .entry(context.tenant_id)
+            .or_default()
+            .retain(|row| !old_units.contains(&row.memory_unit_id));
+        state
+            .embeddings
+            .entry(context.tenant_id)
+            .or_default()
+            .extend(self.embeddings);
+        let profiles = state
+            .embedding_profiles
+            .entry(context.tenant_id)
+            .or_default();
+        for profile in self.embedding_profiles {
+            if !profiles.iter().any(|row| row.id == profile.id) {
+                profiles.push(profile);
+            }
+        }
+        state.job_meta.retain(|id, _| !old_jobs.contains(id));
+        state.job_meta.extend(self.job_meta);
+        state
+            .prepared_structured_state
+            .retain(|(_, id), _| !old_jobs.contains(id));
+        state.prepared_structured_state.extend(self.prepared);
+        state.deletion_generation.insert(
+            (context.tenant_id, context.data_subject_id),
+            self.deletion_generation,
+        );
+    }
+}
+
 impl InMemoryState {
-    fn is_forgotten_source(&self, tenant_id: TenantId, unit: &StoredMemoryUnit) -> bool {
+    fn validate_context(&self, context: &ResolvedMemoryContext) -> Result<(), StoreError> {
+        if self
+            .subject_tombstones
+            .contains_key(&(context.tenant_id, context.data_subject_id))
+        {
+            return Err(StoreError::SubjectErased);
+        }
+        let current = self
+            .context_bindings
+            .iter()
+            .find(|((tenant, _), (_, binding))| {
+                *tenant == context.tenant_id
+                    && binding.subject_id == context.data_subject_id
+                    && binding.actor_id == context.actor_id
+                    && binding.scope_id == context.scope_id
+                    && binding.agent_node_id == context.agent_node_id
+            })
+            .map(|(_, (_, binding))| binding)
+            .ok_or(StoreError::NotFound("memory context"))?;
+        if current.subject_generation != context.subject_generation {
+            return Err(StoreError::StaleSubjectGeneration);
+        }
+        Ok(())
+    }
+
+    fn claim_is_current(&self, claim: &ReflectJobRow) -> bool {
+        self.reflect_jobs
+            .get(&claim.job.tenant_id)
+            .is_some_and(|jobs| jobs.contains(&claim.job))
+            && self.job_meta.get(&claim.job.id).is_some_and(|meta| {
+                meta.claimed
+                    && meta.attempts == claim.attempts
+                    && meta.claim_generation == claim.claim_generation
+                    && !meta.completed
+                    && !meta.terminal
+            })
+    }
+
+    fn is_forgotten_source(&self, unit: &StoredMemoryUnit) -> bool {
+        let owner = (
+            unit.tenant_id,
+            unit.data_subject_id,
+            unit.subject_generation,
+            unit.scope_id,
+            unit.agent_node_id,
+        );
         if let Some(episode_id) = unit.source_episode_id
             && self.forgotten_sources.contains(&(
-                tenant_id,
+                owner.0,
+                owner.1,
+                owner.2,
+                owner.3,
+                owner.4,
                 SourceKindKey::Episode,
                 episode_id.as_uuid(),
             ))
@@ -669,30 +1779,374 @@ impl InMemoryState {
         }
         if let Some(resource_id) = unit.source_resource_id
             && self.forgotten_sources.contains(&(
-                tenant_id,
+                owner.0,
+                owner.1,
+                owner.2,
+                owner.3,
+                owner.4,
                 SourceKindKey::Resource,
                 resource_id.as_uuid(),
             ))
         {
             return true;
         }
+        self.forgotten_sources.contains(&(
+            owner.0,
+            owner.1,
+            owner.2,
+            owner.3,
+            owner.4,
+            SourceKindKey::MemoryUnit,
+            unit.id.as_uuid(),
+        ))
+    }
+
+    fn erase_subject(
+        &mut self,
+        tenant: TenantId,
+        subject: SubjectId,
+        receipt: &SubjectErasureReceipt,
+    ) {
+        let erased_unit_ids: HashSet<_> = self
+            .memory_units
+            .get(&tenant)
+            .into_iter()
+            .flatten()
+            .filter(|unit| unit.data_subject_id == subject)
+            .map(|unit| unit.id)
+            .collect();
+        let erased_job_ids: HashSet<_> = self
+            .reflect_jobs
+            .get(&tenant)
+            .into_iter()
+            .flatten()
+            .filter(|job| job.data_subject_id == subject)
+            .map(|job| job.id)
+            .chain(
+                self.reflect_trace_owners
+                    .iter()
+                    .filter(|((owner_tenant, _, _), owner)| {
+                        *owner_tenant == tenant && owner.0 == subject
+                    })
+                    .map(|((_, job_id, _), _)| *job_id),
+            )
+            .collect();
+        let erased_trace_ids: HashSet<_> = self
+            .retrieval_traces
+            .get(&tenant)
+            .into_iter()
+            .flatten()
+            .filter(|trace| trace.data_subject_id == subject)
+            .map(|trace| trace.id)
+            .collect();
+
+        self.context_bindings
+            .retain(|(key_tenant, _), (_, binding)| {
+                *key_tenant != tenant || binding.subject_id != subject
+            });
+        self.api_keys
+            .retain(|key| key.tenant_id != tenant || key.data_subject_id != Some(subject));
+        self.episodes
+            .entry(tenant)
+            .or_default()
+            .retain(|episode| episode.data_subject_id != subject);
+        self.resources
+            .entry(tenant)
+            .or_default()
+            .retain(|resource| resource.data_subject_id != subject);
+        self.memory_units
+            .entry(tenant)
+            .or_default()
+            .retain(|unit| unit.data_subject_id != subject);
+        self.memory_edges.entry(tenant).or_default().retain(|edge| {
+            !erased_unit_ids.contains(&edge.src_id) && !erased_unit_ids.contains(&edge.dst_id)
+        });
+        self.citations
+            .entry(tenant)
+            .or_default()
+            .retain(|citation| !erased_unit_ids.contains(&citation.memory_unit_id));
+        self.embeddings
+            .entry(tenant)
+            .or_default()
+            .retain(|row| !erased_unit_ids.contains(&row.memory_unit_id));
+        self.reflect_jobs
+            .entry(tenant)
+            .or_default()
+            .retain(|job| job.data_subject_id != subject);
+        self.reflect_traces
+            .entry(tenant)
+            .or_default()
+            .retain(|trace| !erased_job_ids.contains(&trace.job_id));
+        self.reflect_trace_owners
+            .retain(|(owner_tenant, _, _), owner| *owner_tenant != tenant || owner.0 != subject);
+        self.retrieval_traces
+            .entry(tenant)
+            .or_default()
+            .retain(|trace| trace.data_subject_id != subject);
+        self.review_events
+            .entry(tenant)
+            .or_default()
+            .retain(|event| !erased_trace_ids.contains(&event.trace_id));
         self.forgotten_sources
-            .contains(&(tenant_id, SourceKindKey::MemoryUnit, unit.id.as_uuid()))
+            .retain(|entry| entry.0 != tenant || entry.1 != subject);
+        self.prepared_structured_state
+            .retain(|(owner_tenant, job_id), _| {
+                *owner_tenant != tenant || !erased_job_ids.contains(job_id)
+            });
+        self.job_meta
+            .retain(|job_id, _| !erased_job_ids.contains(job_id));
+        self.mutation_ledger.retain(|_, entry| {
+            entry.claim.tenant_id != tenant || entry.claim.data_subject_id != subject
+        });
+        self.subject_tombstones.insert(
+            (tenant, subject),
+            SubjectTombstone {
+                generation: receipt.generation,
+                erased_at: receipt.erased_at.clone(),
+            },
+        );
     }
 }
 
-#[derive(Default)]
+fn in_memory_binding_by_external_pair<'a>(
+    state: &'a InMemoryState,
+    tenant: TenantId,
+    subject_external_ref: &str,
+    scope_external_ref: &str,
+    agent_external_ref: &str,
+) -> Option<&'a (ContextBindingRequest, ContextBindingResponse)> {
+    state
+        .context_bindings
+        .iter()
+        .filter(|((bound_tenant, _), _)| *bound_tenant == tenant)
+        .map(|(_, binding)| binding)
+        .find(|(bound, _)| {
+            bound.subject.external_ref == subject_external_ref
+                && bound.scope.external_ref == scope_external_ref
+                && bound.agent_node.external_ref == agent_external_ref
+        })
+}
+
+fn in_memory_scope_is_strict_ancestor(
+    state: &InMemoryState,
+    tenant: TenantId,
+    subject_external_ref: &str,
+    ancestor_external_ref: &str,
+    request: &ContextBindingRequest,
+) -> bool {
+    let mut parent = request.scope.parent_external_ref.as_deref();
+    while let Some(parent_ref) = parent {
+        if parent_ref == ancestor_external_ref {
+            return true;
+        }
+        parent = state
+            .context_bindings
+            .iter()
+            .filter(|((bound_tenant, _), _)| *bound_tenant == tenant)
+            .map(|(_, binding)| binding)
+            .find(|(bound, _)| {
+                bound.subject.external_ref == subject_external_ref
+                    && bound.scope.external_ref == parent_ref
+            })
+            .and_then(|(bound, _)| bound.scope.parent_external_ref.as_deref());
+    }
+    false
+}
+
+fn validate_in_memory_access_policies(
+    state: &InMemoryState,
+    tenant: TenantId,
+    request: &ContextBindingRequest,
+    agent_level: u8,
+) -> Result<(), StoreError> {
+    let mut seen = HashSet::new();
+    for policy in &request.access_policies {
+        let key = (
+            policy.source_scope_external_ref().to_string(),
+            policy.source_agent_node_external_ref().to_string(),
+            policy.kind(),
+        );
+        if !seen.insert(key) {
+            return Err(StoreError::Conflict("duplicate access policy".to_string()));
+        }
+        let kind = policy.kind();
+        if !agent_level_allows_memory_kind(agent_level, kind) {
+            return Err(StoreError::Conflict(
+                "memory kind is not allowed for the grantee agent level".to_string(),
+            ));
+        }
+        let source_scope = policy.source_scope_external_ref();
+        let source_agent = policy.source_agent_node_external_ref();
+        in_memory_binding_by_external_pair(
+            state,
+            tenant,
+            &request.subject.external_ref,
+            source_scope,
+            source_agent,
+        )
+        .ok_or(StoreError::NotFound("access policy source context"))?;
+
+        let source_is_grantee = source_scope == request.scope.external_ref
+            && source_agent == request.agent_node.external_ref;
+        match policy {
+            ContextBindingAccessPolicy::Inherit { .. } => {
+                if agent_level != 0
+                    || !matches!(
+                        kind,
+                        MemoryKind::Episodic | MemoryKind::Semantic | MemoryKind::Belief
+                    )
+                    || !in_memory_scope_is_strict_ancestor(
+                        state,
+                        tenant,
+                        &request.subject.external_ref,
+                        source_scope,
+                        request,
+                    )
+                {
+                    return Err(StoreError::Conflict(
+                        "inherit source must be a strict same-subject ancestor root-memory context"
+                            .to_string(),
+                    ));
+                }
+            }
+            ContextBindingAccessPolicy::Grant { .. } if source_is_grantee => {
+                return Err(StoreError::Conflict(
+                    "grant source must differ from the grantee context".to_string(),
+                ));
+            }
+            ContextBindingAccessPolicy::Grant { .. } => {}
+        }
+    }
+    Ok(())
+}
+
 pub struct InMemoryTxn {
+    context: ResolvedMemoryContext,
     episodes: Vec<StoredEpisode>,
-    episode_observation_updates: Vec<(TenantId, EpisodeId)>,
+    episode_observation_updates: Vec<(TenantId, EpisodeId, String)>,
     resources: Vec<StoredResource>,
     memory_units: Vec<StoredMemoryUnit>,
     memory_edges: Vec<StoredMemoryEdge>,
     reflect_jobs: Vec<QueuedReflectJob>,
+    state_snapshot: Option<(InMemoryContextState, Box<InMemoryState>)>,
+    mutation: Option<StagedMutation>,
+    subject_erasure: Option<SubjectErasureReceipt>,
+    mutation_guard: Option<OwnedMutexGuard<()>>,
+    transaction_time: String,
     committed: bool,
 }
 
 impl InMemoryStore {
+    #[cfg(test)]
+    pub(crate) fn fail_next_mutation_response(&self) {
+        self.fail_next_mutation_response
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam: register a context binding that exactly matches a hand-built
+    /// [`ResolvedMemoryContext`] so the store's strict context contract
+    /// (canonical cutover — `validate_context` on commit/recall) accepts it.
+    /// Production code always reaches a real binding via `resolve_context_binding`;
+    /// low-level store tests build contexts directly, so this seeds the one
+    /// binding those ids resolve against. Idempotent per (tenant, subject,
+    /// scope, actor).
+    #[doc(hidden)]
+    pub fn seed_context_binding(&self, context: &ResolvedMemoryContext) {
+        let mut state = self
+            .inner
+            .lock()
+            .expect("seed_context_binding: state lock poisoned");
+        let tag = format!(
+            "seed:{}:{}:{}:{}",
+            context.data_subject_id.as_uuid(),
+            context.scope_id.as_uuid(),
+            context.actor_id.as_uuid(),
+            context.agent_node_id.as_uuid()
+        );
+        let request = ContextBindingRequest {
+            subject: memphant_types::ContextBindingEntityRef {
+                external_ref: format!("subject:{tag}"),
+                kind: "user".to_string(),
+            },
+            actor: memphant_types::ContextBindingEntityRef {
+                external_ref: format!("actor:{tag}"),
+                kind: "user".to_string(),
+            },
+            scope: memphant_types::ContextBindingScopeRef {
+                external_ref: format!("scope:{tag}"),
+                kind: "user_root".to_string(),
+                parent_external_ref: None,
+            },
+            agent_node: memphant_types::ContextBindingAgentRef {
+                external_ref: format!("agent:{tag}"),
+                parent_external_ref: None,
+            },
+            access_policies: Vec::new(),
+        };
+        let response = ContextBindingResponse {
+            subject_id: context.data_subject_id,
+            actor_id: context.actor_id,
+            scope_id: context.scope_id,
+            agent_node_id: context.agent_node_id,
+            agent_level: context.agent_level,
+            policy_revision: context.policy_revision.clone(),
+            subject_generation: context.subject_generation,
+        };
+        state
+            .context_bindings
+            .entry((context.tenant_id, tag))
+            .or_insert((request, response));
+    }
+
+    fn staged_state<'a>(
+        &self,
+        tx: &'a mut InMemoryTxn,
+    ) -> Result<&'a mut InMemoryState, StoreError> {
+        if tx.committed {
+            return Err(StoreError::TransactionAlreadyCommitted);
+        }
+        if tx.state_snapshot.is_none() {
+            let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+            state.validate_context(&tx.context)?;
+            let baseline = InMemoryContextState::capture(&state, &tx.context);
+            let scratch = baseline.clone().into_scratch(&state, &tx.context);
+            tx.state_snapshot = Some((baseline, Box::new(scratch)));
+        }
+        Ok(tx
+            .state_snapshot
+            .as_mut()
+            .expect("snapshot initialized")
+            .1
+            .as_mut())
+    }
+
+    fn prune_mutation_locks(&self) {
+        if let Ok(mut locks) = self.mutation_locks.lock() {
+            locks.retain(|_, lock| lock.strong_count() > 0);
+        }
+    }
+
+    /// Starts an in-memory transaction at a caller-supplied time.
+    ///
+    /// Deterministic evals use this instead of inheriting the host wall clock.
+    pub fn begin_at(&self, context: &ResolvedMemoryContext, clock: &impl Clock) -> InMemoryTxn {
+        InMemoryTxn {
+            context: context.clone(),
+            episodes: Vec::new(),
+            episode_observation_updates: Vec::new(),
+            resources: Vec::new(),
+            memory_units: Vec::new(),
+            memory_edges: Vec::new(),
+            reflect_jobs: Vec::new(),
+            state_snapshot: None,
+            mutation: None,
+            subject_erasure: None,
+            mutation_guard: None,
+            transaction_time: clock.now_rfc3339(),
+            committed: false,
+        }
+    }
+
     pub fn episodes(&self, tenant_id: TenantId) -> Vec<StoredEpisode> {
         self.inner
             .lock()
@@ -853,11 +2307,221 @@ impl InMemoryStore {
     }
 }
 
+fn validate_context_identity(
+    context: &ResolvedMemoryContext,
+    tenant_id: TenantId,
+    data_subject_id: SubjectId,
+    subject_generation: u64,
+    scope_id: ScopeId,
+    agent_node_id: AgentNodeId,
+    actor_id: Option<ActorId>,
+) -> Result<(), StoreError> {
+    if tenant_id != context.tenant_id
+        || data_subject_id != context.data_subject_id
+        || subject_generation != context.subject_generation
+        || scope_id != context.scope_id
+        || agent_node_id != context.agent_node_id
+        || actor_id != Some(context.actor_id)
+    {
+        return Err(StoreError::Conflict(
+            "write does not match transaction context".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn unit_matches_context(unit: &StoredMemoryUnit, context: &ResolvedMemoryContext) -> bool {
+    unit.tenant_id == context.tenant_id
+        && unit.data_subject_id == context.data_subject_id
+        && unit.subject_generation == context.subject_generation
+        && unit.scope_id == context.scope_id
+        && unit.agent_node_id == context.agent_node_id
+        && unit.actor_id == Some(context.actor_id)
+}
+
+fn mutation_second(value: &str) -> Result<i64, StoreError> {
+    value
+        .parse::<jiff::Timestamp>()
+        .map(|timestamp| timestamp.as_second())
+        .map_err(|_| StoreError::Backend("transaction time must be RFC3339".to_string()))
+}
+
+impl MutationLedgerStore for InMemoryStore {
+    async fn stage_mutation_claim(
+        &self,
+        tx: &mut Self::Txn,
+        claim: MutationClaim,
+    ) -> Result<MutationClaimOutcome, StoreError> {
+        if tx.committed {
+            return Err(StoreError::TransactionAlreadyCommitted);
+        }
+        if claim.subject_generation != tx.context.subject_generation {
+            return Err(StoreError::StaleSubjectGeneration);
+        }
+        if claim.tenant_id != tx.context.tenant_id
+            || claim.data_subject_id != tx.context.data_subject_id
+        {
+            return Err(StoreError::IdempotencyConflict);
+        }
+        if let Some(staged) = &tx.mutation {
+            if staged.claim != claim {
+                return Err(StoreError::IdempotencyConflict);
+            }
+            return Ok(match (&staged.response, staged.replay) {
+                (Some(response), true) => MutationClaimOutcome::Replay(response.clone()),
+                _ => MutationClaimOutcome::Execute,
+            });
+        }
+
+        let now_second = mutation_second(&tx.transaction_time)?;
+        self.prune_mutation_locks();
+        let ledger_key = (claim.tenant_id, claim.verb, claim.idempotency_key.clone());
+        let lock_key = (
+            claim.tenant_id,
+            claim.verb,
+            Sha256::digest(claim.idempotency_key.as_bytes()).into(),
+        );
+        let lock = {
+            let mut locks = self
+                .mutation_locks
+                .lock()
+                .map_err(|_| StoreError::Poisoned)?;
+            match locks.get(&lock_key).and_then(Weak::upgrade) {
+                Some(lock) => lock,
+                None => {
+                    let lock = Arc::new(AsyncMutex::new(()));
+                    locks.insert(lock_key, Arc::downgrade(&lock));
+                    lock
+                }
+            }
+        };
+        let guard = lock.lock_owned().await;
+
+        let mut state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+        state
+            .mutation_ledger
+            .retain(|_, entry| entry.expires_at_second > now_second);
+        let outcome = match state.mutation_ledger.get(&ledger_key) {
+            Some(entry) if entry.claim == claim => {
+                Ok(MutationClaimOutcome::Replay(entry.response.clone()))
+            }
+            Some(_) => Err(StoreError::IdempotencyConflict),
+            None => state
+                .validate_context(&tx.context)
+                .map(|()| MutationClaimOutcome::Execute),
+        };
+        drop(state);
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                drop(guard);
+                self.prune_mutation_locks();
+                return Err(error);
+            }
+        };
+        tx.mutation_guard = Some(guard);
+        tx.mutation = Some(StagedMutation {
+            claim,
+            response: match &outcome {
+                MutationClaimOutcome::Replay(response) => Some(response.clone()),
+                MutationClaimOutcome::Execute => None,
+            },
+            replay: matches!(outcome, MutationClaimOutcome::Replay(_)),
+        });
+        Ok(outcome)
+    }
+
+    async fn stage_mutation_response(
+        &self,
+        tx: &mut Self::Txn,
+        response: MutationResponse,
+    ) -> Result<(), StoreError> {
+        #[cfg(test)]
+        if self
+            .fail_next_mutation_response
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(StoreError::Backend(
+                "injected mutation response failure".to_string(),
+            ));
+        }
+        if tx.committed {
+            return Err(StoreError::TransactionAlreadyCommitted);
+        }
+        let staged = tx.mutation.as_mut().ok_or_else(|| {
+            StoreError::Conflict("mutation claim must be staged before its response".to_string())
+        })?;
+        if staged.replay {
+            return Err(StoreError::Conflict(
+                "replayed mutation cannot stage a new response".to_string(),
+            ));
+        }
+        if tx.subject_erasure.is_some() {
+            return Err(StoreError::Conflict(
+                "subject erasure response is generated by the store".to_string(),
+            ));
+        }
+        staged.response = Some(response);
+        Ok(())
+    }
+
+    async fn stage_subject_erasure(
+        &self,
+        tx: &mut Self::Txn,
+    ) -> Result<SubjectErasureReceipt, StoreError> {
+        if tx.committed {
+            return Err(StoreError::TransactionAlreadyCommitted);
+        }
+        if !tx.episodes.is_empty()
+            || !tx.episode_observation_updates.is_empty()
+            || !tx.resources.is_empty()
+            || !tx.memory_units.is_empty()
+            || !tx.memory_edges.is_empty()
+            || !tx.reflect_jobs.is_empty()
+            || tx.state_snapshot.is_some()
+        {
+            return Err(StoreError::Conflict(
+                "subject erasure requires an otherwise empty transaction".to_string(),
+            ));
+        }
+        let staged = tx.mutation.as_mut().ok_or_else(|| {
+            StoreError::Conflict("erasure claim must be staged first".to_string())
+        })?;
+        if staged.replay || staged.claim.verb != MutationVerb::EraseSubject {
+            return Err(StoreError::Conflict(
+                "subject erasure requires an executable erase_subject claim".to_string(),
+            ));
+        }
+        if staged.claim.subject_generation != tx.context.subject_generation {
+            return Err(StoreError::StaleSubjectGeneration);
+        }
+        if tx.subject_erasure.is_some() {
+            return Err(StoreError::Conflict(
+                "subject erasure is already staged".to_string(),
+            ));
+        }
+        let receipt = SubjectErasureReceipt {
+            generation: tx
+                .context
+                .subject_generation
+                .checked_add(1)
+                .ok_or_else(|| StoreError::Conflict("subject generation overflow".to_string()))?,
+            erased_at: tx.transaction_time.clone(),
+        };
+        staged.response = Some(MutationResponse::success(
+            200,
+            serde_json::to_vec(&receipt).map_err(|error| StoreError::Backend(error.to_string()))?,
+        )?);
+        tx.subject_erasure = Some(receipt.clone());
+        Ok(receipt)
+    }
+}
+
 impl MemoryStore for InMemoryStore {
     type Txn = InMemoryTxn;
 
-    async fn begin(&self) -> Self::Txn {
-        InMemoryTxn::default()
+    async fn begin(&self, context: &ResolvedMemoryContext) -> Result<Self::Txn, StoreError> {
+        Ok(self.begin_at(context, &SystemClock))
     }
 
     async fn commit(&self, mut tx: Self::Txn) -> Result<(), StoreError> {
@@ -865,10 +2529,97 @@ impl MemoryStore for InMemoryStore {
             return Err(StoreError::TransactionAlreadyCommitted);
         }
         tx.committed = true;
+        let mutation_guard = tx.mutation_guard.take();
 
+        let now_second = mutation_second(&tx.transaction_time)?;
+        let has_staged_writes = !tx.episodes.is_empty()
+            || !tx.episode_observation_updates.is_empty()
+            || !tx.resources.is_empty()
+            || !tx.memory_units.is_empty()
+            || !tx.memory_edges.is_empty()
+            || !tx.reflect_jobs.is_empty()
+            || tx.state_snapshot.is_some()
+            || tx.subject_erasure.is_some();
+        let subject_erasure = tx.subject_erasure.take();
+        let mut mutation = match tx.mutation.take() {
+            Some(staged) if staged.replay => {
+                if has_staged_writes {
+                    return Err(StoreError::Conflict(
+                        "replayed mutation cannot contain staged writes".to_string(),
+                    ));
+                }
+                drop(mutation_guard);
+                self.prune_mutation_locks();
+                return Ok(());
+            }
+            Some(staged) => Some((
+                staged.claim,
+                staged.response.ok_or_else(|| {
+                    StoreError::Conflict(
+                        "successful mutation response must be staged before commit".to_string(),
+                    )
+                })?,
+            )),
+            None => None,
+        };
         let mut state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
-        for (tenant_id, episode_id) in tx.episode_observation_updates {
-            if let Some(episode) = state
+        let mut next = match tx.state_snapshot.take() {
+            Some((baseline, staged)) => {
+                if InMemoryContextState::capture(&state, &tx.context) != baseline {
+                    return Err(StoreError::Conflict(
+                        "in-memory transaction state changed before commit".to_string(),
+                    ));
+                }
+                let staged = InMemoryContextState::capture(&staged, &tx.context);
+                let mut next = state.clone();
+                staged.replace_in(&mut next, &tx.context);
+                next
+            }
+            None => state.clone(),
+        };
+        next.validate_context(&tx.context)?;
+        if let Some((claim, _)) = &mutation {
+            let key = (claim.tenant_id, claim.verb, claim.idempotency_key.clone());
+            if let Some(existing) = next.mutation_ledger.get(&key)
+                && existing.expires_at_second > now_second
+            {
+                if existing.claim == *claim {
+                    drop(state);
+                    drop(mutation_guard);
+                    self.prune_mutation_locks();
+                    return Ok(());
+                }
+                return Err(StoreError::IdempotencyConflict);
+            }
+        }
+        if let Some(receipt) = &subject_erasure {
+            let (claim, response) = mutation.take().ok_or_else(|| {
+                StoreError::Conflict("subject erasure requires a mutation claim".to_string())
+            })?;
+            if claim.verb != MutationVerb::EraseSubject
+                || receipt.generation != claim.subject_generation + 1
+            {
+                return Err(StoreError::Conflict(
+                    "subject erasure does not match its claim".to_string(),
+                ));
+            }
+            next.erase_subject(claim.tenant_id, claim.data_subject_id, receipt);
+            next.mutation_ledger.insert(
+                (claim.tenant_id, claim.verb, claim.idempotency_key.clone()),
+                MutationLedgerEntry {
+                    claim,
+                    response,
+                    expires_at_second: now_second + 24 * 60 * 60,
+                },
+            );
+            *state = next;
+            drop(state);
+            drop(mutation_guard);
+            self.prune_mutation_locks();
+            return Ok(());
+        }
+        for (tenant_id, episode_id, observed_at) in tx.episode_observation_updates {
+            if let Some(episode) = next
                 .episodes
                 .entry(tenant_id)
                 .or_default()
@@ -876,43 +2627,62 @@ impl MemoryStore for InMemoryStore {
                 .find(|episode| episode.id == episode_id)
             {
                 episode.observation_count += 1;
+                if cmp_rfc3339(&observed_at, &episode.first_observed_at).is_lt() {
+                    episode.first_observed_at = observed_at.clone();
+                }
+                if cmp_rfc3339(&observed_at, &episode.last_observed_at).is_gt() {
+                    episode.last_observed_at = observed_at;
+                }
             }
         }
         for episode in tx.episodes {
-            state
-                .episodes
+            next.episodes
                 .entry(episode.tenant_id)
                 .or_default()
                 .push(episode);
         }
         for resource in tx.resources {
-            state
-                .resources
+            next.resources
                 .entry(resource.tenant_id)
                 .or_default()
                 .push(resource);
         }
         for unit in tx.memory_units {
-            state
-                .memory_units
+            next.memory_units
                 .entry(unit.tenant_id)
                 .or_default()
                 .push(unit);
         }
         for edge in tx.memory_edges {
-            state
-                .memory_edges
+            next.memory_edges
                 .entry(edge.tenant_id)
                 .or_default()
                 .push(edge);
         }
         for job in tx.reflect_jobs {
-            state
-                .reflect_jobs
+            next.reflect_jobs
                 .entry(job.tenant_id)
                 .or_default()
                 .push(job);
         }
+        if let Some((claim, response)) = mutation {
+            next.mutation_ledger.insert(
+                (claim.tenant_id, claim.verb, claim.idempotency_key.clone()),
+                MutationLedgerEntry {
+                    claim,
+                    response,
+                    expires_at_second: now_second + 24 * 60 * 60,
+                },
+            );
+        }
+        *state = next;
+        drop(state);
+        drop(mutation_guard);
+        self.prune_mutation_locks();
+        Ok(())
+    }
+
+    async fn rollback(&self, _tx: Self::Txn) -> Result<(), StoreError> {
         Ok(())
     }
 
@@ -924,13 +2694,32 @@ impl MemoryStore for InMemoryStore {
         if tx.committed {
             return Err(StoreError::TransactionAlreadyCommitted);
         }
+        validate_context_identity(
+            &tx.context,
+            episode.tenant_id,
+            episode.data_subject_id,
+            episode.subject_generation,
+            episode.scope_id,
+            episode.agent_node_id,
+            Some(episode.actor_id),
+        )?;
 
         if let Some(staged) = tx.episodes.iter_mut().find(|staged| {
             staged.tenant_id == episode.tenant_id
+                && staged.data_subject_id == episode.data_subject_id
+                && staged.subject_generation == episode.subject_generation
                 && staged.scope_id == episode.scope_id
+                && staged.agent_node_id == episode.agent_node_id
+                && staged.actor_id == episode.actor_id
                 && staged.dedup_key == episode.dedup_key
         }) {
             staged.observation_count += 1;
+            if cmp_rfc3339(&episode.observed_at, &staged.first_observed_at).is_lt() {
+                staged.first_observed_at = episode.observed_at.clone();
+            }
+            if cmp_rfc3339(&episode.observed_at, &staged.last_observed_at).is_gt() {
+                staged.last_observed_at = episode.observed_at.clone();
+            }
             return Ok(RetainOutcome {
                 episode_id: staged.id,
                 dedup: DedupOutcome {
@@ -943,16 +2732,24 @@ impl MemoryStore for InMemoryStore {
         let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
         if let Some(existing) = state.episodes.get(&episode.tenant_id).and_then(|episodes| {
             episodes.iter().find(|stored| {
-                stored.scope_id == episode.scope_id && stored.dedup_key == episode.dedup_key
+                stored.data_subject_id == episode.data_subject_id
+                    && stored.subject_generation == episode.subject_generation
+                    && stored.scope_id == episode.scope_id
+                    && stored.agent_node_id == episode.agent_node_id
+                    && stored.actor_id == episode.actor_id
+                    && stored.dedup_key == episode.dedup_key
             })
         }) {
             let pending_updates = tx
                 .episode_observation_updates
                 .iter()
-                .filter(|(_, id)| *id == existing.id)
+                .filter(|(_, id, _)| *id == existing.id)
                 .count() as u32;
-            tx.episode_observation_updates
-                .push((episode.tenant_id, existing.id));
+            tx.episode_observation_updates.push((
+                episode.tenant_id,
+                existing.id,
+                episode.observed_at,
+            ));
             return Ok(RetainOutcome {
                 episode_id: existing.id,
                 dedup: DedupOutcome {
@@ -967,13 +2764,19 @@ impl MemoryStore for InMemoryStore {
         let stored = StoredEpisode {
             id,
             tenant_id: episode.tenant_id,
+            data_subject_id: episode.data_subject_id,
             scope_id: episode.scope_id,
             actor_id: episode.actor_id,
+            agent_node_id: episode.agent_node_id,
+            subject_generation: episode.subject_generation,
             source_kind: episode.source_kind,
+            source_ref: episode.source_ref,
             source_trust: episode.source_trust,
             dedup_key: episode.dedup_key,
             body: episode.body,
             observation_count: 1,
+            first_observed_at: episode.observed_at.clone(),
+            last_observed_at: episode.observed_at,
         };
         tx.episodes.push(stored);
         Ok(RetainOutcome {
@@ -993,21 +2796,37 @@ impl MemoryStore for InMemoryStore {
         if tx.committed {
             return Err(StoreError::TransactionAlreadyCommitted);
         }
+        validate_context_identity(
+            &tx.context,
+            unit.tenant_id,
+            unit.data_subject_id,
+            unit.subject_generation,
+            unit.scope_id,
+            unit.agent_node_id,
+            unit.actor_id,
+        )?;
 
         let id = UnitId::new();
         tx.memory_units.push(StoredMemoryUnit {
             id,
             tenant_id: unit.tenant_id,
+            data_subject_id: unit.data_subject_id,
             scope_id: unit.scope_id,
+            agent_node_id: unit.agent_node_id,
+            subject_generation: unit.subject_generation,
             kind: unit.kind,
             state: unit.state,
-            subject_key: unit.subject_key,
+            fact_key: unit.fact_key,
+            predicate: unit.predicate,
             body: unit.body,
+            confidence: unit.confidence,
             trust_level: unit.trust_level,
             churn_class: unit.churn_class,
             freshness_due_at: unit.freshness_due_at,
             actor_id: unit.actor_id,
             source_kind: unit.source_kind,
+            source_ref: unit.source_ref,
+            observed_at: unit.observed_at,
             source_episode_id: unit.source_episode_id,
             source_resource_id: unit.source_resource_id,
             deletion_generation: unit.deletion_generation,
@@ -1032,14 +2851,28 @@ impl MemoryStore for InMemoryStore {
         if tx.committed {
             return Err(StoreError::TransactionAlreadyCommitted);
         }
+        validate_context_identity(
+            &tx.context,
+            resource.tenant_id,
+            resource.data_subject_id,
+            resource.subject_generation,
+            resource.scope_id,
+            resource.agent_node_id,
+            Some(resource.actor_id),
+        )?;
 
         let id = ResourceId::new();
         tx.resources.push(StoredResource {
             id,
             tenant_id: resource.tenant_id,
+            data_subject_id: resource.data_subject_id,
             scope_id: resource.scope_id,
             actor_id: resource.actor_id,
+            agent_node_id: resource.agent_node_id,
+            subject_generation: resource.subject_generation,
             uri: resource.uri,
+            source_ref: resource.source_ref,
+            observed_at: resource.observed_at,
             kind: resource.kind,
             content_hash: resource.content_hash,
             mime_type: resource.mime_type,
@@ -1059,6 +2892,30 @@ impl MemoryStore for InMemoryStore {
         if tx.committed {
             return Err(StoreError::TransactionAlreadyCommitted);
         }
+        if edge.tenant_id != tx.context.tenant_id || edge.scope_id != tx.context.scope_id {
+            return Err(StoreError::Conflict(
+                "memory edge does not match transaction context".to_string(),
+            ));
+        }
+        let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+        let endpoint_matches = |id| {
+            tx.memory_units
+                .iter()
+                .chain(
+                    state
+                        .memory_units
+                        .get(&tx.context.tenant_id)
+                        .into_iter()
+                        .flatten(),
+                )
+                .any(|unit| unit.id == id && unit_matches_context(unit, &tx.context))
+        };
+        if !endpoint_matches(edge.src_id) || !endpoint_matches(edge.dst_id) {
+            return Err(StoreError::Conflict(
+                "memory edge endpoints must belong to the transaction context".to_string(),
+            ));
+        }
+        drop(state);
 
         let id = EdgeId::new();
         tx.memory_edges.push(StoredMemoryEdge {
@@ -1068,6 +2925,8 @@ impl MemoryStore for InMemoryStore {
             src_id: edge.src_id,
             dst_id: edge.dst_id,
             kind: edge.kind,
+            transaction_from: Some(tx.transaction_time.clone()),
+            transaction_to: None,
         });
         Ok(id)
     }
@@ -1080,12 +2939,105 @@ impl MemoryStore for InMemoryStore {
         if tx.committed {
             return Err(StoreError::TransactionAlreadyCommitted);
         }
+        validate_context_identity(
+            &tx.context,
+            job.tenant_id,
+            job.data_subject_id,
+            job.subject_generation,
+            job.scope_id,
+            job.agent_node_id,
+            Some(job.actor_id),
+        )?;
+        let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+        let target_matches = match job.kind {
+            ReflectJobKind::ReflectEpisode if job.resource_id.is_none() => {
+                job.episode_id.is_some_and(|id| {
+                    tx.episodes.iter().any(|episode| episode.id == id)
+                        || state
+                            .episodes
+                            .get(&tx.context.tenant_id)
+                            .is_some_and(|episodes| {
+                                episodes.iter().any(|episode| {
+                                    episode.id == id
+                                        && episode.data_subject_id == tx.context.data_subject_id
+                                        && episode.subject_generation
+                                            == tx.context.subject_generation
+                                        && episode.scope_id == tx.context.scope_id
+                                        && episode.agent_node_id == tx.context.agent_node_id
+                                        && episode.actor_id == tx.context.actor_id
+                                })
+                            })
+                })
+            }
+            ReflectJobKind::ReflectResource if job.episode_id.is_none() => {
+                job.resource_id.is_some_and(|id| {
+                    tx.resources.iter().any(|resource| resource.id == id)
+                        || state
+                            .resources
+                            .get(&tx.context.tenant_id)
+                            .is_some_and(|resources| {
+                                resources.iter().any(|resource| {
+                                    resource.id == id
+                                        && resource.data_subject_id == tx.context.data_subject_id
+                                        && resource.subject_generation
+                                            == tx.context.subject_generation
+                                        && resource.scope_id == tx.context.scope_id
+                                        && resource.agent_node_id == tx.context.agent_node_id
+                                        && resource.actor_id == tx.context.actor_id
+                                })
+                            })
+                })
+            }
+            ReflectJobKind::ReflectScope
+                if job.episode_id.is_none() && job.resource_id.is_none() =>
+            {
+                true
+            }
+            _ => false,
+        };
+        drop(state);
+        if !target_matches {
+            return Err(StoreError::Conflict(
+                "reflect job target must belong to the transaction context".to_string(),
+            ));
+        }
+
+        let same_job = |queued: &QueuedReflectJob| {
+            queued.tenant_id == job.tenant_id
+                && queued.data_subject_id == job.data_subject_id
+                && queued.subject_generation == job.subject_generation
+                && queued.scope_id == job.scope_id
+                && queued.actor_id == job.actor_id
+                && queued.agent_node_id == job.agent_node_id
+                && queued.kind == job.kind
+                && queued.episode_id == job.episode_id
+                && queued.resource_id == job.resource_id
+                && queued.compiler_version == job.compiler_version
+        };
+        if job.kind != ReflectJobKind::ReflectScope {
+            if let Some(existing) = tx.reflect_jobs.iter().find(|queued| same_job(queued)) {
+                return Ok(existing.id);
+            }
+            let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+            if let Some(existing) = state
+                .reflect_jobs
+                .get(&job.tenant_id)
+                .and_then(|jobs| jobs.iter().find(|queued| same_job(queued)))
+            {
+                return Ok(existing.id);
+            }
+            drop(state);
+        }
 
         let id = JobId::new();
         tx.reflect_jobs.push(QueuedReflectJob {
             id,
             tenant_id: job.tenant_id,
+            data_subject_id: job.data_subject_id,
             scope_id: job.scope_id,
+            actor_id: job.actor_id,
+            agent_node_id: job.agent_node_id,
+            subject_generation: job.subject_generation,
             episode_id: job.episode_id,
             resource_id: job.resource_id,
             kind: job.kind,
@@ -1098,21 +3050,27 @@ impl MemoryStore for InMemoryStore {
 
     async fn fetch_recall_candidates(
         &self,
-        tenant: TenantId,
-        scopes: &[ScopeId],
+        context: &ResolvedMemoryContext,
         kinds: &[MemoryKind],
         _query_terms: &[String],
+        time: &RecallTime,
         limit: usize,
     ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
         let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+        state.validate_context(context)?;
         let mut units: Vec<_> = state
             .memory_units
-            .get(&tenant)
+            .get(&context.tenant_id)
             .map(|units| {
                 units
                     .iter()
-                    .filter(|unit| scopes.contains(&unit.scope_id))
+                    .filter(|unit| {
+                        unit.data_subject_id == context.data_subject_id
+                            && unit.subject_generation == context.subject_generation
+                            && context.allows(unit.kind, unit.scope_id, unit.agent_node_id)
+                    })
                     .filter(|unit| kinds.is_empty() || kinds.contains(&unit.kind))
+                    .filter(|unit| bitemporally_recallable(unit, time))
                     .cloned()
                     .collect()
             })
@@ -1121,25 +3079,55 @@ impl MemoryStore for InMemoryStore {
         Ok(units)
     }
 
-    async fn fetch_vector_candidates(
+    async fn fetch_scope_open_units(
         &self,
-        tenant: TenantId,
-        scopes: &[ScopeId],
-        kinds: &[MemoryKind],
-        query_vec: &[f32],
-        profile_id: Uuid,
-        limit: usize,
-    ) -> Result<Vec<(StoredMemoryUnit, f32)>, StoreError> {
+        context: &ResolvedMemoryContext,
+    ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
         let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
-        let embeddings = state.embeddings.get(&tenant);
-        let mut scored: Vec<(StoredMemoryUnit, f32)> = state
+        state.validate_context(context)?;
+        Ok(state
             .memory_units
-            .get(&tenant)
+            .get(&context.tenant_id)
             .map(|units| {
                 units
                     .iter()
-                    .filter(|unit| scopes.contains(&unit.scope_id))
-                    .filter(|unit| kinds.is_empty() || kinds.contains(&unit.kind))
+                    .filter(|unit| {
+                        unit.data_subject_id == context.data_subject_id
+                            && unit.subject_generation == context.subject_generation
+                            && unit.scope_id == context.scope_id
+                            && unit.agent_node_id == context.agent_node_id
+                            && context.allows(unit.kind, unit.scope_id, unit.agent_node_id)
+                            && unit.transaction_to.is_none()
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    async fn fetch_vector_candidates(
+        &self,
+        context: &ResolvedMemoryContext,
+        query_vec: &[f32],
+        profile_id: Uuid,
+        time: &RecallTime,
+        limit: usize,
+    ) -> Result<Vec<(StoredMemoryUnit, f32)>, StoreError> {
+        let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+        state.validate_context(context)?;
+        let embeddings = state.embeddings.get(&context.tenant_id);
+        let mut scored: Vec<(StoredMemoryUnit, f32)> = state
+            .memory_units
+            .get(&context.tenant_id)
+            .map(|units| {
+                units
+                    .iter()
+                    .filter(|unit| {
+                        unit.data_subject_id == context.data_subject_id
+                            && unit.subject_generation == context.subject_generation
+                            && context.allows(unit.kind, unit.scope_id, unit.agent_node_id)
+                    })
+                    .filter(|unit| bitemporally_recallable(unit, time))
                     .filter_map(|unit| {
                         // Best (nearest) embedding for this unit UNDER the
                         // active profile; app-side cosine, returned as cosine
@@ -1162,6 +3150,9 @@ impl MemoryStore for InMemoryStore {
             left.1
                 .partial_cmp(&right.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                // Content tie-break so the top-`limit` cut is stable across
+                // re-ingests, mirroring the postgres `<=>, unit.body` order-by.
+                .then_with(|| left.0.body.cmp(&right.0.body))
         });
         scored.truncate(limit);
         Ok(scored)
@@ -1169,17 +3160,23 @@ impl MemoryStore for InMemoryStore {
 
     async fn fetch_units_by_ids(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         ids: &[UnitId],
     ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
         let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+        state.validate_context(context)?;
         Ok(state
             .memory_units
-            .get(&tenant)
+            .get(&context.tenant_id)
             .map(|units| {
                 units
                     .iter()
-                    .filter(|unit| ids.contains(&unit.id))
+                    .filter(|unit| {
+                        ids.contains(&unit.id)
+                            && unit.data_subject_id == context.data_subject_id
+                            && unit.subject_generation == context.subject_generation
+                            && context.allows(unit.kind, unit.scope_id, unit.agent_node_id)
+                    })
                     .cloned()
                     .collect()
             })
@@ -1188,18 +3185,56 @@ impl MemoryStore for InMemoryStore {
 
     async fn fetch_edges(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         unit_ids: &[UnitId],
+        time: &RecallTime,
     ) -> Result<Vec<StoredMemoryEdge>, StoreError> {
         let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+        state.validate_context(context)?;
+        let requested_ids: HashSet<_> = state
+            .memory_units
+            .get(&context.tenant_id)
+            .into_iter()
+            .flatten()
+            .filter(|unit| {
+                unit_ids.contains(&unit.id)
+                    && unit.data_subject_id == context.data_subject_id
+                    && unit.subject_generation == context.subject_generation
+                    && context.allows(unit.kind, unit.scope_id, unit.agent_node_id)
+            })
+            .map(|unit| unit.id)
+            .collect();
+        let authorized_ids: HashSet<_> = state
+            .memory_units
+            .get(&context.tenant_id)
+            .into_iter()
+            .flatten()
+            .filter(|unit| {
+                unit.data_subject_id == context.data_subject_id
+                    && unit.subject_generation == context.subject_generation
+                    && context.allows(unit.kind, unit.scope_id, unit.agent_node_id)
+            })
+            .map(|unit| unit.id)
+            .collect();
         Ok(state
             .memory_edges
-            .get(&tenant)
+            .get(&context.tenant_id)
             .map(|edges| {
                 edges
                     .iter()
                     .filter(|edge| {
-                        unit_ids.contains(&edge.src_id) || unit_ids.contains(&edge.dst_id)
+                        (requested_ids.contains(&edge.src_id)
+                            || requested_ids.contains(&edge.dst_id))
+                            && authorized_ids.contains(&edge.src_id)
+                            && authorized_ids.contains(&edge.dst_id)
+                    })
+                    .filter(|edge| {
+                        edge.transaction_from.as_deref().is_none_or(|from| {
+                            cmp_rfc3339(from, &time.transaction_as_of)
+                                != std::cmp::Ordering::Greater
+                        }) && edge.transaction_to.as_deref().is_none_or(|to| {
+                            cmp_rfc3339(&time.transaction_as_of, to) == std::cmp::Ordering::Less
+                        })
                     })
                     .cloned()
                     .collect()
@@ -1207,23 +3242,119 @@ impl MemoryStore for InMemoryStore {
             .unwrap_or_default())
     }
 
+    async fn fetch_record_material(
+        &self,
+        context: &ResolvedMemoryContext,
+        ids: &[UnitId],
+        time: &RecallTime,
+    ) -> Result<Vec<RecordMaterial>, StoreError> {
+        let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+        state.validate_context(context)?;
+        let authorized: HashMap<UnitId, StoredMemoryUnit> = state
+            .memory_units
+            .get(&context.tenant_id)
+            .into_iter()
+            .flatten()
+            .filter(|unit| {
+                unit.data_subject_id == context.data_subject_id
+                    && unit.subject_generation == context.subject_generation
+                    && context.allows(unit.kind, unit.scope_id, unit.agent_node_id)
+                    && bitemporally_recallable(unit, time)
+            })
+            .map(|unit| (unit.id, unit.clone()))
+            .collect();
+        Ok(ids
+            .iter()
+            .filter_map(|id| authorized.get(id))
+            .map(|unit| RecordMaterial {
+                unit: unit.clone(),
+                citations: state
+                    .citations
+                    .get(&context.tenant_id)
+                    .into_iter()
+                    .flatten()
+                    .filter(|citation| {
+                        citation.memory_unit_id == unit.id
+                            && citation.data_subject_id == context.data_subject_id
+                            && citation.subject_generation == context.subject_generation
+                    })
+                    .cloned()
+                    .collect(),
+                lineage: state
+                    .memory_edges
+                    .get(&context.tenant_id)
+                    .into_iter()
+                    .flatten()
+                    .filter(|edge| edge.src_id == unit.id || edge.dst_id == unit.id)
+                    .filter(|edge| {
+                        authorized.contains_key(&edge.src_id)
+                            && authorized.contains_key(&edge.dst_id)
+                    })
+                    .filter(|edge| {
+                        edge.transaction_from.as_deref().is_none_or(|from| {
+                            cmp_rfc3339(from, &time.transaction_as_of)
+                                != std::cmp::Ordering::Greater
+                        }) && edge.transaction_to.as_deref().is_none_or(|to| {
+                            cmp_rfc3339(&time.transaction_as_of, to) == std::cmp::Ordering::Less
+                        })
+                    })
+                    .filter(|edge| {
+                        matches!(
+                            edge.kind,
+                            MemoryEdgeKind::Supersedes
+                                | MemoryEdgeKind::Contradicts
+                                | MemoryEdgeKind::DerivedFrom
+                                | MemoryEdgeKind::Cites
+                        )
+                    })
+                    .cloned()
+                    .collect(),
+            })
+            .collect())
+    }
+
     async fn fetch_review_events(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         unit_ids: &[UnitId],
+        time: &RecallTime,
     ) -> Result<Vec<ReviewEventRow>, StoreError> {
         let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+        state.validate_context(context)?;
+        let trace_ids: HashSet<_> = state
+            .retrieval_traces
+            .get(&context.tenant_id)
+            .into_iter()
+            .flatten()
+            .filter(|trace| {
+                trace.data_subject_id == context.data_subject_id
+                    && trace.subject_generation == context.subject_generation
+                    && trace.scope_id == context.scope_id
+                    && trace.actor_id == context.actor_id
+                    && trace.agent_node_id == context.agent_node_id
+            })
+            .map(|trace| trace.id)
+            .collect();
         Ok(state
             .review_events
-            .get(&tenant)
+            .get(&context.tenant_id)
             .map(|events| {
                 events
                     .iter()
+                    .filter(|event| trace_ids.contains(&event.trace_id))
                     .filter(|event| {
                         event.used_ids.is_empty()
                             || event.used_ids.iter().any(|id| unit_ids.contains(id))
                     })
+                    .filter(|event| {
+                        cmp_rfc3339(&event.recorded_at, &time.transaction_as_of)
+                            != std::cmp::Ordering::Greater
+                    })
                     .cloned()
+                    .map(|mut event| {
+                        event.used_ids.retain(|id| unit_ids.contains(id));
+                        event
+                    })
                     .collect()
             })
             .unwrap_or_default())
@@ -1231,18 +3362,26 @@ impl MemoryStore for InMemoryStore {
 
     async fn fetch_episodes_for_scope(
         &self,
-        tenant: TenantId,
-        scope: ScopeId,
+        context: &ResolvedMemoryContext,
         limit: usize,
     ) -> Result<Vec<StoredEpisode>, StoreError> {
         let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+        state.validate_context(context)?;
         let mut episodes: Vec<_> = state
             .episodes
-            .get(&tenant)
+            .get(&context.tenant_id)
             .map(|episodes| {
                 episodes
                     .iter()
-                    .filter(|episode| episode.scope_id == scope)
+                    .filter(|episode| {
+                        episode.data_subject_id == context.data_subject_id
+                            && episode.subject_generation == context.subject_generation
+                            && context.allows(
+                                MemoryKind::Episodic,
+                                episode.scope_id,
+                                episode.agent_node_id,
+                            )
+                    })
                     .cloned()
                     .collect()
             })
@@ -1253,16 +3392,21 @@ impl MemoryStore for InMemoryStore {
 
     async fn pending_job_count(
         &self,
-        tenant: TenantId,
-        scope: ScopeId,
+        context: &ResolvedMemoryContext,
     ) -> Result<usize, StoreError> {
         let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+        state.validate_context(context)?;
         Ok(state
             .reflect_jobs
-            .get(&tenant)
+            .get(&context.tenant_id)
             .map(|jobs| {
                 jobs.iter()
-                    .filter(|job| job.scope_id == scope)
+                    .filter(|job| {
+                        job.data_subject_id == context.data_subject_id
+                            && job.subject_generation == context.subject_generation
+                            && job.scope_id == context.scope_id
+                            && job.agent_node_id == context.agent_node_id
+                    })
                     .filter(|job| {
                         !state
                             .job_meta
@@ -1277,83 +3421,157 @@ impl MemoryStore for InMemoryStore {
 
     async fn fetch_episode(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         id: EpisodeId,
     ) -> Result<Option<StoredEpisode>, StoreError> {
         let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
-        Ok(state
-            .episodes
-            .get(&tenant)
-            .and_then(|episodes| episodes.iter().find(|episode| episode.id == id).cloned()))
+        state.validate_context(context)?;
+        Ok(state.episodes.get(&context.tenant_id).and_then(|episodes| {
+            episodes
+                .iter()
+                .find(|episode| {
+                    episode.id == id
+                        && episode.data_subject_id == context.data_subject_id
+                        && episode.subject_generation == context.subject_generation
+                        && episode.scope_id == context.scope_id
+                        && episode.agent_node_id == context.agent_node_id
+                        && episode.actor_id == context.actor_id
+                })
+                .cloned()
+        }))
     }
 
     async fn fetch_resource(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         id: ResourceId,
     ) -> Result<Option<StoredResource>, StoreError> {
         let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+        state.validate_context(context)?;
         Ok(state
             .resources
-            .get(&tenant)
-            .and_then(|resources| resources.iter().find(|resource| resource.id == id).cloned()))
+            .get(&context.tenant_id)
+            .and_then(|resources| {
+                resources
+                    .iter()
+                    .find(|resource| {
+                        resource.id == id
+                            && resource.data_subject_id == context.data_subject_id
+                            && resource.subject_generation == context.subject_generation
+                            && resource.scope_id == context.scope_id
+                            && resource.agent_node_id == context.agent_node_id
+                            && resource.actor_id == context.actor_id
+                    })
+                    .cloned()
+            }))
     }
 
-    async fn apply_correction(
+    async fn stage_correction(
         &self,
-        tenant: TenantId,
+        tx: &mut Self::Txn,
         correction: CorrectionWrite,
     ) -> Result<CorrectOutcome, StoreError> {
-        let mut state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
-        let units = state
+        let context = tx.context.clone();
+        let state = self.staged_state(tx)?;
+        let old_unit = state
             .memory_units
-            .get_mut(&tenant)
+            .get(&context.tenant_id)
             .ok_or(StoreError::NotFound("memory_unit"))?;
-        let old_index = units
+        let old_unit = old_unit
             .iter()
-            .position(|unit| {
+            .find(|unit| {
                 unit.id == correction.selector.memory_unit_id
-                    && unit.scope_id == correction.scope_id
+                    && unit.data_subject_id == context.data_subject_id
+                    && unit.subject_generation == context.subject_generation
+                    && unit.scope_id == context.scope_id
+                    && unit.agent_node_id == context.agent_node_id
+                    && unit.actor_id == Some(context.actor_id)
                     && unit.state != UnitState::Deleted
+                    // Only the OPEN generation is correctable: re-correcting an
+                    // already-superseded id must not mint a second live unit.
+                    && unit.transaction_to.is_none()
             })
+            .cloned()
             .ok_or(StoreError::NotFound("memory_unit"))?;
-        let mut replacement = units[old_index].clone();
-        let old_id = replacement.id;
-        let new_id = UnitId::new();
+        let old_id = old_unit.id;
+        let (replacement, remainders) = correction_rectangles(
+            &old_unit,
+            &correction.correction,
+            &correction.source_ref,
+            &correction.observed_at,
+            context.actor_id,
+            &correction.now,
+        )?;
+        let new_id = replacement.id;
+        let remainder_ids: Vec<UnitId> = remainders.iter().map(|unit| unit.id).collect();
+        let old_embeddings: Vec<EmbeddingRow> = state
+            .embeddings
+            .get(&context.tenant_id)
+            .into_iter()
+            .flatten()
+            .filter(|row| row.memory_unit_id == old_id)
+            .cloned()
+            .collect();
         let is_retroactive =
             correction.correction.valid_from.is_some() || correction.correction.valid_to.is_some();
 
+        let units = state.memory_units.entry(context.tenant_id).or_default();
+        let old_index = units.iter().position(|unit| unit.id == old_id).unwrap();
         units[old_index].state = UnitState::Superseded;
         units[old_index].transaction_to = Some(correction.now.clone());
-        replacement.id = new_id;
-        replacement.body = correction.correction.value;
-        replacement.state = UnitState::Active;
-        replacement.actor_id = Some(correction.actor_id);
-        replacement.deletion_generation = None;
-        replacement.valid_from = correction.correction.valid_from;
-        replacement.valid_to = correction.correction.valid_to;
-        replacement.transaction_from = Some(correction.now.clone());
-        replacement.transaction_to = None;
         units.push(replacement);
+        units.extend(remainders);
 
-        state
-            .memory_edges
-            .entry(tenant)
-            .or_default()
-            .push(StoredMemoryEdge {
+        let edges = state.memory_edges.entry(context.tenant_id).or_default();
+        for created_id in std::iter::once(new_id).chain(remainder_ids.iter().copied()) {
+            edges.push(StoredMemoryEdge {
                 id: EdgeId::new(),
-                tenant_id: tenant,
-                scope_id: correction.scope_id,
-                src_id: new_id,
+                tenant_id: context.tenant_id,
+                scope_id: context.scope_id,
+                src_id: created_id,
                 dst_id: old_id,
                 kind: MemoryEdgeKind::Supersedes,
+                transaction_from: Some(correction.now.clone()),
+                transaction_to: None,
             });
-        expire_composed_dependents(&mut state, tenant, &[old_id], &correction.now);
+        }
+        expire_composed_dependents(state, &context, &[old_id], &correction.now);
 
+        // Embed the replacement unit under the same lock as its supersedes edge
+        // so corrected truth is vector-visible — mirrors the Postgres path.
+        if let Some((profile, vec)) = correction.embedding.filter(|(_, vec)| !vec.is_empty()) {
+            let profile_id = profile.id;
+            let profiles = state
+                .embedding_profiles
+                .entry(context.tenant_id)
+                .or_default();
+            if !profiles.iter().any(|existing| existing.id == profile_id) {
+                profiles.push(profile);
+            }
+            let stored = state.embeddings.entry(context.tenant_id).or_default();
+            stored.retain(|existing| {
+                !(existing.memory_unit_id == new_id && existing.embedding_profile_id == profile_id)
+            });
+            stored.push(EmbeddingRow {
+                memory_unit_id: new_id,
+                embedding_profile_id: profile_id,
+                vec,
+            });
+        }
+        let stored = state.embeddings.entry(context.tenant_id).or_default();
+        for remainder_id in &remainder_ids {
+            stored.extend(old_embeddings.iter().cloned().map(|mut row| {
+                row.memory_unit_id = *remainder_id;
+                row
+            }));
+        }
+
+        let mut created = vec![new_id];
+        created.extend(remainder_ids);
         Ok(CorrectResult {
             correction_id: format!("cor_{}", new_id.as_uuid()),
             superseded: vec![old_id],
-            created: vec![new_id],
+            created,
             correction_kind: if is_retroactive {
                 "retroactive".to_string()
             } else {
@@ -1363,52 +3581,179 @@ impl MemoryStore for InMemoryStore {
         })
     }
 
-    async fn apply_forget(
+    async fn stage_forget(
         &self,
-        tenant: TenantId,
+        tx: &mut Self::Txn,
         forget: ForgetWrite,
     ) -> Result<ForgetOutcome, StoreError> {
-        let mut state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
-        state.deletion_generation = state.deletion_generation.saturating_add(1);
-        let deletion_generation = state.deletion_generation;
+        let context = tx.context.clone();
+        let state = self.staged_state(tx)?;
+        let authorized = match forget.target {
+            ForgetTarget::MemoryUnit(id) => state
+                .memory_units
+                .get(&context.tenant_id)
+                .into_iter()
+                .flatten()
+                .any(|unit| {
+                    unit.id == id
+                        && unit.data_subject_id == context.data_subject_id
+                        && unit.subject_generation == context.subject_generation
+                        && unit.scope_id == context.scope_id
+                        && unit.agent_node_id == context.agent_node_id
+                        && unit.actor_id == Some(context.actor_id)
+                }),
+            ForgetTarget::Episode(id) => state
+                .episodes
+                .get(&context.tenant_id)
+                .into_iter()
+                .flatten()
+                .any(|episode| {
+                    episode.id == id
+                        && episode.data_subject_id == context.data_subject_id
+                        && episode.subject_generation == context.subject_generation
+                        && episode.scope_id == context.scope_id
+                        && episode.agent_node_id == context.agent_node_id
+                        && episode.actor_id == context.actor_id
+                }),
+            ForgetTarget::Resource(id) => state
+                .resources
+                .get(&context.tenant_id)
+                .into_iter()
+                .flatten()
+                .any(|resource| {
+                    resource.id == id
+                        && resource.data_subject_id == context.data_subject_id
+                        && resource.subject_generation == context.subject_generation
+                        && resource.scope_id == context.scope_id
+                        && resource.agent_node_id == context.agent_node_id
+                        && resource.actor_id == context.actor_id
+                }),
+        };
+        if !authorized {
+            return Err(StoreError::NotFound("forget target"));
+        }
+        let deletion_generation = state
+            .deletion_generation
+            .entry((context.tenant_id, context.data_subject_id))
+            .or_default();
+        *deletion_generation = deletion_generation.saturating_add(1);
+        let deletion_generation = *deletion_generation;
 
         let tombstone = match forget.target {
             ForgetTarget::MemoryUnit(id) => (SourceKindKey::MemoryUnit, id.as_uuid()),
             ForgetTarget::Episode(id) => (SourceKindKey::Episode, id.as_uuid()),
             ForgetTarget::Resource(id) => (SourceKindKey::Resource, id.as_uuid()),
         };
-        state
-            .forgotten_sources
-            .insert((tenant, tombstone.0, tombstone.1));
+        state.forgotten_sources.insert((
+            context.tenant_id,
+            context.data_subject_id,
+            context.subject_generation,
+            context.scope_id,
+            context.agent_node_id,
+            tombstone.0,
+            tombstone.1,
+        ));
 
         if let ForgetTarget::Episode(episode_id) = forget.target
-            && let Some(episodes) = state.episodes.get_mut(&tenant)
+            && let Some(episodes) = state.episodes.get_mut(&context.tenant_id)
         {
-            episodes.retain(|episode| episode.id != episode_id);
+            episodes.retain(|episode| {
+                episode.id != episode_id
+                    || episode.data_subject_id != context.data_subject_id
+                    || episode.subject_generation != context.subject_generation
+                    || episode.scope_id != context.scope_id
+                    || episode.agent_node_id != context.agent_node_id
+                    || episode.actor_id != context.actor_id
+            });
+        }
+
+        // Seed the sweep set. Unit forget erases the whole fact lineage
+        // (bidirectional supersedes closure); episode/resource forget seeds
+        // from the source columns, then must still cascade to supersedes
+        // DESCENDANTS: a correction replacement carries correction provenance
+        // (source_episode_id = None, pinned by correction_provenance.rs), so
+        // the source-column match alone lets corrected content survive the
+        // episode's erasure. Descendants only — an ancestor a corrected unit
+        // superseded came from a different source and is not this target's
+        // content.
+        let mut memory_lineage = HashSet::new();
+        match forget.target {
+            ForgetTarget::MemoryUnit(id) => {
+                memory_lineage.insert(id);
+            }
+            ForgetTarget::Episode(_) | ForgetTarget::Resource(_) => {
+                for unit in state
+                    .memory_units
+                    .get(&context.tenant_id)
+                    .into_iter()
+                    .flatten()
+                    .filter(|unit| {
+                        unit.data_subject_id == context.data_subject_id
+                            && unit.subject_generation == context.subject_generation
+                            && unit.scope_id == context.scope_id
+                            && unit.agent_node_id == context.agent_node_id
+                            && unit.actor_id == Some(context.actor_id)
+                            && match forget.target {
+                                ForgetTarget::Episode(id) => unit.source_episode_id == Some(id),
+                                ForgetTarget::Resource(id) => unit.source_resource_id == Some(id),
+                                ForgetTarget::MemoryUnit(_) => unreachable!(),
+                            }
+                    })
+                {
+                    memory_lineage.insert(unit.id);
+                }
+            }
+        }
+        let bidirectional = matches!(forget.target, ForgetTarget::MemoryUnit(_));
+        if let Some(edges) = state.memory_edges.get(&context.tenant_id) {
+            loop {
+                let before = memory_lineage.len();
+                for edge in edges
+                    .iter()
+                    .filter(|edge| edge.kind == MemoryEdgeKind::Supersedes)
+                {
+                    if memory_lineage.contains(&edge.dst_id) {
+                        memory_lineage.insert(edge.src_id);
+                    }
+                    if bidirectional && memory_lineage.contains(&edge.src_id) {
+                        memory_lineage.insert(edge.dst_id);
+                    }
+                }
+                if memory_lineage.len() == before {
+                    break;
+                }
+            }
         }
 
         let mut invalidated_units: Vec<UnitId> = Vec::new();
-        if let Some(units) = state.memory_units.get_mut(&tenant) {
+        if let Some(units) = state.memory_units.get_mut(&context.tenant_id) {
             for unit in units.iter_mut().filter(|unit| {
-                unit.scope_id == forget.scope_id
+                unit.data_subject_id == context.data_subject_id
+                    && unit.subject_generation == context.subject_generation
+                    && unit.scope_id == context.scope_id
+                    && unit.agent_node_id == context.agent_node_id
+                    && unit.actor_id == Some(context.actor_id)
                     && unit.state != UnitState::Deleted
-                    && match forget.target {
-                        ForgetTarget::MemoryUnit(id) => unit.id == id,
-                        ForgetTarget::Episode(id) => unit.source_episode_id == Some(id),
-                        ForgetTarget::Resource(id) => unit.source_resource_id == Some(id),
-                    }
+                    && memory_lineage.contains(&unit.id)
             }) {
                 unit.state = UnitState::Deleted;
                 unit.deletion_generation = Some(deletion_generation);
+                unit.transaction_to = Some(forget.now.clone());
                 invalidated_units.push(unit.id);
             }
         }
         invalidated_units.extend(delete_composed_dependents(
-            &mut state,
-            tenant,
+            state,
+            &context,
             &invalidated_units,
             deletion_generation,
+            &forget.now,
         ));
+
+        // Forgotten embeddings are hard-deleted with their units (Pg parity).
+        if let Some(embeddings) = state.embeddings.get_mut(&context.tenant_id) {
+            embeddings.retain(|row| !invalidated_units.contains(&row.memory_unit_id));
+        }
 
         Ok(ForgetOutcome {
             deletion_generation,
@@ -1416,13 +3761,52 @@ impl MemoryStore for InMemoryStore {
         })
     }
 
-    async fn record_review_events(
+    async fn stage_review_events(
         &self,
-        tenant: TenantId,
+        tx: &mut Self::Txn,
         events: Vec<ReviewEventRow>,
     ) -> Result<(), StoreError> {
-        let mut state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
-        let stored = state.review_events.entry(tenant).or_default();
+        let context = tx.context.clone();
+        let state = self.staged_state(tx)?;
+        let trace_ids: HashMap<_, HashSet<_>> = state
+            .retrieval_traces
+            .get(&context.tenant_id)
+            .into_iter()
+            .flatten()
+            .filter(|trace| {
+                trace.data_subject_id == context.data_subject_id
+                    && trace.subject_generation == context.subject_generation
+                    && trace.scope_id == context.scope_id
+                    && trace.actor_id == context.actor_id
+                    && trace.agent_node_id == context.agent_node_id
+            })
+            .map(|trace| {
+                (
+                    trace.id,
+                    // Derived source ids are valid mark targets: record_mark
+                    // expands synthetic items into them before staging.
+                    trace
+                        .context_items
+                        .iter()
+                        .flat_map(|item| {
+                            std::iter::once(item.unit_id)
+                                .chain(item.derived_from_unit_ids.iter().copied())
+                        })
+                        .collect::<HashSet<_>>(),
+                )
+            })
+            .collect();
+        for event in &events {
+            let Some(whitelist) = trace_ids.get(&event.trace_id) else {
+                return Err(StoreError::NotFound("retrieval trace"));
+            };
+            if event.tenant_id != context.tenant_id
+                || event.used_ids.iter().any(|id| !whitelist.contains(id))
+            {
+                return Err(StoreError::NotFound("retrieval trace review whitelist"));
+            }
+        }
+        let stored = state.review_events.entry(context.tenant_id).or_default();
         for event in events {
             if !stored.iter().any(|existing| {
                 existing.trace_id == event.trace_id && existing.caller_id == event.caller_id
@@ -1433,43 +3817,78 @@ impl MemoryStore for InMemoryStore {
         Ok(())
     }
 
-    async fn store_trace(&self, tenant: TenantId, trace: RetrievalTrace) -> Result<(), StoreError> {
+    async fn store_trace(
+        &self,
+        context: &ResolvedMemoryContext,
+        trace: RetrievalTrace,
+    ) -> Result<(), StoreError> {
+        if trace.tenant_id != context.tenant_id
+            || trace.data_subject_id != context.data_subject_id
+            || trace.subject_generation != context.subject_generation
+            || trace.scope_id != context.scope_id
+            || trace.actor_id != context.actor_id
+            || trace.agent_node_id != context.agent_node_id
+            || trace.policy_revision != context.policy_revision
+        {
+            return Err(StoreError::Conflict("trace context mismatch".to_string()));
+        }
         let mut state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
-        state
-            .retrieval_traces
-            .entry(tenant)
-            .or_default()
-            .push(trace);
+        state.validate_context(context)?;
+        let traces = state.retrieval_traces.entry(context.tenant_id).or_default();
+        if let Some(existing) = traces.iter_mut().find(|existing| existing.id == trace.id) {
+            *existing = trace;
+        } else {
+            traces.push(trace);
+        }
         Ok(())
     }
 
     async fn trace_by_id(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         id: TraceId,
     ) -> Result<Option<RetrievalTrace>, StoreError> {
         let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+        state.validate_context(context)?;
         Ok(state
             .retrieval_traces
-            .get(&tenant)
-            .and_then(|traces| traces.iter().find(|trace| trace.id == id).cloned()))
+            .get(&context.tenant_id)
+            .and_then(|traces| {
+                traces
+                    .iter()
+                    .find(|trace| {
+                        trace.id == id
+                            && trace.data_subject_id == context.data_subject_id
+                            && trace.subject_generation == context.subject_generation
+                            && trace.scope_id == context.scope_id
+                            && trace.actor_id == context.actor_id
+                            && trace.agent_node_id == context.agent_node_id
+                    })
+                    .cloned()
+            }))
     }
 
     async fn scope_memory_page(
         &self,
-        tenant: TenantId,
-        scope: ScopeId,
+        context: &ResolvedMemoryContext,
         cursor: Option<UnitId>,
         limit: usize,
     ) -> Result<ScopePage, StoreError> {
         let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+        state.validate_context(context)?;
         let mut units: Vec<_> = state
             .memory_units
-            .get(&tenant)
+            .get(&context.tenant_id)
             .map(|units| {
                 units
                     .iter()
-                    .filter(|unit| unit.scope_id == scope)
+                    .filter(|unit| {
+                        unit.data_subject_id == context.data_subject_id
+                            && unit.subject_generation == context.subject_generation
+                            && unit.scope_id == context.scope_id
+                            && unit.agent_node_id == context.agent_node_id
+                            && context.allows(unit.kind, unit.scope_id, unit.agent_node_id)
+                    })
                     .cloned()
                     .collect()
             })
@@ -1494,6 +3913,15 @@ impl MemoryStore for InMemoryStore {
         limit: usize,
     ) -> Result<Vec<ReflectJobRow>, StoreError> {
         let mut state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+        let lane = |job: &QueuedReflectJob| {
+            (
+                job.tenant_id,
+                job.data_subject_id,
+                job.subject_generation,
+                job.scope_id,
+                job.agent_node_id,
+            )
+        };
         let candidates: Vec<QueuedReflectJob> = state
             .reflect_jobs
             .iter()
@@ -1501,8 +3929,30 @@ impl MemoryStore for InMemoryStore {
             .flat_map(|(_, jobs)| jobs.iter())
             .filter(|job| filter.scope.is_none_or(|wanted| job.scope_id == wanted))
             .filter(|job| {
+                state.context_bindings.values().any(|(_, binding)| {
+                    binding.subject_id == job.data_subject_id
+                        && binding.actor_id == job.actor_id
+                        && binding.scope_id == job.scope_id
+                        && binding.agent_node_id == job.agent_node_id
+                        && binding.subject_generation == job.subject_generation
+                })
+            })
+            .filter(|job| {
                 let meta = state.job_meta.get(&job.id).copied().unwrap_or_default();
-                !meta.completed && !meta.claimed && meta.attempts < JOB_DEAD_LETTER_ATTEMPTS
+                !meta.completed
+                    && !meta.terminal
+                    && !meta.claimed
+                    && meta.attempts < JOB_DEAD_LETTER_ATTEMPTS
+            })
+            .filter(|job| {
+                let wanted_lane = lane(job);
+                !state.reflect_jobs.values().flatten().any(|other| {
+                    lane(other) == wanted_lane
+                        && state
+                            .job_meta
+                            .get(&other.id)
+                            .is_some_and(|meta| meta.claimed && !meta.completed)
+                })
             })
             .take(limit)
             .cloned()
@@ -1513,32 +3963,197 @@ impl MemoryStore for InMemoryStore {
             meta.claimed = true;
             meta.attempts = meta.attempts.saturating_add(1);
             let attempts = meta.attempts;
-            claimed.push(ReflectJobRow { job, attempts });
+            claimed.push(ReflectJobRow {
+                job,
+                attempts,
+                claim_generation: meta.claim_generation,
+            });
         }
         Ok(claimed)
     }
 
-    async fn complete_reflect_job(&self, id: JobId) -> Result<(), StoreError> {
+    async fn complete_reflect_job(
+        &self,
+        claim: &ReflectJobRow,
+    ) -> Result<ClaimMutationOutcome, StoreError> {
         let mut state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
-        let meta = state.job_meta.entry(id).or_default();
+        let exact_completed = state
+            .reflect_jobs
+            .get(&claim.job.tenant_id)
+            .is_some_and(|jobs| jobs.contains(&claim.job))
+            && state.job_meta.get(&claim.job.id).is_some_and(|meta| {
+                meta.completed
+                    && meta.attempts == claim.attempts
+                    && meta.claim_generation == claim.claim_generation
+            });
+        if exact_completed {
+            return Ok(ClaimMutationOutcome::Applied);
+        }
+        if !state.claim_is_current(claim) {
+            return Ok(ClaimMutationOutcome::Stale);
+        }
+        let meta = state.job_meta.entry(claim.job.id).or_default();
         meta.completed = true;
         meta.claimed = false;
+        Ok(ClaimMutationOutcome::Applied)
+    }
+
+    async fn fetch_prepared_structured_state(
+        &self,
+        claim: &ReflectJobRow,
+    ) -> Result<Option<Vec<ProjectedStructuredState>>, StoreError> {
+        let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+        if !state.claim_is_current(claim) {
+            return Ok(None);
+        }
+        Ok(state
+            .prepared_structured_state
+            .get(&(claim.job.tenant_id, claim.job.id))
+            .cloned())
+    }
+
+    async fn store_prepared_structured_state(
+        &self,
+        claim: &ReflectJobRow,
+        projections: Vec<ProjectedStructuredState>,
+    ) -> Result<(), StoreError> {
+        let mut state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+        if !state.claim_is_current(claim) {
+            return Ok(());
+        }
+        state
+            .prepared_structured_state
+            .entry((claim.job.tenant_id, claim.job.id))
+            .or_insert(projections);
         Ok(())
     }
 
-    async fn persist_compiled_units(
+    async fn release_reflect_job(
         &self,
-        tenant: TenantId,
-        write: CompiledWrite,
+        claim: &ReflectJobRow,
+        _retry_after_seconds: u64,
+        _error: String,
     ) -> Result<(), StoreError> {
         let mut state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
-        let already_compiled = state.reflect_traces.get(&tenant).is_some_and(|traces| {
-            traces.iter().any(|trace| {
-                trace.job_id == write.job_id && trace.compiler_version == write.compiler_version
-            })
-        });
-        if already_compiled {
+        if !state.claim_is_current(claim) {
             return Ok(());
+        }
+        state.job_meta.entry(claim.job.id).or_default().claimed = false;
+        Ok(())
+    }
+
+    async fn fail_reflect_job(
+        &self,
+        claim: &ReflectJobRow,
+        _error: String,
+    ) -> Result<(), StoreError> {
+        let mut state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+        if !state.claim_is_current(claim) {
+            return Ok(());
+        }
+        let meta = state.job_meta.entry(claim.job.id).or_default();
+        meta.claimed = false;
+        meta.terminal = true;
+        Ok(())
+    }
+
+    async fn stage_compiled_units(
+        &self,
+        tx: &mut Self::Txn,
+        claim: Option<&ReflectJobRow>,
+        write: CompiledWrite,
+    ) -> Result<ClaimMutationOutcome, StoreError> {
+        let context = tx.context.clone();
+        let state = self.staged_state(tx)?;
+        if let Some(claim) = claim {
+            if !state.claim_is_current(claim) {
+                return Ok(ClaimMutationOutcome::Stale);
+            }
+            if claim.job.tenant_id != context.tenant_id
+                || claim.job.data_subject_id != context.data_subject_id
+                || claim.job.subject_generation != context.subject_generation
+                || claim.job.scope_id != context.scope_id
+                || claim.job.agent_node_id != context.agent_node_id
+                || claim.job.actor_id != context.actor_id
+                || claim.job.id != write.job_id
+                || claim.job.compiler_version != write.compiler_version
+            {
+                return Err(StoreError::Conflict(
+                    "reflect claim does not match memory context".to_string(),
+                ));
+            }
+        }
+        let tenant = context.tenant_id;
+        let owner_key = (tenant, write.job_id, write.compiler_version.clone());
+        if let Some(owner) = state.reflect_trace_owners.get(&owner_key) {
+            let requested = (
+                context.data_subject_id,
+                context.subject_generation,
+                context.scope_id,
+                context.agent_node_id,
+                context.actor_id,
+            );
+            if *owner != requested {
+                return Err(StoreError::Conflict(
+                    "reflect job identity belongs to another memory context".to_string(),
+                ));
+            }
+            return Ok(ClaimMutationOutcome::Applied);
+        }
+
+        let owned_unit = |unit: &StoredMemoryUnit| {
+            unit.tenant_id == context.tenant_id
+                && unit.data_subject_id == context.data_subject_id
+                && unit.subject_generation == context.subject_generation
+                && unit.scope_id == context.scope_id
+                && unit.agent_node_id == context.agent_node_id
+                && unit.actor_id == Some(context.actor_id)
+        };
+        if write.new_units.iter().any(|unit| !owned_unit(unit)) {
+            return Err(StoreError::Conflict(
+                "compiled unit does not match memory context".to_string(),
+            ));
+        }
+        let existing_owned_ids: HashSet<UnitId> = state
+            .memory_units
+            .get(&tenant)
+            .into_iter()
+            .flatten()
+            .filter(|unit| owned_unit(unit))
+            .map(|unit| unit.id)
+            .collect();
+        if write
+            .unit_updates
+            .iter()
+            .any(|update| !existing_owned_ids.contains(&update.id))
+        {
+            return Err(StoreError::Conflict(
+                "compiled update does not match memory context".to_string(),
+            ));
+        }
+        let new_ids: HashSet<UnitId> = write.new_units.iter().map(|unit| unit.id).collect();
+        if write.new_edges.iter().any(|edge| {
+            edge.tenant_id != context.tenant_id
+                || edge.scope_id != context.scope_id
+                || (!new_ids.contains(&edge.src_id) && !existing_owned_ids.contains(&edge.src_id))
+                || (!new_ids.contains(&edge.dst_id) && !existing_owned_ids.contains(&edge.dst_id))
+        }) {
+            return Err(StoreError::Conflict(
+                "compiled edge does not match memory context".to_string(),
+            ));
+        }
+        if write.citations.iter().any(|citation| {
+            citation.tenant_id != context.tenant_id
+                || citation.data_subject_id != context.data_subject_id
+                || citation.subject_generation != context.subject_generation
+                || citation.scope_id != context.scope_id
+                || citation.agent_node_id != context.agent_node_id
+                || !new_ids.contains(&citation.memory_unit_id)
+                || (citation.episode_id.is_some() && citation.resource_id.is_some())
+        }) {
+            return Err(StoreError::Conflict(
+                "compiled citation does not match memory context".to_string(),
+            ));
         }
 
         for update in &write.unit_updates {
@@ -1559,7 +4174,7 @@ impl MemoryStore for InMemoryStore {
         let mut admitted_ids = HashSet::new();
         let mut admitted_units = Vec::new();
         for unit in write.new_units {
-            if state.is_forgotten_source(tenant, &unit) {
+            if state.is_forgotten_source(&unit) {
                 continue;
             }
             admitted_ids.insert(unit.id);
@@ -1586,36 +4201,132 @@ impl MemoryStore for InMemoryStore {
                     admitted_ids.contains(&edge.dst_id) || existing_ids.contains(&edge.dst_id);
                 src_ok && dst_ok
             }));
+        state.citations.entry(tenant).or_default().extend(
+            write
+                .citations
+                .into_iter()
+                .filter(|citation| admitted_ids.contains(&citation.memory_unit_id)),
+        );
         state
             .reflect_traces
             .entry(tenant)
             .or_default()
             .push(write.trace);
-        Ok(())
+        state.reflect_trace_owners.insert(
+            (tenant, write.job_id, write.compiler_version.clone()),
+            (
+                context.data_subject_id,
+                context.subject_generation,
+                context.scope_id,
+                context.agent_node_id,
+                context.actor_id,
+            ),
+        );
+
+        // Embedding write-through under the same lock as the units, admitted
+        // units only — mirrors the Postgres persist path.
+        if let Some(profile) = write.embedding_profile {
+            let rows: Vec<EmbeddingRow> = write
+                .embeddings
+                .into_iter()
+                .filter(|row| admitted_ids.contains(&row.memory_unit_id) && !row.vec.is_empty())
+                .collect();
+            if !rows.is_empty() {
+                let profile_id = profile.id;
+                let profiles = state.embedding_profiles.entry(tenant).or_default();
+                if !profiles.iter().any(|existing| existing.id == profile_id) {
+                    profiles.push(profile);
+                }
+                let stored = state.embeddings.entry(tenant).or_default();
+                for row in rows {
+                    stored.retain(|existing| {
+                        !(existing.memory_unit_id == row.memory_unit_id
+                            && existing.embedding_profile_id == row.embedding_profile_id)
+                    });
+                    stored.push(row);
+                }
+            }
+        }
+        if claim.is_some() {
+            let meta = state.job_meta.entry(write.job_id).or_default();
+            meta.completed = true;
+            meta.claimed = false;
+        }
+        Ok(ClaimMutationOutcome::Applied)
     }
 
     async fn fetch_reflect_trace(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         job_id: JobId,
         compiler_version: &str,
     ) -> Result<Option<ReflectTrace>, StoreError> {
         let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
-        Ok(state.reflect_traces.get(&tenant).and_then(|traces| {
-            traces
-                .iter()
-                .find(|trace| trace.job_id == job_id && trace.compiler_version == compiler_version)
-                .cloned()
-        }))
+        state.validate_context(context)?;
+        let owner = state.reflect_trace_owners.get(&(
+            context.tenant_id,
+            job_id,
+            compiler_version.to_string(),
+        ));
+        let requested = (
+            context.data_subject_id,
+            context.subject_generation,
+            context.scope_id,
+            context.agent_node_id,
+            context.actor_id,
+        );
+        match owner {
+            // Fresh identity: no completed trace for this tenant/job/compiler.
+            None => return Ok(None),
+            // Same identity replayed: fall through to return the existing trace
+            // (idempotent replay preserved).
+            Some(existing) if *existing == requested => {}
+            // A different subject/scope in the same tenant is replaying a job
+            // identity another context owns. Fail closed to match the Postgres
+            // store, whose (tenant_id, id) primary key rejects the second insert.
+            Some(_) => {
+                return Err(StoreError::Conflict(
+                    "reflect job identity belongs to another memory context".to_string(),
+                ));
+            }
+        }
+        Ok(state
+            .reflect_traces
+            .get(&context.tenant_id)
+            .and_then(|traces| {
+                traces
+                    .iter()
+                    .find(|trace| {
+                        trace.job_id == job_id && trace.compiler_version == compiler_version
+                    })
+                    .cloned()
+            }))
     }
 
     async fn upsert_embeddings(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         rows: Vec<EmbeddingRow>,
     ) -> Result<(), StoreError> {
         let mut state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
-        let stored = state.embeddings.entry(tenant).or_default();
+        state.validate_context(context)?;
+        let owned_ids: HashSet<UnitId> = state
+            .memory_units
+            .get(&context.tenant_id)
+            .into_iter()
+            .flatten()
+            .filter(|unit| unit_matches_context(unit, context))
+            .map(|unit| unit.id)
+            .collect();
+        if rows
+            .iter()
+            .any(|row| !owned_ids.contains(&row.memory_unit_id))
+        {
+            return Err(StoreError::PolicyDenied(
+                "embedding unit does not match context".to_string(),
+            ));
+        }
+        let stored = state.embeddings.entry(context.tenant_id).or_default();
         for row in rows {
             stored.retain(|existing| {
                 !(existing.memory_unit_id == row.memory_unit_id
@@ -1641,16 +4352,25 @@ impl MemoryStore for InMemoryStore {
 
     async fn fetch_embeddings(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         unit_ids: &[UnitId],
     ) -> Result<Vec<EmbeddingRow>, StoreError> {
         let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+        state.validate_context(context)?;
+        let owned_ids: HashSet<UnitId> = state
+            .memory_units
+            .get(&context.tenant_id)
+            .into_iter()
+            .flatten()
+            .filter(|unit| unit_matches_context(unit, context) && unit_ids.contains(&unit.id))
+            .map(|unit| unit.id)
+            .collect();
         Ok(state
             .embeddings
-            .get(&tenant)
+            .get(&context.tenant_id)
             .map(|rows| {
                 rows.iter()
-                    .filter(|row| unit_ids.contains(&row.memory_unit_id))
+                    .filter(|row| owned_ids.contains(&row.memory_unit_id))
                     .cloned()
                     .collect()
             })
@@ -1666,6 +4386,277 @@ impl MemoryStore for InMemoryStore {
             .cloned())
     }
 
+    async fn resolve_context_binding(
+        &self,
+        tenant: TenantId,
+        client_ref: String,
+        mut request: ContextBindingRequest,
+    ) -> Result<ContextBindingResponse, StoreError> {
+        let mut state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+        canonicalize_access_policies(&mut request.access_policies);
+        let key = (tenant, client_ref);
+        if let Some((existing_request, existing_response)) =
+            state.context_bindings.get(&key).cloned()
+        {
+            let mut existing_identity = existing_request.clone();
+            existing_identity.access_policies.clear();
+            let mut requested_identity = request.clone();
+            requested_identity.access_policies.clear();
+            if existing_identity != requested_identity {
+                return Err(StoreError::Conflict(
+                    "context binding identity, kind, and parent are immutable".to_string(),
+                ));
+            }
+            if existing_request == request {
+                return Ok(existing_response);
+            }
+            validate_in_memory_access_policies(
+                &state,
+                tenant,
+                &request,
+                existing_response.agent_level,
+            )?;
+            let mut updated_response = existing_response;
+            updated_response.policy_revision = context_policy_revision(&request.access_policies)?;
+            state
+                .context_bindings
+                .insert(key, (request, updated_response.clone()));
+            return Ok(updated_response);
+        }
+        let mut requested_identity = request.clone();
+        requested_identity.access_policies.clear();
+        if state
+            .context_bindings
+            .iter()
+            .filter(|((bound_tenant, _), _)| *bound_tenant == tenant)
+            .any(|(_, (bound, _))| {
+                let mut bound_identity = bound.clone();
+                bound_identity.access_policies.clear();
+                bound_identity == requested_identity
+            })
+        {
+            return Err(StoreError::Conflict(
+                "context identity is already registered under another client_ref".to_string(),
+            ));
+        }
+        if state
+            .context_bindings
+            .iter()
+            .filter(|((bound_tenant, _), _)| *bound_tenant == tenant)
+            .any(|(_, (bound, _))| {
+                bound.subject.external_ref == request.subject.external_ref
+                    && bound.agent_node.external_ref == request.agent_node.external_ref
+            })
+        {
+            return Err(StoreError::Conflict(
+                "agent node is already registered under another client_ref".to_string(),
+            ));
+        }
+
+        for (_, (bound, _)) in state
+            .context_bindings
+            .iter()
+            .filter(|((bound_tenant, _), _)| *bound_tenant == tenant)
+        {
+            if bound.subject.external_ref == request.subject.external_ref
+                && bound.subject.kind != request.subject.kind
+            {
+                return Err(StoreError::Conflict(
+                    "subject kind is immutable".to_string(),
+                ));
+            }
+            if bound.subject.external_ref == request.subject.external_ref
+                && bound.actor.external_ref == request.actor.external_ref
+                && bound.actor.kind != request.actor.kind
+            {
+                return Err(StoreError::Conflict("actor kind is immutable".to_string()));
+            }
+            if bound.subject.external_ref == request.subject.external_ref
+                && bound.scope.external_ref == request.scope.external_ref
+                && (bound.scope.kind != request.scope.kind
+                    || bound.scope.parent_external_ref != request.scope.parent_external_ref)
+            {
+                return Err(StoreError::Conflict(
+                    "scope kind or parent is immutable".to_string(),
+                ));
+            }
+            if bound.subject.external_ref == request.subject.external_ref
+                && bound.agent_node.external_ref == request.agent_node.external_ref
+                && (bound.agent_node.parent_external_ref != request.agent_node.parent_external_ref
+                    || bound.scope.external_ref != request.scope.external_ref)
+            {
+                return Err(StoreError::Conflict(
+                    "agent node parent or scope is immutable".to_string(),
+                ));
+            }
+        }
+
+        let agent_level = match request.agent_node.parent_external_ref.as_deref() {
+            None => 0,
+            Some(parent_ref) => state
+                .context_bindings
+                .iter()
+                .filter(|((bound_tenant, _), _)| *bound_tenant == tenant)
+                .find(|(_, (bound, _))| {
+                    bound.subject.external_ref == request.subject.external_ref
+                        && bound.agent_node.external_ref == parent_ref
+                })
+                .map(|(_, (_, response))| response.agent_level.saturating_add(1))
+                .ok_or(StoreError::NotFound("parent agent node"))?,
+        };
+        if let Some(parent_ref) = request.scope.parent_external_ref.as_deref()
+            && !state
+                .context_bindings
+                .iter()
+                .filter(|((bound_tenant, _), _)| *bound_tenant == tenant)
+                .any(|(_, (bound, _))| {
+                    bound.subject.external_ref == request.subject.external_ref
+                        && bound.scope.external_ref == parent_ref
+                })
+        {
+            return Err(StoreError::NotFound("parent scope"));
+        }
+
+        validate_in_memory_access_policies(&state, tenant, &request, agent_level)?;
+
+        let policy_revision = context_policy_revision(&request.access_policies)?;
+        let existing_subject = state
+            .context_bindings
+            .iter()
+            .filter(|((bound_tenant, _), _)| *bound_tenant == tenant)
+            .find(|(_, (bound, _))| bound.subject.external_ref == request.subject.external_ref)
+            .map(|(_, (_, response))| (response.subject_id, response.subject_generation));
+        let existing_actor = state
+            .context_bindings
+            .iter()
+            .filter(|((bound_tenant, _), _)| *bound_tenant == tenant)
+            .find(|(_, (bound, _))| {
+                bound.subject.external_ref == request.subject.external_ref
+                    && bound.actor.external_ref == request.actor.external_ref
+            })
+            .map(|(_, (_, response))| response.actor_id);
+        let existing_scope = state
+            .context_bindings
+            .iter()
+            .filter(|((bound_tenant, _), _)| *bound_tenant == tenant)
+            .find(|(_, (bound, _))| {
+                bound.subject.external_ref == request.subject.external_ref
+                    && bound.scope.external_ref == request.scope.external_ref
+            })
+            .map(|(_, (_, response))| response.scope_id);
+        let response = ContextBindingResponse {
+            subject_id: existing_subject
+                .map(|(subject_id, _)| subject_id)
+                .unwrap_or_default(),
+            actor_id: existing_actor.unwrap_or_default(),
+            scope_id: existing_scope.unwrap_or_default(),
+            agent_node_id: memphant_types::AgentNodeId::new(),
+            agent_level,
+            policy_revision: policy_revision.clone(),
+            subject_generation: existing_subject
+                .map(|(_, generation)| generation)
+                .unwrap_or(0),
+        };
+        state
+            .context_bindings
+            .insert(key, (request, response.clone()));
+        Ok(response)
+    }
+
+    async fn resolve_memory_context(
+        &self,
+        tenant: TenantId,
+        subject_id: SubjectId,
+        actor_id: ActorId,
+        scope_id: ScopeId,
+        agent_node_id: AgentNodeId,
+    ) -> Result<ResolvedMemoryContext, StoreError> {
+        let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+        if let Some(tombstone) = state.subject_tombstones.get(&(tenant, subject_id)) {
+            if tombstone.generation == 0 || tombstone.erased_at.is_empty() {
+                return Err(StoreError::Backend(
+                    "invalid subject erasure tombstone".to_string(),
+                ));
+            }
+            return Err(StoreError::SubjectErased);
+        }
+        let (binding, response) = state
+            .context_bindings
+            .iter()
+            .filter(|((bound_tenant, _), _)| *bound_tenant == tenant)
+            .map(|(_, value)| value)
+            .find(|(_, response)| {
+                response.subject_id == subject_id
+                    && response.actor_id == actor_id
+                    && response.scope_id == scope_id
+                    && response.agent_node_id == agent_node_id
+            })
+            .ok_or(StoreError::NotFound("memory context"))?;
+
+        let mut sources_by_kind = BTreeMap::new();
+        for kind in [
+            MemoryKind::Episodic,
+            MemoryKind::Semantic,
+            MemoryKind::Procedural,
+            MemoryKind::Belief,
+            MemoryKind::Resource,
+        ] {
+            let exact_allowed = agent_level_allows_memory_kind(response.agent_level, kind);
+            sources_by_kind.insert(
+                kind,
+                if exact_allowed {
+                    vec![ResolvedMemorySource {
+                        scope_id,
+                        agent_node_id,
+                    }]
+                } else {
+                    Vec::new()
+                },
+            );
+        }
+
+        for policy in &binding.access_policies {
+            let (_, source_response) = state
+                .context_bindings
+                .iter()
+                .filter(|((bound_tenant, _), _)| *bound_tenant == tenant)
+                .map(|(_, value)| value)
+                .find(|(candidate, candidate_response)| {
+                    candidate_response.subject_id == subject_id
+                        && candidate.scope.external_ref == policy.source_scope_external_ref()
+                        && candidate.agent_node.external_ref
+                            == policy.source_agent_node_external_ref()
+                })
+                .ok_or(StoreError::NotFound("access policy source context"))?;
+            sources_by_kind
+                .entry(policy.kind())
+                .or_default()
+                .push(ResolvedMemorySource {
+                    scope_id: source_response.scope_id,
+                    agent_node_id: source_response.agent_node_id,
+                });
+        }
+
+        for sources in sources_by_kind.values_mut() {
+            sources
+                .sort_by_key(|source| (source.scope_id.as_uuid(), source.agent_node_id.as_uuid()));
+            sources.dedup();
+        }
+
+        Ok(ResolvedMemoryContext {
+            tenant_id: tenant,
+            data_subject_id: subject_id,
+            actor_id,
+            actor_trust: memphant_types::actor_kind_trust(&binding.actor.kind),
+            scope_id,
+            agent_node_id,
+            agent_level: response.agent_level,
+            subject_generation: response.subject_generation,
+            policy_revision: response.policy_revision.clone(),
+            sources_by_kind,
+        })
+    }
+
     async fn ping(&self) -> Result<(), StoreError> {
         Ok(())
     }
@@ -1675,13 +4666,16 @@ impl MemoryStore for InMemoryStore {
         Ok(state
             .job_meta
             .values()
-            .filter(|meta| !meta.completed && meta.attempts >= JOB_DEAD_LETTER_ATTEMPTS)
+            .filter(|meta| {
+                !meta.completed && (meta.terminal || meta.attempts >= JOB_DEAD_LETTER_ATTEMPTS)
+            })
             .count() as u64)
     }
 }
 
 pub async fn retain_episode<S>(
     store: &S,
+    context: &ResolvedMemoryContext,
     request: RetainRequest,
 ) -> Result<RetainOutcome, CoreError>
 where
@@ -1691,20 +4685,24 @@ where
         return Err(CoreError::EmptyBody);
     }
 
-    let mut tx = store.begin().await;
+    let mut tx = store.begin(context).await?;
     let outcome = store
         .stage_episode(
             &mut tx,
             NewEpisode {
                 tenant_id: request.tenant_id,
+                data_subject_id: request.data_subject_id,
                 scope_id: request.scope_id,
                 actor_id: request.actor_id,
+                agent_node_id: request.agent_node_id,
+                subject_generation: request.subject_generation,
                 source_kind: request.source_kind.clone(),
+                source_ref: request.source_ref.clone(),
+                observed_at: request.observed_at,
                 source_trust: request.source_trust,
-                dedup_key: derive_dedup_key(
-                    request.scope_id.as_uuid(),
+                dedup_key: derive_episode_dedup_key(
                     &request.source_kind,
-                    request.subject_hint.as_deref(),
+                    &request.source_ref,
                     &request.body,
                 ),
                 body: request.body,
@@ -1716,7 +4714,11 @@ where
             &mut tx,
             ReflectJob {
                 tenant_id: request.tenant_id,
+                data_subject_id: request.data_subject_id,
                 scope_id: request.scope_id,
+                actor_id: request.actor_id,
+                agent_node_id: request.agent_node_id,
+                subject_generation: request.subject_generation,
                 episode_id: Some(outcome.episode_id),
                 resource_id: None,
                 kind: ReflectJobKind::ReflectEpisode,
@@ -1732,20 +4734,26 @@ where
 
 pub async fn retain_resource<S>(
     store: &S,
+    context: &ResolvedMemoryContext,
     request: RetainResourceRequest,
 ) -> Result<RetainResourceOutcome, CoreError>
 where
     S: MemoryStore,
 {
-    let mut tx = store.begin().await;
+    let mut tx = store.begin(context).await?;
     let resource_id = store
         .stage_resource(
             &mut tx,
             NewResource {
                 tenant_id: request.tenant_id,
+                data_subject_id: request.data_subject_id,
                 scope_id: request.scope_id,
                 actor_id: request.actor_id,
+                agent_node_id: request.agent_node_id,
+                subject_generation: request.subject_generation,
                 uri: request.uri,
+                source_ref: request.source_ref,
+                observed_at: request.observed_at,
                 kind: request.kind.unwrap_or_default(),
                 content_hash: request.content_hash,
                 mime_type: request.mime_type,
@@ -1760,7 +4768,11 @@ where
             &mut tx,
             ReflectJob {
                 tenant_id: request.tenant_id,
+                data_subject_id: request.data_subject_id,
                 scope_id: request.scope_id,
+                actor_id: request.actor_id,
+                agent_node_id: request.agent_node_id,
+                subject_generation: request.subject_generation,
                 episode_id: None,
                 resource_id: Some(resource_id),
                 kind: ReflectJobKind::ReflectResource,
@@ -1776,7 +4788,9 @@ where
 
 pub async fn correct_memory<S>(
     store: &S,
-    request: CorrectRequest,
+    context: &ResolvedMemoryContext,
+    mut request: CorrectRequest,
+    embedder: &dyn EmbeddingProvider,
     clock: &dyn Clock,
 ) -> Result<CorrectResult, CoreError>
 where
@@ -1787,21 +4801,68 @@ where
             "correction value cannot be empty".to_string(),
         ));
     }
+    if request.correction.source_ref.trim().is_empty() {
+        return Err(CoreError::Invalid(
+            "correction source_ref cannot be empty".to_string(),
+        ));
+    }
+    if !(request.correction.observed_at.ends_with('Z')
+        || request.correction.observed_at.ends_with("+00:00"))
+    {
+        return Err(CoreError::Invalid(
+            "correction observed_at must use a UTC offset".to_string(),
+        ));
+    }
+    request.correction.observed_at = fmt_rfc3339(
+        request
+            .correction
+            .observed_at
+            .parse::<jiff::Timestamp>()
+            .map_err(|_| {
+                CoreError::Invalid("correction observed_at must be RFC3339".to_string())
+            })?,
+    );
+    validate_valid_interval(
+        request.correction.valid_from.as_deref(),
+        request.correction.valid_to.as_deref(),
+    )?;
 
-    match store
-        .apply_correction(
-            request.tenant_id,
+    // Embed the corrected body before the correction transaction (network I/O
+    // outside the DB lock) so the replacement unit is written into the vector
+    // channel atomically with its supersedes edge — mirrors reflect_recorded.
+    let embedding = if embedder.dimensions() > 0 {
+        embedder
+            .embed(std::slice::from_ref(&request.correction.value))
+            .map_err(|error| {
+                CoreError::Store(StoreError::Backend(format!("embedding failed: {error}")))
+            })?
+            .into_iter()
+            .next()
+            .filter(|vec| !vec.is_empty())
+            .map(|vec| (embedding_profile_for(embedder), vec))
+    } else {
+        None
+    };
+
+    let mut tx = store.begin(context).await?;
+    let outcome = store
+        .stage_correction(
+            &mut tx,
             CorrectionWrite {
-                scope_id: request.scope_id,
-                actor_id: request.actor_id,
                 selector: request.selector,
+                source_ref: request.correction.source_ref.clone(),
+                observed_at: request.correction.observed_at.clone(),
                 correction: request.correction,
                 now: clock.now_rfc3339(),
+                embedding,
             },
         )
-        .await
-    {
-        Ok(outcome) => Ok(outcome),
+        .await;
+    match outcome {
+        Ok(outcome) => {
+            store.commit(tx).await?;
+            Ok(outcome)
+        }
         Err(StoreError::NotFound(entity)) => Err(CoreError::NotFound(entity.to_string())),
         Err(error) => Err(CoreError::Store(error)),
     }
@@ -1809,6 +4870,7 @@ where
 
 pub async fn forget_memory<S>(
     store: &S,
+    context: &ResolvedMemoryContext,
     request: ForgetRequest,
     clock: &dyn Clock,
 ) -> Result<ForgetResult, CoreError>
@@ -1820,94 +4882,33 @@ where
         .exactly_one_target()
         .map_err(CoreError::Invalid)?;
 
+    let mut tx = store.begin(context).await?;
     let outcome = store
-        .apply_forget(
-            request.tenant_id,
+        .stage_forget(
+            &mut tx,
             ForgetWrite {
-                scope_id: request.selector.scope_id,
-                actor_id: request.actor_id,
                 target,
+                now: clock.now_rfc3339(),
             },
         )
         .await?;
-
-    // REAL verification: re-run a recall probe against the forgotten bodies
-    // and report how many forgotten units a caller could still retrieve.
-    let probe_hits = post_forget_probe_hits(
-        store,
-        &request,
-        request.selector.scope_id,
-        &outcome.invalidated_units,
-        clock,
-    )
-    .await?;
+    store.commit(tx).await?;
 
     Ok(ForgetResult {
         deletion_generation: outcome.deletion_generation,
         policy: "hard_delete".to_string(),
         invalidated_units: outcome.invalidated_units,
-        verification: format!("post_forget_recall_probe_hits={probe_hits}"),
+        verification: "authorized_transaction_committed".to_string(),
         trace_ref: None,
     })
 }
 
-async fn post_forget_probe_hits<S>(
+pub async fn record_mark<S>(
     store: &S,
-    request: &ForgetRequest,
-    scope_id: ScopeId,
-    invalidated_units: &[UnitId],
+    context: &ResolvedMemoryContext,
+    mut request: MarkRequest,
     clock: &dyn Clock,
-) -> Result<usize, CoreError>
-where
-    S: MemoryStore,
-{
-    if invalidated_units.is_empty() {
-        return Ok(0);
-    }
-    let forgotten = store
-        .fetch_units_by_ids(request.tenant_id, invalidated_units)
-        .await?;
-    let probe_query = forgotten
-        .iter()
-        .map(|unit| unit.body.as_str())
-        .collect::<Vec<_>>()
-        .join(" ");
-    if probe_query.trim().is_empty() {
-        return Ok(0);
-    }
-    let probe = recall(
-        store,
-        RecallRequest {
-            tenant_id: request.tenant_id,
-            scope_id,
-            actor_id: request.actor_id,
-            allowed_scope_ids: vec![scope_id],
-            query: probe_query,
-            k: invalidated_units.len().max(8),
-            budget_tokens: 4096,
-            mode: RecallMode::Exhaustive,
-            include_beliefs: true,
-            edge_expansion_enabled: true,
-            context_packing_abstention_enabled: false,
-            rerank_enabled: false,
-            learned_rerank_profile: None,
-            query_decomposition_enabled: false,
-            procedure_recall_enabled: true,
-            decay_enabled: false,
-            engine_version: "forget-verification-probe".to_string(),
-        },
-        None,
-        clock,
-    )
-    .await?;
-    Ok(probe
-        .items
-        .iter()
-        .filter(|item| invalidated_units.contains(&item.unit_id))
-        .count())
-}
-
-pub async fn record_mark<S>(store: &S, request: MarkRequest) -> Result<MarkResult, CoreError>
+) -> Result<MarkResult, CoreError>
 where
     S: MemoryStore,
 {
@@ -1915,18 +4916,57 @@ where
         return Err(CoreError::Invalid("caller_id cannot be empty".to_string()));
     }
 
+    let trace = store
+        .trace_by_id(context, request.trace_id)
+        .await?
+        .ok_or_else(|| CoreError::NotFound("retrieval trace".to_string()))?;
+    let canonical_ids: HashSet<UnitId> = trace
+        .context_items
+        .iter()
+        .map(|item| item.unit_id)
+        .collect();
+    if request
+        .used_ids
+        .iter()
+        .any(|unit_id| !canonical_ids.contains(unit_id))
+    {
+        return Err(CoreError::Invalid(
+            "marked units must belong to the trace canonical inclusion whitelist".to_string(),
+        ));
+    }
+    // Usage credit for a synthetic item (e.g. a quantity rollup) must flow to
+    // the real units it was derived from: the synthetic unit id exists only
+    // inside this trace, so persisting it verbatim would credit nothing.
+    let mut used_ids = Vec::with_capacity(request.used_ids.len());
+    for unit_id in &request.used_ids {
+        match trace
+            .context_items
+            .iter()
+            .find(|item| item.unit_id == *unit_id && !item.derived_from_unit_ids.is_empty())
+        {
+            Some(item) => used_ids.extend(item.derived_from_unit_ids.iter().copied()),
+            None => used_ids.push(*unit_id),
+        }
+    }
+    request.used_ids = used_ids;
+    request.used_ids.sort_unstable_by_key(|id| id.as_uuid());
+    request.used_ids.dedup();
+
+    let mut tx = store.begin(context).await?;
     store
-        .record_review_events(
-            request.tenant_id,
+        .stage_review_events(
+            &mut tx,
             vec![ReviewEvent {
-                tenant_id: request.tenant_id,
+                tenant_id: context.tenant_id,
                 trace_id: request.trace_id,
                 caller_id: request.caller_id,
                 used_ids: request.used_ids,
                 outcome: request.outcome,
+                recorded_at: clock.now_rfc3339(),
             }],
         )
         .await?;
+    store.commit(tx).await?;
 
     Ok(MarkResult {
         accepted: true,
@@ -1948,7 +4988,7 @@ where
         request,
         vector_query,
         clock,
-        DEFAULT_CANDIDATE_POOL_SIZE,
+        DEFAULT_RECALL_POOL_DEPTH,
         PackLevers::default(),
         false,
         None,
@@ -1956,17 +4996,511 @@ where
     .await
 }
 
-/// `recall` with the candidate-pool knob exposed. `candidate_pool_size` sets the
-/// vector-channel KNN fan-out — the one historically-narrow per-family fetch
-/// limit (`VECTOR_CANDIDATE_LIMIT`, 32) — so the W8 cross-encoder rerank arm can
-/// widen its rerank pool to 64–128 WITHOUT any wire change. The construction-time
-/// [`crate::service::MemoryService`] candidate-pool option threads its value
-/// here; the plain [`recall`] above delegates with [`DEFAULT_CANDIDATE_POOL_SIZE`]
-/// so every existing call site keeps today's behavior. See the pool-mapping note
-/// on [`DEFAULT_CANDIDATE_POOL_SIZE`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExactDecimal {
+    coefficient: i128,
+    scale: u32,
+}
+
+impl ExactDecimal {
+    fn parse(value: &str) -> Option<Self> {
+        let negative = value.starts_with('-');
+        let unsigned = value.strip_prefix('-').unwrap_or(value);
+        let (whole, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+        let scale = u32::try_from(fraction.len()).ok()?;
+        let digits = format!("{whole}{fraction}");
+        let coefficient = digits.parse::<i128>().ok()?;
+        Some(Self {
+            coefficient: if negative { -coefficient } else { coefficient },
+            scale,
+        })
+    }
+
+    fn rescale(&self, scale: u32) -> Option<i128> {
+        self.coefficient
+            .checked_mul(10_i128.checked_pow(scale.checked_sub(self.scale)?)?)
+    }
+
+    fn format(coefficient: i128, scale: u32) -> String {
+        let negative = coefficient < 0;
+        let digits = coefficient.unsigned_abs().to_string();
+        if scale == 0 {
+            return format!("{}{digits}", if negative { "-" } else { "" });
+        }
+        let width = scale as usize + 1;
+        let padded = format!("{digits:0>width$}");
+        let split = padded.len() - scale as usize;
+        let fraction = padded[split..].trim_end_matches('0');
+        if fraction.is_empty() {
+            format!("{}{}", if negative { "-" } else { "" }, &padded[..split])
+        } else {
+            format!(
+                "{}{}.{}",
+                if negative { "-" } else { "" },
+                &padded[..split],
+                fraction
+            )
+        }
+    }
+
+    fn average(total: i128, scale: u32, count: i128) -> Option<String> {
+        if total % count == 0 {
+            return Some(Self::format(total / count, scale));
+        }
+        const PRECISION: u32 = 6;
+        let (numerator, denominator) = if scale <= PRECISION {
+            (
+                total.checked_mul(10_i128.checked_pow(PRECISION - scale)?)?,
+                count,
+            )
+        } else {
+            (
+                total,
+                count.checked_mul(10_i128.checked_pow(scale - PRECISION)?)?,
+            )
+        };
+        let quotient = numerator / denominator;
+        let remainder = numerator % denominator;
+        let rounded = if remainder.unsigned_abs().saturating_mul(2) >= denominator.unsigned_abs() {
+            quotient.checked_add(if numerator < 0 { -1 } else { 1 })?
+        } else {
+            quotient
+        };
+        Some(Self::format(rounded, PRECISION))
+    }
+}
+
+#[derive(Debug)]
+struct QuantityRollup {
+    unit: StoredMemoryUnit,
+    source_unit_ids: Vec<UnitId>,
+}
+
+#[derive(Debug)]
+struct ArtifactBundle {
+    unit: StoredMemoryUnit,
+    source_unit_ids: Vec<UnitId>,
+}
+
+fn validate_aggregation_window(window: &AggregationWindow) -> Result<(), CoreError> {
+    let from = window
+        .from
+        .parse::<jiff::Timestamp>()
+        .map_err(|_| CoreError::Invalid("aggregation_window.from must be RFC 3339".to_string()))?;
+    let to = window
+        .to
+        .parse::<jiff::Timestamp>()
+        .map_err(|_| CoreError::Invalid("aggregation_window.to must be RFC 3339".to_string()))?;
+    if from >= to {
+        return Err(CoreError::Invalid(
+            "aggregation_window.from must be before aggregation_window.to".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn quantity_rollups(
+    units: &[StoredMemoryUnit],
+    request: &RecallRequest,
+    window: &AggregationWindow,
+    recall_time: &RecallTime,
+) -> Vec<QuantityRollup> {
+    #[derive(Debug)]
+    struct Event<'a> {
+        unit: &'a StoredMemoryUnit,
+        event: QuantityEvent,
+    }
+
+    let mut groups: BTreeMap<(String, String, String, String), Vec<Event<'_>>> = BTreeMap::new();
+    for unit in units {
+        if unit.scope_id != request.context.scope_id
+            || unit.kind != MemoryKind::Semantic
+            || !matches!(unit.state, UnitState::Active | UnitState::Superseded)
+            || !bitemporally_recallable(unit, recall_time)
+        {
+            continue;
+        }
+        let Some(event) = quantity_event_from_body(&unit.body) else {
+            continue;
+        };
+        if cmp_rfc3339(&event.occurred_at, &window.from) == std::cmp::Ordering::Less
+            || cmp_rfc3339(&event.occurred_at, &window.to) != std::cmp::Ordering::Less
+        {
+            continue;
+        }
+        groups
+            .entry((
+                event.namespace.clone(),
+                event.item_key.clone(),
+                event.measure.clone(),
+                event.unit.clone(),
+            ))
+            .or_default()
+            .push(Event { unit, event });
+    }
+
+    let query_tokens = tokenize(&request.query);
+    groups
+        .into_iter()
+        .filter_map(|((namespace, item_key, measure, unit_name), events)| {
+            let matched_dimensions: BTreeMap<String, HashSet<String>> = events
+                .iter()
+                .flat_map(|event| {
+                    event.event.dimensions.iter().filter_map(|(key, value)| {
+                        let rendered = value
+                            .as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| value.to_string());
+                        tokenize(&rendered)
+                            .iter()
+                            .any(|token| query_tokens.contains(token))
+                            .then(|| (key.clone(), rendered))
+                    })
+                })
+                .fold(BTreeMap::new(), |mut filters, (key, value)| {
+                    filters.entry(key).or_insert_with(HashSet::new).insert(value);
+                    filters
+                });
+            let series_relevant = tokenize(&format!("{namespace} {item_key} {measure}"))
+                .iter()
+                .any(|token| query_tokens.contains(token));
+            if !series_relevant && matched_dimensions.is_empty() {
+                return None;
+            }
+            let selected: Vec<_> = events
+                .into_iter()
+                .filter(|event| {
+                    matched_dimensions.is_empty()
+                        || matched_dimensions.iter().all(|(key, values)| {
+                            event.event.dimensions.get(key).is_some_and(|candidate| {
+                                let rendered = candidate
+                                    .as_str()
+                                    .map(str::to_string)
+                                    .unwrap_or_else(|| candidate.to_string());
+                                values.contains(&rendered)
+                            })
+                        })
+                })
+                .collect();
+            if selected.is_empty() {
+                return None;
+            }
+            let decimals: Vec<_> = selected
+                .iter()
+                .map(|event| ExactDecimal::parse(&event.event.value))
+                .collect::<Option<_>>()?;
+            let scale = decimals.iter().map(|value| value.scale).max()?;
+            let values: Vec<i128> = decimals
+                .iter()
+                .map(|value| value.rescale(scale))
+                .collect::<Option<_>>()?;
+            let total = values
+                .iter()
+                .try_fold(0_i128, |sum, value| sum.checked_add(*value))?;
+            let min = *values.iter().min()?;
+            let max = *values.iter().max()?;
+            let count = values.len() as i128;
+            let average = ExactDecimal::average(total, scale, count)?;
+            let mut source_unit_ids: Vec<_> = selected.iter().map(|event| event.unit.id).collect();
+            source_unit_ids.sort_unstable_by_key(|id| id.as_uuid());
+            let filters = if matched_dimensions.is_empty() {
+                "all".to_string()
+            } else {
+                let mut values = matched_dimensions
+                    .iter()
+                    .map(|(key, values)| {
+                        let mut values = values.iter().cloned().collect::<Vec<_>>();
+                        values.sort();
+                        format!("{key}={}", values.join("|"))
+                    })
+                    .collect::<Vec<_>>();
+                values.sort();
+                values.join(",")
+            };
+            let body = format!(
+                "quantity rollup {namespace}/{item_key}/{measure} ({unit_name}); window=[{},{}); filter={filters}; total={}; average={average} (rounded to 6 decimal places when needed); count={}; min={}; max={}",
+                window.from,
+                window.to,
+                ExactDecimal::format(total, scale),
+                source_unit_ids.len(),
+                ExactDecimal::format(min, scale),
+                ExactDecimal::format(max, scale),
+            );
+            let mut hasher = Sha256::new();
+            for component in [
+                request.context.tenant_id.as_uuid().to_string(),
+                request.context.scope_id.as_uuid().to_string(),
+                window.from.clone(),
+                window.to.clone(),
+                namespace.clone(),
+                item_key.clone(),
+                measure.clone(),
+                unit_name.clone(),
+                filters,
+            ] {
+                hasher.update(component.len().to_be_bytes());
+                hasher.update(component.as_bytes());
+            }
+            for id in &source_unit_ids {
+                hasher.update(id.as_uuid().as_bytes());
+            }
+            let digest = hasher.finalize();
+            let id = UnitId::from_u128(u128::from_be_bytes(digest[..16].try_into().unwrap()));
+            Some(QuantityRollup {
+                unit: StoredMemoryUnit {
+                    id,
+                    tenant_id: request.context.tenant_id,
+                    data_subject_id: selected[0].unit.data_subject_id,
+                    scope_id: request.context.scope_id,
+                    agent_node_id: selected[0].unit.agent_node_id,
+                    subject_generation: selected[0].unit.subject_generation,
+                    kind: MemoryKind::Semantic,
+                    state: UnitState::Active,
+                    fact_key: Some(format!(
+                        "{}:quantity_rollup:{namespace}:{item_key}:{measure}:{unit_name}",
+                        request.context.scope_id.as_uuid()
+                    )),
+                    predicate: None,
+                    body,
+                    confidence: None,
+                    trust_level: selected
+                        .iter()
+                        .map(|event| event.unit.trust_level)
+                        .max_by_key(|trust| trust_risk_rank(*trust))
+                        .unwrap_or(TrustLevel::Quarantined),
+                    churn_class: None,
+                    freshness_due_at: None,
+                    actor_id: Some(request.context.actor_id),
+                    source_kind: Some("quantity_rollup".to_string()),
+                    source_ref: selected[0].unit.source_ref.clone(),
+                    observed_at: selected[0].unit.observed_at.clone(),
+                    source_episode_id: None,
+                    source_resource_id: None,
+                    deletion_generation: None,
+                    contextual_chunks: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                    transaction_from: None,
+                    transaction_to: None,
+                    difficulty: None,
+                    stability_days: None,
+                    last_reinforced_at: None,
+                    reinforcement_count: 0,
+                },
+                source_unit_ids,
+            })
+        })
+        .collect()
+}
+
+fn trust_risk_rank(trust: TrustLevel) -> u8 {
+    match trust {
+        TrustLevel::TrustedUser | TrustLevel::TrustedSystem => 0,
+        TrustLevel::VerifiedTool => 1,
+        TrustLevel::UnverifiedTool => 2,
+        TrustLevel::WebContent => 3,
+        TrustLevel::AgentOutput => 4,
+        TrustLevel::ImportedExternal => 5,
+        TrustLevel::Quarantined => 6,
+    }
+}
+
+fn explicit_artifact_anchor(query: &str) -> Option<String> {
+    let mut quoted = Vec::new();
+    let chars = query.char_indices().collect::<Vec<_>>();
+    let mut open: Option<(char, usize)> = None;
+    for (index, &(byte, character)) in chars.iter().enumerate() {
+        if !matches!(character, '\'' | '"') {
+            continue;
+        }
+        let previous_is_word = index
+            .checked_sub(1)
+            .and_then(|previous| chars.get(previous))
+            .is_some_and(|(_, previous)| previous.is_alphanumeric());
+        let next_is_word = chars
+            .get(index + 1)
+            .is_some_and(|(_, next)| next.is_alphanumeric());
+        match open {
+            Some((quote, start)) if quote == character && !next_is_word => {
+                quoted.push(query[start..byte].trim());
+                open = None;
+            }
+            None if !previous_is_word && next_is_word => {
+                open = Some((character, byte + character.len_utf8()));
+            }
+            _ => {}
+        }
+    }
+    quoted
+        .into_iter()
+        .max_by_key(|value| value.len())
+        .or_else(|| query.rsplit_once(':').map(|(_, suffix)| suffix.trim()))
+        .map(normalize_artifact_text)
+        .filter(|anchor| anchor.split_whitespace().count() >= 3)
+}
+
+fn normalize_artifact_text(value: &str) -> String {
+    let mut normalized = String::with_capacity(value.len());
+    for character in value.chars() {
+        if character.is_alphanumeric() {
+            normalized.extend(character.to_lowercase());
+        } else {
+            normalized.push(' ');
+        }
+    }
+    normalized.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn artifact_state_identity(unit: &StoredMemoryUnit) -> Option<(String, String)> {
+    if unit.kind != MemoryKind::Semantic
+        || unit.deletion_generation.is_some()
+        || !(unit.state == UnitState::Active
+            || (unit.state == UnitState::Superseded && unit.transaction_to.is_some()))
+        || unit.contextual_chunks.first()?.header != "[structured-state evidence]"
+    {
+        return None;
+    }
+    let (identity, fields_json) = unit.body.split_once(": ")?;
+    let (namespace, item_key) = identity.split_once(" item ")?;
+    if namespace == structured_state::QUANTITY_EVENT_TYPE
+        || serde_json::from_str::<BTreeMap<String, serde_json::Value>>(fields_json).is_err()
+    {
+        return None;
+    }
+    Some((namespace.to_string(), item_key.to_string()))
+}
+
+fn artifact_bundle(units: &[StoredMemoryUnit], request: &RecallRequest) -> Option<ArtifactBundle> {
+    let anchor = explicit_artifact_anchor(&request.query)?;
+    let seed_episodes = units
+        .iter()
+        .filter(|unit| unit.scope_id == request.context.scope_id)
+        .filter(|unit| normalize_artifact_text(&unit.body).contains(&anchor))
+        .filter_map(|unit| unit.source_episode_id)
+        .collect::<HashSet<_>>();
+    if seed_episodes.is_empty() {
+        return None;
+    }
+
+    let structured = units
+        .iter()
+        .filter(|unit| unit.scope_id == request.context.scope_id)
+        .filter_map(|unit| {
+            artifact_state_identity(unit).map(|(namespace, item_key)| (unit, namespace, item_key))
+        })
+        .collect::<Vec<_>>();
+    let namespaces = structured
+        .iter()
+        .filter(|(unit, _, _)| {
+            unit.source_episode_id
+                .is_some_and(|episode| seed_episodes.contains(&episode))
+        })
+        .map(|(_, namespace, _)| namespace.clone())
+        .collect::<HashSet<_>>();
+    let mut members = structured
+        .into_iter()
+        .filter(|(_, namespace, _)| namespaces.contains(namespace))
+        .collect::<Vec<_>>();
+    if members.len() < 2 {
+        return None;
+    }
+    members.sort_by(
+        |(left_unit, left_namespace, left_key), (right_unit, right_namespace, right_key)| {
+            left_namespace
+                .cmp(right_namespace)
+                .then_with(|| left_key.cmp(right_key))
+                .then_with(|| left_unit.id.as_uuid().cmp(&right_unit.id.as_uuid()))
+        },
+    );
+    let body = format!(
+        "[artifact state]\n{}",
+        members
+            .iter()
+            .map(|(unit, _, _)| unit.body.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let mut source_unit_ids = members
+        .iter()
+        .map(|(unit, _, _)| unit.id)
+        .collect::<Vec<_>>();
+    source_unit_ids.sort_unstable_by_key(|id| id.as_uuid());
+    let mut hasher = Sha256::new();
+    hasher.update(b"artifact_bundle_v1");
+    hasher.update(request.context.tenant_id.as_uuid().as_bytes());
+    hasher.update(request.context.scope_id.as_uuid().as_bytes());
+    for id in &source_unit_ids {
+        hasher.update(id.as_uuid().as_bytes());
+    }
+    let digest = hasher.finalize();
+    let id = UnitId::from_u128(u128::from_be_bytes(digest[..16].try_into().unwrap()));
+    let actor_id = members
+        .first()
+        .and_then(|(unit, _, _)| unit.actor_id)
+        .filter(|actor| {
+            members
+                .iter()
+                .all(|(unit, _, _)| unit.actor_id == Some(*actor))
+        });
+    Some(ArtifactBundle {
+        unit: StoredMemoryUnit {
+            id,
+            tenant_id: request.context.tenant_id,
+            data_subject_id: members[0].0.data_subject_id,
+            scope_id: request.context.scope_id,
+            agent_node_id: members[0].0.agent_node_id,
+            subject_generation: members[0].0.subject_generation,
+            kind: MemoryKind::Semantic,
+            state: UnitState::Active,
+            fact_key: Some(format!(
+                "{}:artifact_bundle:{}",
+                request.context.scope_id.as_uuid(),
+                id.as_uuid()
+            )),
+            predicate: None,
+            body,
+            confidence: None,
+            trust_level: members
+                .iter()
+                .map(|(unit, _, _)| unit.trust_level)
+                .max_by_key(|trust| trust_risk_rank(*trust))
+                .unwrap_or(TrustLevel::Quarantined),
+            churn_class: None,
+            freshness_due_at: None,
+            actor_id,
+            source_kind: Some("artifact_bundle".to_string()),
+            source_ref: members[0].0.source_ref.clone(),
+            observed_at: members[0].0.observed_at.clone(),
+            source_episode_id: None,
+            source_resource_id: None,
+            deletion_generation: None,
+            contextual_chunks: Vec::new(),
+            valid_from: None,
+            valid_to: None,
+            transaction_from: None,
+            transaction_to: None,
+            difficulty: None,
+            stability_days: None,
+            last_reinforced_at: None,
+            reinforcement_count: 0,
+        },
+        source_unit_ids,
+    })
+}
+
+/// `recall` with the recall-pool-depth knob exposed. `recall_pool_depth` is the
+/// ONE knob every internal channel/fusion limit in the recall path derives
+/// from (R1.5-T0 — see the pool-mapping note on [`DEFAULT_RECALL_POOL_DEPTH`]):
+/// the vector-channel KNN fan-out, the Fast/Balanced packing scan window and
+/// Exhaustive scan multiplier, and the rerank rescoring cap. `k` never gates
+/// any of these — only the final `PackCtx::output_limit` truncation to `k`
+/// items. The construction-time [`crate::service::MemoryService`] recall-pool
+/// option threads its value here; the plain [`recall`] above delegates with
+/// [`DEFAULT_RECALL_POOL_DEPTH`] so every existing call site keeps today's
+/// (post-R1.5-T0) behavior.
 ///
 /// `pack_levers` threads the W4 packing levers (sibling-gather + session
-/// diversity quota) construction-time, mirroring `candidate_pool_size`; the
+/// diversity quota) construction-time, mirroring `recall_pool_depth`; the
 /// plain [`recall`] delegates with [`PackLevers::default`] (both off).
 ///
 /// `temporal_grounding_enabled` (W5, default off via the plain [`recall`]) gates
@@ -1978,19 +5512,23 @@ where
 ///
 /// `cross_reranker` (W8, `None` via the plain [`recall`]) is the cross-encoder
 /// rerank seam: when present, AFTER fusion produces the ranked candidate list
-/// and BEFORE packing, the top `candidate_pool_size` candidates are scored as
+/// and BEFORE packing, the top `recall_pool_depth` candidates are scored as
 /// `(query, unit body)` pairs and reordered by cross-encoder score (ties broken
 /// by prior fused rank via a stable sort). `None` leaves the fused order
 /// untouched — byte-identical to today. This is independent of, and never
 /// entangled with, the retired deterministic heuristic [`rerank_candidates`]
-/// stage (gated by `request.rerank_enabled`, off by default).
+/// stage (gated by `request.rerank_enabled`, off by default). R1.5-T1: the
+/// wall-clock spent in `cross_rerank_candidates` (0 when `None` or the pool is
+/// empty) is recorded on the trace as `RetrievalTrace::cross_rerank_ms` and
+/// `eprintln!`-logged, and `"cross_rerank_enabled"` is added to
+/// `feature_flags` when a reranker is installed.
 #[allow(clippy::too_many_arguments)]
 pub async fn recall_with_pool<S>(
     store: &S,
     request: RecallRequest,
     vector_query: Option<VectorQuery<'_>>,
     clock: &dyn Clock,
-    candidate_pool_size: usize,
+    recall_pool_depth: usize,
     pack_levers: PackLevers,
     temporal_grounding_enabled: bool,
     cross_reranker: Option<&dyn CrossReranker>,
@@ -1998,27 +5536,101 @@ pub async fn recall_with_pool<S>(
 where
     S: MemoryStore,
 {
+    recall_with_pool_and_selection(
+        store,
+        request,
+        vector_query,
+        clock,
+        recall_pool_depth,
+        pack_levers,
+        temporal_grounding_enabled,
+        cross_reranker,
+        CrossRerankCandidateSelection::FusedHead,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn recall_with_pool_and_selection<S>(
+    store: &S,
+    request: RecallRequest,
+    vector_query: Option<VectorQuery<'_>>,
+    clock: &dyn Clock,
+    recall_pool_depth: usize,
+    pack_levers: PackLevers,
+    temporal_grounding_enabled: bool,
+    cross_reranker: Option<&dyn CrossReranker>,
+    cross_rerank_candidate_selection: CrossRerankCandidateSelection,
+) -> Result<RecallResponse, CoreError>
+where
+    S: MemoryStore,
+{
+    recall_with_pool_and_selection_impl(
+        store,
+        request,
+        vector_query,
+        clock,
+        recall_pool_depth,
+        pack_levers,
+        temporal_grounding_enabled,
+        cross_reranker,
+        cross_rerank_candidate_selection,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn recall_with_pool_and_selection_impl<S>(
+    store: &S,
+    request: RecallRequest,
+    vector_query: Option<VectorQuery<'_>>,
+    clock: &dyn Clock,
+    recall_pool_depth: usize,
+    pack_levers: PackLevers,
+    temporal_grounding_enabled: bool,
+    cross_reranker: Option<&dyn CrossReranker>,
+    cross_rerank_candidate_selection: CrossRerankCandidateSelection,
+) -> Result<RecallResponse, CoreError>
+where
+    S: MemoryStore,
+{
     validate_learned_rerank_profile(request.learned_rerank_profile.as_ref())?;
 
-    let now = clock.now_rfc3339();
+    let recall_time = resolve_recall_time(
+        request.transaction_as_of.as_deref(),
+        request.valid_at.as_deref(),
+        clock.now(),
+    )?;
+    if let Some(window) = request.aggregation_window.as_ref() {
+        validate_aggregation_window(window)?;
+    }
     // W5: parse the query's date ONCE (clock-free). `None` whenever the flag is
     // off or the query carries no date — the whole windowing/pack path is then
     // inert. Bound to the full query; subquery passes intentionally see `None`.
     let temporal_window = temporal_grounding_enabled
         .then(|| extract_query_date(&request.query))
         .flatten();
-    let allowed = request.allowed_scope_ids.contains(&request.scope_id);
+    let allowed = request.context.sources_by_kind.values().any(|sources| {
+        sources.contains(&ResolvedMemorySource {
+            scope_id: request.context.scope_id,
+            agent_node_id: request.context.agent_node_id,
+        })
+    });
 
     if !allowed {
         let trace_id = TraceId::new();
         let trace = RetrievalTrace {
             id: trace_id,
-            tenant_id: request.tenant_id,
-            scope_id: request.scope_id,
-            actor_id: request.actor_id,
+            tenant_id: request.context.tenant_id,
+            data_subject_id: request.context.data_subject_id,
+            scope_id: request.context.scope_id,
+            actor_id: request.context.actor_id,
+            agent_node_id: request.context.agent_node_id,
+            subject_generation: request.context.subject_generation,
+            policy_revision: request.context.policy_revision.clone(),
             query_hash: hash_query(&request.query),
             engine_version: request.engine_version.clone(),
-            feature_flags: Vec::new(),
+            feature_flags: recall_feature_flags(&request, false),
             channel_runs: vec![ReflectStageFact {
                 stage: "stage0_policy".to_string(),
                 detail: "denied_scope".to_string(),
@@ -2026,14 +5638,18 @@ where
             candidates: Vec::new(),
             policy_filters: vec![RecallPolicyFilter {
                 reason: RecallDropReason::Scope,
-                detail: "scope not in allowed_scope_ids".to_string(),
+                detail: "scope is not admitted by the resolved context".to_string(),
             }],
             context_items: Vec::new(),
             dropped_items: Vec::new(),
             citations: Vec::new(),
             filter_selectivity: None,
             iterative_scan_depth: None,
+            recall_pool_depth: recall_pool_depth as u32,
+            cross_rerank_ms: 0,
+            cross_rerank: None,
             consolidation_lag_ms: 0,
+            degradation: None,
             weight_vector_id: "none".to_string(),
             mode_requested: request.mode,
             mode_executed: request.mode,
@@ -2053,8 +5669,9 @@ where
             decay_model_id: decay_model_id(&request).to_string(),
             l4_sandbox_id: None,
             l4_gathered_evidence_ids: Vec::new(),
+            recall_time: recall_time.clone(),
         };
-        store.store_trace(request.tenant_id, trace).await?;
+        store.store_trace(&request.context, trace).await?;
         return Err(CoreError::PolicyDenied("scope".to_string()));
     }
 
@@ -2062,13 +5679,23 @@ where
     let vector_query = vector_query.filter(|query| !query.vec.is_empty());
     let mut tenant_units = store
         .fetch_recall_candidates(
-            request.tenant_id,
-            &request.allowed_scope_ids,
+            &request.context,
             &[],
             &query_tokens,
+            &recall_time,
             usize::MAX,
         )
         .await?;
+    let quantity_rollups = request
+        .aggregation_window
+        .as_ref()
+        .map(|window| quantity_rollups(&tenant_units, &request, window, &recall_time))
+        .unwrap_or_default();
+    let mut synthetic_sources: HashMap<_, _> = quantity_rollups
+        .iter()
+        .map(|rollup| (rollup.unit.id, rollup.source_unit_ids.clone()))
+        .collect();
+    tenant_units.extend(quantity_rollups.into_iter().map(|rollup| rollup.unit));
     // Real vector channel: the store returns (unit, cosine DISTANCE) for the
     // nearest units under the active profile (pgvector `<=>`, or the in-memory
     // app-side cosine), and the channel score is `1 - distance` — no app-side
@@ -2079,14 +5706,13 @@ where
         Some(query) => {
             let pairs = store
                 .fetch_vector_candidates(
-                    request.tenant_id,
-                    &request.allowed_scope_ids,
-                    &[],
+                    &request.context,
                     query.vec,
                     query.profile_id,
-                    // W3 pool knob: the vector KNN fan-out is the widen-able
-                    // per-family limit (default `VECTOR_CANDIDATE_LIMIT`).
-                    candidate_pool_size,
+                    &recall_time,
+                    // R1.5-T0 pool knob: the vector KNN fan-out derives from
+                    // `recall_pool_depth`, never from `k` (default 64).
+                    recall_pool_depth,
                 )
                 .await?;
             let mut seen: HashSet<UnitId> = tenant_units.iter().map(|unit| unit.id).collect();
@@ -2105,22 +5731,25 @@ where
         }
         None => None,
     };
-    let unit_ids: Vec<UnitId> = tenant_units.iter().map(|unit| unit.id).collect();
-    let tenant_edges = store.fetch_edges(request.tenant_id, &unit_ids).await?;
-    let mut tenant_episodes = Vec::new();
-    if request.mode == RecallMode::Exhaustive {
-        for scope in &request.allowed_scope_ids {
-            tenant_episodes.extend(
-                store
-                    .fetch_episodes_for_scope(request.tenant_id, *scope, usize::MAX)
-                    .await?,
-            );
-        }
+    let artifact_bundle = artifact_bundle(&tenant_units, &request);
+    if let Some(bundle) = artifact_bundle {
+        let source_ids = bundle
+            .source_unit_ids
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        tenant_units.retain(|unit| !source_ids.contains(&unit.id));
+        synthetic_sources.insert(bundle.unit.id, bundle.source_unit_ids);
+        tenant_units.push(bundle.unit);
     }
-    let tenant_review_events = store
-        .fetch_review_events(request.tenant_id, &unit_ids)
+    let unit_ids: Vec<UnitId> = tenant_units.iter().map(|unit| unit.id).collect();
+    let tenant_edges = store
+        .fetch_edges(&request.context, &unit_ids, &recall_time)
         .await?;
-    let dropped_items = trace_filter_drops(&tenant_units, &request, &now);
+    let tenant_review_events = store
+        .fetch_review_events(&request.context, &unit_ids, &recall_time)
+        .await?;
+    let dropped_items = trace_filter_drops(&tenant_units, &request, &recall_time);
     let surviving = tenant_units.len().saturating_sub(dropped_items.len());
     let filter_selectivity = Some(surviving as f32 / tenant_units.len().max(1) as f32);
     let decomposition = decompose_query(&request);
@@ -2153,7 +5782,7 @@ where
             &request,
             &query_tokens,
             vector_scores.as_ref(),
-            &now,
+            &recall_time,
             temporal_window.as_ref(),
         );
         ranked.sort_by(|left, right| {
@@ -2181,7 +5810,6 @@ where
                     rerank_score: 0.0,
                     cross_rerank_rank: None,
                     decay,
-                    l4_score: 0.0,
                     subquery_ids: Vec::new(),
                     decomposition_rank: None,
                     channels: vec![(channel, channel_rank, score)],
@@ -2204,11 +5832,27 @@ where
                 trust_level: unit.trust_level,
                 state: unit.state,
                 discard_reason: None,
+                valid_from: unit.valid_from.clone(),
+                valid_to: unit.valid_to.clone(),
+                transaction_from: unit.transaction_from.clone(),
+                transaction_to: unit.transaction_to.clone(),
             });
         }
     }
 
     if decomposition.active() {
+        // R1.5-T0 (review follow-up): the per-subquery per-channel fusion cap
+        // derives from the pool depth, never from the caller's `k` (it was
+        // `.take(request.k.max(1))`). This cap is doubly load-bearing: besides
+        // gating which units receive subquery fusion contributions, active
+        // decomposition RETAINS only subquery-tagged candidates after fusion
+        // (`fused.retain(|c| !c.subquery_ids.is_empty())` below), so the old
+        // k-derived cap silently controlled candidate MEMBERSHIP — a k=5
+        // caller lost every unit outside each subquery channel's top-5 while
+        // a k=50 caller kept it, changing even the top-5. Floored at
+        // `output_limit` like `recall_pack_scan_limit`'s `pool_floor`, so a
+        // `k` larger than the pool still tags at least `k` per channel.
+        let subquery_channel_cap = recall_pool_depth.max(request.k.max(1));
         for (subquery_index, subquery) in decomposition.subqueries.iter().enumerate() {
             let subquery_tokens = tokenize(&subquery.query);
             for pass in channels
@@ -2223,7 +5867,7 @@ where
                     &request,
                     &subquery_tokens,
                     None,
-                    &now,
+                    &recall_time,
                     None,
                 );
                 ranked.sort_by(|left, right| {
@@ -2233,7 +5877,9 @@ where
                         .unwrap_or(std::cmp::Ordering::Equal)
                         .then_with(|| left.0.body.cmp(&right.0.body))
                 });
-                for (rank, (unit, score)) in ranked.into_iter().take(request.k.max(1)).enumerate() {
+                for (rank, (unit, score)) in
+                    ranked.into_iter().take(subquery_channel_cap).enumerate()
+                {
                     let channel_rank = rank + 1;
                     let decay =
                         decay_score_for(&unit, &tenant_review_events, request.decay_enabled);
@@ -2253,7 +5899,6 @@ where
                             rerank_score: 0.0,
                             cross_rerank_rank: None,
                             decay,
-                            l4_score: 0.0,
                             subquery_ids: vec![subquery.id.clone()],
                             decomposition_rank: None,
                             channels: vec![(channel, channel_rank, score)],
@@ -2276,6 +5921,10 @@ where
                         trust_level: unit.trust_level,
                         state: unit.state,
                         discard_reason: None,
+                        valid_from: unit.valid_from.clone(),
+                        valid_to: unit.valid_to.clone(),
+                        transaction_from: unit.transaction_from.clone(),
+                        transaction_to: unit.transaction_to.clone(),
                     });
                 }
             }
@@ -2288,69 +5937,7 @@ where
         }
     }
 
-    let mut l4_gathered_evidence_ids = Vec::new();
-    if request.mode == RecallMode::Exhaustive {
-        let mut ranked = l4_exhaustive_candidates(
-            &tenant_units,
-            &tenant_episodes,
-            &request,
-            &query_tokens,
-            &now,
-        );
-        ranked.sort_by(|left, right| {
-            right
-                .1
-                .partial_cmp(&left.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| left.0.body.cmp(&right.0.body))
-        });
-        for (rank, (unit, score, evidence_id)) in ranked.into_iter().enumerate() {
-            let channel_rank = rank + 1;
-            let decay = decay_score_for(&unit, &tenant_review_events, request.decay_enabled);
-            let contribution = 8.0 + score + (1.0 / (50.0 + channel_rank as f32));
-            push_unique(&mut l4_gathered_evidence_ids, evidence_id.clone());
-            candidates_by_unit
-                .entry(unit.id)
-                .and_modify(|candidate| {
-                    candidate.fused_score += contribution;
-                    candidate.l4_score = candidate.l4_score.max(score);
-                    candidate
-                        .channels
-                        .push((RecallChannel::Exhaustive, channel_rank, score));
-                })
-                .or_insert_with(|| CandidateAccumulator {
-                    unit: unit.clone(),
-                    fused_score: contribution,
-                    rerank_rank: None,
-                    rerank_score: 0.0,
-                    cross_rerank_rank: None,
-                    decay,
-                    l4_score: score,
-                    subquery_ids: Vec::new(),
-                    decomposition_rank: None,
-                    channels: vec![(RecallChannel::Exhaustive, channel_rank, score)],
-                });
-            candidate_traces.push(RecallCandidateTrace {
-                unit_id: unit.id,
-                channel: RecallChannel::Exhaustive,
-                channel_rank,
-                channel_score: score,
-                derived_by: derived_by_for_unit(&unit).to_string(),
-                fused_rank: None,
-                fused_score: None,
-                rerank_rank: None,
-                rerank_score: 0.0,
-                subquery_ids: Vec::new(),
-                decay_retrievability: decay.retrievability,
-                dsr_stability_days: decay.stability_days,
-                dsr_difficulty: decay.difficulty,
-                dsr_reinforcement_count: decay.reinforcement_count,
-                trust_level: unit.trust_level,
-                state: unit.state,
-                discard_reason: None,
-            });
-        }
-    }
+    let l4_gathered_evidence_ids = Vec::new();
 
     let mut fused: Vec<_> = candidates_by_unit.into_values().collect();
     if decomposition.active() {
@@ -2373,7 +5960,12 @@ where
         }
     }
 
-    let rerank = rerank_candidates(fused.as_mut_slice(), &request, &query_tokens);
+    let rerank = rerank_candidates(
+        fused.as_mut_slice(),
+        &request,
+        &query_tokens,
+        recall_pool_depth,
+    );
     for candidate in &fused {
         for trace_candidate in candidate_traces
             .iter_mut()
@@ -2385,20 +5977,43 @@ where
         }
     }
 
-    // W8 cross-encoder rerank: reorder the top `candidate_pool_size` fused
+    // W8 cross-encoder rerank: reorder the top `recall_pool_depth` fused
     // candidates by a real (query, body) cross-encoder before packing. A no-op
     // when no reranker is wired (the default) or the pool is empty — the fused
-    // order then flows unchanged into packing.
+    // order then flows unchanged into packing. R1.5-T1: the wall-clock is
+    // measured HERE (not by a decorator around `reranker`) so the same number
+    // lands in the trace for every caller — server, worker/mcp (via
+    // `MemoryService`) and the eval bench alike — rather than each call site
+    // having to wrap its own reranker to get visibility. `eprintln!` is this
+    // crate's existing convention for opt-in-path diagnostics (see the
+    // mutex-poisoned warning in `FastEmbedCrossReranker::rerank`); there is no
+    // tracing/log dependency in this crate to hook a real "debug" level into.
+    let mut cross_rerank_ms: u64 = 0;
+    let mut cross_rerank = None;
     if let Some(reranker) = cross_reranker {
-        cross_rerank_candidates(
+        if cross_rerank_candidate_selection == CrossRerankCandidateSelection::VectorLexicalBalanced
+        {
+            promote_vector_lexical_balanced(
+                &mut fused,
+                reranker.config().candidate_limit.min(recall_pool_depth),
+            );
+        }
+        let cross_rerank_started = std::time::Instant::now();
+        cross_rerank = Some(cross_rerank_candidates(
             fused.as_mut_slice(),
             &request.query,
             reranker,
-            candidate_pool_size,
+            recall_pool_depth,
+        ));
+        cross_rerank_ms = cross_rerank_started.elapsed().as_millis() as u64;
+        eprintln!(
+            "memphant: cross_rerank_ms={cross_rerank_ms} pool={}",
+            recall_pool_depth.min(fused.len())
         );
     }
 
-    let iterative_scan_depth = recall_pack_scan_limit(&request, fused.len(), pack_levers);
+    let iterative_scan_depth =
+        recall_pack_scan_limit(&request, fused.len(), pack_levers, recall_pool_depth);
     let packed = pack_recall_context(
         fused,
         &request,
@@ -2410,7 +6025,12 @@ where
         temporal_grounding_enabled,
     );
     let token_estimate = packed.token_estimate;
-    let items = packed.items;
+    let mut items = packed.items;
+    for item in &mut items {
+        if let Some(source_ids) = synthetic_sources.get(&item.unit_id) {
+            item.derived_from_unit_ids = source_ids.clone();
+        }
+    }
     let dropped_items = packed.dropped_items;
     let abstention = packed.abstention;
 
@@ -2426,11 +6046,16 @@ where
     }
     let citations: Vec<_> = items
         .iter()
-        .filter(|item| item.citation_episode_id.is_some() || item.citation_resource_id.is_some())
+        .filter(|item| {
+            item.citation_episode_id.is_some()
+                || item.citation_resource_id.is_some()
+                || !item.derived_from_unit_ids.is_empty()
+        })
         .map(|item| RecallCitation {
             unit_id: item.unit_id,
             episode_id: item.citation_episode_id,
             resource_id: item.citation_resource_id,
+            derived_from_unit_ids: item.derived_from_unit_ids.clone(),
         })
         .collect();
     let procedure_ids = items
@@ -2448,11 +6073,24 @@ where
     {
         feature_flags.push("inferred_belief_composition_enabled".to_string());
     }
+    if cross_reranker.is_some() {
+        // R1.5-T1: construction-time flag (the `MemoryService`/runtime
+        // `MEMPHANT_CROSS_RERANK` seam), not a `RecallRequest` field — mirrors
+        // how `contextual_chunks_enabled` is unconditional-per-service rather
+        // than request-derived. Distinct from the retired heuristic
+        // `rerank_enabled` flag above (already pushed by
+        // `recall_feature_flags` when `request.rerank_enabled`).
+        feature_flags.push("cross_rerank_enabled".to_string());
+    }
     let trace = RetrievalTrace {
         id: trace_id,
-        tenant_id: request.tenant_id,
-        scope_id: request.scope_id,
-        actor_id: request.actor_id,
+        tenant_id: request.context.tenant_id,
+        data_subject_id: request.context.data_subject_id,
+        scope_id: request.context.scope_id,
+        actor_id: request.context.actor_id,
+        agent_node_id: request.context.agent_node_id,
+        subject_generation: request.context.subject_generation,
+        policy_revision: request.context.policy_revision.clone(),
         query_hash: hash_query(&request.query),
         engine_version: request.engine_version.clone(),
         feature_flags,
@@ -2464,7 +6102,11 @@ where
         citations: citations.clone(),
         filter_selectivity,
         iterative_scan_depth: Some(iterative_scan_depth as u32),
+        recall_pool_depth: recall_pool_depth as u32,
+        cross_rerank_ms,
+        cross_rerank,
         consolidation_lag_ms: 0,
+        degradation: None,
         weight_vector_id: rerank.weight_vector_id,
         mode_requested: request.mode,
         mode_executed: request.mode,
@@ -2486,10 +6128,11 @@ where
         token_estimate,
         cost_micros: 0,
         decay_model_id: decay_model_id(&request).to_string(),
-        l4_sandbox_id: (request.mode == RecallMode::Exhaustive).then(|| L4_SANDBOX_ID.to_string()),
+        l4_sandbox_id: None,
         l4_gathered_evidence_ids,
+        recall_time: recall_time.clone(),
     };
-    store.store_trace(request.tenant_id, trace).await?;
+    store.store_trace(&request.context, trace).await?;
 
     Ok(RecallResponse {
         trace_id,
@@ -2500,22 +6143,106 @@ where
         degraded: false,
         consolidation_lag_ms: 0,
         suppression_labels,
+        recall_time,
     })
+}
+
+fn promote_vector_lexical_balanced(fused: &mut Vec<CandidateAccumulator>, candidate_limit: usize) {
+    let target = candidate_limit.min(fused.len());
+    let mut selected = Vec::with_capacity(target);
+    let ranked_by_channel = [RecallChannel::Vector, RecallChannel::Lexical].map(|channel| {
+        let mut ranked = fused
+            .iter()
+            .enumerate()
+            .filter_map(|(index, candidate)| {
+                candidate
+                    .channels
+                    .iter()
+                    .filter(|(candidate_channel, _, _)| *candidate_channel == channel)
+                    .map(|(_, rank, _)| *rank)
+                    .min()
+                    .map(|rank| (rank, index))
+            })
+            .collect::<Vec<_>>();
+        ranked.sort_unstable();
+        ranked
+    });
+    for (ranked, quota) in ranked_by_channel
+        .iter()
+        .zip([target.div_ceil(2), target / 2])
+    {
+        if quota == 0 {
+            continue;
+        }
+        let mut added = 0;
+        for &(_, index) in ranked {
+            if !selected.contains(&index) {
+                selected.push(index);
+                added += 1;
+                if added == quota {
+                    break;
+                }
+            }
+        }
+    }
+    let mut channel_backfill = ranked_by_channel
+        .iter()
+        .enumerate()
+        .flat_map(|(channel_order, ranked)| {
+            ranked
+                .iter()
+                .map(move |&(rank, index)| (rank, channel_order, index))
+        })
+        .collect::<Vec<_>>();
+    channel_backfill.sort_unstable();
+    for (_, _, index) in channel_backfill {
+        if selected.len() == target {
+            break;
+        }
+        if !selected.contains(&index) {
+            selected.push(index);
+        }
+    }
+    for index in 0..fused.len() {
+        if selected.len() == target {
+            break;
+        }
+        if !selected.contains(&index) {
+            selected.push(index);
+        }
+    }
+    let mut promoted = selected
+        .iter()
+        .map(|index| fused[*index].clone())
+        .collect::<Vec<_>>();
+    promoted.extend(
+        fused
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !selected.contains(index))
+            .map(|(_, candidate)| candidate.clone()),
+    );
+    *fused = promoted;
 }
 
 fn trace_filter_drops(
     units: &[StoredMemoryUnit],
     request: &RecallRequest,
-    now: &str,
+    time: &RecallTime,
 ) -> Vec<RecallDroppedItem> {
     units
         .iter()
         .filter_map(|unit| {
-            let reason = if !request.allowed_scope_ids.contains(&unit.scope_id) {
+            let reason = if !request
+                .context
+                .allows(unit.kind, unit.scope_id, unit.agent_node_id)
+            {
                 Some(RecallDropReason::Scope)
             } else if unit.deletion_generation.is_some() {
                 Some(RecallDropReason::Deleted)
-            } else if unit.transaction_to.is_some() || !valid_for_query(unit, &request.query, now) {
+            } else if !bitemporally_recallable(unit, time)
+                || !valid_for_query(unit, &request.query, &time.valid_at)
+            {
                 Some(RecallDropReason::Stale)
             } else if let Some(reason) = procedure_drop_reason(unit, request) {
                 Some(reason)
@@ -2525,6 +6252,7 @@ fn trace_filter_drops(
                 match unit.state {
                     UnitState::Deleted => Some(RecallDropReason::Deleted),
                     UnitState::Invalidated => Some(RecallDropReason::Invalidated),
+                    UnitState::Superseded if unit.transaction_to.is_some() => None,
                     UnitState::Superseded | UnitState::Expired | UnitState::Retired => {
                         Some(RecallDropReason::Stale)
                     }
@@ -2569,7 +6297,9 @@ fn procedure_trace_facts(
         .iter()
         .filter(|unit| {
             unit.kind == MemoryKind::Procedural
-                && request.allowed_scope_ids.contains(&unit.scope_id)
+                && request
+                    .context
+                    .allows(unit.kind, unit.scope_id, unit.agent_node_id)
                 && unit.deletion_generation.is_none()
                 && unit.transaction_to.is_none()
         })
@@ -2595,7 +6325,7 @@ fn procedure_validation_state(unit: &StoredMemoryUnit) -> &'static str {
 fn procedure_signal_kind(unit: &StoredMemoryUnit) -> &'static str {
     let body = normalize_component(&unit.body);
     let subject = unit
-        .subject_key
+        .fact_key
         .as_deref()
         .map(normalize_component)
         .unwrap_or_default();
@@ -2793,29 +6523,61 @@ fn push_unique(values: &mut Vec<String>, value: String) {
 ///
 /// Determinism + ties: the top-`pool` slice is already in fused-rank order, and
 /// a STABLE sort by descending cross-encoder score preserves that order for
-/// equal scores — so ties break by prior rank. The tail (below `pool`) is left
-/// exactly where fusion put it. A reranker that returns a score vector whose
-/// length != the pool (the seam's "no-op" signal, e.g. inference failure) is
-/// honored by leaving the whole order unchanged.
+/// equal scores — so ties break by prior rank. The tail below the configured
+/// scored prefix is left exactly where fusion put it. Any failed or invalid
+/// inference leaves the whole order unchanged and records the failure.
 fn cross_rerank_candidates(
     fused: &mut [CandidateAccumulator],
     query: &str,
     reranker: &dyn CrossReranker,
     pool: usize,
-) {
-    let head = pool.min(fused.len());
-    if head == 0 {
-        return;
-    }
+) -> CrossRerankTrace {
+    let config = reranker.config();
+    let head = pool.min(config.candidate_limit).min(fused.len());
     let docs: Vec<&str> = fused[..head]
         .iter()
         .map(|candidate| candidate.unit.body.as_str())
         .collect();
-    let scores = reranker.rerank(query, &docs);
-    // Contract: one score per doc, in input order. Any other length is a no-op.
-    if scores.len() != head {
-        return;
+    let mut input_chars = docs
+        .iter()
+        .map(|doc| doc.chars().count())
+        .collect::<Vec<_>>();
+    input_chars.sort_unstable();
+    let mut trace = CrossRerankTrace {
+        provider: config.provider,
+        model: config.model,
+        candidate_limit: config.candidate_limit,
+        candidate_count: head,
+        max_length: config.max_length,
+        batch_size: config.batch_size,
+        input_chars_p50: percentile(&input_chars, 50),
+        input_chars_p95: percentile(&input_chars, 95),
+        input_chars_max: input_chars.last().copied().unwrap_or(0),
+        failure: CrossRerankFailure::None,
+    };
+    if head == 0 {
+        return trace;
     }
+    let scores = match reranker.rerank(query, &docs) {
+        Ok(scores) if scores.is_empty() => {
+            trace.failure = CrossRerankFailure::Empty;
+            return trace;
+        }
+        Ok(scores) if scores.len() != head => {
+            trace.failure = CrossRerankFailure::InvalidScoreCount;
+            return trace;
+        }
+        Ok(scores) if scores.iter().any(|score| !score.is_finite()) => {
+            trace.failure = CrossRerankFailure::NonFiniteScore;
+            return trace;
+        }
+        Ok(scores) => scores,
+        Err(error) => {
+            eprintln!("memphant: cross-reranker inference failed: {error}");
+            trace.failure = CrossRerankFailure::Error;
+            return trace;
+        }
+    };
     let mut order: Vec<usize> = (0..head).collect();
     order.sort_by(|&left, &right| {
         scores[right]
@@ -2834,12 +6596,22 @@ fn cross_rerank_candidates(
         candidate.cross_rerank_rank = Some(rank);
     }
     fused[..head].clone_from_slice(&reordered);
+    trace
+}
+
+fn percentile(sorted: &[usize], percentile: usize) -> usize {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let index = (percentile * sorted.len()).div_ceil(100).saturating_sub(1);
+    sorted[index]
 }
 
 fn rerank_candidates(
     fused: &mut [CandidateAccumulator],
     request: &RecallRequest,
     query_tokens: &[String],
+    recall_pool_depth: usize,
 ) -> RerankTraceFacts {
     if !request.rerank_enabled {
         return RerankTraceFacts {
@@ -2852,7 +6624,9 @@ fn rerank_candidates(
     }
 
     let profile = request.learned_rerank_profile.as_ref();
-    let input_count = fused.len().min(rerank_input_cap(request));
+    let input_count = fused
+        .len()
+        .min(rerank_input_cap(request, recall_pool_depth));
     for candidate in fused.iter_mut().take(input_count) {
         candidate.rerank_score = rerank_score(candidate, query_tokens, profile);
     }
@@ -2886,12 +6660,18 @@ fn rerank_candidates(
     }
 }
 
-fn rerank_input_cap(request: &RecallRequest) -> usize {
+/// R1.5-T0: the deterministic-rerank rescoring cap derives from
+/// `recall_pool_depth`, NOT from `k * 10` (the old formula) — a caller
+/// requesting a larger `k` no longer widens how many fused candidates get
+/// rescored. `mode_cap` (100 Fast / 200 Balanced+Exhaustive) is an
+/// independent, non-`k`-derived per-mode ceiling, unchanged by this task.
+/// Floored at `k` so the rerank always covers at least the final output size.
+fn rerank_input_cap(request: &RecallRequest, recall_pool_depth: usize) -> usize {
     let mode_cap = match request.mode {
         RecallMode::Fast => 100,
         RecallMode::Balanced | RecallMode::Exhaustive => 200,
     };
-    (request.k.saturating_mul(10)).min(mode_cap).max(request.k)
+    recall_pool_depth.min(mode_cap).max(request.k.max(1))
 }
 
 fn rerank_score(
@@ -2900,7 +6680,12 @@ fn rerank_score(
     profile: Option<&LearnedRerankProfile>,
 ) -> f32 {
     let lexical = lexical_score(&candidate.unit, query_tokens);
-    let vector = token_set_overlap_score(&candidate.unit, query_tokens);
+    let vector = candidate
+        .channels
+        .iter()
+        .filter(|(channel, _, _)| *channel == RecallChannel::Vector)
+        .map(|(_, _, score)| *score)
+        .fold(0.0, f32::max);
     let exact = exact_score(&candidate.unit, query_tokens);
     let intent = rerank_intent_anchor_score(&candidate.unit, query_tokens);
     let decay = candidate.decay.retrievability;
@@ -2920,10 +6705,10 @@ fn rerank_score(
 }
 
 fn rerank_intent_anchor_score(unit: &StoredMemoryUnit, query_tokens: &[String]) -> f32 {
-    let Some(subject_key) = unit.subject_key.as_deref() else {
+    let Some(fact_key) = unit.fact_key.as_deref() else {
         return 0.0;
     };
-    let subject_tokens = tokenize(subject_key);
+    let subject_tokens = tokenize(fact_key);
     let body_tokens = tokenize(&unit.body);
     query_tokens
         .iter()
@@ -2962,13 +6747,12 @@ struct CandidateAccumulator {
     rerank_rank: Option<usize>,
     rerank_score: f32,
     /// W8 cross-encoder rank (0-based): `Some` only for candidates the
-    /// cross-reranker scored (the top `candidate_pool_size` fused head). Packing
+    /// cross-reranker scored (the top `recall_pool_depth` fused head). Packing
     /// honors it FIRST when any candidate carries one, so the cross-encoder
     /// ordering survives the pack re-sort. `None` for the unreranked tail and
     /// for every run without a cross-reranker (then packing is unchanged).
     cross_rerank_rank: Option<usize>,
     decay: DecayScore,
-    l4_score: f32,
     subquery_ids: Vec<String>,
     decomposition_rank: Option<usize>,
     channels: Vec<(RecallChannel, usize, f32)>,
@@ -3083,6 +6867,18 @@ struct PackCtx<'a> {
     /// W5: when on, each admitted item records its grounded date so the post-fill
     /// pass can prefix `[date YYYY-MM-DD]`. Off ⇒ no prefixes recorded or applied.
     temporal_grounding_enabled: bool,
+    /// R1.5-T0: `true` when a rank signal external to `packing_relevance_score`
+    /// (cross-encoder rerank, decomposition, or the deterministic/learned
+    /// reranker) governs this candidate list's established sort order. See
+    /// `admit_or_drop`'s "output already full" branch.
+    rank_based_ordering_active: bool,
+    /// Policy-filtered, recallable heads participating in this recall. A
+    /// historical Contradicts edge is unresolved only when both endpoints are
+    /// simultaneously live candidates; superseded endpoints never enter this
+    /// set.
+    live_candidate_ids: HashSet<UnitId>,
+    /// Exact structured goal promoted beside an authoritative quantity rollup.
+    goal_companion_id: Option<UnitId>,
 }
 
 /// Everything computed once per candidate before the admit/drop decision.
@@ -3134,6 +6930,51 @@ impl PackAccumulator {
     }
 }
 
+fn goal_companion_id(
+    candidates: &[CandidateAccumulator],
+    query_tokens: &[String],
+) -> Option<UnitId> {
+    if !query_tokens
+        .iter()
+        .any(|token| matches!(token.as_str(), "goal" | "budget"))
+        || !candidates
+            .iter()
+            .any(|candidate| candidate.unit.source_kind.as_deref() == Some("quantity_rollup"))
+    {
+        return None;
+    }
+    let generic = ["am", "i", "my", "meeting", "goal", "budget"];
+    candidates
+        .iter()
+        .filter_map(|candidate| {
+            let body_tokens = tokenize(&candidate.unit.body);
+            let structured =
+                candidate.unit.body.contains(" item ") && candidate.unit.body.contains(": {");
+            let goal_like = body_tokens.iter().any(|token| {
+                matches!(
+                    token.as_str(),
+                    "goal" | "goals" | "budget" | "target" | "limit"
+                )
+            });
+            if candidate.unit.kind != MemoryKind::Semantic || !structured || !goal_like {
+                return None;
+            }
+            let overlap = query_tokens
+                .iter()
+                .filter(|token| !generic.contains(&token.as_str()))
+                .filter(|token| body_tokens.contains(token))
+                .count();
+            (overlap > 0).then_some((overlap, candidate.unit.body.len(), candidate.unit.id))
+        })
+        .max_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| right.1.cmp(&left.1))
+                .then_with(|| right.2.as_uuid().cmp(&left.2.as_uuid()))
+        })
+        .map(|(_, _, id)| id)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn pack_recall_context(
     mut fused: Vec<CandidateAccumulator>,
@@ -3147,6 +6988,21 @@ fn pack_recall_context(
 ) -> PackedRecallContext {
     let mut acc = PackAccumulator::default();
     let mut seen_subjects: HashMap<String, Vec<UnitId>> = HashMap::new();
+    let live_candidate_ids = fused.iter().map(|candidate| candidate.unit.id).collect();
+    let goal_companion_id = goal_companion_id(&fused, query_tokens);
+
+    // R1.5-T0: does an EXTERNAL rank signal (cross-encoder rerank,
+    // decomposition, or the deterministic/learned reranker) actually govern
+    // this candidate list's order? Mirrors the exact per-pair conditions the
+    // `fused.sort_by` below uses. Threaded into `PackCtx` so `admit_or_drop`
+    // can tell whether the established sort order is rank-authoritative (see
+    // the comment on the "output already full" branch there for why that
+    // matters).
+    let rank_based_ordering_active = fused.iter().any(|candidate| {
+        candidate.cross_rerank_rank.is_some()
+            || (request.query_decomposition_enabled && candidate.decomposition_rank.is_some())
+            || (request.rerank_enabled && candidate.rerank_rank.is_some())
+    });
 
     if request.context_packing_abstention_enabled {
         fused.sort_by(|left, right| {
@@ -3210,6 +7066,19 @@ fn pack_recall_context(
         });
     }
 
+    // Query-specific deterministic projections over already-authorized source
+    // units must not be buried by ordinary corpus fusion. Stable partitioning
+    // preserves the selected lane ordering everywhere else.
+    fused.sort_by_key(|candidate| {
+        if is_authoritative_projection(&candidate.unit) {
+            0
+        } else if Some(candidate.unit.id) == goal_companion_id {
+            1
+        } else {
+            2
+        }
+    });
+
     let ctx = PackCtx {
         request,
         tenant_edges,
@@ -3217,6 +7086,9 @@ fn pack_recall_context(
         output_limit: request.k.max(1),
         sibling_gather_enabled: pack_levers.sibling_gather_enabled,
         temporal_grounding_enabled,
+        rank_based_ordering_active,
+        live_candidate_ids,
+        goal_companion_id,
     };
 
     // Greedy fill. With the session-diversity quota on, a candidate whose episode
@@ -3300,9 +7172,9 @@ fn admit_or_drop(
 ) {
     let request = ctx.request;
     if request.context_packing_abstention_enabled
-        && let Some(subject_key) = candidate.unit.subject_key.as_deref()
+        && let Some(fact_key) = candidate.unit.fact_key.as_deref()
     {
-        let dedup_key = normalize_component(subject_key);
+        let dedup_key = normalize_component(fact_key);
         if !dedup_key.is_empty() {
             let seen_ids = seen_subjects.entry(dedup_key).or_default();
             if !seen_ids.is_empty()
@@ -3319,8 +7191,16 @@ fn admit_or_drop(
     }
 
     let (rendered_body, unit_tokens, chunk_mask) = packed_render(&candidate.unit, ctx.query_tokens);
-    let candidate_score = packing_relevance_score(&candidate, ctx.query_tokens);
     let candidate_id = candidate.unit.id;
+    // The projection and its exact goal are authoritative packet structure.
+    // Protect only those items; ordinary candidates must keep competing.
+    let candidate_score = if is_authoritative_projection(&candidate.unit)
+        || Some(candidate_id) == ctx.goal_companion_id
+    {
+        f32::INFINITY
+    } else {
+        packing_relevance_score(&candidate, ctx.query_tokens)
+    };
     let admission = Admission {
         episode_id: candidate.unit.source_episode_id,
         candidate,
@@ -3331,14 +7211,48 @@ fn admit_or_drop(
     };
 
     if acc.items.len() >= ctx.output_limit {
-        if let Some(replace_index) = replacement_index(
-            &acc.token_counts,
-            &acc.relevance_scores,
-            acc.token_estimate,
-            unit_tokens,
-            candidate_score,
-            request.budget_tokens,
-        ) {
+        // R1.5-T0: decoupling the packing scan window from `k` (widening it
+        // to `recall_pool_depth`) makes this branch reachable in Fast/Balanced
+        // mode for candidates beyond the top-`k` for the first time — before
+        // this fix `scan_limit == k == output_limit` made it unreachable
+        // there. `fused` is ALREADY sorted by the request's established
+        // priority before this loop runs, so a candidate reached here is, by
+        // construction, never higher-priority than an already-admitted one
+        // UNDER THAT ORDER. `replacement_index` below decides eligibility
+        // with `packing_relevance_score` — a DIFFERENT formula (it never
+        // reads `rerank_rank`/`decomposition_rank`/`cross_rerank_rank`) — so
+        // reopening this contest whenever a rank signal external to that
+        // formula governs the order would silently override the caller's
+        // opted-into rerank/decomposition decision. Skip the contest (just
+        // drop) in that case; otherwise (no rank signal in play — the
+        // historical case this mechanism was exercised for, via Exhaustive
+        // mode / the session-diversity quota) keep today's behavior
+        // unconditionally. The BUDGET-driven replacement below is a separate,
+        // unaffected mechanism — a legitimate substitution when a candidate
+        // would not fit as a fresh addition regardless of rank.
+        //
+        // MEASURED 2026-07-12 (bench-lme cross-rerank arm, seed 20260710,
+        // 30-q + partial 100-q, pool 64, k 10): every suppression this gate
+        // performed (97 + 179) had the candidate WORSE-ranked than its
+        // would-be evictee under the authoritative order — zero cross-tier,
+        // zero same-rank ties. A per-item tier-aware comparator would
+        // suppress the identical set, so this all-or-nothing gate IS the
+        // correct permanent mechanism, not a stopgap. Do not build the
+        // tier-aware replacement unless a future ordering introduces
+        // same-rank ties (multiple candidates sharing one rank key).
+        let replace_index = if ctx.rank_based_ordering_active {
+            None
+        } else {
+            replacement_index(
+                &acc.token_counts,
+                &acc.relevance_scores,
+                acc.token_estimate,
+                unit_tokens,
+                candidate_score,
+                request.budget_tokens,
+            )
+        };
+        if let Some(replace_index) = replace_index {
             let replaced_id = acc.evict(replace_index);
             dropped_items.push(RecallDroppedItem {
                 unit_id: replaced_id,
@@ -3381,6 +7295,13 @@ fn admit_or_drop(
     admit_new(acc, ctx, admission);
 }
 
+fn is_authoritative_projection(unit: &StoredMemoryUnit) -> bool {
+    matches!(
+        unit.source_kind.as_deref(),
+        Some("quantity_rollup" | "artifact_bundle")
+    )
+}
+
 /// Appends a newly admitted candidate to `acc`, capturing its sibling-gather
 /// state (only when the lever is on and the item was chunk-rendered) before the
 /// candidate is consumed into the context item.
@@ -3412,7 +7333,13 @@ fn admit_new(acc: &mut PackAccumulator, ctx: &PackCtx, admission: Admission) {
     } else {
         None
     };
-    let item = context_item_for(candidate, ctx.tenant_edges, ctx.query_tokens, rendered_body);
+    let item = context_item_for(
+        candidate,
+        ctx.tenant_edges,
+        &ctx.live_candidate_ids,
+        ctx.query_tokens,
+        rendered_body,
+    );
     if let Some(episode_id) = episode_id {
         *acc.episode_counts.entry(episode_id).or_default() += 1;
     }
@@ -3463,28 +7390,45 @@ fn sibling_gather_pass(acc: &mut PackAccumulator, budget_tokens: usize) {
     }
 }
 
+/// R1.5-T0 / D1 fix: the packing CONSIDERATION window (how many of the
+/// fused, score-sorted candidates get a chance at admission) now derives from
+/// `recall_pool_depth`, never from `k`. Before this fix, Fast/Balanced set
+/// `scan_limit == output_limit == k` — a caller requesting a larger `k` gave
+/// the greedy fill a wider window to skip past subject-dedup/budget/quota
+/// drops, which changed WHICH candidates filled even the top-5 slots (D1:
+/// k=50 vs k=10 over an identical corpus/query produced different top-5
+/// orderings; R@5 0.067→0.167, `docs/build-log/2026-07-12-r1-docs-gate.md`).
+/// `pool_floor` is at least `recall_pool_depth` AND at least `output_limit`
+/// (so a `k` bigger than the pool still gets a wide-enough window to fill —
+/// returned items still stop at exactly `k`, only the scan window changed).
 fn recall_pack_scan_limit(
     request: &RecallRequest,
     candidate_count: usize,
     pack_levers: PackLevers,
+    recall_pool_depth: usize,
 ) -> usize {
     let output_limit = request.k.max(1);
+    let pool_floor = recall_pool_depth.max(output_limit);
     let scan_limit = match request.mode {
         RecallMode::Exhaustive => candidate_count
-            .min(output_limit.saturating_mul(25).max(25))
+            .min(pool_floor.saturating_mul(25).max(25))
             .max(output_limit),
-        RecallMode::Fast | RecallMode::Balanced => output_limit.min(candidate_count).max(1),
+        RecallMode::Fast | RecallMode::Balanced => pool_floor.min(candidate_count).max(1),
     };
-    // wave-final-review finding: in Fast/Balanced, scan_limit == output_limit
-    // == k, so the session-diversity quota (W4, `pack_levers.session_quota`)
-    // could only reshuffle the already-admitted top-k and could never surface
-    // a below-k distinct episode — its entire purpose. The quota's cap needs
-    // scan headroom past k to have candidates worth deferring, so widen to at
-    // least 2*k whenever the quota is enabled. `.take(scan_limit)` downstream
-    // clamps to `candidate_count`, so widening past it is harmless. Quota off
-    // leaves `scan_limit` untouched — byte-identical to today.
+    // wave-final-review finding (pre-R1.5-T0): in Fast/Balanced, scan_limit ==
+    // output_limit == k, so the session-diversity quota (W4,
+    // `pack_levers.session_quota`) could only reshuffle the already-admitted
+    // top-k and could never surface a below-k distinct episode — its entire
+    // purpose. R1.5-T0 widens this past the POOL FLOOR (not past `k`) so the
+    // quota keeps its headroom independent of `k`; `pool_floor` (not bare
+    // `recall_pool_depth`) so a `k > recall_pool_depth` request still gets
+    // headroom past its own `k` — `recall_pool_depth*2` alone could sit at or
+    // below `scan_limit` there, silencing the quota again for exactly the
+    // large-k callers. `.take(scan_limit)` downstream clamps to
+    // `candidate_count`, so widening past it is harmless. Quota off leaves
+    // `scan_limit` untouched.
     match pack_levers.session_quota {
-        Some(_) => scan_limit.max(output_limit.saturating_mul(2)),
+        Some(_) => scan_limit.max(pool_floor.saturating_mul(2)),
         None => scan_limit,
     }
 }
@@ -3569,10 +7513,12 @@ fn packed_render(
 fn context_item_for(
     candidate: CandidateAccumulator,
     tenant_edges: &[StoredMemoryEdge],
+    live_candidate_ids: &HashSet<UnitId>,
     query_tokens: &[String],
     rendered_body: Option<String>,
 ) -> RecallContextItem {
-    let suppression_labels = suppression_labels_for(&candidate.unit, tenant_edges);
+    let suppression_labels =
+        suppression_labels_for(&candidate.unit, tenant_edges, live_candidate_ids);
     let derived_by = derived_by_for_unit(&candidate.unit).to_string();
     let matched_contextual_chunk = contextual_chunk_score(&candidate.unit, query_tokens) > 0.0;
     let inclusion_reason = if candidate.unit.kind == MemoryKind::Procedural
@@ -3581,8 +7527,6 @@ fn context_item_for(
         "validated_failure_pattern"
     } else if candidate.unit.kind == MemoryKind::Procedural {
         "validated_procedure"
-    } else if candidate.l4_score > 0.0 {
-        "l4_exhaustive"
     } else if matched_contextual_chunk {
         "contextual_chunk"
     } else {
@@ -3596,6 +7540,7 @@ fn context_item_for(
         inclusion_reason: inclusion_reason.to_string(),
         citation_episode_id: candidate.unit.source_episode_id,
         citation_resource_id: candidate.unit.source_resource_id,
+        derived_from_unit_ids: Vec::new(),
         suppression_labels,
     }
 }
@@ -3764,30 +7709,25 @@ fn has_contradiction_with_any(
     })
 }
 
-fn derive_dedup_key(
-    scope_id: impl std::fmt::Display,
-    source_kind: &str,
-    subject_hint: Option<&str>,
-    body: &str,
-) -> String {
-    let subject = subject_hint
-        .map(normalize_component)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "unspecified".to_string());
-    // The body component is content-hashed (sha256 of the normalized body):
-    // dedup equality is unchanged, but the key stays small enough for the
-    // `(tenant_id, scope_id, dedup_key)` btree unique index regardless of
-    // episode body size (btree tuples cap at ~8KB).
-    use sha2::{Digest, Sha256};
+fn derive_episode_dedup_key(source_kind: &str, source_ref: &str, body: &str) -> String {
+    // `source_ref` is an opaque external identity: hash its exact bytes with
+    // length delimiters so case, whitespace, and component boundaries remain
+    // significant while the indexed key stays bounded.
+    //
+    // Content-only on purpose — no scope/tenant salt. Dedup is already scoped
+    // by the (tenant, subject, generation, scope, agent, actor) columns of the
+    // unique key, and recall/episode tie-breaks rely on `dedup_key` being
+    // identical for identical content across a fresh-UUID re-ingest.
     let mut hasher = Sha256::new();
-    hasher.update(normalize_component(body).as_bytes());
-    format!(
-        "{}:{}:{}:{:x}",
-        scope_id,
+    for component in [
         normalize_component(source_kind),
-        subject,
-        hasher.finalize()
-    )
+        source_ref.to_string(),
+        normalize_component(body),
+    ] {
+        hasher.update((component.len() as u64).to_be_bytes());
+        hasher.update(component.as_bytes());
+    }
+    format!("{:x}", hasher.finalize())
 }
 
 pub(crate) fn normalize_component(value: &str) -> String {
@@ -3854,19 +7794,23 @@ fn channel_candidates(
     request: &RecallRequest,
     query_tokens: &[String],
     vector_scores: Option<&HashMap<UnitId, f32>>,
-    now: &str,
+    time: &RecallTime,
     temporal_window: Option<&DateWindow>,
 ) -> Vec<(StoredMemoryUnit, f32)> {
     units
         .iter()
-        .filter(|unit| request.allowed_scope_ids.contains(&unit.scope_id))
+        .filter(|unit| {
+            request
+                .context
+                .allows(unit.kind, unit.scope_id, unit.agent_node_id)
+        })
         .filter(|unit| {
             recallable(
                 unit,
                 request.include_beliefs,
                 request.procedure_recall_enabled,
                 &request.query,
-                now,
+                time,
             )
         })
         .filter(|unit| high_risk_recall_drop_reason(unit, request).is_none())
@@ -3882,7 +7826,7 @@ fn channel_candidates(
                     edges,
                     query_tokens,
                     request.procedure_recall_enabled,
-                    now,
+                    time,
                 ),
                 ChannelPass::Vector => vector_scores
                     .and_then(|scores| scores.get(&unit.id).copied())
@@ -3893,54 +7837,13 @@ fn channel_candidates(
         .collect()
 }
 
-fn l4_exhaustive_candidates(
-    units: &[StoredMemoryUnit],
-    episodes: &[StoredEpisode],
-    request: &RecallRequest,
-    query_tokens: &[String],
-    now: &str,
-) -> Vec<(StoredMemoryUnit, f32, String)> {
-    units
-        .iter()
-        .filter(|unit| request.allowed_scope_ids.contains(&unit.scope_id))
-        .filter(|unit| {
-            recallable(
-                unit,
-                request.include_beliefs,
-                request.procedure_recall_enabled,
-                &request.query,
-                now,
-            )
-        })
-        .filter(|unit| high_risk_recall_drop_reason(unit, request).is_none())
-        .filter_map(|unit| {
-            let episode = unit
-                .source_episode_id
-                .and_then(|episode_id| episodes.iter().find(|episode| episode.id == episode_id))?;
-            let raw_score = token_set_overlap_text_score(&episode.body, query_tokens);
-            let direct_score = exact_score(unit, query_tokens)
-                .max(lexical_score(unit, query_tokens))
-                .max(token_set_overlap_score(unit, query_tokens))
-                .max(temporal_score(unit, &request.query, None));
-            let score = raw_score - direct_score;
-            (score > 0.0).then(|| {
-                (
-                    unit.clone(),
-                    score,
-                    format!("episode:{}", episode.id.as_uuid()),
-                )
-            })
-        })
-        .collect()
-}
-
 fn edge_score(
     unit: &StoredMemoryUnit,
     units: &[StoredMemoryUnit],
     edges: &[StoredMemoryEdge],
     query_tokens: &[String],
     procedure_recall_enabled: bool,
-    now: &str,
+    time: &RecallTime,
 ) -> f32 {
     let related_match = edges.iter().any(|edge| {
         if edge.src_id != unit.id && edge.dst_id != unit.id {
@@ -3955,7 +7858,7 @@ fn edge_score(
             .iter()
             .find(|candidate| candidate.id == other_id)
             .is_some_and(|candidate| {
-                recallable(candidate, true, procedure_recall_enabled, "", now)
+                recallable(candidate, true, procedure_recall_enabled, "", time)
                     && (lexical_score(candidate, query_tokens) > 0.0
                         || exact_score(candidate, query_tokens) > 0.0)
             })
@@ -3963,11 +7866,16 @@ fn edge_score(
     if related_match { 1.0 } else { 0.0 }
 }
 
-fn suppression_labels_for(unit: &StoredMemoryUnit, edges: &[StoredMemoryEdge]) -> Vec<String> {
+fn suppression_labels_for(
+    unit: &StoredMemoryUnit,
+    edges: &[StoredMemoryEdge],
+    live_candidate_ids: &HashSet<UnitId>,
+) -> Vec<String> {
     let mut labels = Vec::new();
     if edges.iter().any(|edge| {
         edge.kind == MemoryEdgeKind::Contradicts
-            && (edge.src_id == unit.id || edge.dst_id == unit.id)
+            && ((edge.src_id == unit.id && live_candidate_ids.contains(&edge.dst_id))
+                || (edge.dst_id == unit.id && live_candidate_ids.contains(&edge.src_id)))
     }) {
         labels.push("unresolved_contradiction".to_string());
     }
@@ -3982,12 +7890,9 @@ fn recallable(
     include_beliefs: bool,
     procedure_recall_enabled: bool,
     query: &str,
-    now: &str,
+    time: &RecallTime,
 ) -> bool {
-    if unit.deletion_generation.is_some() {
-        return false;
-    }
-    if unit.transaction_to.is_some() || !valid_for_query(unit, query, now) {
+    if !bitemporally_recallable(unit, time) || !valid_for_query(unit, query, &time.valid_at) {
         return false;
     }
     if unit.kind == MemoryKind::Procedural {
@@ -3995,8 +7900,34 @@ fn recallable(
             && unit.state == UnitState::Validated
             && !unsafe_procedure_step(unit);
     }
-    matches!(unit.state, UnitState::Active | UnitState::Validated)
+    (matches!(unit.state, UnitState::Active | UnitState::Validated)
+        || (unit.state == UnitState::Superseded && unit.transaction_to.is_some()))
         && (include_beliefs || unit.kind != MemoryKind::Belief)
+}
+
+fn bitemporally_recallable(unit: &StoredMemoryUnit, time: &RecallTime) -> bool {
+    if unit.deletion_generation.is_some() || unit.state == UnitState::Deleted {
+        return false;
+    }
+    let transaction_visible = unit.transaction_from.as_deref().is_none_or(|from| {
+        cmp_rfc3339(from, &time.transaction_as_of) != std::cmp::Ordering::Greater
+    }) && unit
+        .transaction_to
+        .as_deref()
+        .is_none_or(|to| cmp_rfc3339(&time.transaction_as_of, to) == std::cmp::Ordering::Less);
+    let valid = unit
+        .valid_from
+        .as_deref()
+        .is_none_or(|from| cmp_rfc3339(from, &time.valid_at) != std::cmp::Ordering::Greater)
+        && unit
+            .valid_to
+            .as_deref()
+            .is_none_or(|to| cmp_rfc3339(&time.valid_at, to) == std::cmp::Ordering::Less);
+    transaction_visible && valid
+}
+
+pub fn unit_is_recallable_at(unit: &StoredMemoryUnit, time: &RecallTime) -> bool {
+    bitemporally_recallable(unit, time)
 }
 
 fn high_risk_recall_drop_reason(
@@ -4017,8 +7948,8 @@ fn high_risk_recall_drop_reason(
 
 fn personal_context_unit(unit: &StoredMemoryUnit) -> bool {
     let source_kind = unit.source_kind.as_deref().unwrap_or_default();
-    let subject_key = unit.subject_key.as_deref().unwrap_or_default();
-    let text = normalize_component(&format!("{source_kind} {subject_key} {}", unit.body));
+    let fact_key = unit.fact_key.as_deref().unwrap_or_default();
+    let text = normalize_component(&format!("{source_kind} {fact_key} {}", unit.body));
     contains_any_phrase(
         &text,
         &[
@@ -4513,10 +8444,10 @@ fn is_historical_query(query: &str) -> bool {
 }
 
 fn exact_score(unit: &StoredMemoryUnit, query_tokens: &[String]) -> f32 {
-    let Some(subject_key) = unit.subject_key.as_deref() else {
+    let Some(fact_key) = unit.fact_key.as_deref() else {
         return 0.0;
     };
-    let subject_tokens = tokenize(subject_key);
+    let subject_tokens = tokenize(fact_key);
     let matches = subject_tokens
         .iter()
         .filter(|token| {
@@ -4533,7 +8464,11 @@ fn exact_score(unit: &StoredMemoryUnit, query_tokens: &[String]) -> f32 {
 }
 
 fn lexical_score(unit: &StoredMemoryUnit, query_tokens: &[String]) -> f32 {
-    let body_tokens = tokenize(&unit.body);
+    lexical_text_score(&unit.body, query_tokens)
+}
+
+pub(crate) fn lexical_text_score(text: &str, query_tokens: &[String]) -> f32 {
+    let body_tokens = tokenize(text);
     let overlap = body_tokens
         .iter()
         .filter(|token| {
@@ -4822,7 +8757,7 @@ fn recall_stage_facts(vector_enabled: bool) -> Vec<ReflectStageFact> {
         stage: stage.to_string(),
         // The vector channel only reports scores when a real embedding
         // provider is configured; the default runtime traces it as disabled.
-        detail: if stage == "vector" && !vector_enabled {
+        detail: if (stage == "vector" && !vector_enabled) || stage == "l4_exhaustive" {
             "disabled".to_string()
         } else {
             "completed".to_string()
@@ -4864,32 +8799,136 @@ fn recall_feature_flags(request: &RecallRequest, vector_enabled: bool) -> Vec<St
     if request.decay_enabled {
         flags.push("decay_enabled".to_string());
     }
-    if request.mode == RecallMode::Exhaustive {
-        flags.push("l4_exhaustive_enabled".to_string());
+    if request.transaction_as_of.is_some() {
+        flags.push("transaction_snapshot_requested".to_string());
+    }
+    if request.valid_at.is_some() {
+        flags.push("valid_time_override_requested".to_string());
     }
     flags
 }
 
+/// Returns the trace plus the ids of the units this call newly created (in
+/// persistence order). A redelivery short-circuits on the idempotency marker
+/// and creates nothing, so its created-id list is empty.
 pub async fn reflect_recorded<S>(
     store: &S,
     input: ReflectInput,
     embedder: &dyn EmbeddingProvider,
     clock: &dyn Clock,
-) -> Result<ReflectTrace, CoreError>
+) -> Result<(ReflectTrace, Vec<UnitId>), CoreError>
 where
     S: MemoryStore,
 {
+    reflect_recorded_inner(store, input, embedder, clock, None, None).await
+}
+
+pub async fn reflect_recorded_claimed<S>(
+    store: &S,
+    input: ReflectInput,
+    embedder: &dyn EmbeddingProvider,
+    clock: &dyn Clock,
+    context: &ResolvedMemoryContext,
+    claim: &ReflectJobRow,
+) -> Result<(ReflectTrace, Vec<UnitId>), CoreError>
+where
+    S: MemoryStore,
+{
+    reflect_recorded_inner(store, input, embedder, clock, Some(context), Some(claim)).await
+}
+
+async fn reflect_recorded_inner<S>(
+    store: &S,
+    input: ReflectInput,
+    embedder: &dyn EmbeddingProvider,
+    clock: &dyn Clock,
+    resolved_context: Option<&ResolvedMemoryContext>,
+    claim: Option<&ReflectJobRow>,
+) -> Result<(ReflectTrace, Vec<UnitId>), CoreError>
+where
+    S: MemoryStore,
+{
+    let prepared = prepare_compiled_write(store, input, embedder, clock, resolved_context).await?;
+    match prepared {
+        PreparedCompiledWrite::Existing(trace) => Ok((trace, Vec::new())),
+        PreparedCompiledWrite::Write {
+            context,
+            trace,
+            created_unit_ids,
+            write,
+        } => {
+            store.persist_compiled_units(&context, claim, write).await?;
+            Ok((trace, created_unit_ids))
+        }
+    }
+}
+
+// ponytail: transient local, returned and immediately destructured, never
+// collected — boxing the large variant would add a heap alloc on the write path
+// for no benefit. Box it if this ever gets stored in a Vec.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum PreparedCompiledWrite {
+    Existing(ReflectTrace),
+    Write {
+        context: ResolvedMemoryContext,
+        trace: ReflectTrace,
+        created_unit_ids: Vec<UnitId>,
+        write: CompiledWrite,
+    },
+}
+
+pub(crate) async fn prepare_compiled_write<S>(
+    store: &S,
+    input: ReflectInput,
+    embedder: &dyn EmbeddingProvider,
+    clock: &dyn Clock,
+    resolved_context: Option<&ResolvedMemoryContext>,
+) -> Result<PreparedCompiledWrite, CoreError>
+where
+    S: MemoryStore,
+{
+    let now = clock.now_rfc3339();
+    // The write compiler dedups/supersedes against the WHOLE open scope — a
+    // bounded recall pool would silently miss aged units and let a duplicate
+    // subject collide with the open-subject unique index (spec: supersedence is
+    // by subject, not recency).
+    let resolved;
+    let context = match resolved_context {
+        Some(context) => context,
+        None => {
+            resolved = store
+                .resolve_memory_context(
+                    input.tenant_id,
+                    input.data_subject_id,
+                    input.actor_id,
+                    input.scope_id,
+                    input.agent_node_id,
+                )
+                .await?;
+            &resolved
+        }
+    };
+    if context.tenant_id != input.tenant_id
+        || context.data_subject_id != input.data_subject_id
+        || context.actor_id != input.actor_id
+        || context.scope_id != input.scope_id
+        || context.agent_node_id != input.agent_node_id
+    {
+        return Err(StoreError::Conflict(
+            "reflect input does not match memory context".to_string(),
+        )
+        .into());
+    }
+    if context.subject_generation != input.subject_generation {
+        return Err(StoreError::Conflict("subject generation is stale".to_string()).into());
+    }
     if let Some(existing) = store
-        .fetch_reflect_trace(input.tenant_id, input.job_id, &input.compiler_version)
+        .fetch_reflect_trace(context, input.job_id, &input.compiler_version)
         .await?
     {
-        return Ok(existing);
+        return Ok(PreparedCompiledWrite::Existing(existing));
     }
-
-    let now = clock.now_rfc3339();
-    let mut working = store
-        .fetch_recall_candidates(input.tenant_id, &[input.scope_id], &[], &[], usize::MAX)
-        .await?;
+    let mut working = store.fetch_scope_open_units(context).await?;
     let originals: HashMap<UnitId, (UnitState, Option<String>)> = working
         .iter()
         .map(|unit| (unit.id, (unit.state, unit.transaction_to.clone())))
@@ -4906,12 +8945,58 @@ where
         }
 
         let explicit_subject = has_explicit_subject(&candidate);
-        let subject_key = derive_subject_key(
-            input.scope_id.as_uuid(),
-            candidate.subject.as_deref(),
-            candidate.predicate.as_deref(),
-            &candidate.body,
-        );
+        let fact_key = candidate.fact_key.clone().unwrap_or_else(|| {
+            derive_fact_key(
+                input.scope_id.as_uuid(),
+                candidate.subject.as_deref(),
+                candidate.predicate.as_deref(),
+                &candidate.body,
+            )
+        });
+
+        let targeted_indices = if let Some(target_ids) = &candidate.target_unit_ids {
+            let unique_targets = target_ids.iter().copied().collect::<HashSet<_>>();
+            if unique_targets.len() != target_ids.len() {
+                return Err(CoreError::ProviderInvalid(
+                    "structured-state target ids are duplicated".to_string(),
+                ));
+            }
+            let indices = working
+                .iter()
+                .enumerate()
+                .filter(|(_, unit)| {
+                    unique_targets.contains(&unit.id)
+                        && unit.scope_id == input.scope_id
+                        && unit.fact_key.as_deref() == Some(fact_key.as_str())
+                        && unit.state == UnitState::Active
+                        && unit.kind == MemoryKind::Semantic
+                        && unit.transaction_to.is_none()
+                        && candidate_targets_unit(&candidate, unit, &now)
+                })
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            if indices.len() != target_ids.len() {
+                return Err(CoreError::ProviderInvalid(format!(
+                    "structured-state mutation did not match every exact active target for subject key {fact_key}"
+                )));
+            }
+            if target_ids.is_empty()
+                && working.iter().any(|unit| {
+                    unit.scope_id == input.scope_id
+                        && unit.fact_key.as_deref() == Some(fact_key.as_str())
+                        && unit.state == UnitState::Active
+                        && unit.kind == MemoryKind::Semantic
+                        && unit.transaction_to.is_none()
+                })
+            {
+                return Err(CoreError::ProviderInvalid(format!(
+                    "structured-state create collided with active subject key {fact_key}"
+                )));
+            }
+            indices
+        } else {
+            Vec::new()
+        };
 
         let high_trust = matches!(
             candidate.trust_level,
@@ -4920,10 +9005,17 @@ where
 
         let action = if let Some(existing_index) = working.iter().position(|unit| {
             unit.scope_id == input.scope_id
-                && unit.subject_key.as_deref() == Some(subject_key.as_str())
+                && unit.fact_key.as_deref() == Some(fact_key.as_str())
                 && unit.body == candidate.body
-                && unit.state != UnitState::Deleted
-                && unit.state != UnitState::Invalidated
+                && unit.transaction_to.is_none()
+                && !matches!(
+                    unit.state,
+                    UnitState::Deleted
+                        | UnitState::Invalidated
+                        | UnitState::Superseded
+                        | UnitState::Expired
+                )
+                && candidate_validity_covered_by_unit(&candidate, unit, &now)
         }) {
             if can_promote_belief(&working[existing_index], &candidate) {
                 let belief_id = working[existing_index].id;
@@ -4933,7 +9025,7 @@ where
                     &input,
                     MemoryKind::Semantic,
                     UnitState::Active,
-                    subject_key,
+                    fact_key.clone(),
                     &candidate,
                     &now,
                 );
@@ -4946,6 +9038,8 @@ where
                     src_id: semantic_id,
                     dst_id: belief_id,
                     kind: MemoryEdgeKind::DerivedFrom,
+                    transaction_from: Some(now.clone()),
+                    transaction_to: None,
                 });
                 AdmissionAction::Append
             } else {
@@ -4953,13 +9047,78 @@ where
             }
         } else if high_trust {
             if candidate.admission_hint == Some(AdmissionAction::Invalidate) {
-                if let Some(existing_index) = working.iter().position(|unit| {
-                    unit.scope_id == input.scope_id
-                        && unit.subject_key.as_deref() == Some(subject_key.as_str())
-                        && unit.state == UnitState::Active
-                        && unit.kind == MemoryKind::Semantic
-                }) {
-                    working[existing_index].state = UnitState::Invalidated;
+                let bounded = candidate.valid_from.is_some() || candidate.valid_to.is_some();
+                let mut existing_indices = if candidate.target_unit_ids.is_some() {
+                    targeted_indices.clone()
+                } else {
+                    working
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, unit)| {
+                            unit.scope_id == input.scope_id
+                                && unit.fact_key.as_deref() == Some(fact_key.as_str())
+                                && unit.state == UnitState::Active
+                                && unit.kind == MemoryKind::Semantic
+                                && candidate_targets_unit(&candidate, unit, &now)
+                        })
+                        .map(|(index, _)| index)
+                        .collect::<Vec<_>>()
+                };
+                if existing_indices.is_empty() {
+                    return Err(CoreError::ProviderInvalid(format!(
+                        "invalidation matched no open semantic unit for subject key {fact_key}"
+                    )));
+                }
+                if !bounded && candidate.target_unit_ids.is_none() {
+                    existing_indices.truncate(1);
+                }
+                for existing_index in existing_indices {
+                    let old = working[existing_index].clone();
+                    working[existing_index].state = if bounded {
+                        UnitState::Superseded
+                    } else {
+                        UnitState::Invalidated
+                    };
+                    working[existing_index].transaction_to = Some(now.clone());
+                    if bounded {
+                        let (valid_from, valid_to) = interval_intersection(
+                            old.valid_from.as_deref(),
+                            old.valid_to.as_deref(),
+                            candidate.valid_from.as_deref(),
+                            candidate.valid_to.as_deref(),
+                        );
+                        let payload = CorrectionPayload {
+                            value: old.body.clone(),
+                            reason: "reflect_invalidation".to_string(),
+                            source_ref: input.source_ref.clone(),
+                            observed_at: input.observed_at.clone(),
+                            valid_from,
+                            valid_to,
+                        };
+                        let (_, remainders) = correction_rectangles(
+                            &old,
+                            &payload,
+                            &input.source_ref,
+                            &input.observed_at,
+                            input.actor_id,
+                            &now,
+                        )?;
+                        for remainder in remainders {
+                            let remainder_id = remainder.id;
+                            working.push(remainder);
+                            new_ids.insert(remainder_id);
+                            new_edges.push(StoredMemoryEdge {
+                                id: EdgeId::new(),
+                                tenant_id: input.tenant_id,
+                                scope_id: input.scope_id,
+                                src_id: remainder_id,
+                                dst_id: old.id,
+                                kind: MemoryEdgeKind::Supersedes,
+                                transaction_from: Some(now.clone()),
+                                transaction_to: None,
+                            });
+                        }
+                    }
                 }
                 AdmissionAction::Invalidate
             } else if candidate.admission_hint == Some(AdmissionAction::Quarantine) {
@@ -4969,7 +9128,7 @@ where
                     &input,
                     MemoryKind::Belief,
                     UnitState::Quarantined,
-                    subject_key,
+                    fact_key,
                     &candidate,
                     &now,
                 );
@@ -4979,47 +9138,109 @@ where
             } else {
                 let new_id = UnitId::new();
                 let mut action = AdmissionAction::Append;
-                // AUTO-KEYS NEVER SUPERSEDE: content-hash subject keys only
-                // participate in exact-duplicate dedup above; subject-based
-                // supersedence requires an explicit subject/predicate.
-                if explicit_subject
-                    && let Some(existing_index) = working.iter().position(|unit| {
-                        unit.scope_id == input.scope_id
-                            && unit.subject_key.as_deref() == Some(subject_key.as_str())
-                            && unit.state == UnitState::Active
-                            && unit.kind == MemoryKind::Semantic
-                    })
-                {
-                    action = AdmissionAction::Supersede;
-                    let old_id = working[existing_index].id;
-                    working[existing_index].state = UnitState::Superseded;
-                    working[existing_index].transaction_to = Some(now.clone());
-                    new_edges.push(StoredMemoryEdge {
-                        id: EdgeId::new(),
-                        tenant_id: input.tenant_id,
-                        scope_id: input.scope_id,
-                        src_id: old_id,
-                        dst_id: new_id,
-                        kind: MemoryEdgeKind::Contradicts,
-                    });
-                    new_edges.push(StoredMemoryEdge {
-                        id: EdgeId::new(),
-                        tenant_id: input.tenant_id,
-                        scope_id: input.scope_id,
-                        src_id: new_id,
-                        dst_id: old_id,
-                        kind: MemoryEdgeKind::Supersedes,
-                    });
-                }
-                let unit = minted_unit(
+                let mut unit = minted_unit(
                     new_id,
                     &input,
                     candidate.kind.unwrap_or(MemoryKind::Semantic),
                     UnitState::Active,
-                    subject_key,
+                    fact_key.clone(),
                     &candidate,
                     &now,
                 );
+                // AUTO-KEYS NEVER SUPERSEDE: content-hash subject keys only
+                // participate in exact-duplicate dedup above; subject-based
+                // supersedence requires an explicit subject/predicate.
+                if explicit_subject {
+                    let bounded = candidate.valid_from.is_some() || candidate.valid_to.is_some();
+                    let mut existing_indices = if candidate.target_unit_ids.is_some() {
+                        targeted_indices.clone()
+                    } else {
+                        working
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, existing)| {
+                                existing.scope_id == input.scope_id
+                                    && existing.fact_key.as_deref() == Some(fact_key.as_str())
+                                    && existing.state == UnitState::Active
+                                    && existing.kind == MemoryKind::Semantic
+                                    && candidate_targets_unit(&candidate, existing, &now)
+                            })
+                            .map(|(index, _)| index)
+                            .collect::<Vec<_>>()
+                    };
+                    if !bounded && candidate.target_unit_ids.is_none() {
+                        existing_indices.truncate(1);
+                    }
+                    if !existing_indices.is_empty() {
+                        action = AdmissionAction::Supersede;
+                        for existing_index in existing_indices {
+                            let old = working[existing_index].clone();
+                            let old_id = old.id;
+                            working[existing_index].state = UnitState::Superseded;
+                            working[existing_index].transaction_to = Some(now.clone());
+                            let (valid_from, valid_to) = if bounded {
+                                interval_intersection(
+                                    old.valid_from.as_deref(),
+                                    old.valid_to.as_deref(),
+                                    candidate.valid_from.as_deref(),
+                                    candidate.valid_to.as_deref(),
+                                )
+                            } else {
+                                (unit.valid_from.clone(), unit.valid_to.clone())
+                            };
+                            let payload = CorrectionPayload {
+                                value: unit.body.clone(),
+                                reason: "reflect_supersedence".to_string(),
+                                source_ref: input.source_ref.clone(),
+                                observed_at: input.observed_at.clone(),
+                                valid_from,
+                                valid_to,
+                            };
+                            let (replacement, remainders) = correction_rectangles(
+                                &old,
+                                &payload,
+                                &input.source_ref,
+                                &input.observed_at,
+                                input.actor_id,
+                                &now,
+                            )?;
+                            if !bounded {
+                                unit.valid_from = replacement.valid_from;
+                                unit.valid_to = replacement.valid_to;
+                            }
+                            for remainder in remainders {
+                                let remainder_id = remainder.id;
+                                working.push(remainder);
+                                new_ids.insert(remainder_id);
+                                new_edges.push(StoredMemoryEdge {
+                                    id: EdgeId::new(),
+                                    tenant_id: input.tenant_id,
+                                    scope_id: input.scope_id,
+                                    src_id: remainder_id,
+                                    dst_id: old_id,
+                                    kind: MemoryEdgeKind::Supersedes,
+                                    transaction_from: Some(now.clone()),
+                                    transaction_to: None,
+                                });
+                            }
+                            for (src_id, dst_id, kind) in [
+                                (old_id, new_id, MemoryEdgeKind::Contradicts),
+                                (new_id, old_id, MemoryEdgeKind::Supersedes),
+                            ] {
+                                new_edges.push(StoredMemoryEdge {
+                                    id: EdgeId::new(),
+                                    tenant_id: input.tenant_id,
+                                    scope_id: input.scope_id,
+                                    src_id,
+                                    dst_id,
+                                    kind,
+                                    transaction_from: Some(now.clone()),
+                                    transaction_to: None,
+                                });
+                            }
+                        }
+                    }
+                }
                 working.push(unit);
                 new_ids.insert(new_id);
                 action
@@ -5031,7 +9252,7 @@ where
                 &input,
                 MemoryKind::Belief,
                 UnitState::Quarantined,
-                subject_key,
+                fact_key,
                 &candidate,
                 &now,
             );
@@ -5051,7 +9272,7 @@ where
                 &input,
                 low_trust_kind,
                 UnitState::Candidate,
-                subject_key,
+                fact_key,
                 &candidate,
                 &now,
             );
@@ -5067,7 +9288,10 @@ where
         &mut new_ids,
         &mut new_edges,
         input.tenant_id,
+        input.data_subject_id,
         input.scope_id,
+        input.agent_node_id,
+        input.subject_generation,
         input.actor_id,
         input.episode_id,
         &now,
@@ -5103,6 +9327,8 @@ where
         .filter(|unit| new_ids.contains(&unit.id))
         .cloned()
         .collect();
+    let citations = mint_compiled_citations(&input, &new_units)?;
+    let created_unit_ids: Vec<UnitId> = new_units.iter().map(|unit| unit.id).collect();
     let unit_updates: Vec<UnitUpdate> = working
         .iter()
         .filter(|unit| !new_ids.contains(&unit.id))
@@ -5118,25 +9344,14 @@ where
         })
         .collect();
 
-    store
-        .persist_compiled_units(
-            input.tenant_id,
-            CompiledWrite {
-                scope_id: input.scope_id,
-                job_id: input.job_id,
-                compiler_version: input.compiler_version,
-                new_units: new_units.clone(),
-                new_edges,
-                unit_updates,
-                trace: trace.clone(),
-            },
-        )
-        .await?;
-
-    // Embedding write-through: when a real provider is configured, newly
-    // compiled unit bodies are embedded and persisted under the provider's
-    // (idempotently seeded) embedding profile. Noop providers skip entirely.
-    if embedder.dimensions() > 0 && !new_units.is_empty() {
+    // Embedding write-through: embed the new unit bodies BEFORE the persist
+    // transaction (the provider call is network I/O and must not run inside a
+    // DB transaction), then hand the rows to `persist_compiled_units` so units,
+    // embeddings, and the idempotency marker all commit atomically. A failure
+    // here returns before any marker is written, so a retry recomputes cleanly
+    // instead of short-circuiting on a marker whose embeddings never landed.
+    // Noop providers (dimensions() == 0) skip entirely.
+    let (embedding_profile, embeddings) = if embedder.dimensions() > 0 && !new_units.is_empty() {
         let profile = embedding_profile_for(embedder);
         let bodies: Vec<String> = new_units.iter().map(|unit| unit.body.clone()).collect();
         let vectors = embedder
@@ -5152,17 +9367,156 @@ where
                 vec,
             })
             .collect();
-        if !rows.is_empty() {
-            store
-                .upsert_embedding_profile(input.tenant_id, profile)
-                .await?;
-            store.upsert_embeddings(input.tenant_id, rows).await?;
+        if rows.is_empty() {
+            (None, Vec::new())
+        } else {
+            (Some(profile), rows)
+        }
+    } else {
+        (None, Vec::new())
+    };
+
+    Ok(PreparedCompiledWrite::Write {
+        context: context.clone(),
+        trace: trace.clone(),
+        created_unit_ids,
+        write: CompiledWrite {
+            job_id: input.job_id,
+            compiler_version: input.compiler_version,
+            new_units,
+            new_edges,
+            citations,
+            unit_updates,
+            trace,
+            embedding_profile,
+            embeddings,
+        },
+    })
+}
+
+fn mint_compiled_citations(
+    input: &ReflectInput,
+    units: &[StoredMemoryUnit],
+) -> Result<Vec<StoredCitation>, StoreError> {
+    let Some(source_body) = input.source_body.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let citation =
+        |unit: &StoredMemoryUnit, start: usize, end: usize, quote: &str| -> StoredCitation {
+            StoredCitation {
+                id: Uuid::new_v4(),
+                tenant_id: unit.tenant_id,
+                data_subject_id: unit.data_subject_id,
+                scope_id: unit.scope_id,
+                agent_node_id: unit.agent_node_id,
+                subject_generation: unit.subject_generation,
+                memory_unit_id: unit.id,
+                episode_id: unit.source_episode_id,
+                resource_id: unit.source_resource_id,
+                span: Some(memphant_types::CitationSpan {
+                    start: start as u64,
+                    end: end as u64,
+                }),
+                quote_hash: Some(format!("sha256:{:x}", Sha256::digest(quote.as_bytes()))),
+            }
+        };
+    let mut citations = Vec::new();
+    for unit in units {
+        // Span validation is only meaningful against the body the unit was
+        // minted from. Supersession remainders (correction_rectangles) are
+        // clones of an OLDER unit carrying chunks from a different episode;
+        // validating those against this compile's source_body is a false
+        // conflict, and their evidence lineage already lives on the original
+        // generation's citations plus the supersedes edge.
+        if unit.source_episode_id != input.episode_id
+            || unit.source_resource_id != input.resource_id
+        {
+            continue;
+        }
+        let spans: Vec<_> = unit
+            .contextual_chunks
+            .iter()
+            .filter_map(|chunk| chunk.source_span.as_deref().map(|span| (chunk, span)))
+            .collect();
+        if spans.len() != unit.contextual_chunks.len() {
+            citations.push(citation(unit, 0, source_body.len(), source_body));
+            continue;
+        }
+        for (chunk, span) in spans {
+            let (start, end) = span
+                .split_once('-')
+                .and_then(|(start, end)| Some((start.parse().ok()?, end.parse().ok()?)))
+                .ok_or_else(|| {
+                    StoreError::Conflict("contextual chunk span is invalid".to_string())
+                })?;
+            let quote = source_body.get(start..end).ok_or_else(|| {
+                StoreError::Conflict("contextual chunk span is out of bounds".to_string())
+            })?;
+            if quote != chunk.body {
+                return Err(StoreError::Conflict(
+                    "contextual chunk span does not match its source body".to_string(),
+                ));
+            }
+            citations.push(citation(unit, start, end, quote));
         }
     }
-    Ok(trace)
+    Ok(citations)
+}
+
+fn candidate_targets_unit(
+    candidate: &memphant_types::ReflectCandidate,
+    unit: &StoredMemoryUnit,
+    now: &str,
+) -> bool {
+    if candidate.valid_from.is_none() && candidate.valid_to.is_none() {
+        unit.valid_from
+            .as_deref()
+            .is_none_or(|from| cmp_rfc3339(from, now) != std::cmp::Ordering::Greater)
+            && unit
+                .valid_to
+                .as_deref()
+                .is_none_or(|to| cmp_rfc3339(now, to) == std::cmp::Ordering::Less)
+    } else {
+        intervals_overlap(
+            unit.valid_from.as_deref(),
+            unit.valid_to.as_deref(),
+            candidate.valid_from.as_deref(),
+            candidate.valid_to.as_deref(),
+        )
+    }
+}
+
+fn candidate_validity_covered_by_unit(
+    candidate: &memphant_types::ReflectCandidate,
+    unit: &StoredMemoryUnit,
+    now: &str,
+) -> bool {
+    if candidate.valid_from.is_none() && candidate.valid_to.is_none() {
+        return candidate_targets_unit(candidate, unit, now);
+    }
+    let start_covered = match candidate.valid_from.as_deref() {
+        None => unit.valid_from.is_none(),
+        Some(candidate_start) => unit.valid_from.as_deref().is_none_or(|unit_start| {
+            cmp_rfc3339(unit_start, candidate_start) != std::cmp::Ordering::Greater
+        }),
+    };
+    let end_covered = match candidate.valid_to.as_deref() {
+        None => unit.valid_to.is_none(),
+        Some(candidate_end) => unit.valid_to.as_deref().is_none_or(|unit_end| {
+            cmp_rfc3339(candidate_end, unit_end) != std::cmp::Ordering::Greater
+        }),
+    };
+    start_covered && end_covered
 }
 
 fn has_explicit_subject(candidate: &memphant_types::ReflectCandidate) -> bool {
+    if candidate
+        .fact_key
+        .as_deref()
+        .is_some_and(|key| !key.trim().is_empty())
+    {
+        return true;
+    }
     candidate
         .subject
         .as_deref()
@@ -5181,7 +9535,7 @@ fn minted_unit(
     input: &ReflectInput,
     kind: MemoryKind,
     state: UnitState,
-    subject_key: String,
+    fact_key: String,
     candidate: &memphant_types::ReflectCandidate,
     now: &str,
 ) -> StoredMemoryUnit {
@@ -5191,16 +9545,23 @@ fn minted_unit(
     StoredMemoryUnit {
         id,
         tenant_id: input.tenant_id,
+        data_subject_id: input.data_subject_id,
         scope_id: input.scope_id,
+        agent_node_id: input.agent_node_id,
+        subject_generation: input.subject_generation,
         kind,
         state,
-        subject_key: Some(subject_key),
+        fact_key: Some(fact_key),
+        predicate: candidate.predicate.clone(),
         body: candidate.body.clone(),
+        confidence: candidate.confidence,
         trust_level: candidate.trust_level,
         freshness_due_at,
         churn_class: candidate.churn_class.clone(),
         actor_id: Some(candidate.actor_id),
         source_kind: Some(candidate.source_kind.clone()),
+        source_ref: input.source_ref.clone(),
+        observed_at: input.observed_at.clone(),
         source_episode_id: input.episode_id,
         source_resource_id: input.resource_id,
         deletion_generation: None,
@@ -5221,7 +9582,7 @@ fn minted_unit(
 /// supersedence; absent either, a content-hash key
 /// `{scope_id}:auto:{sha256(body)[..16]}` is derived so distinct content never
 /// collides and identical content dedups. Auto keys never supersede.
-pub fn derive_subject_key(
+pub fn derive_fact_key(
     scope_id: Uuid,
     subject: Option<&str>,
     predicate: Option<&str>,
@@ -5255,8 +9616,13 @@ fn is_independent_source(
     existing: &StoredMemoryUnit,
     candidate: &memphant_types::ReflectCandidate,
 ) -> bool {
-    existing.actor_id != Some(candidate.actor_id)
-        && existing.source_kind.as_deref() != Some(candidate.source_kind.as_str())
+    // Under strict context binding a unit is always stamped with its writing
+    // context's `actor_id` (see `owned_unit` in `persist_compiled_units`), and a
+    // reflect candidate is written by that same bound actor — so within a scope
+    // the actor never varies and independence is carried entirely by the source
+    // channel. A different `source_kind` corroborating the same fact is what
+    // promotes a belief; a repeat from the same channel only merges.
+    existing.source_kind.as_deref() != Some(candidate.source_kind.as_str())
 }
 
 fn can_promote_belief(
@@ -5278,7 +9644,10 @@ fn compose_inferred_beliefs(
     new_ids: &mut HashSet<UnitId>,
     composed_edges: &mut Vec<StoredMemoryEdge>,
     tenant_id: TenantId,
+    data_subject_id: SubjectId,
     scope_id: ScopeId,
+    agent_node_id: AgentNodeId,
+    subject_generation: u64,
     actor_id: ActorId,
     episode_id: Option<EpisodeId>,
     now: &str,
@@ -5334,7 +9703,7 @@ fn compose_inferred_beliefs(
         {
             continue;
         }
-        let subject_key = derive_subject_key(
+        let fact_key = derive_fact_key(
             scope_id.as_uuid(),
             Some("user preference"),
             Some(&object),
@@ -5344,16 +9713,23 @@ fn compose_inferred_beliefs(
         new_units.push(StoredMemoryUnit {
             id: composed_id,
             tenant_id,
+            data_subject_id,
             scope_id,
+            agent_node_id,
+            subject_generation,
             kind: MemoryKind::Belief,
             state: UnitState::Candidate,
-            subject_key: Some(subject_key),
+            fact_key: Some(fact_key),
+            predicate: None,
             body,
+            confidence: None,
             trust_level: TrustLevel::AgentOutput,
             freshness_due_at: None,
             churn_class: None,
             actor_id: Some(actor_id),
             source_kind: Some("composition".to_string()),
+            source_ref: observations[0].1.source_ref.clone(),
+            observed_at: observations[0].1.observed_at.clone(),
             source_episode_id: episode_id,
             source_resource_id: None,
             deletion_generation: None,
@@ -5375,6 +9751,8 @@ fn compose_inferred_beliefs(
                 src_id: composed_id,
                 dst_id: source.id,
                 kind: MemoryEdgeKind::DerivedFrom,
+                transaction_from: Some(now.to_string()),
+                transaction_to: None,
             });
         }
         actions.push(AdmissionAction::Append);
@@ -5454,6 +9832,10 @@ fn contains_composition_risk(value: &str) -> bool {
 fn derived_by_for_unit(unit: &StoredMemoryUnit) -> &'static str {
     if unit.source_kind.as_deref() == Some("composition") {
         "composition"
+    } else if unit.source_kind.as_deref() == Some("quantity_rollup") {
+        "quantity_rollup"
+    } else if unit.source_kind.as_deref() == Some("artifact_bundle") {
+        "artifact_bundle"
     } else {
         "extraction"
     }
@@ -5461,16 +9843,20 @@ fn derived_by_for_unit(unit: &StoredMemoryUnit) -> &'static str {
 
 fn expire_composed_dependents(
     state: &mut InMemoryState,
-    tenant_id: TenantId,
+    context: &ResolvedMemoryContext,
     source_ids: &[UnitId],
     now: &str,
 ) {
-    let dependent_ids = composed_dependent_ids(state, tenant_id, source_ids);
-    if let Some(units) = state.memory_units.get_mut(&tenant_id) {
-        for unit in units
-            .iter_mut()
-            .filter(|unit| dependent_ids.contains(&unit.id))
-        {
+    let dependent_ids = composed_dependent_ids(state, context.tenant_id, source_ids);
+    if let Some(units) = state.memory_units.get_mut(&context.tenant_id) {
+        for unit in units.iter_mut().filter(|unit| {
+            dependent_ids.contains(&unit.id)
+                && unit.data_subject_id == context.data_subject_id
+                && unit.subject_generation == context.subject_generation
+                && unit.scope_id == context.scope_id
+                && unit.agent_node_id == context.agent_node_id
+                && unit.actor_id == Some(context.actor_id)
+        }) {
             if unit.state != UnitState::Deleted && unit.transaction_to.is_none() {
                 unit.state = UnitState::Expired;
                 unit.transaction_to = Some(now.to_string());
@@ -5481,20 +9867,26 @@ fn expire_composed_dependents(
 
 fn delete_composed_dependents(
     state: &mut InMemoryState,
-    tenant_id: TenantId,
+    context: &ResolvedMemoryContext,
     source_ids: &[UnitId],
     deletion_generation: u64,
+    now: &str,
 ) -> Vec<UnitId> {
-    let dependent_ids = composed_dependent_ids(state, tenant_id, source_ids);
+    let dependent_ids = composed_dependent_ids(state, context.tenant_id, source_ids);
     let mut deleted = Vec::new();
-    if let Some(units) = state.memory_units.get_mut(&tenant_id) {
-        for unit in units
-            .iter_mut()
-            .filter(|unit| dependent_ids.contains(&unit.id))
-        {
+    if let Some(units) = state.memory_units.get_mut(&context.tenant_id) {
+        for unit in units.iter_mut().filter(|unit| {
+            dependent_ids.contains(&unit.id)
+                && unit.data_subject_id == context.data_subject_id
+                && unit.subject_generation == context.subject_generation
+                && unit.scope_id == context.scope_id
+                && unit.agent_node_id == context.agent_node_id
+                && unit.actor_id == Some(context.actor_id)
+        }) {
             if unit.state != UnitState::Deleted {
                 unit.state = UnitState::Deleted;
                 unit.deletion_generation = Some(deletion_generation);
+                unit.transaction_to = Some(now.to_string());
                 deleted.push(unit.id);
             }
         }
@@ -5533,8 +9925,609 @@ fn composed_dependent_ids(
 }
 
 #[cfg(test)]
+mod in_memory_mutation_retention_tests {
+    use super::*;
+
+    async fn bound_context(store: &InMemoryStore) -> ResolvedMemoryContext {
+        let tenant = TenantId::new();
+        let binding = store
+            .resolve_context_binding(
+                tenant,
+                "erasure-retention".to_string(),
+                ContextBindingRequest {
+                    subject: memphant_types::ContextBindingEntityRef {
+                        external_ref: "subject:retention".to_string(),
+                        kind: "user".to_string(),
+                    },
+                    actor: memphant_types::ContextBindingEntityRef {
+                        external_ref: "actor:retention".to_string(),
+                        kind: "user".to_string(),
+                    },
+                    scope: memphant_types::ContextBindingScopeRef {
+                        external_ref: "scope:retention".to_string(),
+                        kind: "memory".to_string(),
+                        parent_external_ref: None,
+                    },
+                    agent_node: memphant_types::ContextBindingAgentRef {
+                        external_ref: "agent:retention".to_string(),
+                        parent_external_ref: None,
+                    },
+                    access_policies: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .resolve_memory_context(
+                tenant,
+                binding.subject_id,
+                binding.actor_id,
+                binding.scope_id,
+                binding.agent_node_id,
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn expired_erasure_receipt_and_unused_lock_are_physically_purged() {
+        let store = InMemoryStore::default();
+        let context = bound_context(&store).await;
+        let claim = MutationClaim::new(
+            &context,
+            MutationVerb::EraseSubject,
+            "erase-retention",
+            [7; 32],
+        )
+        .unwrap();
+        let mut erase = store.begin_at(&context, &FixedClock("2026-07-15T00:00:00Z"));
+        store
+            .stage_mutation_claim(&mut erase, claim.clone())
+            .await
+            .unwrap();
+        store.stage_subject_erasure(&mut erase).await.unwrap();
+        store.commit(erase).await.unwrap();
+
+        assert_eq!(store.inner.lock().unwrap().mutation_ledger.len(), 1);
+        assert!(store.mutation_locks.lock().unwrap().is_empty());
+
+        let mut expired = store.begin_at(&context, &FixedClock("2026-07-16T00:00:00Z"));
+        assert!(matches!(
+            store.stage_mutation_claim(&mut expired, claim).await,
+            Err(StoreError::SubjectErased)
+        ));
+        assert!(store.inner.lock().unwrap().mutation_ledger.is_empty());
+        assert!(store.mutation_locks.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn abandoned_transaction_retains_only_a_dead_digest_until_the_next_claim() {
+        let store = InMemoryStore::default();
+        let context = bound_context(&store).await;
+        let sensitive_key = "user@example.test/private-source";
+        let digest: [u8; 32] = Sha256::digest(sensitive_key.as_bytes()).into();
+        let mut abandoned = store.begin_at(&context, &FixedClock("2026-07-15T00:00:00Z"));
+        store
+            .stage_mutation_claim(
+                &mut abandoned,
+                MutationClaim::new(&context, MutationVerb::Retain, sensitive_key, [1; 32]).unwrap(),
+            )
+            .await
+            .unwrap();
+        drop(abandoned);
+
+        let old_lock_key = (context.tenant_id, MutationVerb::Retain, digest);
+        // Scoped so the guard is out of scope before the await below (clippy's
+        // await_holding_lock keys on the binding's scope, not an explicit drop).
+        {
+            let locks = store.mutation_locks.lock().unwrap();
+            assert!(locks.get(&old_lock_key).unwrap().upgrade().is_none());
+        }
+
+        let mut next = store.begin_at(&context, &FixedClock("2026-07-15T00:00:01Z"));
+        store
+            .stage_mutation_claim(
+                &mut next,
+                MutationClaim::new(&context, MutationVerb::Retain, "next", [2; 32]).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !store
+                .mutation_locks
+                .lock()
+                .unwrap()
+                .contains_key(&old_lock_key)
+        );
+        drop(next);
+        store.prune_mutation_locks();
+        assert!(store.mutation_locks.lock().unwrap().is_empty());
+    }
+
+    async fn seed_unit(store: &InMemoryStore, context: &ResolvedMemoryContext) -> UnitId {
+        let mut tx = store.begin(context).await.unwrap();
+        let id = store
+            .stage_memory_unit(
+                &mut tx,
+                NewMemoryUnit {
+                    tenant_id: context.tenant_id,
+                    data_subject_id: context.data_subject_id,
+                    scope_id: context.scope_id,
+                    agent_node_id: context.agent_node_id,
+                    subject_generation: context.subject_generation,
+                    kind: MemoryKind::Semantic,
+                    state: UnitState::Active,
+                    fact_key: Some("timezone:value".to_string()),
+                    predicate: None,
+                    body: "Timezone is UTC.".to_string(),
+                    confidence: Some(1.0),
+                    trust_level: TrustLevel::TrustedUser,
+                    churn_class: None,
+                    freshness_due_at: None,
+                    actor_id: Some(context.actor_id),
+                    source_kind: Some("user".to_string()),
+                    source_ref: "test:seed".to_string(),
+                    observed_at: "2026-07-15T00:00:00Z".to_string(),
+                    source_episode_id: None,
+                    source_resource_id: None,
+                    deletion_generation: None,
+                    contextual_chunks: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                    transaction_from: None,
+                    transaction_to: None,
+                },
+            )
+            .await
+            .unwrap();
+        store.commit(tx).await.unwrap();
+        id
+    }
+
+    fn correction(id: UnitId, value: &str) -> CorrectionWrite {
+        CorrectionWrite {
+            selector: CorrectSelector { memory_unit_id: id },
+            source_ref: "test:correction".to_string(),
+            observed_at: "2026-07-15T00:00:00Z".to_string(),
+            correction: CorrectionPayload {
+                value: value.to_string(),
+                reason: "test".to_string(),
+                source_ref: "test:correction".to_string(),
+                observed_at: "2026-07-15T00:00:00Z".to_string(),
+                valid_from: None,
+                valid_to: None,
+            },
+            now: "2026-07-15T00:00:00Z".to_string(),
+            embedding: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn staged_corrections_roll_back_and_unrelated_contexts_commit_independently() {
+        let store = InMemoryStore::default();
+        let first = bound_context(&store).await;
+        let second = bound_context(&store).await;
+        let first_id = seed_unit(&store, &first).await;
+        let second_id = seed_unit(&store, &second).await;
+        let mut rolled_back = store.begin(&first).await.unwrap();
+        store
+            .stage_correction(&mut rolled_back, correction(first_id, "Timezone is PST."))
+            .await
+            .unwrap();
+        drop(rolled_back);
+        assert!(
+            store
+                .memory_units(first.tenant_id)
+                .iter()
+                .any(|unit| unit.id == first_id && unit.transaction_to.is_none())
+        );
+        let mut first_tx = store.begin(&first).await.unwrap();
+        let mut second_tx = store.begin(&second).await.unwrap();
+        store
+            .stage_correction(&mut first_tx, correction(first_id, "Timezone is PST."))
+            .await
+            .unwrap();
+        store
+            .stage_correction(&mut second_tx, correction(second_id, "Timezone is CET."))
+            .await
+            .unwrap();
+        store.commit(first_tx).await.unwrap();
+        store.commit(second_tx).await.unwrap();
+
+        let mut mixed = store.begin(&first).await.unwrap();
+        store
+            .stage_mutation_claim(
+                &mut mixed,
+                MutationClaim::new(
+                    &first,
+                    MutationVerb::EraseSubject,
+                    "erase-after-write",
+                    [9; 32],
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        store
+            .stage_correction(
+                &mut mixed,
+                correction(
+                    store
+                        .memory_units(first.tenant_id)
+                        .iter()
+                        .find(|unit| unit.transaction_to.is_none())
+                        .unwrap()
+                        .id,
+                    "Timezone is MST.",
+                ),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.stage_subject_erasure(&mut mixed).await,
+            Err(StoreError::Conflict(_))
+        ));
+    }
+}
+
+#[cfg(test)]
 mod temporal_grounding_tests {
     use super::*;
+
+    fn temporal_test_unit(id: u128, body: &str, valid_from: &str) -> StoredMemoryUnit {
+        StoredMemoryUnit {
+            id: UnitId::from_u128(id),
+            tenant_id: TenantId::from_u128(1),
+            data_subject_id: SubjectId::from_u128(1),
+            scope_id: ScopeId::from_u128(1),
+            agent_node_id: memphant_types::AgentNodeId::from_u128(
+                ScopeId::from_u128(1).as_uuid().as_u128(),
+            ),
+            subject_generation: 0,
+            kind: MemoryKind::Semantic,
+            state: UnitState::Active,
+            fact_key: None,
+            predicate: None,
+            body: body.to_string(),
+            confidence: None,
+            trust_level: TrustLevel::TrustedUser,
+            churn_class: None,
+            freshness_due_at: None,
+            actor_id: None,
+            source_kind: None,
+            source_ref: "test:temporal".to_string(),
+            observed_at: "2025-01-01T00:00:00Z".to_string(),
+            source_episode_id: None,
+            source_resource_id: None,
+            deletion_generation: None,
+            contextual_chunks: Vec::new(),
+            valid_from: Some(valid_from.to_string()),
+            valid_to: None,
+            transaction_from: None,
+            transaction_to: None,
+            difficulty: None,
+            stability_days: None,
+            last_reinforced_at: None,
+            reinforcement_count: 0,
+        }
+    }
+
+    #[test]
+    fn recall_time_normalizes_defaults_and_rejects_future_transaction_snapshots() {
+        let now: jiff::Timestamp = "2026-07-13T12:00:00Z".parse().unwrap();
+
+        let defaulted = resolve_recall_time(None, None, now).unwrap();
+        assert_eq!(defaulted.evaluated_at, "2026-07-13T12:00:00Z");
+        assert_eq!(defaulted.transaction_as_of, "2026-07-13T12:00:00Z");
+        assert_eq!(defaulted.valid_at, "2026-07-13T12:00:00Z");
+
+        let normalized = resolve_recall_time(
+            Some("2026-07-13T03:00:00-07:00"),
+            Some("2025-01-01T01:30:00+01:30"),
+            now,
+        )
+        .unwrap();
+        assert_eq!(normalized.transaction_as_of, "2026-07-13T10:00:00Z");
+        assert_eq!(normalized.valid_at, "2025-01-01T00:00:00Z");
+
+        assert!(matches!(
+            resolve_recall_time(Some("2026-07-13T12:00:00.000000001Z"), None, now),
+            Err(CoreError::Invalid(message)) if message == "transaction_as_of cannot be in the future"
+        ));
+        assert!(matches!(
+            resolve_recall_time(Some("not-a-time"), None, now),
+            Err(CoreError::Invalid(message)) if message == "transaction_as_of must be RFC3339"
+        ));
+    }
+
+    #[test]
+    fn valid_interval_rejects_malformed_and_empty_ranges() {
+        assert!(matches!(
+            validate_valid_interval(Some("bad"), None),
+            Err(CoreError::Invalid(message)) if message == "valid_from must be RFC3339"
+        ));
+        for (from, to) in [
+            ("2025-01-01T00:00:00Z", "2025-01-01T00:00:00Z"),
+            ("2025-01-02T00:00:00Z", "2025-01-01T00:00:00Z"),
+        ] {
+            assert!(matches!(
+                validate_valid_interval(Some(from), Some(to)),
+                Err(CoreError::Invalid(message)) if message == "valid_from must be before valid_to"
+            ));
+        }
+    }
+
+    #[test]
+    fn bitemporal_visibility_is_half_open_and_forgetting_overrides_history() {
+        let mut historical = temporal_test_unit(900, "old truth", "2025-01-01T00:00:00Z");
+        historical.state = UnitState::Superseded;
+        historical.transaction_from = Some("2025-02-01T00:00:00Z".to_string());
+        historical.transaction_to = Some("2025-03-01T00:00:00Z".to_string());
+        historical.valid_to = Some("2025-06-01T00:00:00Z".to_string());
+
+        let inside = RecallTime {
+            evaluated_at: "2026-01-01T00:00:00Z".to_string(),
+            transaction_as_of: "2025-02-15T00:00:00Z".to_string(),
+            valid_at: "2025-05-31T23:59:59Z".to_string(),
+        };
+        assert!(bitemporally_recallable(&historical, &inside));
+
+        let transaction_end = RecallTime {
+            evaluated_at: "2026-01-01T00:00:00Z".to_string(),
+            transaction_as_of: "2025-03-01T00:00:00Z".to_string(),
+            valid_at: "2025-05-01T00:00:00Z".to_string(),
+        };
+        assert!(!bitemporally_recallable(&historical, &transaction_end));
+
+        let valid_end = RecallTime {
+            evaluated_at: "2026-01-01T00:00:00Z".to_string(),
+            transaction_as_of: "2025-02-15T00:00:00Z".to_string(),
+            valid_at: "2025-06-01T00:00:00Z".to_string(),
+        };
+        assert!(!bitemporally_recallable(&historical, &valid_end));
+
+        historical.deletion_generation = Some(1);
+        assert!(!bitemporally_recallable(&historical, &inside));
+    }
+
+    #[test]
+    fn retroactive_correction_splits_valid_time_without_erasing_old_transaction_history() {
+        let mut old = temporal_test_unit(901, "old truth", "2025-01-01T00:00:00Z");
+        old.valid_to = Some("2026-01-01T00:00:00Z".to_string());
+        old.transaction_from = Some("2025-01-02T00:00:00Z".to_string());
+        let correction = CorrectionPayload {
+            value: "new truth".to_string(),
+            reason: "fix".to_string(),
+            source_ref: "test:retroactive".to_string(),
+            observed_at: "2026-02-01T00:00:00Z".to_string(),
+            valid_from: Some("2025-04-01T00:00:00Z".to_string()),
+            valid_to: Some("2025-07-01T00:00:00Z".to_string()),
+        };
+
+        let (replacement, remainders) = correction_rectangles(
+            &old,
+            &correction,
+            &correction.source_ref,
+            &correction.observed_at,
+            ActorId::from_u128(2),
+            "2026-02-01T00:00:00Z",
+        )
+        .unwrap();
+
+        assert_eq!(replacement.body, "new truth");
+        assert_eq!(
+            replacement.valid_from.as_deref(),
+            Some("2025-04-01T00:00:00Z")
+        );
+        assert_eq!(
+            replacement.valid_to.as_deref(),
+            Some("2025-07-01T00:00:00Z")
+        );
+        assert_eq!(remainders.len(), 2);
+        assert_eq!(remainders[0].body, "old truth");
+        assert_eq!(
+            remainders[0].valid_from.as_deref(),
+            Some("2025-01-01T00:00:00Z")
+        );
+        assert_eq!(
+            remainders[0].valid_to.as_deref(),
+            Some("2025-04-01T00:00:00Z")
+        );
+        assert_eq!(
+            remainders[1].valid_from.as_deref(),
+            Some("2025-07-01T00:00:00Z")
+        );
+        assert_eq!(
+            remainders[1].valid_to.as_deref(),
+            Some("2026-01-01T00:00:00Z")
+        );
+        assert!(replacement.transaction_from.as_deref() == Some("2026-02-01T00:00:00Z"));
+        assert!(
+            remainders
+                .iter()
+                .all(|unit| unit.transaction_from == replacement.transaction_from)
+        );
+    }
+
+    #[test]
+    fn current_correction_starts_at_write_time_and_preserves_prior_validity() {
+        let mut old = temporal_test_unit(902, "old", "2025-01-01T00:00:00Z");
+        old.valid_from = Some("2025-01-01T00:00:00Z".to_string());
+        let (replacement, remainders) = correction_rectangles(
+            &old,
+            &CorrectionPayload {
+                value: "new".to_string(),
+                reason: "changed now".to_string(),
+                source_ref: "test:current".to_string(),
+                observed_at: "2025-08-01T00:00:00Z".to_string(),
+                valid_from: None,
+                valid_to: None,
+            },
+            "test:current",
+            "2025-08-01T00:00:00Z",
+            ActorId::from_u128(7),
+            "2025-08-01T00:00:00Z",
+        )
+        .expect("current correction");
+
+        assert_eq!(
+            replacement.valid_from.as_deref(),
+            Some("2025-08-01T00:00:00Z")
+        );
+        assert_eq!(remainders.len(), 1);
+        assert_eq!(remainders[0].body, old.body);
+        assert_eq!(remainders[0].valid_from, old.valid_from);
+        assert_eq!(
+            remainders[0].valid_to.as_deref(),
+            Some("2025-08-01T00:00:00Z")
+        );
+    }
+
+    #[tokio::test]
+    async fn in_memory_review_events_respect_their_recorded_transaction_time() {
+        let store = InMemoryStore::default();
+        let tenant = TenantId::from_u128(910);
+        // The store's strict context contract (canonical cutover) requires a
+        // registered binding before any read/write; hand-built contexts are
+        // rejected with NotFound("memory context").
+        let binding = store
+            .resolve_context_binding(
+                tenant,
+                "review-test".to_string(),
+                ContextBindingRequest {
+                    subject: memphant_types::ContextBindingEntityRef {
+                        external_ref: "subject:review".to_string(),
+                        kind: "user".to_string(),
+                    },
+                    actor: memphant_types::ContextBindingEntityRef {
+                        external_ref: "actor:review".to_string(),
+                        kind: "user".to_string(),
+                    },
+                    scope: memphant_types::ContextBindingScopeRef {
+                        external_ref: "scope:review".to_string(),
+                        kind: "memory".to_string(),
+                        parent_external_ref: None,
+                    },
+                    agent_node: memphant_types::ContextBindingAgentRef {
+                        external_ref: "agent:review".to_string(),
+                        parent_external_ref: None,
+                    },
+                    access_policies: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        let context = store
+            .resolve_memory_context(
+                tenant,
+                binding.subject_id,
+                binding.actor_id,
+                binding.scope_id,
+                binding.agent_node_id,
+            )
+            .await
+            .unwrap();
+        let recalled = recall(
+            &store,
+            RecallRequest {
+                context: context.clone(),
+                query: "nothing stored".to_string(),
+                k: 1,
+                budget_tokens: 32,
+                mode: RecallMode::Fast,
+                include_beliefs: false,
+                edge_expansion_enabled: false,
+                context_packing_abstention_enabled: false,
+                rerank_enabled: false,
+                learned_rerank_profile: None,
+                query_decomposition_enabled: false,
+                procedure_recall_enabled: false,
+                decay_enabled: false,
+                engine_version: "review-test".to_string(),
+                transaction_as_of: None,
+                valid_at: None,
+                aggregation_window: None,
+            },
+            None,
+            &FixedClock("2025-01-01T00:00:00Z"),
+        )
+        .await
+        .unwrap();
+        store
+            .record_review_events(
+                &context,
+                vec![ReviewEvent {
+                    tenant_id: tenant,
+                    trace_id: recalled.trace_id,
+                    caller_id: "reviewer".to_string(),
+                    used_ids: Vec::new(),
+                    outcome: MarkOutcome::Success,
+                    recorded_at: "2025-03-01T00:00:00Z".to_string(),
+                }],
+            )
+            .await
+            .unwrap();
+
+        let before = RecallTime {
+            evaluated_at: "2026-01-01T00:00:00Z".to_string(),
+            transaction_as_of: "2025-02-01T00:00:00Z".to_string(),
+            valid_at: "2025-02-01T00:00:00Z".to_string(),
+        };
+        assert!(
+            store
+                .fetch_review_events(&context, &[], &before,)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn in_memory_staged_edges_require_context_owned_endpoints() {
+        let store = InMemoryStore::default();
+        let tenant = TenantId::from_u128(920);
+        let scope = ScopeId::from_u128(921);
+        let src = UnitId::from_u128(922);
+        let dst = UnitId::from_u128(923);
+        let agent_node_id = AgentNodeId::from_u128(925);
+        let context = ResolvedMemoryContext {
+            tenant_id: tenant,
+            data_subject_id: SubjectId::from_u128(920),
+            actor_id: ActorId::from_u128(924),
+            actor_trust: TrustLevel::TrustedUser,
+            scope_id: scope,
+            agent_node_id,
+            agent_level: 0,
+            subject_generation: 0,
+            policy_revision: "test-policy".to_string(),
+            sources_by_kind: MemoryKind::ALL
+                .into_iter()
+                .map(|kind| {
+                    (
+                        kind,
+                        vec![ResolvedMemorySource {
+                            scope_id: scope,
+                            agent_node_id,
+                        }],
+                    )
+                })
+                .collect(),
+        };
+        let mut tx = store.begin(&context).await.unwrap();
+        let result = store
+            .stage_memory_edge(
+                &mut tx,
+                NewMemoryEdge {
+                    tenant_id: tenant,
+                    scope_id: scope,
+                    src_id: src,
+                    dst_id: dst,
+                    kind: MemoryEdgeKind::SameSubject,
+                },
+            )
+            .await;
+        assert!(matches!(result, Err(StoreError::Conflict(_))));
+    }
 
     /// §6 date-parser table: every supported content-date shape parses to the
     /// same normalized `YYYY-MM-DD`, and non-dates / impossible dates are
@@ -5921,16 +10914,25 @@ mod pack_cost_tests {
         StoredMemoryUnit {
             id: UnitId::from_u128(id),
             tenant_id: TenantId::from_u128(1),
+            data_subject_id: SubjectId::from_u128(1),
             scope_id: ScopeId::from_u128(1),
+            agent_node_id: memphant_types::AgentNodeId::from_u128(
+                ScopeId::from_u128(1).as_uuid().as_u128(),
+            ),
+            subject_generation: 0,
             kind: MemoryKind::Semantic,
             state: UnitState::Active,
-            subject_key: None,
+            fact_key: None,
+            predicate: None,
             body: body.to_string(),
+            confidence: None,
             trust_level: TrustLevel::TrustedUser,
             churn_class: None,
             freshness_due_at: None,
             actor_id: None,
             source_kind: None,
+            source_ref: "test:packing".to_string(),
+            observed_at: "2026-07-15T00:00:00Z".to_string(),
             source_episode_id: None,
             source_resource_id: None,
             deletion_generation: None,
@@ -5955,11 +10957,128 @@ mod pack_cost_tests {
             rerank_score: 0.0,
             cross_rerank_rank: None,
             decay,
-            l4_score: 0.0,
             subquery_ids: Vec::new(),
             decomposition_rank: None,
             channels: Vec::new(),
         }
+    }
+
+    fn channel_candidate(id: u128, channel: RecallChannel, rank: usize) -> CandidateAccumulator {
+        let mut candidate = candidate(unit(id, &format!("{channel:?}-{rank}"), Vec::new()), 1.0);
+        candidate.channels = vec![(channel, rank, 1.0)];
+        candidate
+    }
+
+    #[test]
+    fn cross_rerank_balances_eight_vector_and_eight_lexical_at_limit_sixteen() {
+        let mut candidates =
+            (0..32)
+                .map(|rank| channel_candidate(rank + 1, RecallChannel::Vector, rank as usize))
+                .chain((0..32).map(|rank| {
+                    channel_candidate(rank + 101, RecallChannel::Lexical, rank as usize)
+                }))
+                .collect::<Vec<_>>();
+
+        promote_vector_lexical_balanced(&mut candidates, 16);
+
+        assert_eq!(
+            candidates[..16]
+                .iter()
+                .filter(|candidate| candidate.channels[0].0 == RecallChannel::Vector)
+                .count(),
+            8
+        );
+        assert_eq!(
+            candidates[..16]
+                .iter()
+                .filter(|candidate| candidate.channels[0].0 == RecallChannel::Lexical)
+                .count(),
+            8
+        );
+    }
+
+    #[test]
+    fn cross_rerank_balances_thirty_two_per_channel_at_limit_sixty_four() {
+        let mut candidates =
+            (0..64)
+                .map(|rank| channel_candidate(rank + 1, RecallChannel::Vector, rank as usize))
+                .chain((0..64).map(|rank| {
+                    channel_candidate(rank + 101, RecallChannel::Lexical, rank as usize)
+                }))
+                .collect::<Vec<_>>();
+
+        promote_vector_lexical_balanced(&mut candidates, 64);
+
+        assert_eq!(
+            candidates[..64]
+                .iter()
+                .filter(|candidate| candidate.channels[0].0 == RecallChannel::Vector)
+                .count(),
+            32
+        );
+        assert_eq!(
+            candidates[..64]
+                .iter()
+                .filter(|candidate| candidate.channels[0].0 == RecallChannel::Lexical)
+                .count(),
+            32
+        );
+    }
+
+    #[test]
+    fn cross_rerank_balance_deduplicates_and_backfills_channel_overlap() {
+        let mut candidates = (0..8)
+            .map(|rank| {
+                let mut candidate =
+                    channel_candidate(rank + 1, RecallChannel::Vector, rank as usize);
+                candidate
+                    .channels
+                    .push((RecallChannel::Lexical, rank as usize, 1.0));
+                candidate
+            })
+            .chain((0..16).map(|rank| {
+                channel_candidate(rank + 101, RecallChannel::Lexical, rank as usize + 8)
+            }))
+            .collect::<Vec<_>>();
+
+        promote_vector_lexical_balanced(&mut candidates, 16);
+
+        assert_eq!(
+            candidates[..16]
+                .iter()
+                .map(|candidate| candidate.unit.id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            16
+        );
+        assert_eq!(
+            candidates[..16]
+                .iter()
+                .filter(|candidate| candidate.unit.id.as_uuid().as_u128() >= 101)
+                .count(),
+            8,
+            "overlapping vector+lexical candidates do not consume lexical quota twice"
+        );
+    }
+
+    #[test]
+    fn cross_rerank_balance_backfills_from_the_available_channel() {
+        let mut candidates =
+            (0..16)
+                .map(|rank| candidate(unit(rank + 1, "unchanneled", Vec::new()), 1.0))
+                .chain((0..16).map(|rank| {
+                    channel_candidate(rank + 101, RecallChannel::Lexical, rank as usize)
+                }))
+                .collect::<Vec<_>>();
+
+        promote_vector_lexical_balanced(&mut candidates, 16);
+
+        assert!(
+            candidates[..16]
+                .iter()
+                .all(|candidate| candidate.channels[0].0 == RecallChannel::Lexical),
+            "a missing vector half is backfilled from ranked lexical candidates before fused fallback"
+        );
     }
 
     /// A minimal request with abstention/rerank/decomposition OFF so the packing
@@ -5967,10 +11086,29 @@ mod pack_cost_tests {
     /// cost-charging behaviour under test.
     fn request(budget_tokens: usize) -> RecallRequest {
         RecallRequest {
-            tenant_id: TenantId::from_u128(1),
-            scope_id: ScopeId::from_u128(1),
-            actor_id: ActorId::from_u128(1),
-            allowed_scope_ids: vec![ScopeId::from_u128(1)],
+            context: ResolvedMemoryContext {
+                tenant_id: TenantId::from_u128(1),
+                data_subject_id: SubjectId::from_u128(1),
+                actor_id: ActorId::from_u128(1),
+                actor_trust: TrustLevel::TrustedUser,
+                scope_id: ScopeId::from_u128(1),
+                agent_node_id: AgentNodeId::from_u128(1),
+                agent_level: 0,
+                subject_generation: 0,
+                policy_revision: "test-policy".to_string(),
+                sources_by_kind: MemoryKind::ALL
+                    .into_iter()
+                    .map(|kind| {
+                        (
+                            kind,
+                            vec![ResolvedMemorySource {
+                                scope_id: ScopeId::from_u128(1),
+                                agent_node_id: AgentNodeId::from_u128(1),
+                            }],
+                        )
+                    })
+                    .collect(),
+            },
             query: "quantum".to_string(),
             k: 10,
             budget_tokens,
@@ -5984,6 +11122,9 @@ mod pack_cost_tests {
             procedure_recall_enabled: true,
             decay_enabled: false,
             engine_version: "pack-cost-test".to_string(),
+            transaction_as_of: None,
+            valid_at: None,
+            aggregation_window: None,
         }
     }
 
@@ -6210,6 +11351,37 @@ mod pack_cost_tests {
             .collect()
     }
 
+    #[test]
+    fn quantity_rollup_does_not_disable_ordinary_relevance_replacement() {
+        let weak = candidate(unit(1, "irrelevant", Vec::new()), 2.0);
+        let strong = candidate(unit(2, "quantum", Vec::new()), 1.0);
+        let mut rollup = candidate(unit(3, "quantity rollup quantum", Vec::new()), 100.0);
+        rollup.unit.source_kind = Some("quantity_rollup".to_string());
+        let mut request = request(100);
+        request.k = 2;
+
+        let packed = pack_recall_context(
+            vec![weak, strong, rollup],
+            &request,
+            &[],
+            &tokenize("quantum"),
+            Vec::new(),
+            3,
+            PackLevers::default(),
+            false,
+        );
+
+        assert_eq!(
+            packed
+                .items
+                .iter()
+                .map(|item| item.unit_id)
+                .collect::<Vec<_>>(),
+            vec![UnitId::from_u128(3), UnitId::from_u128(2)],
+            "the projection consumes one slot but must not freeze a weaker ordinary item",
+        );
+    }
+
     /// §5 sibling-gather: after the greedy fill, an already chunk-rendered item
     /// spends the pack's leftover budget on its OWN unselected sibling chunks.
     /// At admission the per-item cap (the 20-token whole-body count) admits the
@@ -6426,12 +11598,21 @@ mod pack_cost_tests {
         );
     }
 
-    /// wave-final-review finding: `recall_pack_scan_limit` clamped
-    /// `scan_limit == output_limit == k` in Fast/Balanced, so the quota could
-    /// only reshuffle the already-admitted top-k and never surface a below-k
-    /// distinct episode — its entire purpose. Quota off must reproduce
-    /// today's exact formula (`output_limit.min(candidate_count).max(1)`);
-    /// quota on must widen to give the quota scan headroom past k.
+    /// R1.5-T0 / D1 fix: `recall_pack_scan_limit` no longer clamps
+    /// `scan_limit == output_limit == k` in Fast/Balanced — that conflated the
+    /// caller-presentation `k` with the engine's internal fan-out (D1: a
+    /// larger `k` widened the scan window, which changed even the top-5
+    /// ordering). Quota off must now match the pool floor
+    /// (`recall_pool_depth.max(k)` — `k=8 < 64` here so the pool wins); quota
+    /// on doubles the POOL FLOOR for headroom, so a `k` LARGER than the pool
+    /// depth still gets scan room past its own `k` (second block below) —
+    /// `recall_pool_depth*2` alone would sit at/below `scan_limit` there and
+    /// silence the quota for exactly the large-k callers.
+    ///
+    /// wave-final-review finding (superseded by the above): quota off used to
+    /// reproduce `output_limit.min(candidate_count).max(1)` and quota on
+    /// widened to `2*k` — both were `k`-derived, which this test now pins
+    /// against the decoupled formula instead.
     #[test]
     fn recall_pack_scan_limit_quota_off_is_unchanged_quota_on_widens() {
         let mut req = request(10_000);
@@ -6440,10 +11621,15 @@ mod pack_cost_tests {
 
         for mode in [RecallMode::Fast, RecallMode::Balanced] {
             req.mode = mode;
-            let off = recall_pack_scan_limit(&req, candidate_count, PackLevers::default());
+            let off = recall_pack_scan_limit(
+                &req,
+                candidate_count,
+                PackLevers::default(),
+                DEFAULT_RECALL_POOL_DEPTH,
+            );
             assert_eq!(
-                off, 8,
-                "{mode:?}: quota off must match today's output_limit.min(candidate_count).max(1)"
+                off, DEFAULT_RECALL_POOL_DEPTH,
+                "{mode:?}: quota off must match recall_pool_depth (floored at k), not k"
             );
 
             let on = recall_pack_scan_limit(
@@ -6453,10 +11639,45 @@ mod pack_cost_tests {
                     sibling_gather_enabled: false,
                     session_quota: Some(DEFAULT_SESSION_DIVERSITY_QUOTA),
                 },
+                DEFAULT_RECALL_POOL_DEPTH,
             );
             assert_eq!(
-                on, 16,
-                "{mode:?}: quota on widens to 2*k so the quota has headroom"
+                on,
+                DEFAULT_RECALL_POOL_DEPTH * 2,
+                "{mode:?}: quota on widens to 2*recall_pool_depth (not 2*k) so the quota has headroom"
+            );
+        }
+
+        // k LARGER than the pool depth: the quota widen must double the pool
+        // FLOOR (max(pool, k) = 200 here), not the bare pool depth — bare
+        // `64*2 = 128 < k` would leave the quota with no headroom past k.
+        req.k = 200;
+        let candidate_count = 1_000;
+        for mode in [RecallMode::Fast, RecallMode::Balanced] {
+            req.mode = mode;
+            let off = recall_pack_scan_limit(
+                &req,
+                candidate_count,
+                PackLevers::default(),
+                DEFAULT_RECALL_POOL_DEPTH,
+            );
+            assert_eq!(
+                off, 200,
+                "{mode:?}: quota off, k>pool: the pool floor is k itself"
+            );
+            let on = recall_pack_scan_limit(
+                &req,
+                candidate_count,
+                PackLevers {
+                    sibling_gather_enabled: false,
+                    session_quota: Some(DEFAULT_SESSION_DIVERSITY_QUOTA),
+                },
+                DEFAULT_RECALL_POOL_DEPTH,
+            );
+            assert_eq!(
+                on, 400,
+                "{mode:?}: quota on, k>pool: widen doubles the pool floor (2*max(pool, k)), \
+                 keeping headroom past k"
             );
         }
     }
@@ -6492,7 +11713,12 @@ mod pack_cost_tests {
         req.mode = RecallMode::Fast;
 
         let off_levers = PackLevers::default();
-        let off_scan_limit = recall_pack_scan_limit(&req, candidates().len(), off_levers);
+        let off_scan_limit = recall_pack_scan_limit(
+            &req,
+            candidates().len(),
+            off_levers,
+            DEFAULT_RECALL_POOL_DEPTH,
+        );
         let off = pack_recall_context(
             candidates(),
             &req,
@@ -6513,7 +11739,12 @@ mod pack_cost_tests {
             sibling_gather_enabled: false,
             session_quota: Some(DEFAULT_SESSION_DIVERSITY_QUOTA),
         };
-        let on_scan_limit = recall_pack_scan_limit(&req, candidates().len(), on_levers);
+        let on_scan_limit = recall_pack_scan_limit(
+            &req,
+            candidates().len(),
+            on_levers,
+            DEFAULT_RECALL_POOL_DEPTH,
+        );
         assert!(
             on_scan_limit > req.k,
             "quota on: the real derivation must widen past k, got {on_scan_limit}"

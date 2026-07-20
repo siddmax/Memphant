@@ -1,0 +1,28 @@
+{
+  "benchmark": "STALE",
+  "code": {
+    "repo": "https://github.com/icedreamc/STALE.git",
+    "revision": "ea7d391103a151927cd29d2f01d87597a782bdcb"
+  },
+  "dataset": {
+    "file": "T1_T2_400_FULL.json",
+    "record_count": 400,
+    "repo": "STALEproj/STALE",
+    "revision": "617c51dc200b5ab09970834144c7e51c77959af0",
+    "sha256": "5f3ec375179e20e2e94469e018189188f34e2e7e5f21cbecbd99fcfa648c1876",
+    "size_bytes": 305908212
+  },
+  "native_scorer": {
+    "default_judge_model": "gemini-3.1-flash-lite-preview",
+    "default_judge_provider": "OPENAI",
+    "entrypoint": "STALE/Evaluation/full_eval_performance.py",
+    "files": {
+      "STALE/Evaluation/full_eval_performance.py": "976ab2ca3b975c58ce5765ab2c0f11a3cc6135f56f72f3807353fe57c72aee82",
+      "STALE/Evaluation/judge_prompts.py": "123696c2ee24f4159485e700ef29afbb4dc7da956fe0beedd1327b7ad016dcf9",
+      "STALE/Generation/clients.py": "d2d4ff9b0ea85161c318d7e586e26cce439b01006e146bee201cfe9c49a448c9"
+    },
+    "requirements_sha256": "d7670540fe00b54ee0b615499f7e633a97fa3938888b8bb2225ad21d8aad6180"
+  },
+  "source_status": "official_native_scorer",
+  "upstream_license": "MIT code; CC-BY-4.0 dataset"
+}

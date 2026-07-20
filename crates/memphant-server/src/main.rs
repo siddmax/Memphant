@@ -14,7 +14,7 @@ async fn main() {
         return;
     }
 
-    let store = memphant_runtime::build_store()
+    let store = memphant_runtime::build_app_store()
         .await
         .expect("memphant-server: store construction failed");
     let store_name = store.name();

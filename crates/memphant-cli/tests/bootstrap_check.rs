@@ -116,3 +116,35 @@ MEMPHANT_SUPABASE_LINT_COMMAND="supabase db lint --db-url $DATABASE_URL --schema
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn bootstrap_check_rejects_supabase_transaction_pooler_for_persistent_runtime() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let profile = dir.path().join("supabase.env");
+    let default_profile =
+        fs::read_to_string(repo_root().join("deploy/provider-profiles/supabase.env.example"))
+            .expect("read default profile")
+            .replace(":5432/", ":6543/");
+    fs::write(&profile, default_profile).expect("write profile");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_memphant-cli"))
+        .current_dir(repo_root())
+        .args([
+            "db",
+            "bootstrap-check",
+            "--provider",
+            "supabase",
+            "--profile",
+            profile.to_str().expect("profile path"),
+        ])
+        .output()
+        .expect("run bootstrap check");
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("supabase:database_url_transaction_pooler_forbidden"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

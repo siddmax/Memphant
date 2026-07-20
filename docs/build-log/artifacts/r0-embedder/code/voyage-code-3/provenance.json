@@ -1,0 +1,341 @@
+{
+  "engine": "memphant",
+  "lane": "code",
+  "runtime": "memphant-server episode ingest (role-prefixed turn body) + /v1/recall",
+  "embed_model": "voyage-code-3",
+  "label": "r0-code-voyage-code-3",
+  "golden_path": "/Users/sidsharma/Memphant/benchmarks/data/coding_events_golden.jsonl",
+  "database_url_db": "memphant_code_r0",
+  "k": 10,
+  "recall_mode": "exhaustive",
+  "budget_tokens": 8192,
+  "ingested_attempts": 8,
+  "corpus_attempts": 8,
+  "limit_attempts": 0,
+  "golden_sha256": "b7bf9b34959c7c751502dee6bfecb8a794f9fdf87418b69a397e50611c5429e7",
+  "golden_count": 40,
+  "recall_at_5": 0.275,
+  "recall_at_10": 0.275,
+  "per_question": [
+    {
+      "question_id": "code_lane_001_assistant",
+      "question_type": "assistant",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "code_lane_002_toolResult",
+      "question_type": "toolResult",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "code_lane_003_assistant",
+      "question_type": "assistant",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "code_lane_004_toolResult",
+      "question_type": "toolResult",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "code_lane_005_assistant",
+      "question_type": "assistant",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": true,
+      "hit_at_10": true
+    },
+    {
+      "question_id": "code_lane_006_toolResult",
+      "question_type": "toolResult",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "code_lane_007_assistant",
+      "question_type": "assistant",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "code_lane_008_toolResult",
+      "question_type": "toolResult",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": true,
+      "hit_at_10": true
+    },
+    {
+      "question_id": "code_lane_009_user",
+      "question_type": "user",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": true,
+      "hit_at_10": true
+    },
+    {
+      "question_id": "code_lane_010_assistant",
+      "question_type": "assistant",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "code_lane_011_toolResult",
+      "question_type": "toolResult",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "code_lane_012_assistant",
+      "question_type": "assistant",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "code_lane_013_toolResult",
+      "question_type": "toolResult",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "code_lane_014_assistant",
+      "question_type": "assistant",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": true,
+      "hit_at_10": true
+    },
+    {
+      "question_id": "code_lane_015_toolResult",
+      "question_type": "toolResult",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "code_lane_016_user",
+      "question_type": "user",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": true,
+      "hit_at_10": true
+    },
+    {
+      "question_id": "code_lane_017_assistant",
+      "question_type": "assistant",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "code_lane_018_toolResult",
+      "question_type": "toolResult",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "code_lane_019_user",
+      "question_type": "user",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": true,
+      "hit_at_10": true
+    },
+    {
+      "question_id": "code_lane_020_assistant",
+      "question_type": "assistant",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": true,
+      "hit_at_10": true
+    },
+    {
+      "question_id": "code_lane_021_toolResult",
+      "question_type": "toolResult",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "code_lane_022_assistant",
+      "question_type": "assistant",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "code_lane_023_toolResult",
+      "question_type": "toolResult",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "code_lane_024_assistant",
+      "question_type": "assistant",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "code_lane_025_toolResult",
+      "question_type": "toolResult",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "code_lane_026_assistant",
+      "question_type": "assistant",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": true,
+      "hit_at_10": true
+    },
+    {
+      "question_id": "code_lane_027_toolResult",
+      "question_type": "toolResult",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "code_lane_028_assistant",
+      "question_type": "assistant",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "code_lane_029_toolResult",
+      "question_type": "toolResult",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": true,
+      "hit_at_10": true
+    },
+    {
+      "question_id": "code_lane_030_assistant",
+      "question_type": "assistant",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "code_lane_031_toolResult",
+      "question_type": "toolResult",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "code_lane_032_assistant",
+      "question_type": "assistant",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "code_lane_033_toolResult",
+      "question_type": "toolResult",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": true,
+      "hit_at_10": true
+    },
+    {
+      "question_id": "code_lane_034_assistant",
+      "question_type": "assistant",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "code_lane_035_toolResult",
+      "question_type": "toolResult",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": true,
+      "hit_at_10": true
+    },
+    {
+      "question_id": "code_lane_036_assistant",
+      "question_type": "assistant",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "code_lane_037_toolResult",
+      "question_type": "toolResult",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "code_lane_038_assistant",
+      "question_type": "assistant",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "code_lane_039_toolResult",
+      "question_type": "toolResult",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    },
+    {
+      "question_id": "code_lane_040_assistant",
+      "question_type": "assistant",
+      "returned_items": 2,
+      "degraded": false,
+      "hit_at_5": false,
+      "hit_at_10": false
+    }
+  ]
+}

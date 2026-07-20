@@ -13,7 +13,50 @@
           "format": "uuid",
           "type": "string"
         },
+        "AgentNodeId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "CorrectRequest": {
+          "additionalProperties": false,
+          "properties": {
+            "actor_id": {
+              "$ref": "#/$defs/ActorId"
+            },
+            "agent_node_id": {
+              "$ref": "#/$defs/AgentNodeId"
+            },
+            "correction": {
+              "$ref": "#/$defs/CorrectionPayload"
+            },
+            "scope_id": {
+              "$ref": "#/$defs/ScopeId"
+            },
+            "selector": {
+              "$ref": "#/$defs/CorrectSelector"
+            },
+            "subject_generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "subject_id": {
+              "$ref": "#/$defs/SubjectId"
+            }
+          },
+          "required": [
+            "subject_id",
+            "scope_id",
+            "actor_id",
+            "agent_node_id",
+            "subject_generation",
+            "selector",
+            "correction"
+          ],
+          "type": "object"
+        },
         "CorrectSelector": {
+          "additionalProperties": false,
           "properties": {
             "memory_unit_id": {
               "$ref": "#/$defs/UnitId"
@@ -25,17 +68,26 @@
           "type": "object"
         },
         "CorrectionPayload": {
+          "additionalProperties": false,
           "properties": {
+            "observed_at": {
+              "type": "string"
+            },
             "reason": {
               "type": "string"
             },
+            "source_ref": {
+              "type": "string"
+            },
             "valid_from": {
+              "default": null,
               "type": [
                 "string",
                 "null"
               ]
             },
             "valid_to": {
+              "default": null,
               "type": [
                 "string",
                 "null"
@@ -47,7 +99,9 @@
           },
           "required": [
             "value",
-            "reason"
+            "reason",
+            "source_ref",
+            "observed_at"
           ],
           "type": "object"
         },
@@ -55,7 +109,7 @@
           "format": "uuid",
           "type": "string"
         },
-        "TenantId": {
+        "SubjectId": {
           "format": "uuid",
           "type": "string"
         },
@@ -65,29 +119,20 @@
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "properties": {
-        "actor_id": {
-          "$ref": "#/$defs/ActorId"
+        "idempotency_key": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
         },
-        "correction": {
-          "$ref": "#/$defs/CorrectionPayload"
-        },
-        "scope_id": {
-          "$ref": "#/$defs/ScopeId"
-        },
-        "selector": {
-          "$ref": "#/$defs/CorrectSelector"
-        },
-        "tenant_id": {
-          "$ref": "#/$defs/TenantId"
+        "request": {
+          "$ref": "#/$defs/CorrectRequest"
         }
       },
       "required": [
-        "tenant_id",
-        "scope_id",
-        "actor_id",
-        "selector",
-        "correction"
+        "idempotency_key",
+        "request"
       ],
       "type": "object"
     },
@@ -149,11 +194,54 @@
           "format": "uuid",
           "type": "string"
         },
+        "AgentNodeId": {
+          "format": "uuid",
+          "type": "string"
+        },
         "EpisodeId": {
           "format": "uuid",
           "type": "string"
         },
+        "ForgetRequest": {
+          "additionalProperties": false,
+          "properties": {
+            "actor_id": {
+              "$ref": "#/$defs/ActorId"
+            },
+            "agent_node_id": {
+              "$ref": "#/$defs/AgentNodeId"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "scope_id": {
+              "$ref": "#/$defs/ScopeId"
+            },
+            "selector": {
+              "$ref": "#/$defs/ForgetSelector"
+            },
+            "subject_generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "subject_id": {
+              "$ref": "#/$defs/SubjectId"
+            }
+          },
+          "required": [
+            "subject_id",
+            "scope_id",
+            "actor_id",
+            "agent_node_id",
+            "subject_generation",
+            "selector",
+            "reason"
+          ],
+          "type": "object"
+        },
         "ForgetSelector": {
+          "additionalProperties": false,
           "properties": {
             "episode_id": {
               "anyOf": [
@@ -205,7 +293,7 @@
           "format": "uuid",
           "type": "string"
         },
-        "TenantId": {
+        "SubjectId": {
           "format": "uuid",
           "type": "string"
         },
@@ -215,29 +303,20 @@
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "properties": {
-        "actor_id": {
-          "$ref": "#/$defs/ActorId"
-        },
-        "reason": {
+        "idempotency_key": {
+          "maxLength": 255,
+          "minLength": 1,
           "type": "string"
         },
-        "scope_id": {
-          "$ref": "#/$defs/ScopeId"
-        },
-        "selector": {
-          "$ref": "#/$defs/ForgetSelector"
-        },
-        "tenant_id": {
-          "$ref": "#/$defs/TenantId"
+        "request": {
+          "$ref": "#/$defs/ForgetRequest"
         }
       },
       "required": [
-        "tenant_id",
-        "scope_id",
-        "actor_id",
-        "selector",
-        "reason"
+        "idempotency_key",
+        "request"
       ],
       "type": "object"
     },
@@ -294,6 +373,14 @@
     "description": "Report what the caller did with a recall pack (feeds decay/reinforcement).",
     "inputSchema": {
       "$defs": {
+        "ActorId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "AgentNodeId": {
+          "format": "uuid",
+          "type": "string"
+        },
         "MarkOutcome": {
           "enum": [
             "success",
@@ -303,7 +390,60 @@
           ],
           "type": "string"
         },
-        "TenantId": {
+        "MarkRequest": {
+          "additionalProperties": false,
+          "properties": {
+            "actor_id": {
+              "$ref": "#/$defs/ActorId"
+            },
+            "agent_node_id": {
+              "$ref": "#/$defs/AgentNodeId"
+            },
+            "caller_id": {
+              "type": "string"
+            },
+            "outcome": {
+              "$ref": "#/$defs/MarkOutcome"
+            },
+            "scope_id": {
+              "$ref": "#/$defs/ScopeId"
+            },
+            "subject_generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "subject_id": {
+              "$ref": "#/$defs/SubjectId"
+            },
+            "trace_id": {
+              "$ref": "#/$defs/TraceId"
+            },
+            "used_ids": {
+              "items": {
+                "$ref": "#/$defs/UnitId"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "subject_id",
+            "scope_id",
+            "actor_id",
+            "agent_node_id",
+            "subject_generation",
+            "trace_id",
+            "caller_id",
+            "used_ids",
+            "outcome"
+          ],
+          "type": "object"
+        },
+        "ScopeId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "SubjectId": {
           "format": "uuid",
           "type": "string"
         },
@@ -317,32 +457,20 @@
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "properties": {
-        "caller_id": {
+        "idempotency_key": {
+          "maxLength": 255,
+          "minLength": 1,
           "type": "string"
         },
-        "outcome": {
-          "$ref": "#/$defs/MarkOutcome"
-        },
-        "tenant_id": {
-          "$ref": "#/$defs/TenantId"
-        },
-        "trace_id": {
-          "$ref": "#/$defs/TraceId"
-        },
-        "used_ids": {
-          "items": {
-            "$ref": "#/$defs/UnitId"
-          },
-          "type": "array"
+        "request": {
+          "$ref": "#/$defs/MarkRequest"
         }
       },
       "required": [
-        "tenant_id",
-        "trace_id",
-        "caller_id",
-        "used_ids",
-        "outcome"
+        "idempotency_key",
+        "request"
       ],
       "type": "object"
     },
@@ -384,6 +512,28 @@
           "format": "uuid",
           "type": "string"
         },
+        "AgentNodeId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "AggregationWindow": {
+          "additionalProperties": false,
+          "properties": {
+            "from": {
+              "description": "Inclusive RFC 3339 lower bound supplied by the host.",
+              "type": "string"
+            },
+            "to": {
+              "description": "Exclusive RFC 3339 upper bound supplied by the host.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": "object"
+        },
         "RecallMode": {
           "enum": [
             "fast",
@@ -396,48 +546,36 @@
           "format": "uuid",
           "type": "string"
         },
-        "TenantId": {
+        "SubjectId": {
           "format": "uuid",
           "type": "string"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "properties": {
         "actor_id": {
           "$ref": "#/$defs/ActorId"
         },
-        "allowed_scope_ids": {
-          "items": {
-            "$ref": "#/$defs/ScopeId"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
+        "agent_node_id": {
+          "$ref": "#/$defs/AgentNodeId"
+        },
+        "aggregation_window": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AggregationWindow"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "budget_tokens": {
           "format": "uint",
           "minimum": 0,
           "type": [
             "integer",
-            "null"
-          ]
-        },
-        "context_packing_abstention_enabled": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "decay_enabled": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "edge_expansion_enabled": {
-          "type": [
-            "boolean",
             "null"
           ]
         },
@@ -465,38 +603,39 @@
             }
           ]
         },
-        "procedure_recall_enabled": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
         "query": {
           "type": "string"
-        },
-        "query_decomposition_enabled": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "rerank_enabled": {
-          "type": [
-            "boolean",
-            "null"
-          ]
         },
         "scope_id": {
           "$ref": "#/$defs/ScopeId"
         },
-        "tenant_id": {
-          "$ref": "#/$defs/TenantId"
+        "subject_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "subject_id": {
+          "$ref": "#/$defs/SubjectId"
+        },
+        "transaction_as_of": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "valid_at": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
-        "tenant_id",
+        "subject_id",
         "scope_id",
         "actor_id",
+        "agent_node_id",
+        "subject_generation",
         "query"
       ],
       "type": "object"
@@ -520,6 +659,13 @@
         },
         "RecallCitation": {
           "properties": {
+            "derived_from_unit_ids": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/UnitId"
+              },
+              "type": "array"
+            },
             "episode_id": {
               "anyOf": [
                 {
@@ -577,6 +723,13 @@
             "derived_by": {
               "type": "string"
             },
+            "derived_from_unit_ids": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/UnitId"
+              },
+              "type": "array"
+            },
             "inclusion_reason": {
               "type": "string"
             },
@@ -600,6 +753,25 @@
             "derived_by",
             "inclusion_reason",
             "suppression_labels"
+          ],
+          "type": "object"
+        },
+        "RecallTime": {
+          "properties": {
+            "evaluated_at": {
+              "type": "string"
+            },
+            "transaction_as_of": {
+              "type": "string"
+            },
+            "valid_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "evaluated_at",
+            "transaction_as_of",
+            "valid_at"
           ],
           "type": "object"
         },
@@ -649,6 +821,9 @@
           },
           "type": "array"
         },
+        "recall_time": {
+          "$ref": "#/$defs/RecallTime"
+        },
         "suppression_labels": {
           "items": {
             "type": "string"
@@ -666,7 +841,8 @@
         "citations",
         "abstention",
         "degraded",
-        "suppression_labels"
+        "suppression_labels",
+        "recall_time"
       ],
       "type": "object"
     }
@@ -685,68 +861,84 @@
           "format": "uuid",
           "type": "string"
         },
+        "AgentNodeId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "ReflectRequest": {
+          "additionalProperties": false,
+          "properties": {
+            "actor_id": {
+              "$ref": "#/$defs/ActorId"
+            },
+            "agent_node_id": {
+              "$ref": "#/$defs/AgentNodeId"
+            },
+            "scope_id": {
+              "$ref": "#/$defs/ScopeId"
+            },
+            "subject_generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "subject_id": {
+              "$ref": "#/$defs/SubjectId"
+            }
+          },
+          "required": [
+            "subject_id",
+            "scope_id",
+            "actor_id",
+            "agent_node_id",
+            "subject_generation"
+          ],
+          "type": "object"
+        },
         "ScopeId": {
           "format": "uuid",
           "type": "string"
         },
-        "TenantId": {
+        "SubjectId": {
           "format": "uuid",
           "type": "string"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "properties": {
-        "actor_id": {
-          "$ref": "#/$defs/ActorId"
+        "idempotency_key": {
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
         },
-        "compiler_version": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "scope_id": {
-          "$ref": "#/$defs/ScopeId"
-        },
-        "tenant_id": {
-          "$ref": "#/$defs/TenantId"
+        "request": {
+          "$ref": "#/$defs/ReflectRequest"
         }
       },
       "required": [
-        "tenant_id",
-        "scope_id",
-        "actor_id"
+        "idempotency_key",
+        "request"
       ],
       "type": "object"
     },
     "name": "reflect",
     "outputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "candidates_created": {
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "episodes_consumed": {
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "reflect_id": {
+      "$defs": {
+        "JobId": {
+          "format": "uuid",
           "type": "string"
-        },
-        "trace_ref": {
-          "type": [
-            "string",
-            "null"
-          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "job_id": {
+          "$ref": "#/$defs/JobId"
         }
       },
       "required": [
-        "reflect_id",
-        "episodes_consumed",
-        "candidates_created"
+        "job_id"
       ],
       "type": "object"
     }
@@ -758,10 +950,14 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Store memory: an episode body (default), a resource {uri, mime_type, content_hash, revision?, body} or a direct pre-compiled unit {kind, subject, predicate, body}.",
+    "description": "Store exactly one episode, resource, or direct unit with provenance.",
     "inputSchema": {
       "$defs": {
         "ActorId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "AgentNodeId": {
           "format": "uuid",
           "type": "string"
         },
@@ -784,7 +980,107 @@
           ],
           "type": "string"
         },
+        "RetainEpisodeHttpRequest": {
+          "additionalProperties": false,
+          "description": "The retain verb request with exactly one tagged episode, resource, or unit payload.",
+          "properties": {
+            "actor_id": {
+              "$ref": "#/$defs/ActorId"
+            },
+            "agent_node_id": {
+              "$ref": "#/$defs/AgentNodeId"
+            },
+            "observed_at": {
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/RetainPayload"
+            },
+            "scope_id": {
+              "$ref": "#/$defs/ScopeId"
+            },
+            "source_ref": {
+              "type": "string"
+            },
+            "subject_generation": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "subject_id": {
+              "$ref": "#/$defs/SubjectId"
+            }
+          },
+          "required": [
+            "subject_id",
+            "scope_id",
+            "actor_id",
+            "agent_node_id",
+            "subject_generation",
+            "source_ref",
+            "observed_at",
+            "payload"
+          ],
+          "type": "object"
+        },
+        "RetainEpisodePayload": {
+          "additionalProperties": false,
+          "properties": {
+            "body": {
+              "type": "string"
+            },
+            "source_kind": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_kind",
+            "body"
+          ],
+          "type": "object"
+        },
+        "RetainPayload": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "episode": {
+                  "$ref": "#/$defs/RetainEpisodePayload"
+                }
+              },
+              "required": [
+                "episode"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "resource": {
+                  "$ref": "#/$defs/RetainResourcePayload"
+                }
+              },
+              "required": [
+                "resource"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "unit": {
+                  "$ref": "#/$defs/RetainUnitPayload"
+                }
+              },
+              "required": [
+                "unit"
+              ],
+              "type": "object"
+            }
+          ]
+        },
         "RetainResourcePayload": {
+          "additionalProperties": false,
           "description": "Resource payload for the retain verb (spec 08 §209 `resource` shape).",
           "properties": {
             "body": {
@@ -832,17 +1128,18 @@
           "type": "object"
         },
         "RetainUnitPayload": {
-          "description": "Direct pre-compiled unit payload for trusted callers (spec 08 §209 `unit`\nshape). Requires an explicit subject/predicate and kind; the admission\ntrust policy still applies.",
+          "additionalProperties": false,
+          "description": "Direct pre-compiled unit payload for trusted callers (spec 08 §209 `unit`\nshape). Requires an explicit fact key, predicate, confidence, and kind; the admission\ntrust policy still applies.",
           "properties": {
             "body": {
               "type": "string"
             },
-            "churn_class": {
-              "default": null,
-              "type": [
-                "string",
-                "null"
-              ]
+            "confidence": {
+              "format": "float",
+              "type": "number"
+            },
+            "fact_key": {
+              "type": "string"
             },
             "kind": {
               "$ref": "#/$defs/MemoryKind"
@@ -850,15 +1147,27 @@
             "predicate": {
               "type": "string"
             },
-            "subject": {
-              "type": "string"
+            "valid_from": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "valid_to": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
             "kind",
-            "subject",
+            "fact_key",
             "predicate",
-            "body"
+            "body",
+            "confidence"
           ],
           "type": "object"
         },
@@ -866,106 +1175,26 @@
           "format": "uuid",
           "type": "string"
         },
-        "TenantId": {
+        "SubjectId": {
           "format": "uuid",
-          "type": "string"
-        },
-        "TrustLevel": {
-          "enum": [
-            "trusted_user",
-            "trusted_system",
-            "verified_tool",
-            "unverified_tool",
-            "web_content",
-            "agent_output",
-            "imported_external",
-            "quarantined"
-          ],
           "type": "string"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "properties": {
-        "actor_id": {
-          "$ref": "#/$defs/ActorId"
-        },
-        "body": {
-          "default": null,
-          "description": "Episode body; required for the episode payload shape.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "compiler_version": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "predicate": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "resource": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/RetainResourcePayload"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Present → resource payload shape."
-        },
-        "scope_id": {
-          "$ref": "#/$defs/ScopeId"
-        },
-        "source_kind": {
+        "idempotency_key": {
+          "maxLength": 255,
+          "minLength": 1,
           "type": "string"
         },
-        "source_trust": {
-          "$ref": "#/$defs/TrustLevel"
-        },
-        "subject": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "subject_hint": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "tenant_id": {
-          "$ref": "#/$defs/TenantId"
-        },
-        "unit": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/RetainUnitPayload"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Present → direct unit payload shape."
+        "request": {
+          "$ref": "#/$defs/RetainEpisodeHttpRequest"
         }
       },
       "required": [
-        "tenant_id",
-        "scope_id",
-        "actor_id",
-        "source_kind",
-        "source_trust"
+        "idempotency_key",
+        "request"
       ],
       "type": "object"
     },
@@ -1098,7 +1327,19 @@
     "description": "Inspect a retrieval trace (tenant-bound).",
     "inputSchema": {
       "$defs": {
-        "TenantId": {
+        "ActorId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "AgentNodeId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "ScopeId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "SubjectId": {
           "format": "uuid",
           "type": "string"
         },
@@ -1108,16 +1349,35 @@
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
       "properties": {
-        "tenant_id": {
-          "$ref": "#/$defs/TenantId"
+        "actor_id": {
+          "$ref": "#/$defs/ActorId"
+        },
+        "agent_node_id": {
+          "$ref": "#/$defs/AgentNodeId"
+        },
+        "scope_id": {
+          "$ref": "#/$defs/ScopeId"
+        },
+        "subject_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "subject_id": {
+          "$ref": "#/$defs/SubjectId"
         },
         "trace_id": {
           "$ref": "#/$defs/TraceId"
         }
       },
       "required": [
-        "tenant_id",
+        "subject_id",
+        "scope_id",
+        "actor_id",
+        "agent_node_id",
+        "subject_generation",
         "trace_id"
       ],
       "type": "object"
@@ -1128,6 +1388,99 @@
         "ActorId": {
           "format": "uuid",
           "type": "string"
+        },
+        "AgentNodeId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "CrossRerankFailure": {
+          "enum": [
+            "none",
+            "error",
+            "empty",
+            "invalid_score_count",
+            "non_finite_score"
+          ],
+          "type": "string"
+        },
+        "CrossRerankTrace": {
+          "properties": {
+            "batch_size": {
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "candidate_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "candidate_limit": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "failure": {
+              "$ref": "#/$defs/CrossRerankFailure"
+            },
+            "input_chars_max": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "input_chars_p50": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "input_chars_p95": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "max_length": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "model": {
+              "type": "string"
+            },
+            "provider": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "provider",
+            "model",
+            "candidate_limit",
+            "candidate_count",
+            "max_length",
+            "input_chars_p50",
+            "input_chars_p95",
+            "input_chars_max",
+            "failure"
+          ],
+          "type": "object"
+        },
+        "DegradedRecallTraceItem": {
+          "additionalProperties": false,
+          "properties": {
+            "body": {
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/$defs/MemoryKind"
+            }
+          },
+          "required": [
+            "body",
+            "kind"
+          ],
+          "type": "object"
         },
         "EpisodeId": {
           "format": "uuid",
@@ -1257,11 +1610,35 @@
               },
               "type": "array"
             },
+            "transaction_from": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "transaction_to": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "trust_level": {
               "$ref": "#/$defs/TrustLevel"
             },
             "unit_id": {
               "$ref": "#/$defs/UnitId"
+            },
+            "valid_from": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "valid_to": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
@@ -1289,6 +1666,13 @@
         },
         "RecallCitation": {
           "properties": {
+            "derived_from_unit_ids": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/UnitId"
+              },
+              "type": "array"
+            },
             "episode_id": {
               "anyOf": [
                 {
@@ -1346,6 +1730,13 @@
             "derived_by": {
               "type": "string"
             },
+            "derived_from_unit_ids": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/UnitId"
+              },
+              "type": "array"
+            },
             "inclusion_reason": {
               "type": "string"
             },
@@ -1371,6 +1762,37 @@
             "suppression_labels"
           ],
           "type": "object"
+        },
+        "RecallDegradationDiagnostic": {
+          "additionalProperties": false,
+          "properties": {
+            "consolidation_lag_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "items": {
+              "items": {
+                "$ref": "#/$defs/DegradedRecallTraceItem"
+              },
+              "type": "array"
+            },
+            "reason": {
+              "$ref": "#/$defs/RecallDegradationReason"
+            }
+          },
+          "required": [
+            "reason",
+            "consolidation_lag_ms",
+            "items"
+          ],
+          "type": "object"
+        },
+        "RecallDegradationReason": {
+          "enum": [
+            "pending_reflection_read_your_own_writes"
+          ],
+          "type": "string"
         },
         "RecallDropReason": {
           "enum": [
@@ -1430,6 +1852,25 @@
           ],
           "type": "object"
         },
+        "RecallTime": {
+          "properties": {
+            "evaluated_at": {
+              "type": "string"
+            },
+            "transaction_as_of": {
+              "type": "string"
+            },
+            "valid_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "evaluated_at",
+            "transaction_as_of",
+            "valid_at"
+          ],
+          "type": "object"
+        },
         "ReflectStageFact": {
           "properties": {
             "detail": {
@@ -1450,6 +1891,10 @@
           "type": "string"
         },
         "ScopeId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "SubjectId": {
           "format": "uuid",
           "type": "string"
         },
@@ -1503,6 +1948,9 @@
         "actor_id": {
           "$ref": "#/$defs/ActorId"
         },
+        "agent_node_id": {
+          "$ref": "#/$defs/AgentNodeId"
+        },
         "candidates": {
           "items": {
             "$ref": "#/$defs/RecallCandidateTrace"
@@ -1537,12 +1985,44 @@
           "minimum": 0,
           "type": "integer"
         },
+        "cross_rerank": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CrossRerankTrace"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "cross_rerank_ms": {
+          "default": 0,
+          "description": "R1.5-T1: per-recall wall-clock (ms) spent inside the W8 cross-encoder\nrerank stage ([`crate::CrossReranker`], distinct from the retired\nheuristic `reranker_id`/`rerank_input_count`/`rerank_overfetch_ratio`\nfields below). `0` when no cross-reranker is installed on the service\n(the default) or the candidate pool was empty — a legitimate \"not\nrun\" value, not a sentinel. `#[serde(default)]` so traces recorded\nbefore this field existed still deserialize.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "data_subject_id": {
+          "$ref": "#/$defs/SubjectId"
+        },
         "decay_model_id": {
           "default": "",
           "type": "string"
         },
         "decomposition_reason": {
           "type": "string"
+        },
+        "degradation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RecallDegradationDiagnostic"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "dropped_items": {
           "items": {
@@ -1618,6 +2098,9 @@
           },
           "type": "array"
         },
+        "policy_revision": {
+          "type": "string"
+        },
         "procedure_ids": {
           "default": [],
           "items": {
@@ -1635,6 +2118,16 @@
         "query_hash": {
           "type": "string"
         },
+        "recall_pool_depth": {
+          "default": 0,
+          "description": "R1.5-T0: the `recall_pool_depth` in effect for this recall — the ONE\nknob the vector/rerank/packing-scan internal fan-out derived from\n(never from `k`). Recorded per-trace so latency attribution stays\nobservable across deployments that override\n`MEMPHANT_RECALL_POOL_DEPTH`. `#[serde(default)]` so traces recorded\nbefore this field existed still deserialize (as `0`, a visible \"not\nrecorded\" sentinel — pool depth is never legitimately 0).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "recall_time": {
+          "$ref": "#/$defs/RecallTime"
+        },
         "rerank_input_count": {
           "format": "uint",
           "minimum": 0,
@@ -1649,6 +2142,11 @@
         },
         "scope_id": {
           "$ref": "#/$defs/ScopeId"
+        },
+        "subject_generation": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
         },
         "subquery_ids": {
           "default": [],
@@ -1672,8 +2170,12 @@
       "required": [
         "id",
         "tenant_id",
+        "data_subject_id",
         "scope_id",
         "actor_id",
+        "agent_node_id",
+        "subject_generation",
+        "policy_revision",
         "query_hash",
         "engine_version",
         "feature_flags",
@@ -1695,7 +2197,8 @@
         "abstention_signal",
         "latency_ms",
         "token_estimate",
-        "cost_micros"
+        "cost_micros",
+        "recall_time"
       ],
       "type": "object"
     }

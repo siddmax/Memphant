@@ -42,13 +42,49 @@ temp/
 benchmarks/data/*
 !benchmarks/data/syndai_docs_golden.jsonl
 !benchmarks/data/syndai_docs_golden.lock.json
+!benchmarks/data/syndai_docs_golden_v2.jsonl
+!benchmarks/data/syndai_docs_golden_v2.lock.json
+!benchmarks/data/syndai_docs_negative.jsonl
+!benchmarks/data/syndai_docs_negative.lock.json
+# R0-T6 code lane: the corpus + golden JSONL are the user's PRIVATE coding
+# content (extracted from the Syndai coding_execution_attempt_events table)
+# and must never be committed — only the lock (sha256/counts/stats/seed/
+# extraction params, no content) is. Already covered by the blanket
+# `benchmarks/data/*` above; listed explicitly for the binding privacy note.
+benchmarks/data/coding_events_corpus.jsonl
+benchmarks/data/coding_events_corpus.stats.json
+benchmarks/data/coding_events_golden.jsonl
+!benchmarks/data/coding_events_golden.lock.json
 .fastembed_cache/
 # Reader-lane evidence packs embed raw LongMemEval session text (the raw
 # dataset stays out of the repo); the scored reader-*.json reports are committed.
 docs/build-log/artifacts/*/reader-evidence-*.jsonl
 docs/build-log/artifacts/*/reader-cache/
+docs/build-log/artifacts/*/query-rewrite-cache/
+docs/build-log/artifacts/**/extraction-bank/*.dump
+docs/build-log/artifacts/**/extraction-bank/*.extractor.jsonl
 # Syndai-gate lane: evidence packs embed raw retrieved doc bodies and the miner
 # cache embeds full corpus sections; scored reports + compare verdict are committed.
 docs/build-log/artifacts/syndai-gate/*_evidence.jsonl
 docs/build-log/artifacts/syndai-gate/miner-cache/
 docs/build-log/artifacts/*/ev-*.jsonl
+# R0 embedder bakeoff (docs + chat lanes): evidence packs embed raw retrieved
+# doc bodies / raw corpus text; the shared reader cache is regenerable.
+# provenance.json / lme-*.json / reader-*.json score reports are committed.
+docs/build-log/artifacts/r0-embedder/**/evidence.jsonl
+docs/build-log/artifacts/r0-embedder/**/ev-*.jsonl
+docs/build-log/artifacts/r0-embedder/reader-cache/
+# R0-T6 code-lane miner cache: caches raw LLM replies generated FROM the
+# private corpus text (regenerable from the pinned corpus + seed).
+docs/build-log/artifacts/code-lane/miner-cache/
+docs/build-log/artifacts/r1-docs/**/evidence.jsonl
+docs/build-log/artifacts/r1-docs/**/server-*.log
+docs/build-log/artifacts/r15-docs/**/evidence.jsonl
+docs/build-log/artifacts/r15-docs/**/server-*.log
+docs/build-log/artifacts/r15-docs/chat/ev-*.jsonl
+# Paid campaign evidence stays on disk; canonical small files are force-added
+# per docs/build-log/artifacts/canonical-artifact-allowlist.txt.
+docs/build-log/artifacts/unified-sota-20260713/
+docs/build-log/artifacts/unified-sota-20260714/
+docs/build-log/artifacts/pmu-full300-sequential-20260717/
+.claude/feature-flow/

@@ -1,0 +1,72 @@
+{
+  "benchmark": "LongMemEval-V2",
+  "paper": "https://arxiv.org/abs/2605.12493",
+  "project": "https://xiaowu0162.github.io/longmemeval-v2/",
+  "released_at": "2026-05-17",
+  "code": {
+    "repository": "https://github.com/xiaowu0162/LongMemEval-V2",
+    "commit": "be15ea6e995462f3391c1a610892df3f67dfa7bd",
+    "license": "Apache-2.0",
+    "files": {
+      "LICENSE": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+      "README.md": "bd398dddaff23b6487620bec8e62a0045a8e1dc9400ff4be61322caca9548e72",
+      "data/download_data.py": "075674115ea78457b7c7910b8ed2b574fa45e2e9a4ed4bdf3d4d3773d748a320",
+      "data/prepare_data.py": "b8acf9509681266165f4bd6860b7a4007ffc020ed0fac1c4027b75ab00544796",
+      "data/public_data.py": "d2b868bfb0b6f8b66489c9445389eb6d0f26975f940a9c2365be154e63649c89",
+      "data/validate_data.py": "b5c7367a4ff26f5e57d2e2dd580aa179b10ad788680f753720d05645b5a1e332",
+      "evaluation/harness.py": "8c6d1bd124ce2caf8a4bdc8516ef1b54ffca98ea4c49b4e50355ee4207b55eb1",
+      "evaluation/qa_eval_metrics.py": "f8ba659e237c4282a07a92538090ea500ce8483820b390b1d19af187c01417ac",
+      "memory_modules/memory.py": "512d48d93ff78208127c85ffd90ea4c63f1f9ccea3427f0a7b6928a39bdc6a59",
+      "pyproject.toml": "06ef6a2b995126b1fb0d91f1a50ee1152a150c1754884db5a6e0fba2a09f434e"
+    }
+  },
+  "dataset": {
+    "repository": "xiaowu0162/longmemeval-v2",
+    "revision": "f152293e235517d504809563c833d7190b8c713b",
+    "license": "Apache-2.0",
+    "total_files": 41,
+    "total_bytes": 7120369667,
+    "checksums_file": {
+      "path": "checksums.sha256",
+      "sha256": "b17a18daa52873f915808502217c3c5fab39d20638544f986401155c9e8d67a6",
+      "entries": 37
+    },
+    "files": {
+      "questions.jsonl": {
+        "sha256": "0a3ae5ebea938c24d7800e1e0b0828e08ae1646f939a53853b2b8cdc08e292b7",
+        "bytes": 286186
+      },
+      "trajectories.jsonl": {
+        "sha256": "363cec9a8e87aa8d9101ce4e600aadbf7031d674056ebe4f969e8424abc5f3c6",
+        "bytes": 1195604539
+      },
+      "haystacks/lme_v2_small.json": {
+        "sha256": "9b5301defb23a088a5f06e45ff8d5f35e569d78305a66d492046a9fff9b46593",
+        "bytes": 822632
+      },
+      "haystacks/lme_v2_medium.json": {
+        "sha256": "4756d5126347f0d18f045bb6c47b08cb3b23e9db24386cc48a9b2879e7969b59",
+        "bytes": 4054244
+      },
+      "trajectory_screenshots/enterprise_screenshots_base.tar.gz": {
+        "sha256": "5c4a67ae0856aa1ede9b040e7da7c7a2d0b76fdd6344ef87380bcdf9f4b6d7a3",
+        "bytes": 3354163660
+      },
+      "trajectory_screenshots/web_screenshots.tar.gz": {
+        "sha256": "68699c6842412e09a6f89d3c05c5ae8813275918002b52d82dec43ab24dd01fb",
+        "bytes": 2562302847
+      }
+    }
+  },
+  "protocol": {
+    "questions": 451,
+    "tiers": ["small", "medium"],
+    "domains": ["web", "enterprise"],
+    "fixed_reader": "Qwen/Qwen3.5-9B",
+    "official_default_judge": "gpt-5.2",
+    "generation_and_scoring": "official evaluation/harness.py at code.commit",
+    "memory_interface": "official memory_modules.memory.Memory insert/query contract at code.commit"
+  },
+  "public_execution_ready": true,
+  "acquisition_note": "The immutable public snapshot is approximately 7.12 GB before archive extraction. Acquisition verifies the official 37-entry checksum list plus separately locked LFS hashes for both screenshot archives, which the upstream checksum file omits."
+}

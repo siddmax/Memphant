@@ -8,18 +8,12 @@ fn bundled_wsa_migration_passes_all_provider_lints() {
 }
 
 #[test]
-fn bundled_migration_list_includes_runtime_reconciliation() {
+fn bundled_migrations_are_one_fresh_bootstrap() {
     let versions: Vec<_> = memphant_store_postgres::MIGRATIONS
         .iter()
         .map(|(version, _)| *version)
         .collect();
-    assert_eq!(
-        versions,
-        [
-            "20260703_001_wsa_bootstrap",
-            "20260709_002_runtime_reconciliation"
-        ]
-    );
+    assert_eq!(versions, ["20260703_001_wsa_bootstrap"]);
 }
 
 #[test]
