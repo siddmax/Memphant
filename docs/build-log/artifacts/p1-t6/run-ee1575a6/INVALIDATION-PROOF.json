@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "attempt": "run-ee1575a6",
+  "classification": "memory_context_contract_and_reader_transport_timeout_failure",
+  "invalidated_at": "2026-07-20",
+  "measured_commit": "ee1575a660f69b9ebaef54a3a84cb15e1c45038d",
+  "preserved_evidence": {
+    "pre_invalidation_inventory_files": 25,
+    "pre_invalidation_inventory_sha256": "b3de7dfa909ca1f31927a0b24b21015da1e2994dc6b15cd3d770ebb266ffe1b6",
+    "pre_execution_proof_sha256": "530a0f98a0c13df8a58fcbbcbd8378e2c4bf1da416ca0b7a892cb971821e76af",
+    "frozen_run_order_sha256": "89917f248be4aff9a49fdb2ecbeb9f6d8e1d8efb869c90ebba1075619768a792",
+    "memory_proof_sha256": "2a965a6d73e37b743e3b89a39449a8b5df2d75fbee11ad5a0d5084f3469de673",
+    "prompt_rows_sha256": "de5a8fc9191a508a59f684191a0e01f86662bcfd1af4e499d8a29b1696f23d94",
+    "reader_route_sha256": "004f08d5b288195c5da4bcf5b2eb551a66a8fae300ab586984153208e2d693df",
+    "official_stderr_sha256": "4bfe4e00cafdf3378ae875c763fbe94ea72408ede7399957fadc97795d3e6684",
+    "finalized_failure_rows": [
+      "0001-19367bc7-fast"
+    ],
+    "interrupted_staging_rows": [
+      ".staging-0002-19367bc7-sonnet"
+    ]
+  },
+  "successful_memphant_boundary": {
+    "trajectory_count": 500,
+    "resource_count": 670,
+    "worker_completed_sources": 670,
+    "worker_failures": 0,
+    "recall_duration_ms": 37711,
+    "degraded": false,
+    "returned_context_items": 2
+  },
+  "memory_context_failure": {
+    "runtime_whitespace_token_estimate": 30093,
+    "official_qwen_token_count_before_truncation": 69393,
+    "official_qwen_token_count_after_truncation": 0,
+    "official_memory_context_was_truncated": true,
+    "cause": "The runtime charged whitespace-delimited words rather than a conservative model-token estimate, while oversized single-paragraph trajectory resources produced very large contextual chunks. The official prefix pack could not fit its first returned item, so the reader received no memory."
+  },
+  "external_dispatch_audit": {
+    "reader_dispatches": 1,
+    "reader_audit_status": "pending",
+    "reader_settled_micros": 0,
+    "reader_unsettled_upper_bound_micros": 3084,
+    "judge_dispatches": 0,
+    "deep_dispatches": 0,
+    "conclusion": "The original reader dispatch timed out before a generation ID was archived and remains conservatively unsettled. It is not equated with the separately settled diagnostic replay."
+  },
+  "separate_diagnostic": {
+    "proof_path": "../diagnostic-ee1575a6-reader-route/PROOF.json",
+    "same_request_contract_sha256": "7262b7a2174056865f018dcc81de69d8843b8eb42eebcf0ea390f23912c95227",
+    "provider_name": "DeepInfra",
+    "model": "qwen/qwen3.5-9b-20260310",
+    "generation_time_ms": 270740,
+    "settled_micros": 816,
+    "conclusion": "The strict route contract is valid. The campaign proxy's 300-second upstream timeout had insufficient margin, and its five-second synchronous receipt check raced asynchronous generation metadata."
+  },
+  "cleanup_audit": {
+    "campaign_processes_remaining": 0,
+    "diagnostic_processes_remaining": 0,
+    "scratch_databases_remaining": 0
+  },
+  "retry_decision": {
+    "same_output_root_replay_authorized": false,
+    "fresh_output_root_authorized": false,
+    "authorization_requirements": [
+      "model-aware or conservatively bounded context packing with non-empty untruncated official Qwen context",
+      "bounded oversized-resource chunking with complete source-span coverage",
+      "reader upstream timeout with measured safety margin",
+      "off-response-path generation-receipt reconciliation",
+      "a committed no-model release-runtime proof of the exact first-case context contract",
+      "a bounded exact-route probe with complete settlement proof"
+    ]
+  }
+}

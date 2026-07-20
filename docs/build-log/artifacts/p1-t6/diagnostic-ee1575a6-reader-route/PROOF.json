@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "diagnostic": "exact_reader_route_replay_after_run-ee1575a6",
+  "measured_commit": "ee1575a660f69b9ebaef54a3a84cb15e1c45038d",
+  "request": {
+    "dispatch_count": 1,
+    "request_contract_sha256": "7262b7a2174056865f018dcc81de69d8843b8eb42eebcf0ea390f23912c95227",
+    "provider_policy_sha256": "dbd1302c34ff5ef3e979a55b59ddc4b24cd29f202dd183e218b69eaa42f581cc",
+    "input_token_upper_bound": 832,
+    "completion_token_upper_bound": 20000,
+    "max_liability_micros": 3084
+  },
+  "response": {
+    "generation_id": "gen-1784567901-LHqqVWe148iK7Ll74yRd",
+    "response_sha256": "8d0ed6b2c1981ad8c7ea27dccfa49df6c507f2e8279b6e114b948140635ebc8f",
+    "finish_reason": "stop",
+    "native_finish_reason": "stop"
+  },
+  "settlement": {
+    "audit_status": "settled",
+    "provider_name": "DeepInfra",
+    "model": "qwen/qwen3.5-9b-20260310",
+    "tokens_prompt": 181,
+    "tokens_completion": 5533,
+    "total_cost": 0.000816,
+    "total_cost_micros": 816,
+    "latency_ms": 496,
+    "generation_time_ms": 270740
+  },
+  "conclusions": {
+    "provider_policy_accepted": true,
+    "frozen_provider_and_model_observed": true,
+    "initial_receipt_was_not_yet_complete": true,
+    "proxy_timeout_seconds": 300,
+    "proxy_timeout_too_close_to_observed_generation_seconds": true,
+    "same_output_root_retry_authorized": false
+  }
+}
