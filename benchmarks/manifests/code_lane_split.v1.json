@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "lane": "internal_syndai_code_experience",
+  "classification": "private_internal_diagnostic",
+  "corpus_sha256": "cd1dde7092a7aac51ac9688831288aa574f22fa5dc7aa904d23e186e8c347fab",
+  "golden_sha256": "b7bf9b34959c7c751502dee6bfecb8a794f9fdf87418b69a397e50611c5429e7",
+  "attempt_count": 8,
+  "question_count": 40,
+  "split_unit": ["whole_attempt", "whole_repository", "time_order"],
+  "groups": {
+    "development": {
+      "repository_sha256": "efa736d53145e6e217f4ad2226c7a6bd6bf2d7c177dae8a30925b4bc4e1d235e",
+      "attempt_sha256": [
+        "f2939af33862e820a56a8dc948a2f3377df355e8deecdf35f531e1a60de5b957",
+        "c37f0b44d05be1c6412b4fa39f79a42ca2ce5563f04d97e2b61d38faba082667",
+        "2c59fb1c053119854c06c085e6c5934fd4d4f25bd8861df74daa4fabd7b59ada",
+        "82ec672b94a4c3a16d44d4b3f3d59e2dbe4f3619c4db6327b364eb2a987fb601",
+        "6399fb3061003b7658de616ea66729d9e66d6210f4fcdcdbb700c24dc4529229",
+        "7ecd3648a529db3e31b0ce75e2a542ddfb981c309f9772aee6d79c7fe64835d3"
+      ],
+      "question_count": 36,
+      "started_at_min": "2026-06-12T19:56:55.872182+00:00",
+      "started_at_max": "2026-07-06T15:44:21.361084+00:00"
+    },
+    "held_out_retrieval_only": {
+      "repository_sha256": "4fc4f0ea35d4cf0ed85c9dc9031f7a32c2212507ba20a5e0e67c09ad2cb29823",
+      "attempt_sha256": [
+        "6559bd299d1994f835d0b2f395e9733a268c5a3a3352454ee39b2b5aba28d56c",
+        "2f37df17318b74565b8d289968bf0d47a515149997dfdec2d90074bdf1b88996"
+      ],
+      "question_count": 4,
+      "started_at_min": "2026-07-08T02:21:13.17684+00:00",
+      "started_at_max": "2026-07-08T03:13:52.896868+00:00"
+    }
+  },
+  "readiness": {
+    "deterministic_file_search": true,
+    "verbatim_memphant": true,
+    "outcome_marked_memphant": false,
+    "validator_backed_held_out": false,
+    "swe_explore": false
+  },
+  "observed_gaps": [
+    "The pinned rows contain transcript events only: no explicit success, failure, corrected, or ignored post-action labels.",
+    "Run phase, executor exit code, and partial validator counts are not substituted for explicit mark outcomes.",
+    "The repository-held-out slice has only four retrieval questions and no executable validator task package.",
+    "The sample contains no immutable issue-to-base-commit-to-validator triples and therefore cannot support SWE-Explore or task-success claims."
+  ],
+  "next_validator_backed_requirement": {
+    "minimum_tasks": 40,
+    "minimum_repositories": 2,
+    "split": "repositories and base commits absent from development memory; tasks created later in time",
+    "per_task_required": [
+      "immutable repository identity and license",
+      "base commit",
+      "issue or prompt bytes and sha256",
+      "validator command and environment lock",
+      "pre-change failing validator proof",
+      "expected post-change passing validator proof",
+      "line and cost budgets",
+      "explicit post-action outcome written only after validator execution"
+    ],
+    "comparison": "identical agent, answer model, tools, budget, and validator across no-memory, file-search, verbatim MemPhant, and outcome-marked MemPhant"
+  },
+  "syndai_source_audit": {
+    "commit": "fb650da183a9bc8935e7c4c0acdae78c4dcfe7eb",
+    "branch": "main",
+    "worktree_dirty": true,
+    "read_only": true,
+    "observed_schema": [
+      "coding_runs.coding_repository_id",
+      "coding_runs.base_sha",
+      "coding_runs.current_phase",
+      "coding_execution_attempts.exit_code",
+      "coding_execution_attempts.failure_reason",
+      "coding_validation_runs.command",
+      "coding_validation_runs.status",
+      "coding_validation_runs.tree_sha"
+    ]
+  }
+}

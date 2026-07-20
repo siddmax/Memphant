@@ -12,8 +12,8 @@ use std::sync::Arc;
 use memphant_core::service::MemoryService;
 use memphant_core::{FixedClock, InMemoryStore, MemoryStore, StubEmbedding};
 use memphant_types::{
-    ActorId, RecallHttpRequest, ResourceKind, RetainEpisodeHttpRequest, RetainResourcePayload,
-    ScopeId, TenantId, TrustLevel,
+    RecallHttpRequest, ResolvedMemoryContext, ResourceKind, RetainEpisodeHttpRequest,
+    RetainResourcePayload, TenantId, TrustLevel,
 };
 
 const CLOCK: FixedClock = FixedClock("2026-07-11T00:00:00Z");
@@ -51,22 +51,18 @@ fn service(store: InMemoryStore, resource_chunks: bool) -> MemoryService<InMemor
 }
 
 fn retain_resource_request(
-    tenant_id: TenantId,
-    scope_id: ScopeId,
-    actor_id: ActorId,
+    context: &ResolvedMemoryContext,
     kind: ResourceKind,
 ) -> RetainEpisodeHttpRequest {
     RetainEpisodeHttpRequest {
-        tenant_id,
-        scope_id,
-        actor_id,
-        source_kind: "docs".to_string(),
-        source_trust: TrustLevel::TrustedSystem,
-        subject_hint: None,
-        subject: None,
-        predicate: None,
-        body: None,
-        resource: Some(RetainResourcePayload {
+        subject_id: context.data_subject_id,
+        scope_id: context.scope_id,
+        actor_id: context.actor_id,
+        agent_node_id: context.agent_node_id,
+        subject_generation: context.subject_generation,
+        source_ref: RESOURCE_URI.to_string(),
+        observed_at: CLOCK.0.to_string(),
+        payload: memphant_types::RetainPayload::Resource(RetainResourcePayload {
             uri: RESOURCE_URI.to_string(),
             mime_type: "text/markdown".to_string(),
             content_hash: format!("sha256:{}", RESOURCE_BODY.len()),
@@ -74,33 +70,24 @@ fn retain_resource_request(
             revision: Some("r1-gate".to_string()),
             body: Some(RESOURCE_BODY.to_string()),
         }),
-        unit: None,
-        compiler_version: None,
     }
 }
 
-fn recall_request(
-    tenant_id: TenantId,
-    scope_id: ScopeId,
-    actor_id: ActorId,
-    query: &str,
-) -> RecallHttpRequest {
+fn recall_request(context: &ResolvedMemoryContext, query: &str) -> RecallHttpRequest {
     RecallHttpRequest {
-        tenant_id,
-        scope_id,
-        actor_id,
-        allowed_scope_ids: None,
+        subject_id: context.data_subject_id,
+        scope_id: context.scope_id,
+        agent_node_id: context.agent_node_id,
+        subject_generation: context.subject_generation,
+        actor_id: context.actor_id,
         query: query.to_string(),
         limit: None,
         budget_tokens: None,
         mode: None,
         include_beliefs: None,
-        edge_expansion_enabled: None,
-        context_packing_abstention_enabled: None,
-        rerank_enabled: None,
-        query_decomposition_enabled: None,
-        procedure_recall_enabled: None,
-        decay_enabled: None,
+        transaction_as_of: None,
+        valid_at: None,
+        aggregation_window: None,
     }
 }
 
@@ -110,19 +97,25 @@ async fn reflect_resource_chunks(
     store: &InMemoryStore,
     service: &MemoryService<InMemoryStore>,
     tenant: TenantId,
-    scope: ScopeId,
-    actor: ActorId,
     kind: ResourceKind,
 ) -> Vec<memphant_types::ContextualChunk> {
+    let context = memphant_store_testkit::bind_context(store, tenant).await;
     let retained = service
-        .retain(tenant, retain_resource_request(tenant, scope, actor, kind))
+        .retain(
+            &context,
+            concat!("test:", line!()),
+            TrustLevel::TrustedSystem,
+            retain_resource_request(&context, kind),
+        )
         .await
         .expect("retain resource");
+    let retained: memphant_types::RetainEpisodeHttpResponse =
+        serde_json::from_slice(retained.body()).expect("retain response");
     let resource_id = retained.resource_id.expect("resource retained");
-    service.reflect(tenant, scope, None).await.expect("reflect");
+    service.run_worker_tick(usize::MAX).await.expect("reflect");
 
     let page = store
-        .scope_memory_page(tenant, scope, None, 100)
+        .scope_memory_page(&context, None, 100)
         .await
         .expect("page");
     let unit = page
@@ -143,16 +136,8 @@ async fn reflect_stays_chunk_free_by_default() {
         Arc::new(CLOCK),
         Arc::new(StubEmbedding::default()),
     );
-    let (tenant, scope, actor) = (TenantId::new(), ScopeId::new(), ActorId::new());
-    let chunks = reflect_resource_chunks(
-        &store,
-        &service,
-        tenant,
-        scope,
-        actor,
-        ResourceKind::Document,
-    )
-    .await;
+    let tenant = TenantId::new();
+    let chunks = reflect_resource_chunks(&store, &service, tenant, ResourceKind::Document).await;
     assert!(
         chunks.is_empty(),
         "default (flag off) mints no resource chunks — byte-identical to today"
@@ -166,20 +151,25 @@ async fn reflect_stays_chunk_free_by_default() {
 async fn reflect_mints_resource_chunks_when_enabled_for_document() {
     let store = InMemoryStore::default();
     let service = service(store.clone(), true);
-    let (tenant, scope, actor) = (TenantId::new(), ScopeId::new(), ActorId::new());
+    let tenant = TenantId::new();
+    let context = memphant_store_testkit::bind_context(&store, tenant).await;
 
     let retained = service
         .retain(
-            tenant,
-            retain_resource_request(tenant, scope, actor, ResourceKind::Document),
+            &context,
+            concat!("test:", line!()),
+            TrustLevel::TrustedSystem,
+            retain_resource_request(&context, ResourceKind::Document),
         )
         .await
         .expect("retain resource");
+    let retained: memphant_types::RetainEpisodeHttpResponse =
+        serde_json::from_slice(retained.body()).expect("retain response");
     let resource_id = retained.resource_id.expect("resource retained");
-    service.reflect(tenant, scope, None).await.expect("reflect");
+    service.run_worker_tick(usize::MAX).await.expect("reflect");
 
     let page = store
-        .scope_memory_page(tenant, scope, None, 100)
+        .scope_memory_page(&context, None, 100)
         .await
         .expect("page");
     let unit = page
@@ -244,9 +234,8 @@ async fn reflect_mints_resource_chunks_when_enabled_for_document() {
 async fn reflect_stays_chunk_free_for_non_document_kind() {
     let store = InMemoryStore::default();
     let service = service(store.clone(), true);
-    let (tenant, scope, actor) = (TenantId::new(), ScopeId::new(), ActorId::new());
-    let chunks =
-        reflect_resource_chunks(&store, &service, tenant, scope, actor, ResourceKind::Code).await;
+    let tenant = TenantId::new();
+    let chunks = reflect_resource_chunks(&store, &service, tenant, ResourceKind::Code).await;
     assert!(
         chunks.is_empty(),
         "non-document resources are never chunked, even with the flag on"
@@ -260,22 +249,27 @@ async fn reflect_stays_chunk_free_for_non_document_kind() {
 async fn recall_surfaces_document_resource_via_chunk_and_cites_parent() {
     let store = InMemoryStore::default();
     let service = service(store.clone(), true);
-    let (tenant, scope, actor) = (TenantId::new(), ScopeId::new(), ActorId::new());
+    let tenant = TenantId::new();
+    let context = memphant_store_testkit::bind_context(&store, tenant).await;
 
     let retained = service
         .retain(
-            tenant,
-            retain_resource_request(tenant, scope, actor, ResourceKind::Document),
+            &context,
+            concat!("test:", line!()),
+            TrustLevel::TrustedSystem,
+            retain_resource_request(&context, ResourceKind::Document),
         )
         .await
         .expect("retain resource");
+    let retained: memphant_types::RetainEpisodeHttpResponse =
+        serde_json::from_slice(retained.body()).expect("retain response");
     let resource_id = retained.resource_id.expect("resource retained");
-    service.reflect(tenant, scope, None).await.expect("reflect");
+    service.run_worker_tick(usize::MAX).await.expect("reflect");
 
     let response = service
         .recall(
-            tenant,
-            recall_request(tenant, scope, actor, "peregrine falcon telemetry exporter"),
+            context.clone(),
+            recall_request(&context, "peregrine falcon telemetry exporter"),
         )
         .await
         .expect("recall");

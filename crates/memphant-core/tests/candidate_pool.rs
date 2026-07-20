@@ -27,24 +27,21 @@ fn stub_service(store: InMemoryStore) -> MemoryService<InMemoryStore> {
 }
 
 fn retain_request(
-    tenant_id: TenantId,
-    scope_id: ScopeId,
-    actor_id: ActorId,
+    context: &memphant_types::ResolvedMemoryContext,
     body: &str,
 ) -> RetainEpisodeHttpRequest {
     RetainEpisodeHttpRequest {
-        tenant_id,
-        scope_id,
-        actor_id,
-        source_kind: "user".to_string(),
-        source_trust: TrustLevel::TrustedUser,
-        subject_hint: None,
-        subject: None,
-        predicate: None,
-        body: Some(body.to_string()),
-        resource: None,
-        unit: None,
-        compiler_version: None,
+        subject_id: context.data_subject_id,
+        scope_id: context.scope_id,
+        actor_id: context.actor_id,
+        agent_node_id: context.agent_node_id,
+        subject_generation: context.subject_generation,
+        source_ref: "test:fixture".to_string(),
+        observed_at: "2026-07-09T00:00:00Z".to_string(),
+        payload: memphant_types::RetainPayload::Episode(memphant_types::RetainEpisodePayload {
+            source_kind: "user".to_string(),
+            body: body.to_string(),
+        }),
     }
 }
 
@@ -55,21 +52,19 @@ fn recall_request(
     query: &str,
 ) -> RecallHttpRequest {
     RecallHttpRequest {
-        tenant_id,
+        subject_id: memphant_types::SubjectId::from_u128(tenant_id.as_uuid().as_u128()),
         scope_id,
+        agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+        subject_generation: 0,
         actor_id,
-        allowed_scope_ids: None,
         query: query.to_string(),
         limit: None,
         budget_tokens: None,
         mode: None,
         include_beliefs: None,
-        edge_expansion_enabled: None,
-        context_packing_abstention_enabled: None,
-        rerank_enabled: None,
-        query_decomposition_enabled: None,
-        procedure_recall_enabled: None,
-        decay_enabled: None,
+        transaction_as_of: None,
+        valid_at: None,
+        aggregation_window: None,
     }
 }
 
@@ -87,6 +82,9 @@ async fn larger_pool_admits_vector_candidate_default_pool_missed() {
     let tenant = TenantId::new();
     let scope = ScopeId::new();
     let actor = ActorId::new();
+    store.seed_context_binding(&memphant_store_testkit::resolved_context(
+        tenant, scope, actor,
+    ));
 
     // Distinct single-sentence bodies; only the "dolphin" one is the far target.
     // None share a token with the recall query below.
@@ -96,16 +94,25 @@ async fn larger_pool_admits_vector_candidate_default_pool_missed() {
         "Cranes carry lantern parcels weekly.",
         "Dolphins deliver marble crates monthly.",
     ];
-    for body in bodies {
+    for (retain_index, body) in bodies.into_iter().enumerate() {
         ingest
-            .retain(tenant, retain_request(tenant, scope, actor, body))
+            .retain(
+                &memphant_store_testkit::resolved_context(tenant, scope, actor),
+                &format!("test:{retain_index}"),
+                TrustLevel::TrustedUser,
+                retain_request(
+                    &memphant_store_testkit::resolved_context(tenant, scope, actor),
+                    body,
+                ),
+            )
             .await
             .expect("retain");
     }
-    ingest.reflect(tenant, scope, None).await.expect("reflect");
+    while ingest.run_worker_tick(usize::MAX).await.expect("reflect") > 0 {}
 
+    let context = memphant_store_testkit::resolved_context(tenant, scope, actor);
     let page = store
-        .scope_memory_page(tenant, scope, None, 100)
+        .scope_memory_page(&context, None, 100)
         .await
         .expect("page");
     assert!(page.items.len() >= 4, "each episode compiled a unit");
@@ -154,7 +161,7 @@ async fn larger_pool_admits_vector_candidate_default_pool_missed() {
         }
     }
     store
-        .upsert_embeddings(tenant, rows)
+        .upsert_embeddings(&context, rows)
         .await
         .expect("overwrite embeddings");
     assert!(!near_ids.is_empty(), "at least one near unit");
@@ -166,11 +173,17 @@ async fn larger_pool_admits_vector_candidate_default_pool_missed() {
     // fetch entirely.
     let small = stub_service(store.clone()).with_recall_pool_depth(near_pool);
     let small_response = small
-        .recall(tenant, recall_request(tenant, scope, actor, query))
+        .recall(
+            memphant_store_testkit::resolved_context(tenant, scope, actor),
+            recall_request(tenant, scope, actor, query),
+        )
         .await
         .expect("recall (small pool)");
     let small_trace = small
-        .trace(tenant, small_response.trace_id)
+        .trace(
+            &memphant_store_testkit::resolved_context(tenant, scope, actor),
+            small_response.trace_id,
+        )
         .await
         .expect("trace fetch")
         .expect("trace stored");
@@ -195,11 +208,17 @@ async fn larger_pool_admits_vector_candidate_default_pool_missed() {
     // Large pool == near_count + 1: the far unit is now admitted.
     let large = stub_service(store.clone()).with_recall_pool_depth(near_pool + 1);
     let large_response = large
-        .recall(tenant, recall_request(tenant, scope, actor, query))
+        .recall(
+            memphant_store_testkit::resolved_context(tenant, scope, actor),
+            recall_request(tenant, scope, actor, query),
+        )
         .await
         .expect("recall (large pool)");
     let large_trace = large
-        .trace(tenant, large_response.trace_id)
+        .trace(
+            &memphant_store_testkit::resolved_context(tenant, scope, actor),
+            large_response.trace_id,
+        )
         .await
         .expect("trace fetch")
         .expect("trace stored");
@@ -211,5 +230,158 @@ async fn larger_pool_admits_vector_candidate_default_pool_missed() {
         far_in_large,
         "the widened pool ({}) admits the far unit as a vector candidate",
         near_pool + 1
+    );
+}
+
+/// The deterministic reranker's vector feature must be the real cosine score
+/// carried by the vector recall channel. A vector-only target starts behind ten
+/// lexical distractors in fused order, but its perfect cosine match must move
+/// it into the reranked top ten and therefore into the returned pack.
+#[tokio::test]
+async fn deterministic_rerank_admits_strong_vector_only_candidate() {
+    let store = InMemoryStore::default();
+    let ingest = stub_service(store.clone());
+    let tenant = TenantId::new();
+    let scope = ScopeId::new();
+    let actor = ActorId::new();
+    store.seed_context_binding(&memphant_store_testkit::resolved_context(
+        tenant, scope, actor,
+    ));
+    let query = "amber";
+    let bodies = [
+        "Amber aardvark carries ceramic parcels.",
+        "Amber bison carries ceramic parcels.",
+        "Amber crane carries ceramic parcels.",
+        "Amber dingo carries ceramic parcels.",
+        "Amber egret carries ceramic parcels.",
+        "Amber ferret carries ceramic parcels.",
+        "Amber gecko carries ceramic parcels.",
+        "Amber heron carries ceramic parcels.",
+        "Amber ibis carries ceramic parcels.",
+        "Amber jackal carries ceramic parcels.",
+        "Dolphins deliver marble crates monthly.",
+    ];
+    for (retain_index, body) in bodies.into_iter().enumerate() {
+        ingest
+            .retain(
+                &memphant_store_testkit::resolved_context(tenant, scope, actor),
+                &format!("test:{retain_index}"),
+                TrustLevel::TrustedUser,
+                retain_request(
+                    &memphant_store_testkit::resolved_context(tenant, scope, actor),
+                    body,
+                ),
+            )
+            .await
+            .expect("retain");
+    }
+    while ingest.run_worker_tick(usize::MAX).await.expect("reflect") > 0 {}
+
+    let context = memphant_store_testkit::resolved_context(tenant, scope, actor);
+    let page = store
+        .scope_memory_page(&context, None, 100)
+        .await
+        .expect("page");
+    assert_eq!(page.items.len(), bodies.len(), "one unit per episode");
+    let target_id = page
+        .items
+        .iter()
+        .find(|unit| unit.body.contains("Dolphins"))
+        .expect("vector-only target")
+        .id;
+
+    let stub = StubEmbedding::default();
+    let profile = embedding_profile_for(&stub);
+    let query_vec = stub
+        .embed_query(&[query.to_string()])
+        .expect("embed query")
+        .remove(0);
+    let off_axis = query_vec
+        .iter()
+        .position(|value| *value == 0.0)
+        .expect("sparse query vector has an orthogonal component");
+    let mut orthogonal = vec![0.0; query_vec.len()];
+    orthogonal[off_axis] = 1.0;
+    store
+        .upsert_embeddings(
+            &context,
+            page.items
+                .iter()
+                .map(|unit| EmbeddingRow {
+                    memory_unit_id: unit.id,
+                    embedding_profile_id: profile.id,
+                    vec: if unit.id == target_id {
+                        query_vec.clone()
+                    } else {
+                        orthogonal.clone()
+                    },
+                })
+                .collect(),
+        )
+        .await
+        .expect("overwrite embeddings");
+
+    let service = stub_service(store.clone()).with_recall_pool_depth(bodies.len());
+    // The deterministic reranker under test is opt-in (`MemoryService::recall`
+    // hard-codes `rerank_enabled: false` as the real-evidence default), so this
+    // controlled evaluation enters through `recall_internal` with the reranker on.
+    let response = service
+        .recall_internal(memphant_types::RecallRequest {
+            context: memphant_store_testkit::resolved_context(tenant, scope, actor),
+            query: query.to_string(),
+            k: 10,
+            budget_tokens: 8192,
+            mode: memphant_types::RecallMode::Fast,
+            include_beliefs: false,
+            edge_expansion_enabled: false,
+            context_packing_abstention_enabled: true,
+            rerank_enabled: true,
+            learned_rerank_profile: None,
+            query_decomposition_enabled: true,
+            procedure_recall_enabled: true,
+            decay_enabled: true,
+            engine_version: "candidate-pool-rerank-test".to_string(),
+            transaction_as_of: None,
+            valid_at: None,
+            aggregation_window: None,
+        })
+        .await
+        .expect("recall");
+    let trace = service
+        .trace(
+            &memphant_store_testkit::resolved_context(tenant, scope, actor),
+            response.trace_id,
+        )
+        .await
+        .expect("trace fetch")
+        .expect("trace stored");
+    let target = trace
+        .candidates
+        .iter()
+        .find(|candidate| {
+            candidate.unit_id == target_id && candidate.channel == RecallChannel::Vector
+        })
+        .expect("target reached the vector channel");
+
+    assert_eq!(
+        target.channel_score, 1.0,
+        "target is a perfect vector match"
+    );
+    assert!(
+        trace
+            .candidates
+            .iter()
+            .all(|candidate| candidate.unit_id != target_id
+                || candidate.channel != RecallChannel::Lexical),
+        "target has zero lexical overlap"
+    );
+    assert!(
+        target.rerank_rank.is_some_and(|rank| rank <= 10),
+        "strong vector target rerank rank was {:?}",
+        target.rerank_rank
+    );
+    assert!(
+        response.candidate_whitelist.contains(&target_id),
+        "reranked vector target must displace a lexical distractor"
     );
 }

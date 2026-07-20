@@ -11,48 +11,186 @@ verdict, applying the binding gate rule from the plan addendum:
     failure.
 
 Both a retrieval delta (provenance hit@10) and the QA delta are reported with a
-paired bootstrap CI (``run_reader.bootstrap_ci``, reused so the CI method is
-identical to the rest of the harness). Pairing is by question_id.
+source-document cluster bootstrap over the explicit pinned golden file. Pairing
+is by question_id.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gate_common as gc  # noqa: E402
 
-bootstrap_ci = gc._RUN_READER.bootstrap_ci
 BOOTSTRAP_RESAMPLES = gc._RUN_READER.BOOTSTRAP_RESAMPLES
 
 
-def paired_deltas(
-    memphant: dict[str, float], syndai: dict[str, float]
-) -> list[float]:
-    """MemPhant - Syndai per question_id present (and scored) in both."""
-    return [
-        memphant[qid] - syndai[qid]
-        for qid in memphant
-        if qid in syndai
-    ]
+def _load(path: str) -> tuple[dict, bytes]:
+    raw = Path(path).read_bytes()
+    value = json.loads(raw)
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} is not a JSON object")
+    return value, raw
 
 
-def provenance_map(report: dict, field: str) -> dict[str, float]:
+def _clustered_ci(
+    pairs: list[tuple[str, dict, dict]], clusters: dict[str, str], field: str, seed: int
+) -> dict:
+    values: dict[str, list[float]] = defaultdict(list)
+    for question_id, left, right in pairs:
+        values[clusters[question_id]].append(float(left[field]) - float(right[field]))
+    return gc.cluster_bootstrap_ci(values, resamples=BOOTSTRAP_RESAMPLES, seed=seed)
+
+
+def _bind_reader(
+    reader: dict, provenance: dict, provenance_bytes: bytes, *, name: str
+) -> None:
+    if reader.get("source_evidence_sha256") != provenance.get("evidence_sha256"):
+        raise ValueError(f"{name} reader evidence is not bound to provenance")
+    provenance_sha = gc.sha256_hex(provenance_bytes)
+    if reader.get("retrieval_report_sha256") != provenance_sha:
+        raise ValueError(f"{name} reader retrieval report hash differs")
+    evaluator = reader.get("evaluator_fingerprint")
+    if not isinstance(evaluator, dict) or evaluator.get("retrieval_report_sha256") != provenance_sha:
+        raise ValueError(f"{name} evaluator is not bound to retrieval report")
+
+
+def _bind_negative_reader(
+    reader: dict, provenance: dict, provenance_bytes: bytes, *, name: str
+) -> None:
+    negative = provenance.get("negative")
+    if not isinstance(negative, dict):
+        raise ValueError(f"{name} negative provenance is missing")
+    if reader.get("source_evidence_sha256") != negative.get("negative_evidence_sha256"):
+        raise ValueError(f"{name} negative reader evidence is not bound to provenance")
+    provenance_sha = gc.sha256_hex(provenance_bytes)
+    if reader.get("retrieval_report_sha256") != provenance_sha:
+        raise ValueError(f"{name} negative reader retrieval report hash differs")
+    evaluator = reader.get("evaluator_fingerprint")
+    if not isinstance(evaluator, dict) or evaluator.get("retrieval_report_sha256") != provenance_sha:
+        raise ValueError(f"{name} negative evaluator is not bound to retrieval report")
+
+
+def _negative_rows(provenance: dict, *, name: str) -> dict[str, dict]:
+    negative = provenance.get("negative")
+    rows = negative.get("negative_per_case") if isinstance(negative, dict) else None
+    if not isinstance(rows, list) or len(rows) != 10:
+        raise ValueError(f"{name} negative provenance must contain exactly 10 cases")
+    if not re.fullmatch(
+        r"[0-9a-f]{64}", str(negative.get("negative_evidence_sha256", ""))
+    ):
+        raise ValueError(f"{name} negative evidence hash is invalid")
+    by_id = {}
+    for row in rows:
+        case_id = row.get("case_id") if isinstance(row, dict) else None
+        if not isinstance(case_id, str) or not case_id or case_id in by_id:
+            raise ValueError(f"{name} negative provenance has invalid case IDs")
+        if (
+            not isinstance(row.get("case_kind"), str)
+            or row.get("supported") is not True
+            or row.get("unsupported_reason") is not None
+            or type(row.get("forbidden_hits")) is not int
+            or row["forbidden_hits"] < 0
+            or type(row.get("passed")) is not bool
+            or row["passed"] != (row["forbidden_hits"] == 0)
+        ):
+            raise ValueError(f"{name} negative case {case_id} is unsupported or malformed")
+        by_id[case_id] = row
+    forbidden_hits = sum(row["forbidden_hits"] for row in rows)
+    all_passed = all(row["passed"] for row in rows)
+    if (
+        negative.get("negative_case_count") != len(rows)
+        or negative.get("negative_forbidden_hit_count") != forbidden_hits
+        or negative.get("negative_forbidden_hit_rate") != forbidden_hits / len(rows)
+        or negative.get("negative_unsupported_count") != 0
+        or negative.get("negative_promotion_eligible") is not all_passed
+    ):
+        raise ValueError(f"{name} negative provenance aggregates are invalid")
+    return by_id
+
+
+def _validate_negative_admission(
+    mem_prov: dict,
+    syn_prov: dict,
+    mem_prov_bytes: bytes,
+    syn_prov_bytes: bytes,
+    mem_reader: dict,
+    syn_reader: dict,
+) -> dict:
+    mem_rows = _negative_rows(mem_prov, name="memphant")
+    syn_rows = _negative_rows(syn_prov, name="syndai")
+    if set(mem_rows) != set(syn_rows) or any(
+        mem_rows[case_id]["case_kind"] != syn_rows[case_id]["case_kind"]
+        for case_id in mem_rows
+    ):
+        raise ValueError("negative provenance case IDs or kinds differ")
+    pairs = gc._RUN_READER.validate_and_pair_reports(mem_reader, syn_reader, "reader")
+    if {case_id for case_id, _, _ in pairs} != set(mem_rows):
+        raise ValueError("negative reader and provenance case IDs differ")
+    _bind_negative_reader(mem_reader, mem_prov, mem_prov_bytes, name="memphant")
+    _bind_negative_reader(syn_reader, syn_prov, syn_prov_bytes, name="syndai")
+    paired_reader_rows = {}
+    for case_id, mem_row, syn_row in pairs:
+        if any(
+            row.get("question_type") != mem_rows[case_id]["case_kind"]
+            or row.get("is_abstention") is not True
+            or row.get("judge_method") != "abstention_exact"
+            or row.get("gold_answer") != "ABSTAIN"
+            for row in (mem_row, syn_row)
+        ):
+            raise ValueError(f"negative case {case_id} is not an exact-abstention evaluation")
+        paired_reader_rows[case_id] = (mem_row, syn_row)
+
+    def arm_summary(index: int, provenance_rows: dict[str, dict]) -> dict:
+        retrieval_pass = {
+            case_id for case_id, row in provenance_rows.items() if row["passed"]
+        }
+        reader_pass = {
+            case_id
+            for case_id, rows in paired_reader_rows.items()
+            if rows[index]["correct"] is True
+        }
+        joint = retrieval_pass & reader_pass
+        return {
+            "retrieval_pass_count": len(retrieval_pass),
+            "retrieval_pass_rate": len(retrieval_pass) / 10,
+            "exact_abstention_count": len(reader_pass),
+            "exact_abstention_rate": len(reader_pass) / 10,
+            "joint_pass_count": len(joint),
+            "joint_pass_rate": len(joint) / 10,
+        }
+
+    memphant = arm_summary(0, mem_rows)
+    syndai = arm_summary(1, syn_rows)
     return {
-        row["question_id"]: float(row[field])
-        for row in report["per_question"]
+        "n_paired": 10,
+        "inference": "descriptive exact counts only; no bootstrap claim",
+        "memphant": memphant,
+        "syndai": syndai,
+        "candidate_minus_incumbent": {
+            field: memphant[field] - syndai[field]
+            for field in (
+                "retrieval_pass_count",
+                "retrieval_pass_rate",
+                "exact_abstention_count",
+                "exact_abstention_rate",
+                "joint_pass_count",
+                "joint_pass_rate",
+            )
+        },
+        "memphant_restraint_pass": memphant["joint_pass_count"] == 10,
     }
 
 
-def qa_map(report: dict) -> dict[str, float]:
-    return {
-        row["question_id"]: float(row["correct"])
-        for row in report["per_question"]
-        if row.get("correct") is not None
-    }
+def _validate_shared_evidence_contract(memphant: dict, syndai: dict) -> None:
+    for field in ("k", "budget_tokens", "evidence_packer"):
+        if memphant["runtime_config"].get(field) != syndai["runtime_config"].get(field):
+            raise ValueError(f"provenance shared evidence {field} differs")
 
 
 def main() -> int:
@@ -61,12 +199,15 @@ def main() -> int:
     parser.add_argument("--syndai-provenance", required=True)
     parser.add_argument("--memphant-reader", help="run_reader QA report for MemPhant")
     parser.add_argument("--syndai-reader", help="run_reader QA report for Syndai")
+    parser.add_argument("--memphant-negative-reader", help="run_reader abstention report for MemPhant")
+    parser.add_argument("--syndai-negative-reader", help="run_reader abstention report for Syndai")
+    parser.add_argument("--golden", required=True, help="pinned golden JSONL used for source-document clusters")
     parser.add_argument("--out", required=True)
     parser.add_argument("--seed", type=int, default=20260711)
     args = parser.parse_args()
 
-    mem_prov = json.loads(Path(args.memphant_provenance).read_text())
-    syn_prov = json.loads(Path(args.syndai_provenance).read_text())
+    mem_prov, mem_prov_bytes = _load(args.memphant_provenance)
+    syn_prov, syn_prov_bytes = _load(args.syndai_provenance)
 
     result: dict = {
         "gate": "syndai_docs_engine_vs_engine",
@@ -74,13 +215,51 @@ def main() -> int:
         "bootstrap_resamples": BOOTSTRAP_RESAMPLES,
         "retrieval": {},
         "qa": None,
+        "negative": None,
         "verdict": None,
     }
 
+    try:
+        mem_rows = gc.validate_provenance_report(mem_prov)
+        syn_rows = gc.validate_provenance_report(syn_prov)
+        golden_revision, clusters = gc.golden_source_clusters(Path(args.golden))
+        if mem_prov["golden_revision"] != golden_revision or syn_prov["golden_revision"] != golden_revision:
+            raise ValueError("provenance does not match pinned golden revision")
+        if set(mem_rows) != set(syn_rows) or set(mem_rows) != set(clusters):
+            raise ValueError("provenance and pinned golden question IDs differ")
+        if mem_prov["corpus_revision"] != syn_prov["corpus_revision"]:
+            raise ValueError("provenance corpus revisions differ")
+        _validate_shared_evidence_contract(mem_prov, syn_prov)
+        prov_pairs = [(qid, mem_rows[qid], syn_rows[qid]) for qid in sorted(mem_rows)]
+        if not all(
+            isinstance(provenance.get("negative"), dict)
+            for provenance in (mem_prov, syn_prov)
+        ):
+            raise ValueError("both negative provenance reports are required")
+        if not args.memphant_negative_reader or not args.syndai_negative_reader:
+            raise ValueError("both negative reader reports are required")
+        mem_negative_reader, mem_negative_bytes = _load(args.memphant_negative_reader)
+        syn_negative_reader, syn_negative_bytes = _load(args.syndai_negative_reader)
+        negative_reader_bytes = [mem_negative_bytes, syn_negative_bytes]
+        negative_summary = _validate_negative_admission(
+            mem_prov,
+            syn_prov,
+            mem_prov_bytes,
+            syn_prov_bytes,
+            mem_negative_reader,
+            syn_negative_reader,
+        )
+    except ValueError as error:
+        result["verdict"] = {
+            "rule": "Only complete, exactly paired reports may produce a verdict",
+            "memphant_beats_syndai": None,
+            "decision": f"HOLD/INVALID: {error}",
+        }
+        Path(args.out).write_text(json.dumps(result, indent=2) + "\n")
+        return 1
+
     # Retrieval (provenance) comparison.
-    mem_h10 = provenance_map(mem_prov, "hit_at_10")
-    syn_h10 = provenance_map(syn_prov, "hit_at_10")
-    prov_deltas = paired_deltas(mem_h10, syn_h10)
+    prov_deltas = [0] * len(prov_pairs)
     result["retrieval"] = {
         "memphant": {
             "recall_at_5": mem_prov["recall_at_5"],
@@ -93,45 +272,78 @@ def main() -> int:
             "haystack_sections": syn_prov.get("haystack_sections"),
         },
         "n_paired": len(prov_deltas),
-        "delta_hit_at_10": bootstrap_ci(prov_deltas, BOOTSTRAP_RESAMPLES, args.seed),
+        "n_source_document_clusters": len(set(clusters.values())),
+        "cluster_source": "pinned_golden.provenance[].file",
+        "delta_hit_at_10": _clustered_ci(prov_pairs, clusters, "hit_at_10", args.seed),
     }
+    result["negative"] = negative_summary
 
     # QA comparison (the binding verdict).
     if args.memphant_reader and args.syndai_reader:
-        mem_reader = json.loads(Path(args.memphant_reader).read_text())
-        syn_reader = json.loads(Path(args.syndai_reader).read_text())
-        mem_qa = qa_map(mem_reader)
-        syn_qa = qa_map(syn_reader)
-        qa_deltas = paired_deltas(mem_qa, syn_qa)
-        qa_ci = bootstrap_ci(qa_deltas, BOOTSTRAP_RESAMPLES, args.seed)
-        beats = bool(qa_ci["ci_excludes_zero"] and qa_ci["mean"] > 0)
+        mem_reader, mem_reader_bytes = _load(args.memphant_reader)
+        syn_reader, syn_reader_bytes = _load(args.syndai_reader)
+        try:
+            qa_pairs = gc._RUN_READER.validate_and_pair_reports(
+                mem_reader, syn_reader, "reader"
+            )
+            if {qid for qid, _, _ in qa_pairs} != {qid for qid, _, _ in prov_pairs}:
+                raise ValueError("reader and provenance question IDs differ")
+            _bind_reader(mem_reader, mem_prov, mem_prov_bytes, name="memphant")
+            _bind_reader(syn_reader, syn_prov, syn_prov_bytes, name="syndai")
+        except ValueError as error:
+            result["verdict"] = {
+                "rule": "Only complete, exactly paired reports may produce a verdict",
+                "memphant_beats_syndai": None,
+                "decision": f"HOLD/INVALID: {error}",
+            }
+            Path(args.out).write_text(json.dumps(result, indent=2) + "\n")
+            return 1
+        qa_deltas = [0] * len(qa_pairs)
+        qa_ci = _clustered_ci(qa_pairs, clusters, "correct", args.seed + 1)
+        qa_beats = bool(qa_ci["ci_excludes_zero"] and qa_ci["mean"] > 0)
+        beats = qa_beats and negative_summary["memphant_restraint_pass"]
+        mem_accuracy = sum(row["correct"] for _, row, _ in qa_pairs) / len(qa_pairs)
+        syn_accuracy = sum(row["correct"] for _, _, row in qa_pairs) / len(qa_pairs)
         result["qa"] = {
-            "memphant_accuracy": mem_reader["overall"]["qa_accuracy"],
-            "syndai_accuracy": syn_reader["overall"]["qa_accuracy"],
-            "memphant_n_scored": mem_reader["overall"]["n_scored"],
-            "syndai_n_scored": syn_reader["overall"]["n_scored"],
+            "memphant_accuracy": mem_accuracy,
+            "syndai_accuracy": syn_accuracy,
+            "memphant_n_scored": len(qa_pairs),
+            "syndai_n_scored": len(qa_pairs),
             "n_paired": len(qa_deltas),
+            "n_source_document_clusters": len(set(clusters.values())),
             "delta_qa_accuracy": qa_ci,
             "reader_model": mem_reader.get("reader_model_id"),
             "judge_model": mem_reader.get("judge_model_id"),
         }
+        result["artifact_bindings"] = {
+            "memphant_provenance_sha256": gc.sha256_hex(mem_prov_bytes),
+            "syndai_provenance_sha256": gc.sha256_hex(syn_prov_bytes),
+            "memphant_reader_sha256": gc.sha256_hex(mem_reader_bytes),
+            "syndai_reader_sha256": gc.sha256_hex(syn_reader_bytes),
+            "golden_sha256": golden_revision.removeprefix("sha256:"),
+        }
+        result["artifact_bindings"].update(
+            memphant_negative_reader_sha256=gc.sha256_hex(negative_reader_bytes[0]),
+            syndai_negative_reader_sha256=gc.sha256_hex(negative_reader_bytes[1]),
+        )
         result["verdict"] = {
             "rule": (
-                "MemPhant beats Syndai iff the paired QA-accuracy bootstrap CI "
-                "(MemPhant - Syndai) excludes zero and is positive"
+                "MemPhant proceeds iff the paired QA-accuracy bootstrap CI "
+                "(MemPhant - Syndai) excludes zero and is positive, and MemPhant "
+                "passes retrieval restraint plus exact abstention on all 10 negative cases"
             ),
             "memphant_beats_syndai": beats,
             "decision": (
                 "PROCEED: MemPhant beats Syndai's stack on the golden set"
                 if beats
-                else "HOLD: MemPhant does not beat Syndai's stack (finding, not failure)"
+                else "HOLD: positive QA superiority or candidate restraint is not proven"
             ),
         }
     else:
         result["verdict"] = {
             "rule": "QA reader reports required for the binding verdict",
             "memphant_beats_syndai": None,
-            "decision": "INCOMPLETE: run run_reader.py on both engines' evidence",
+            "decision": "HOLD/INVALID: both QA reader reports are required",
         }
 
     Path(args.out).write_text(json.dumps(result, indent=2) + "\n")
@@ -159,7 +371,7 @@ def main() -> int:
             file=sys.stderr,
         )
         print(f"VERDICT    {result['verdict']['decision']}", file=sys.stderr)
-    return 0
+    return 0 if result["qa"] else 1
 
 
 if __name__ == "__main__":

@@ -1,0 +1,65 @@
+{
+  "benchmark": "LongMemEval-V2",
+  "adapter": "MemPhant packaged REST",
+  "schema_version": 2,
+  "upstream_release_lock_sha256": "846c73224c456a981c7812741c33ee948dbdcd8de84a220240e534558fa8cbab",
+  "openapi_sha256": "f30002254deb83d345dadda617d4557db1f9ca28c96f85f82862f81add2a4ae3",
+  "files": {
+    "benchmarks/longmemeval_v2/memphant_memory.py": "0be983b231f96efce865885bc8a7d5eb67a076eaf132a126aefab7327354d3ed",
+    "benchmarks/longmemeval_v2/harness_bootstrap.py": "97b17ebc7091ffd624859ff62b509ab4c7e96586448c7904f208c31ddd8ac8e6",
+    "benchmarks/longmemeval_v2/memphant.memory.json": "fdca02ca3fc3fe419645a5af786055362382bfc6c77bca349fc481bbb5f453f5",
+    "scripts/materialize_longmemeval_v2_runtime.py": "1af300126f98860db36bccc96d112f8b218d4249c15be354b172cf7faa869344",
+    "scripts/run_longmemeval_v2.py": "351209c99e8658541c169cfbedc5da391ffb9b7849fb0728c98f66578519f4c4"
+  },
+  "retrieval": {
+    "top_k": 20,
+    "budget_tokens": 32768,
+    "mode": "exhaustive"
+  },
+  "isolation": {
+    "unit": "one official question per harness invocation",
+    "tenant": "fresh packaged-CLI tenant per Memory instance",
+    "scope": "fresh UUID per Memory instance, enforced by the tenant-admin REST principal and request scope",
+    "database": "ephemeral migrated scratch database required",
+    "shared_haystack_reuse": "rejected by the adapter's single-question invariant"
+  },
+  "leakage": {
+    "question_context_fields_consumed": ["question_id"],
+    "question_context_fields_rejected_from_memory_payloads": [
+      "answer",
+      "answer_gold",
+      "eval_function",
+      "gold",
+      "reference"
+    ],
+    "query_image_content_consumed": false
+  },
+  "proof": {
+    "per_retain": ["request_sha256", "response_sha256", "episode_id"],
+    "per_query": [
+      "query_sha256",
+      "native_query_hash",
+      "recall_request_sha256",
+      "recall_response_sha256",
+      "trace_id",
+      "trace_sha256",
+      "context_sha256"
+    ],
+    "per_run": ["server_binary_sha256", "cli_binary_sha256"],
+    "pairing": "query fails unless synchronous reflect consumes every retained state and trace tenant/scope/actor/context/citations exactly match recall"
+  },
+  "execution_matrix": {
+    "domains": ["web", "enterprise"],
+    "tiers": ["small", "medium"],
+    "arms": ["memphant", "no_retrieval"],
+    "reader_memory_context_max_tokens": 32768,
+    "pairing": "Within every domain/tier cell, both arms must use identical question IDs, reader contract, judge contract, and context ceiling; all questions must complete without errors.",
+    "verification": "python3 scripts/run_longmemeval_v2.py verify-matrix --matrix <matrix.json>"
+  },
+  "paid_models_run": false,
+  "packaged_fixture_dry_run": {
+    "command": "MEMPHANT_LME_PACKAGED_INTEGRATION=1 MEMPHANT_SCRATCH_ACTIVE=1 bash scripts/with_scratch_db.sh postgres://memphant:memphant@localhost:5432/memphant MEMPHANT_TEST_DATABASE_URL python3 -m pytest tests/test_public_benchmark_adapters.py::test_memphant_memory_tiny_packaged_rest_dry_run -q",
+    "result": "1 passed",
+    "database_persisted": false
+  }
+}

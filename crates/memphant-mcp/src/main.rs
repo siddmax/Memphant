@@ -57,7 +57,7 @@ async fn main() -> ExitCode {
 /// Builds the store, resolves the fixed tenant (refusing to start without a
 /// valid key or dev tenant) and returns the tool handler.
 async fn build_handler() -> Result<MemphantMcp, String> {
-    let store = memphant_runtime::build_store()
+    let store = memphant_runtime::build_app_store()
         .await
         .map_err(|error| error.to_string())?;
     let bound = memphant_mcp::resolve_tenant(&store).await?;

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use memphant_core::service::MemoryService;
 use memphant_core::{FixedClock, InMemoryStore, NoopEmbedding};
 use memphant_types::{
-    ActorId, RecallHttpRequest, RetainEpisodeHttpRequest, ScopeId, TenantId, TrustLevel,
+    RecallHttpRequest, ResolvedMemoryContext, RetainEpisodeHttpRequest, TenantId, TrustLevel,
 };
 
 // A clock pinned well after every content date under test, so the grounded
@@ -20,50 +20,37 @@ fn service(store: InMemoryStore, temporal: bool) -> MemoryService<InMemoryStore>
         .with_temporal_grounding_enabled(temporal)
 }
 
-fn retain_request(
-    tenant: TenantId,
-    scope: ScopeId,
-    actor: ActorId,
-    body: &str,
-) -> RetainEpisodeHttpRequest {
+fn retain_request(context: &ResolvedMemoryContext, body: &str) -> RetainEpisodeHttpRequest {
     RetainEpisodeHttpRequest {
-        tenant_id: tenant,
-        scope_id: scope,
-        actor_id: actor,
-        source_kind: "user".to_string(),
-        source_trust: TrustLevel::TrustedUser,
-        subject_hint: None,
-        subject: None,
-        predicate: None,
-        body: Some(body.to_string()),
-        resource: None,
-        unit: None,
-        compiler_version: None,
+        subject_id: context.data_subject_id,
+        scope_id: context.scope_id,
+        actor_id: context.actor_id,
+        agent_node_id: context.agent_node_id,
+        subject_generation: context.subject_generation,
+        source_ref: "test:fixture".to_string(),
+        observed_at: "2026-07-09T00:00:00Z".to_string(),
+        payload: memphant_types::RetainPayload::Episode(memphant_types::RetainEpisodePayload {
+            source_kind: "user".to_string(),
+            body: body.to_string(),
+        }),
     }
 }
 
-fn recall_request(
-    tenant: TenantId,
-    scope: ScopeId,
-    actor: ActorId,
-    query: &str,
-) -> RecallHttpRequest {
+fn recall_request(context: &ResolvedMemoryContext, query: &str) -> RecallHttpRequest {
     RecallHttpRequest {
-        tenant_id: tenant,
-        scope_id: scope,
-        actor_id: actor,
-        allowed_scope_ids: None,
+        subject_id: context.data_subject_id,
+        scope_id: context.scope_id,
+        agent_node_id: context.agent_node_id,
+        subject_generation: context.subject_generation,
+        actor_id: context.actor_id,
         query: query.to_string(),
         limit: None,
         budget_tokens: None,
         mode: None,
         include_beliefs: None,
-        edge_expansion_enabled: None,
-        context_packing_abstention_enabled: None,
-        rerank_enabled: None,
-        query_decomposition_enabled: None,
-        procedure_recall_enabled: None,
-        decay_enabled: None,
+        transaction_as_of: None,
+        valid_at: None,
+        aggregation_window: None,
     }
 }
 
@@ -88,21 +75,17 @@ async fn reflect_grounds_valid_from_and_chunk_headers() {
     let store = InMemoryStore::default();
     let svc = service(store.clone(), true);
     let tenant = TenantId::new();
-    let scope = ScopeId::new();
-    let actor = ActorId::new();
+    let context = memphant_store_testkit::bind_context(&store, tenant).await;
 
     svc.retain(
-        tenant,
-        retain_request(
-            tenant,
-            scope,
-            actor,
-            &dated_session_body("s1", "2023/05/30"),
-        ),
+        &context,
+        concat!("test:", line!()),
+        TrustLevel::TrustedUser,
+        retain_request(&context, &dated_session_body("s1", "2023/05/30")),
     )
     .await
     .expect("retain");
-    svc.reflect(tenant, scope, None).await.expect("reflect");
+    svc.run_worker_tick(usize::MAX).await.expect("reflect");
 
     let units = store.memory_units(tenant);
     assert_eq!(units.len(), 1, "one unit compiled");
@@ -135,21 +118,17 @@ async fn reflect_flag_off_leaves_valid_from_none_and_dateless_headers() {
     let store = InMemoryStore::default();
     let svc = service(store.clone(), false);
     let tenant = TenantId::new();
-    let scope = ScopeId::new();
-    let actor = ActorId::new();
+    let context = memphant_store_testkit::bind_context(&store, tenant).await;
 
     svc.retain(
-        tenant,
-        retain_request(
-            tenant,
-            scope,
-            actor,
-            &dated_session_body("s1", "2023/05/30"),
-        ),
+        &context,
+        concat!("test:", line!()),
+        TrustLevel::TrustedUser,
+        retain_request(&context, &dated_session_body("s1", "2023/05/30")),
     )
     .await
     .expect("retain");
-    svc.reflect(tenant, scope, None).await.expect("reflect");
+    svc.run_worker_tick(usize::MAX).await.expect("reflect");
 
     let units = store.memory_units(tenant);
     assert_eq!(units.len(), 1);
@@ -166,35 +145,34 @@ async fn reflect_flag_off_leaves_valid_from_none_and_dateless_headers() {
     );
 }
 
-/// §1 fallback → none: with the flag on but no parseable date in the body,
-/// `valid_from` is left ungrounded (the store carries no first_observed_at to
-/// fall back to; see the not-yet-wired note in `compile_job`).
+/// With the flag on and no parseable body date, valid time falls back to the
+/// episode's first observation.
 #[tokio::test]
-async fn reflect_grounds_none_when_body_has_no_date() {
+async fn reflect_grounds_first_observation_when_body_has_no_date() {
     let store = InMemoryStore::default();
     let svc = service(store.clone(), true);
     let tenant = TenantId::new();
-    let scope = ScopeId::new();
-    let actor = ActorId::new();
+    let context = memphant_store_testkit::bind_context(&store, tenant).await;
 
     svc.retain(
-        tenant,
+        &context,
+        concat!("test:", line!()),
+        TrustLevel::TrustedUser,
         retain_request(
-            tenant,
-            scope,
-            actor,
+            &context,
             "user: a plain undated note about the quarterly plan and its scope.",
         ),
     )
     .await
     .expect("retain");
-    svc.reflect(tenant, scope, None).await.expect("reflect");
+    svc.run_worker_tick(usize::MAX).await.expect("reflect");
 
     let units = store.memory_units(tenant);
     assert_eq!(units.len(), 1);
-    assert!(
-        units[0].valid_from.is_none(),
-        "no parseable date ⇒ valid_from stays None"
+    assert_eq!(
+        units[0].valid_from.as_deref(),
+        Some("2026-07-09T00:00:00Z"),
+        "no parseable body date ⇒ valid_from uses first observation"
     );
 }
 
@@ -219,22 +197,31 @@ async fn windowing_prefers_in_window_and_keeps_out_window() {
     let store = InMemoryStore::default();
     let svc = service(store.clone(), true);
     let tenant = TenantId::new();
-    let scope = ScopeId::new();
-    let actor = ActorId::new();
+    let context = memphant_store_testkit::bind_context(&store, tenant).await;
     let (in_window, out_window) = windowing_corpus();
 
-    svc.retain(tenant, retain_request(tenant, scope, actor, &in_window))
-        .await
-        .expect("retain in-window");
-    svc.retain(tenant, retain_request(tenant, scope, actor, &out_window))
-        .await
-        .expect("retain out-window");
-    svc.reflect(tenant, scope, None).await.expect("reflect");
+    svc.retain(
+        &context,
+        concat!("test:", line!()),
+        TrustLevel::TrustedUser,
+        retain_request(&context, &in_window),
+    )
+    .await
+    .expect("retain in-window");
+    svc.retain(
+        &context,
+        concat!("test:", line!()),
+        TrustLevel::TrustedUser,
+        retain_request(&context, &out_window),
+    )
+    .await
+    .expect("retain out-window");
+    svc.run_worker_tick(usize::MAX).await.expect("reflect");
 
     let response = svc
         .recall(
-            tenant,
-            recall_request(tenant, scope, actor, "project deadline in may 2023"),
+            context.clone(),
+            recall_request(&context, "project deadline in may 2023"),
         )
         .await
         .expect("recall");
@@ -262,22 +249,31 @@ async fn recall_flag_off_keeps_today_ordering_and_no_prefix() {
     let store = InMemoryStore::default();
     let svc = service(store.clone(), false);
     let tenant = TenantId::new();
-    let scope = ScopeId::new();
-    let actor = ActorId::new();
+    let context = memphant_store_testkit::bind_context(&store, tenant).await;
     let (in_window, out_window) = windowing_corpus();
 
-    svc.retain(tenant, retain_request(tenant, scope, actor, &in_window))
-        .await
-        .expect("retain in-window");
-    svc.retain(tenant, retain_request(tenant, scope, actor, &out_window))
-        .await
-        .expect("retain out-window");
-    svc.reflect(tenant, scope, None).await.expect("reflect");
+    svc.retain(
+        &context,
+        concat!("test:", line!()),
+        TrustLevel::TrustedUser,
+        retain_request(&context, &in_window),
+    )
+    .await
+    .expect("retain in-window");
+    svc.retain(
+        &context,
+        concat!("test:", line!()),
+        TrustLevel::TrustedUser,
+        retain_request(&context, &out_window),
+    )
+    .await
+    .expect("retain out-window");
+    svc.run_worker_tick(usize::MAX).await.expect("reflect");
 
     let response = svc
         .recall(
-            tenant,
-            recall_request(tenant, scope, actor, "project deadline in may 2023"),
+            context.clone(),
+            recall_request(&context, "project deadline in may 2023"),
         )
         .await
         .expect("recall");

@@ -150,6 +150,8 @@ class MemPhant:
         predicate: str,
         body: str,
         churn_class: str | None = None,
+        valid_from: str | None = None,
+        valid_to: str | None = None,
         source_kind: str = "direct",
         compiler_version: str | None = None,
     ) -> dict[str, Any]:
@@ -171,6 +173,8 @@ class MemPhant:
                     "predicate": predicate,
                     "body": body,
                     "churn_class": churn_class,
+                    "valid_from": valid_from,
+                    "valid_to": valid_to,
                 },
                 "compiler_version": compiler_version,
             },
@@ -183,11 +187,13 @@ class MemPhant:
         scope_id: str,
         actor_id: str,
         query: str,
-        allowed_scope_ids: list[str] | None = None,
         limit: int | None = None,
         budget_tokens: int | None = None,
         mode: str | None = None,
         include_beliefs: bool | None = None,
+        transaction_as_of: str | None = None,
+        valid_at: str | None = None,
+        aggregation_window: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         return self._post(
             "/v1/recall",
@@ -195,12 +201,14 @@ class MemPhant:
                 "tenant_id": tenant_id,
                 "scope_id": scope_id,
                 "actor_id": actor_id,
-                "allowed_scope_ids": allowed_scope_ids,
                 "query": query,
                 "limit": limit,
                 "budget_tokens": budget_tokens,
                 "mode": mode,
                 "include_beliefs": include_beliefs,
+                "transaction_as_of": transaction_as_of,
+                "valid_at": valid_at,
+                "aggregation_window": aggregation_window,
             },
         )
 

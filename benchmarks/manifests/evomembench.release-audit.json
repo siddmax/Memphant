@@ -1,0 +1,36 @@
+{
+  "benchmark": "EvoMemBench",
+  "paper": "https://arxiv.org/abs/2605.18421",
+  "audited_at": "2026-07-13",
+  "code": {
+    "repository": "https://github.com/DSAIL-Memory/EvoMemBench",
+    "commit": "aa4cea8fd936b76b2d3591d3ef897030617dc43a",
+    "default_branch": "main",
+    "repository_files": 3910,
+    "tags": [],
+    "github_releases": [],
+    "github_detected_license": null
+  },
+  "public_execution_ready": false,
+  "decision": "do_not_acquire_or_integrate",
+  "blockers": {
+    "repository_license": "missing",
+    "root_license_file": "missing",
+    "single_native_harness": "missing",
+    "external_inputs": [
+      "ALFWorld data requires a separate alfworld-download operation",
+      "MemoryAgentBench data may be loaded from an external Hugging Face dataset",
+      "six benchmark slices use separate environments, launch scripts, metrics, and task-specific adapters"
+    ]
+  },
+  "evidence": [
+    "The GitHub repository API returned license=null at the pinned commit.",
+    "The pinned 3910-file tree has no repository-root LICENSE or COPYING file; licenses only occur inside vendored memory-system subtrees.",
+    "The official README directs users to six task-level setups and says each evaluation setting has its own runtime requirements.",
+    "The official README explicitly requires alfworld-download for the embodied slice."
+  ],
+  "reconsider_when": [
+    "The authors publish a repository-level license covering benchmark code and bundled data.",
+    "A selected benchmark slice has an immutable, self-contained input bundle and an authoritative native scoring entrypoint."
+  ]
+}

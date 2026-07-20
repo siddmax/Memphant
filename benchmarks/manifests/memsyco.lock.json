@@ -1,0 +1,90 @@
+{
+  "benchmark": "MemSyco-Bench",
+  "paper": "https://arxiv.org/abs/2607.01071",
+  "code": {
+    "repository": "https://github.com/XMUDeepLIT/MemSyco-Bench",
+    "revision": "c31e2c85ee8cc3c6f643587b8a6f4b5ad5eb3bf6",
+    "license": "MIT",
+    "files": {
+      "LICENSE": "f607254fa7fd8fd9e0ab9c2199ee568c44232053f5affa5130a5330b7bbf148a",
+      "requirements.txt": "0433ed2bd0b3f83137de54a7686b1beae5f92674a14c277ad29543c7665c7f92",
+      "baselines/base.py": "404a1d708d6327d343c96b0eefc51b6e7400228c91eefcb6e55690be86506b6d",
+      "baselines/common.py": "b0f225d9d651583025df51ef2cb41b15dd24e544e05f77b3083c83b40ab138dc",
+      "baselines/config_loader.py": "3abb7c3d173bd8af46d8b250b992639b2bcdcccf83e3d1f9c9868acb94680ad5",
+      "baselines/registry.py": "b80db6d32f266cc18d24bae9a9b1145a5ce53a39ded38e1324c587a07b314b99",
+      "scripts/run_benchmark.sh": "cd886676e223e214dc8b9d3ca4434dba3a68dde33b7df0cccdf6dcc353f93f97"
+    }
+  },
+  "dataset": {
+    "schema_version": "1.2",
+    "total_samples": 1550,
+    "manifest_sha256": "1e996e2677f57d07884365a1d69d1528ddb9859efd25d0210c14bed0608b4505",
+    "schema_sha256": "8c54d9a53c9a44478f49dbcb003b6251e09d894fb63b687671f9796c13c11b6c",
+    "tasks": {
+      "objective_fact_judgment": {
+        "file": "objective_fact_judgment.jsonl",
+        "samples": 300,
+        "memory_policy": "ignore_as_evidence",
+        "sha256": "cd34eb4136dc9a5e2b4eff742a43de25d50bd1044455160a4b4eea0f082b81bc",
+        "manifest_sha256_claim": "c6ea7e17df9a90480115c0b7ebf8930aa36a39504acbfa1b650d2be167546f97"
+      },
+      "contextual_scope_control": {
+        "file": "contextual_scope_control.jsonl",
+        "samples": 300,
+        "memory_policy": "constrain_to_scope",
+        "sha256": "a233ee49a17434255fd372a95284f57bfa3bbbbcbb5cf9be2d0c6c793865d748"
+      },
+      "memory_evidence_conflict": {
+        "file": "memory_evidence_conflict.jsonl",
+        "samples": 300,
+        "memory_policy": "defer_to_evidence",
+        "sha256": "adf9a924bae5bf4d554c0f7bf69c8c867037caf13c9839afa93605cb39442823"
+      },
+      "valid_memory_selection": {
+        "file": "valid_memory_selection.jsonl",
+        "samples": 350,
+        "memory_policy": "update",
+        "sha256": "7db0f062306a925f7cea9ea9cfb32cb94bbe2bb17999eff3e4a764aeabc4d498"
+      },
+      "personalized_memory_use": {
+        "file": "personalized_memory_use.jsonl",
+        "samples": 300,
+        "memory_policy": "use",
+        "sha256": "7e4384008478265e338c8571a0f6d8e7a8720439f97dff8e735c1c858f613e17"
+      }
+    }
+  },
+  "native_scorer": {
+    "entrypoint": "evaluation/run_task.py",
+    "files": {
+      "evaluation/run_task.py": "bce2466b5069bda83f9b88a5aaa2b26cb5a24f741cd38f714df6525182569070",
+      "evaluation/_objective_base.py": "d70a395326203f0fda8b7b568860443f9a5bed99b7e096b635858d5857c0a43b",
+      "evaluation/task_objective_fact_judgment.py": "33fddc79478be6db2a9cfb86ba8f9fe07cbe64e5a706eafa6a4671a537a7db0e",
+      "evaluation/task_contextual_scope_control.py": "0c73b389f78fa3c2801e7cca9f1c66706c3e282ea6415e90abebf502645be6bd",
+      "evaluation/task_memory_evidence_conflict.py": "9bc9f00cd64cd26b0decb81903768b8e9d8a594561c2aa0a2ba6fd144e5f3987",
+      "evaluation/task_valid_memory_selection.py": "703012e10bde52a22e3f46d6bbf4ea404e0eb1f62cbc2d0de5a4dfaf944245bc",
+      "evaluation/task_personalized_memory_use.py": "30e28ccef529790642e4cbf0ddbc972e4ed6f5f51508183c03352173ff091313"
+    }
+  },
+  "protocol": {
+    "adapter": "official BaselineContext builder over packaged MemPhant REST",
+    "top_k": 10,
+    "budget_tokens": 8192,
+    "mode": "exhaustive",
+    "workers": 1,
+    "current_date": "2025-06-01",
+    "controls": {
+      "RawDialogue": [
+        "contextual_scope_control",
+        "memory_evidence_conflict",
+        "objective_fact_judgment",
+        "personalized_memory_use",
+        "valid_memory_selection"
+      ],
+      "NoMemory": [
+        "objective_fact_judgment"
+      ]
+    },
+    "quality_threshold": null
+  }
+}

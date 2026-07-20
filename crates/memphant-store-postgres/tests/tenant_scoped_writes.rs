@@ -21,6 +21,14 @@ const STORE_SRC: &str = include_str!("../src/store.rs");
 /// `(tenant_id, ...)`.
 const ID_ONLY_TABLES: &[&str] = &["api_key", "tenant", "schema_migrations"];
 
+const SUBJECT_OWNED_IDENTITY_TABLES: &[&str] = &[
+    "actor",
+    "scope",
+    "scope_policy",
+    "agent_node",
+    "context_binding",
+];
+
 /// Each `update`/`delete` statement text, sliced from the verb to the end of
 /// its double-quoted SQL literal. The store's SQL literals never embed a double
 /// quote (SQL string values use single quotes), so the next `"` closes the
@@ -70,5 +78,31 @@ fn every_write_on_a_composite_pk_table_scopes_by_tenant() {
         checked >= 5,
         "expected to scan several tenant-scoped writes; found {checked} — the scanner \
          is likely broken (guards against a silent pass)"
+    );
+}
+
+#[test]
+fn every_identity_write_scopes_by_subject() {
+    let mut checked = 0;
+    for verb in ["update memphant.", "delete from memphant."] {
+        for statement in write_statements(STORE_SRC, verb) {
+            let table = table_of(statement, verb);
+            if !SUBJECT_OWNED_IDENTITY_TABLES.contains(&table.as_str()) {
+                continue;
+            }
+            checked += 1;
+            assert!(
+                statement.contains("data_subject_id"),
+                "write on subject-owned identity table `memphant.{table}` is not scoped by \
+                 data_subject_id: {statement}"
+            );
+        }
+    }
+    assert!(
+        checked >= 2,
+        "expected subject-owned identity writes; found {checked} — the scanner is \
+         likely broken (guards against a silent pass). The canonical store carries \
+         two explicit identity writes (scope_policy delete, context_binding update); \
+         all other identity-row cleanup rides the FK cascade from the subject delete."
     );
 }

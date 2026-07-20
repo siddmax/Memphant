@@ -1,0 +1,61 @@
+{
+  "benchmark": "STATE-Bench",
+  "track": "agent-learning",
+  "license": "MIT",
+  "code": {
+    "repo": "https://github.com/microsoft/STATE-Bench.git",
+    "revision": "e2c8d7af51ef48fbbea51bb2ce1fb859af36b423",
+    "tag": "v0.8.0"
+  },
+  "protocol": {
+    "id": "state_bench_v0.8.0_gpt54",
+    "domains": [
+      "travel",
+      "customer_support",
+      "shopping_assistant"
+    ],
+    "split": "test",
+    "num_runs": 5,
+    "retrieval_top_k": 3
+  },
+  "inventory": {
+    "aggregate_sha256": "87a61d4377e11da0a5c521a1adb93204a936b3ad4de7256ad4998ec80696269b",
+    "domains": {
+      "travel": {
+        "task_count": 150,
+        "task_env_count": 150,
+        "train_count": 100,
+        "test_count": 50,
+        "train_trajectory_count": 100
+      },
+      "customer_support": {
+        "task_count": 150,
+        "task_env_count": 150,
+        "train_count": 100,
+        "test_count": 50,
+        "train_trajectory_count": 100
+      },
+      "shopping_assistant": {
+        "task_count": 150,
+        "task_env_count": 150,
+        "train_count": 100,
+        "test_count": 50,
+        "train_trajectory_count": 100
+      }
+    }
+  },
+  "native_scorer": {
+    "entrypoint": "state_bench.scripts.compute_metrics",
+    "files": {
+      "state_bench/scripts/compute_metrics.py": "a473ae0f1e5c1946553276d1553e9164b96b4d4de5b0673d52c22c4916d9bd4d",
+      "state_bench/scoring.py": "99c9c8fea5d0dc8dfba10d82c6c0dab89e496e41b326b0e35f758e65cec55a6f",
+      "state_bench/protocol.py": "ccf176f0d404a5fa189ac3476a2e934a0f169c484ac4a152d05ae74a3037d252",
+      "state_bench/configs/eval_protocols/gpt54.json": "e4a97cab2b2ed31ec180f671f4b5e5760c00cf30cc56d4cf717481e7a0d29a0c"
+    }
+  },
+  "primary_sources": [
+    "https://github.com/microsoft/STATE-Bench/tree/v0.8.0",
+    "https://github.com/microsoft/STATE-Bench/blob/v0.8.0/docs/AGENT_LEARNING_TRACK.md",
+    "https://opensource.microsoft.com/blog/2026/05/19/introducing-state-bench-a-benchmark-for-ai-agent-memory/"
+  ]
+}

@@ -9,22 +9,15 @@ pub const STORE_NAME: &str = "postgres";
 
 const WSA_BOOTSTRAP_SQL: &str =
     include_str!("../../../memphant_migrations/versions/20260703_001_wsa_bootstrap.sql");
-const RUNTIME_RECONCILIATION_SQL: &str =
-    include_str!("../../../memphant_migrations/versions/20260709_002_runtime_reconciliation.sql");
 
 /// Bundled migrations in apply order.
-pub const MIGRATIONS: &[(&str, &str)] = &[
-    ("20260703_001_wsa_bootstrap", WSA_BOOTSTRAP_SQL),
-    (
-        "20260709_002_runtime_reconciliation",
-        RUNTIME_RECONCILIATION_SQL,
-    ),
-];
+pub const MIGRATIONS: &[(&str, &str)] = &[("20260703_001_wsa_bootstrap", WSA_BOOTSTRAP_SQL)];
 
 const REQUIRED_TABLES: &[&str] = &[
     "tenant",
     "subject",
     "actor",
+    "context_binding",
     "agent_node",
     "scope",
     "scope_policy",
@@ -44,6 +37,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "belief_observation",
     "review_event",
     "scope_block",
+    "mutation_ledger",
     "schema_migrations",
 ];
 
@@ -99,11 +93,29 @@ impl fmt::Display for LintError {
 
 impl std::error::Error for LintError {}
 
-const RECONCILIATION_TABLES: &[&str] = &[
+const FINAL_TABLES: &[&str] = &[
     "api_key",
     "forgotten_source",
     "review_event",
     "review_event_unit",
+];
+
+const CAPABILITY_ROLES: &[&str] = &[
+    "memphant_owner",
+    "memphant_app",
+    "memphant_worker",
+    "memphant_authn",
+    "memphant_readonly",
+    "memphant_provisioner",
+];
+
+const SECURITY_DEFINER_FUNCTIONS: &[&str] = &[
+    "authenticate_api_key",
+    "claim_reflect_jobs",
+    "dead_letter_count",
+    "provision_tenant",
+    "provision_api_key",
+    "revoke_api_key",
 ];
 
 pub fn lint_migrations(provider: Provider) -> Result<(), LintError> {
@@ -118,11 +130,31 @@ pub fn lint_migrations(provider: Provider) -> Result<(), LintError> {
         findings.push("schema_migrations:missing_schema_compat_revision".to_string());
     }
 
-    let reconciliation = normalize(RUNTIME_RECONCILIATION_SQL);
-    findings.extend(lint_sql(&reconciliation, provider));
-    for table in RECONCILIATION_TABLES {
-        if !reconciliation.contains(&format!("create table if not exists memphant.{table}")) {
+    for table in FINAL_TABLES {
+        if !sql.contains(&format!("create table if not exists memphant.{table}")) {
             findings.push(format!("{table}:missing_table"));
+        }
+    }
+    for role in CAPABILITY_ROLES {
+        if !sql.contains(&format!("create role {role} nologin")) {
+            findings.push(format!("{role}:missing_capability_role"));
+        }
+    }
+    for function in SECURITY_DEFINER_FUNCTIONS {
+        let marker = format!("function memphant.{function}");
+        let block = sql
+            .find(&marker)
+            .map(|start| sql[start..].chars().take(900).collect::<String>())
+            .unwrap_or_default();
+        if !block.contains("security definer") {
+            findings.push(format!("{function}:missing_security_definer"));
+        }
+    }
+    for object in ["tables", "sequences", "functions"] {
+        if !sql.contains(&format!(
+            "alter default privileges for role memphant_owner in schema memphant revoke all on {object} from public"
+        )) {
+            findings.push(format!("default_privileges:{object}:missing_public_revoke"));
         }
     }
     finish(findings)
@@ -178,6 +210,11 @@ fn lint_sql(sql: &str, provider: Provider) -> Vec<String> {
         )) {
             findings.push(format!("{table}:missing_rls"));
         }
+        if !sql.contains(&format!(
+            "alter table memphant.{table} force row level security"
+        )) {
+            findings.push(format!("{table}:missing_force_rls"));
+        }
         if table != "tenant"
             && !sql.contains(&format!(
                 "create index if not exists memphant_{table}_tenant"
@@ -192,7 +229,17 @@ fn lint_sql(sql: &str, provider: Provider) -> Vec<String> {
         }
     }
 
-    for function in ["current_tenant_id", "set_updated_at"] {
+    for function in [
+        "current_tenant_id",
+        "bind_tenant",
+        "set_updated_at",
+        "authenticate_api_key",
+        "claim_reflect_jobs",
+        "dead_letter_count",
+        "provision_tenant",
+        "provision_api_key",
+        "revoke_api_key",
+    ] {
         if let Some(index) = sql.find(&format!("function memphant.{function}"))
             && !sql[index..]
                 .chars()

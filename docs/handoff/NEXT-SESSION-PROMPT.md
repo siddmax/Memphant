@@ -1,179 +1,207 @@
-# MemPhant Campaign Handoff — paste this to resume (rewritten clean 2026-07-12, supersedes all v1–v5 accretions; history in git)
+# MemPhant Campaign Handoff — paste this to resume (rewritten 2026-07-19; supersedes the PMU pointer and the 2026-07-12 R2→R6 prompt; history in git)
+
+Current STATUS mirror: RUNTIME COMPLETE — BENCHMARK EVIDENCE PENDING
 
 You are resuming the MemPhant SOTA campaign in `/Users/sidsharma/Memphant` (sibling
-`/Users/sidsharma/Syndai`; spec mirror must stay drift-free: `python3 scripts/check_spec_drift.py`
-after any spec edit + rsync of `docs/superpowers/specs/memphant/`). Execution style: **SDD**
-(subagent-driven: sonnet/opus implementers with briefs in `.superpowers/sdd/briefs/`, per-task
-review, whole-branch review per wave; ledger `.superpowers/sdd/progress.md` is the recovery map).
-Plan of record: `docs/reports/2026-07-11-prosumer-memory-campaign-report.md` §9, as amended by the
-build-logs below. Owner priorities: **accuracy/UX > cost > perf/latency**; prosumer magic
-(corrections stick, preference continuity, freshness, provenance you can tap); tri-domain
-capability — **agents (chat), RAG (docs), codebase** — on ONE substrate; end state = inserted into
-Syndai agents, offered as CaaS, and available to any agent (MCP + file adapters) at scale.
-Pre-production: anything may be rewritten; no backwards compat; never fabricate a number.
+`/Users/sidsharma/Syndai`; spec mirror stays drift-free: `python3 scripts/check_spec_drift.py`).
+Execution style: **SDD** (subagent implementers, briefs in `.superpowers/sdd/briefs/`, per-task
+review; ledger `.superpowers/sdd/progress.md`). Owner priorities: **accuracy > cost > speed**;
+tri-domain — **agents (chat), RAG (docs), codebase** — on ONE substrate; end state = Syndai
+cutover done, CaaS offered, any-agent distribution (MCP + file adapters). Pre-production: anything
+may be rewritten; never fabricate a number.
 
-## 1. State of truth (evidence-anchored; every claim has a build-log + CI artifact)
+**THE FOCUS RULE (owner directive, 2026-07-19).** One active campaign per lane, no detours. The
+PMU/MemSyco weeks produced elite-discipline evidence on a benchmark nobody watches — do not
+repeat that. Any new benchmark, official track, or research rabbit-hole needs an explicit owner
+call first. Sequencing is fixed: **P0 repo green → P1 feature tests (n=12) → P2 cutovers
+(Syndai RAG + CaaS) → P3 public SOTA proof (SWE + LME-V2, leaderboard-submitted).**
 
-- **Runtime**: complete and proven (Postgres REST/MCP/CLI/worker, e2e probe green, scratch-DB
-  isolated harnesses — `scripts/with_scratch_db.sh`; job-debris failure mode structurally gone).
-- **Chat lane (agents)**: QA 0.56 at n=100 (terra/sonnet-5 lattice); R@10 0.83–0.94 → the lane is
-  READER/COMPOSITION-bound, not retrieval-bound (embedder swaps ns ×3; rerank ns at n=100).
-  Promoted default: reflect-stage contextual chunks (+0.110 excl0, two seeds). Baseline artifact
-  for the next round: `docs/build-log/artifacts/r15-docs/chat/reader-small-20260710.json` (QA
-  .550, binary 800ac41).
-- **Docs lane (RAG)**: **the Syndai gate is FLIPPED** at deep-recall (modernbert, k=50/b8192):
-  pooled +0.142 [+0.058,+0.225], both golden sets individually CI-clean
-  (`docs/build-log/2026-07-12-r1-docs-gate.md`). Honest asterisk: ~14× reader-input volume; at
-  k=10 we lose −0.100. R1.5 then proved **ordering is the bottleneck**: server-side cross-encoder
-  = +0.158 excl0 at k=10 (v2 R@5 .250 > Syndai .200) but 13s/query CPU → **accuracy-validated,
-  latency-retired, flag `MEMPHANT_CROSS_RERANK`**
-  (`docs/build-log/2026-07-12-r15-rank-compression.md`).
-- **Code lane**: 40Q mined fixture + runner exist (privacy-gated artifacts; lock committed);
-  voyage-code-3 vs local ns at sample scale. Greenfield beyond that — first-mover space.
-- **Embedders (R0, `docs/build-log/2026-07-11-r0-embedder-bakeoff.md`)**: modernbert-embed-large =
-  docs embedder; bge-small = chat default; NO API embedder cleared the ≥3pt/CI-floor/two-set bar
-  (voyage-context-4 came closest); qwen3-0.6b retired (CPU); grammar: `MEMPHANT_EMBEDDINGS` /
-  `--embed-model` via `embedder_from_id`.
-- **Shipped defaults this campaign**: contextual chunks (episodes), rerank-off (heuristic),
-  body-tiebreak determinism, `recall_pool_depth=64` (k-invariance contract, tombstone-tested).
-  Flag-gated with evidence: cross-rerank (latency), resource chunks (3× ns — retirement
-  candidate), W4–W8 wave levers. Falsified: breadcrumb/heading-path prefix, budget-16384-alone
-  (chat), prompt v2 global, w8 windows, qwen3.
-- **SOTA context**: our 0.56 chat QA sits at the bottom of the reproducible band (independent
-  re-runs place vendors at 0.58–0.72; the paper's optimized band 0.70–0.73). "SOTA" language is
-  BANNED until the full-500 protocol run (R2) — that run doubles as the unlock.
+## 1. What happened before and what worked (compressed; details in the linked artifacts)
 
-## 2. Next: R2 — chat/agent lane to the SOTA band (the campaign's center of gravity)
+- **Runtime is complete and proven** (Postgres REST/MCP/CLI/worker, e2e green, scratch-DB
+  harnesses; bitemporal recall, exact-unit state-aware mutations, chain-heads, fail-closed
+  zero-target — all runtime-proven). STATUS ledger: `docs/superpowers/specs/memphant/STATUS.md`.
+- **PMU campaign complete (2026-07-18)**: MemPhant 298/300 answer accuracy / 300/300 preference
+  use vs RawDialogue 257/291; paired bootstrap lower bounds +0.1000/+0.0133; recall p95 70.61 ms.
+  Dev-evidence only; official track burned. Canonical record:
+  `docs/handoff/2026-07-18-memsyco-personalized-use-sota-handoff.md`; scorecard under
+  `.../candidate-d3c4475f-v12-aggregate/FULL300-SCORECARD.json`. Approved claim wording lives
+  there — nothing stronger.
+- **What worked (keep doing):** the 12-case dev-pack → sealed independent confirmation →
+  full-run loop; one narrow deterministic lever at a time (all 7 retained PMU levers are
+  extraction/canonicalization/packet seam fixes); trace-first diagnosis (fix the first failing
+  stage); rejecting graph memory / learned gates / decay four separate times — externally
+  vindicated (Mem0 dropped its graph; Mem0 scores BELOW no-context on SWE-ContextBench).
+- **What failed (stop doing):** spending elite evidence on low-mindshare benchmarks; opening
+  official/sealed tracks before the shared pipeline survived full-scale exposed pressure (three
+  MemSyco tracks + PMU official burned on first extractor failures); producing evidence that
+  never lands on any public surface; leaving the repo gate red.
+- **Docs lane mechanism validated (2026-07-13)**: balanced admission + Voyage rerank-2.5 top-8 on
+  the corrected 4,870-section corpus — R@10 0.050→0.283 (v1) / 0.100→0.417 (v2), supported
+  answers 0.083→0.350 / 0.117→0.417, CIs exclude zero, p95 ≈ 0.9–1.0 s, zero degraded rows
+  (`docs/build-log/2026-07-13-rag-retrieval-admission.md`). R6 replacement unlock NOT yet fired.
+- **Chat lane**: QA 0.56–0.584 dev (below the honest reproducible band 0.58–0.72). The R2
+  full-500 protocol run — declared the unlock on 2026-07-12 — was never run. It is now P3.1.
+- **Verified external landscape (2026-07-18/19, two adversarial deep-research passes, primary
+  sources):** no vendor has credible SOTA — Supermemory 95% (favorable-judge R@15), Mastra 94.87%
+  (self-run), Zep 71→90% (self; 63.8% independent) are all self-reports with copied competitor
+  numbers; LoCoMo is discredited (6.4% wrong keys, Mem0–Zep denominator scandal → Zep forced to
+  75.14%±0.17). Credible neutral instruments: **LongMemEval-V2** (451Q, 5 abilities, 25M–115M
+  tokens; best = authors' coding-agent AgentRunbook-C 72.5% vs strongest RAG 48.5%; official
+  leaderboard EMPTY), **SWE-ContextBench** (third-party n=99: Supermemory 30.3% resolved best;
+  Mem0 24.24% < no-context 26.26%), **SWE-Explore** (agentic explorers ≫ classical retrieval;
+  line-level coverage is the axis), **MemBench** (ACL 2025). The de facto evidence bar (set by
+  the Mem0–Zep fallout): uniform configs/prompts, standardized judge, multi-run variance,
+  faithful ingestion, leaderboard or third-party run. Nobody has sealed holdouts — our
+  discipline already exceeds the bar; the gap was benchmark allocation, not method.
 
-**Why**: chat is the largest lane by prosumer usage, it is reader-bound (exactly where our levers
-haven't been spent yet), and R2's full-500 run is the protocol run that legitimizes external
-claims. The flip-analysis failure classes at n=100 were: 21/44 reader-with-adequate-pack,
-16/44 pack displacement, 7/44 judge — R2's levers target the first two directly.
+## 2. Standing rules (binding)
 
-**Measurement design (pre-register before any run)**: dev at **n=300, seed 20260712** (detects
-+0.035; CI ±0.036), confirm winners on the **full 500** (virgin-200 subset = built-in held-out;
-full-500 CI ±0.028 is the promotion bar). Promotion = pre-registered lever + full-500 CI excl 0 +
-virgin-200 sign agreement + cross-lattice spot-check. Use the canonical LongMemEval judge prompt
-for the protocol run. Baselines re-run on the R2 binary (same-lattice, same-binary pairing).
+All prior promotion rules hold: packaged-runtime + pinned-corpora + executed-scorer provenance;
+paired bootstrap, two-seed/pooled CI excluding zero; same-lattice AND same-binary pairing;
+scratch DBs only; verbatim-is-the-memory; deterministic writes; "SOTA" language banned until the
+P3.1 protocol run; commits small with `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`;
+never push without owner call. New rules from this rewrite:
 
-**Levers, ranked (build as SDD tasks, measure as paired singles → pre-registered combo)**:
-1. **Chain-of-Note reader v4** (`--prompt-version 4` in `scripts/run_reader.py`): per-item
-   relevance notes before synthesis + structured output; keep v3's routing + calibrated
-   abstention as a comparison arm. Targets the 21/44 reader class.
-2. **Hot-plane profile block**: W6 supersedence chain-heads (keys `{scope}:{family}:{phrase}`,
-   value-free) compiled into ONE deterministic pack item (≤1k tokens). Kills fact-row displacement
-   while shipping preference continuity — the ChatGPT-pole hybrid. This is also the seed of the
-   R3 hot plane; build it as a runtime feature (flag-gated), not a harness hack.
-3. **Temporal re-measure**: W5 machinery with the redundant date-prefix muting fixed; soft
-   temporal boost + dated packs; temporal is every system's weakest axis and ours is built.
-4. **HyDE / query rewrite A/B**: cheap; targets generic-query→specific-memory misses that own the
-   preference stratum. Reader-side, no write-path change.
-5. (Diagnostic arm) cross-rerank at n=300: it was ns at n=100 with the old pools; with
-   recall_pool_depth=64 the picture may differ — one arm, cheap, settles it.
+1. **n=12 micro-eval gate (owner directive).** Every new lever/feature runs a ~12-case exposed
+   dev pack vs control FIRST (the PMU dev-pack pattern — it works). Pass → n≈100–300 paired
+   confirmation for promotion; full-scale runs are for claims only. No integration without the
+   n=12 pass. Losing levers: delete code, keep the negative-result artifact.
+2. **No official/sealed track opens until the identical pipeline is green on a full-scale
+   exposed run.** (The rule the MemSyco burns paid for.)
+3. **Mindshare rule.** Headline claims only on LME-S/V2, SWE-ContextBench/SWE-Explore, or a
+   board-backed instrument. Memora/STALE/MemSyco/MemBench are supporting evidence. LongEval-RAG
+   and Re2Bench could NOT be confirmed to exist — never plan spend on them without verifying.
+4. **Submission is part of done.** A P3 campaign is complete when its result is submitted
+   (official board) or published on **Evalrank** (Syndai's leaderboard feature —
+   `backend/src/features/evalrank/` — our public board for benches without an official one:
+   publish harness, configs, variance, and same-harness competitor re-runs there).
 
-**How**: SDD tasks T0(profile block, opus) → T1(reader v4 + HyDE harness, sonnet) → T2(temporal
-fix, sonnet) → runs (n=300 singles ≈ 3× the n=100 wall-clock; budget ~$12–15/config reader) →
-combo → full-500 protocol run (~$40–60) → adjudicate → build-log + STATUS eighth-pass.
+## 3. Phase plan
 
-## 3. R2.5 — rank-compression ship path (docs lane; interleave during R2's long runs)
+### P0 — Green the repo (days; blocks everything)
 
-**Why**: converts the flipped gate into a comparable-volume, cost-honest win — the pre-registered
-**R6 unlock rule** (k=10/b8192 beats Syndai pooled CI-clean) fires the moment it ships. It is the
-single highest-leverage small engineering item we hold (+0.158 excl0 already banked).
+Fix the exact red predicates preserved in the PMU `POSTFLIGHT-VERIFICATION.json`: five Python
+contract failures, six Clippy findings, three stale `ReflectInput` fixtures, one e2e
+retain-response mismatch. Land the dirty worktree in reviewed commits (owner call on push). Run
+the full `AGENTS.md` gate green. Nothing external ships and no cutover merges while red.
 
-**How (in order of expected value/effort)**:
-1. **Truncated-input rerank**: verify what fastembed's TextRerank actually processes — 13s/64
-   pairs (~200ms/pair) suggests full-length inputs; cap candidate text at ~512 tokens (the model's
-   max anyway) and re-measure. Likely 3–10× for free.
-2. **Rerank top-32** (post-L1, gold mass is ≤32): halves cost.
-3. **Smaller reranker arm** if still >1.5s.
-4. **Async second-pass** as the UX fallback (Syndai knowledge panels tolerate it).
-Gate: same lattice, L1X-truncated vs Syndai pooled; ship + unlock R6 on CI-clean. Include
-`cross_rerank_ms` p50/p95 in provenance (and persist chars/question aggregate — review note).
+### P1 — Feature-test wave (n=12 gates; techniques from the verified 2026-07 research)
 
-## 4. Then, per plan of record (each its own SDD wave)
+Each lever: named failure class → 12-case pack vs control → promote/delete. Ranked by lane:
 
-- **R3 — governance core + hot/file planes**: typed write-router (knowledge=supersession /
-  episodic=decay-to-cold / procedural=evidence-gated / preference=chain-head→hot), demotion-not-
-  deletion cold plane, file plane as PROJECTION (MEMORY.md/AGENTS.md/learnings.md exports with
-  owned regions; evidence-derived, terse — LLM prose dumps measurably hurt), multi-agent
-  principal-scoped access model (the CaaS prerequisite). Spec amendment first, then hot plane
-  (generalize R2's profile block) + one export/ingest MVP behind flags.
-- **R4 — coding lane at full scale**: golden set over the full local event corpus (template:
-  `scripts/code_lane_*`; exclude gap attempts — measured 0% locally, verify per-corpus), plus
-  **post-action outcome write-back** (worked/failed/invalidated-assumptions → procedural memory)
-  — this is "better codebase memory than Syndai" (they have nothing here) and the coding-agent
-  wedge. Measure retrieval + a continuity task suite; promotion rules unchanged.
-- **R5 — longitudinal gate**: MemoryStress (1000 sessions/10 months) + FAMA stale-penalizing
-  scoring; demotion/decay + additive consolidation (citation-anchored reflection nodes; originals
-  never rewritten; offline Qwen3-8B consolidator behind an HHEM/NLI grounding check) adjudicated
-  THERE, never on LME-class benches (95.4 vs 38.3 divergence). This is the month-6 magic bar.
-- **R6 — insertion & scale** (unlocks via R2.5's rule or explicit owner cost acceptance):
-  1) Syndai dogfood flag (`memphant_file_memory_dogfood_enabled`) against deployed MemPhant —
-  docs lane first, episodic next; 2) CaaS hardening: RLS + non-owner runtime role (known queued
-  fix), per-tenant quotas/limits, deployment profiles (compose/supabase/neon exist from WS-H),
-  usage metering; 3) all-agents distribution: MCP surface (exists) + Claude-Code
-  `memory_20250818` file adapter + Hermes provider SPI (R79) — adapters are distribution only,
-  never dependencies.
+**Chat/agents (failure classes from the flip analysis: 21/44 reader-with-adequate-pack, 16/44
+pack displacement):**
+- T1 **Observation-block hot plane** (Mastra OM pattern, verified mechanics: background
+  compression of history into dense date-annotated observations; retrieval-free block +
+  retrieval hybrid). Our `reflect` loop is the natural owner; generalizes the R2 profile-block
+  lever. The single highest-external-evidence chat lever (OM self-reports beating the oracle).
+- T2 **Chain-of-note reader v4** + calibrated abstention comparison arm.
+- T3 **Temporal re-measure** (date-prefix muting fixed; soft temporal boost; dated packs).
+- T4 **HyDE/query rewrite A/B** (cheap; preference-stratum misses).
+- T5 (diagnostic) cross-rerank at n=300 with `recall_pool_depth=64`.
 
-## 5. Standing rules (unchanged, binding)
+**File scale (the verified winner shape: agentic exploration over files beats top-k RAG by ~24
+pts at trajectory scale — LME-V2 72.5 vs 48.5):**
+- T6 **Agentic deep mode** (AgentRunbook-C pattern: trajectories/resources as files + workflow
+  doc + memory manifests + helper scripts; agent gathers evidence at query time). Maps to
+  dormant rung-12 L4 exhaustive — activate as `mode=deep` over the substrate. Latency 100 s+
+  acceptable in deep mode only; hot path unchanged.
+- T7 **L0/L1/L2 multi-resolution resource summaries** (`04` §6.1, dormant; the
+  scan-20-abstracts-load-3 coding-agent case).
 
-Promotion-provenance (packaged Postgres runtime, pinned corpora, executed scorers); paired
-bootstrap, two-set/two-seed or pooled CI excl 0; same-lattice AND same-binary pairing (rebuild →
-re-run baselines); reader `openai/gpt-5.6-terra@medium`, judge `anthropic/claude-sonnet-5`,
-`--engine openrouter` via `doppler run --project syndai --config dev --`; scratch DBs only;
-verbatim is the memory (extraction = keys/metadata only); deterministic writes (no LLM at
-ingest); "SOTA" banned until the R2 protocol run; six verbs + tri-domain contract frozen; no
-competitor code in the tree; commits small with `Co-Authored-By: Claude Fable 5
-<noreply@anthropic.com>`, explicit paths only if owner WIP present, never push without owner call.
+**Code lane:**
+- T8 **Outcome write-back** (worked/failed/invalidated → procedural units; ReasoningBank-shaped
+  `04` §4.1 payload already spec'd). External signal: Letta skill-learning reports +9/+15.7 abs
+  on Terminal Bench 2.0 (vendor-reported; direction matches our design).
 
-## 6. Carry-list (fold opportunistically into R2/R2.5 tasks; none block)
+**Temporal/longitudinal (years-scale; "sleep consolidation"):**
+- T9 **Sleep-time anticipatory consolidation**: idle-time `reflect` pre-computes the observation
+  block / runbook summaries. Verified boundaries (Letta paper, 3-0): pays off only when ≥~10
+  queries amortize one context, and loses to plain test-time scaling at high budgets — gate on
+  amortization math, chat lane first. (`04` §9 reflect IS this loop; the lever is the
+  anticipatory-output half.)
+- T10 **Active freshness** (churn classes on volatile facts, `04` §8.1, dormant) — the
+  years-scale staleness answer; pilot on aged-fact packs.
+- T11 **DSR decay fold pilot** (`fsrs-rs` over the review ledger, rung 11) — internal
+  MemoryStress-style longitudinal suite only; FSRS must beat plain exponential or stay off.
+  External evidence for FSRS-in-agents: none survived verification — treat as hypothesis.
 
-Packing tier reconciliation (chip task_5c5d8184 — spawned twice, both sessions deleted; the
-conservative gate from R1.5-T0 holds meanwhile); feature-off tests dead under `--all-features` CI
-(needs a fastembed-less CI leg — recurring); Retry-After clamp ≤60s; `FastEmbedModel::parse` vs
-`fastembed_arm` dedup + local-arm drift pin; trim-vs-span exactness (chunks, inherited from
-episode twin); W9 tail cap >32 windows; fence-aware chunk header; `build_service` panic→error on
-misconfigured flag; worker skips reranker load; chat-score missing-baseline warning; persist
-chars/question + rerank p50/p95 into provenance.
+Architecture audit verdict (2026-07-19): the substrate already specifies everything the verified
+landscape rewards — five kinds, bitemporal + supersession, retention tiers hot/warm/cold,
+write-time admission control, consolidation with stage checkpoints, event-sourced
+confidence/decay ledgers. **No new architecture is needed for P1–P3; the work is measured
+activation of dormant mechanisms.** Watch-only: learned consolidators (Auto-Dreamer, +7 pts,
+unreplicated preprint) stay data-gated per rung 13.
 
-## 7. Ops gotchas (cost hours before; don't relearn)
+### P2 — Cutovers (Syndai RAG + CaaS; internal gates, NOT public claims)
+
+- **Docs/RAG**: hierarchy parity → comparable-volume full-corpus MemPhant-vs-Syndai on both
+  exposed sets (k=10/b8192; fires the pre-registered R6 unlock on CI-clean) → live restraint
+  10/10 → chat non-regression → sealed version-disjoint holdout → flip
+  `memphant_file_memory_dogfood_enabled` on the Syndai docs surface, then episodic.
+- **CaaS/codebase**: resume `docs/superpowers/plans/2026-07-15-syndai-canonical-memory-cutover.md`
+  task-by-task (subject-bound identity → strict public contracts → provenance/idempotency → …);
+  spec-28 fixture families (arch-decision honored, compaction rehydrate, cross-agent transfer,
+  composite) are the acceptance gate; parity-or-better under the 2,500-token cap; six-table drop
+  only after per-surface proof. T6/T7/T8 feed this lane.
+- Exit: Syndai reads memory only through public MemPhant contracts; legacy tables dropped.
+
+### P3 — Public SOTA proof (small runs first; submission = done)
+
+1. **LME-S full-500 protocol run** (the internal "SOTA-language" unlock) + **same-harness
+   competitor re-run** (Mem0, Zep CE/Graphiti, Letta) under uniform configs, standardized judge,
+   10-run variance — published on Evalrank with the harness. This is the Mem0–Zep lesson
+   weaponized: we run the controlled comparison.
+2. **SWE-ContextBench Lite** (99 related tasks; match the paper's Claude Sonnet 4.5 setup;
+   ~20-task subset first). Floor: beat no-context 26.26% resolved. Target: beat Supermemory
+   30.3% → "outperforms every evaluated memory product on a third-party coding-memory
+   benchmark." Then **SWE-Explore** (line-level localization under budget) with T6. No official
+   boards found for either → Evalrank.
+3. **LongMemEval-V2** — the scale flagship (replaces "BEAM 1M": BEAM's operator/submission
+   surface failed verification and its board is competitor-associated per `27` §1; LME-V2 is
+   neutral, 25M–115M tokens, and its empty official leaderboard is a first-mover slot). Verified
+   submission mechanics: Google Form (`forms.gle/rxUpiuRKDERqpqSi9`), tarball with
+   SYSTEM_DESCRIPTION.md + code + `submission_overview.json`; **paired web+enterprise FULL runs
+   per operating point, every question covered** — a 12-case pilot is private-only. Ranking =
+   LAFS Gain (accuracy-latency frontier), which fits us: submit TWO operating points — fast
+   (RAG hot path, sub-second) and deep (T6 agentic mode). Path: Small-tier ~50Q dev subset →
+   full paired runs → submit. Reference bars: strongest RAG 48.5%, Codex 69.3%, AgentRunbook-C
+   72.5% at 108–140 s/query.
+4. Supporting (never headline): full STALE if free capacity; Memora only if the next causal
+   slice improves 53.49; MemSyco held until a new version/holdout exists.
+
+## 4. Claim ladder (exact wording gates)
+
+- Now: only the approved PMU dev-evidence sentence (see the 07-18 handoff).
+- After P3.1: "full-protocol LongMemEval-S score X±σ; controlled same-harness comparison vs
+  Mem0/Zep/Letta under uniform configs" (never "global SOTA").
+- After P3.2: "outperforms all evaluated memory products on SWE-ContextBench related tasks
+  (third-party benchmark)."
+- After P3.3 acceptance: "first published result on the official LongMemEval-V2 leaderboard."
+- Pareto wins are claimed as "Pareto frontier," never "best accuracy" (`27` §6 rules apply).
+
+## 5. Ops gotchas (carried; cost hours before)
 
 - Keys: `VOYAGE_API_KEY` in Doppler **tacitry/dev**; GEMINI/OPENAI/OPENROUTER in syndai/dev.
-- Build campaign binaries from a **clean git worktree** at the measured commit (owner WIP floats
-  in the main tree); pass `SERVER_BIN/WORKER_BIN/CLI_BIN` + `GATE_PORT` to run scripts.
-- zsh does NOT word-split unquoted vars — use explicit function args in queue one-liners.
-- Background Agent dispatches occasionally misfire (instant garbage return) → re-dispatch or
-  SendMessage-nudge.
-- Docker Desktop's :5432 proxy can wedge after heavy churn (`docker restart memphant-postgres-1`);
-  check nothing squats ::1:5432 (`lsof -iTCP:5432`).
-- First model use downloads weights at server boot (gate runner waits 10min + logs); keep
-  `.fastembed_cache/` warm.
-- Reader cache dir `docs/build-log/artifacts/r0-embedder/reader-cache` is shared across all
-  waves — reuse it; re-scores of unchanged evidence are free.
+- Build campaign binaries from a **clean worktree** at the measured commit; pass
+  `SERVER_BIN/WORKER_BIN/CLI_BIN` + port env to runners. `CARGO_TARGET_DIR=/tmp/...`,
+  `CARGO_BUILD_JOBS=1`, `CARGO_INCREMENTAL=0` must survive the Doppler boundary.
+- One campaign lane, no completion cache, fresh scratch DB per arm, drop at exit; memory arms
+  sequential (`tuple concurrently updated` is infra contention, not a result).
+- Before claiming "stopped": check process TREES, tmux, AND `launchctl list | rg memphant`
+  twice, 3 s apart — delayed Codex app-server children and launch agents restart controllers.
+- Artifact trees can vanish from canonical paths while inodes live under `/.vol` — stat/find
+  before recreating anything; mirror + `MIRROR.json`, never mutate the source.
+- Reader cache `docs/build-log/artifacts/r0-embedder/reader-cache` is shared — reuse it;
+  re-scores of unchanged evidence are free.
+- First model use downloads weights at server boot (10 min); keep `.fastembed_cache/` warm.
+- Absolute `MEMPHANT_STRUCTURED_STATE_PROMPT_PATH` required — the extractor prompt is hash-bound.
 
-## 8. npcsh/npcpy source audit (2026-07-12) — verdict SKIP; three folds, no new workstream
+## 6. Carry-list (fold opportunistically; none block)
 
-Full-source audit (5 parallel deep-dives) of npc-worldwide npcsh/npcpy/npcrs + their paper
-(arXiv 2603.20380). Nothing competes with any MemPhant lane: no rerank, no packing/admission,
-brute-force cosine over JSON-in-BLOB, recency-only memory injection, zero recall evals, and three
-live store-divergence bugs of exactly the class our store contract + testkit forbids. Detail in
-auto-memory `npcsh-npcpy-verdict.md`; do not re-investigate. Fold-ins (opportunistic; none block
-R2):
-1. **Extraction rule-prompt content** (npcpy `llm_funcs.py` ~1415–1450: ban speaker attribution,
-   interaction mechanics, greetings, generic truisms; demand nuance-preserving statements +
-   source excerpts + explicit/inferred tag; return-EMPTY few-shot negatives) → applies ONLY where
-   we already run LLMs — the R5 consolidator prompt and keys/metadata extraction. Verbatim-is-
-   the-memory and no-LLM-at-ingest stand; their retry-until-facts-appear anti-pattern is the
-   cautionary pairing (never pressure a model out of returning empty).
-2. **SHA-256 content-hash-gated incremental re-extraction + noise-file heuristic** (lockfiles,
-   avg line length, printable ratio) → R3 file-plane ingest MVP and R4 code-lane corpus refresh.
-3. **Approval-lifecycle edit history (initial vs final memory, approve/reject/edit labels) as
-   training signal for a learned admission gate** → R3 governance back pocket; pairs with the
-   packing-tier reconciliation carry item.
-Carry-list add: an e2e assertion that the recalled band is NON-EMPTY in the final packed context
-(their Rust port templates memory into the system prompt but nothing ever populates it — silent
-zero-recall, shipped, untested).
-Citable numbers (small-model ≤35B caveat): tool-call accuracy ~95%→~25% as tool catalog grows
-1→8 (keep the MCP surface lean); failed-attempt context poisons retries (delegation retry gain
-~3pp vs ~20pp for search) — independent support for suppression-heavy packing.
+Packing tier reconciliation (conservative gate holds); fastembed-less CI leg for feature-off
+tests; Retry-After clamp ≤60 s; `FastEmbedModel::parse` vs `fastembed_arm` dedup; trim-vs-span
+exactness; W9 tail cap; fence-aware chunk header; `build_service` panic→error; worker skips
+reranker load; chat-score missing-baseline warning; persist chars/question + rerank p50/p95 into
+provenance; resource-chunks retirement decision (3× ns).

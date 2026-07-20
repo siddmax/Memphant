@@ -10,6 +10,7 @@ lock file is).
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 
@@ -19,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 GOLDEN = ROOT / "benchmarks" / "data" / "coding_events_golden.jsonl"
 GOLDEN_LOCK = ROOT / "benchmarks" / "data" / "coding_events_golden.lock.json"
 CORPUS = ROOT / "benchmarks" / "data" / "coding_events_corpus.jsonl"
+SPLIT = ROOT / "benchmarks" / "manifests" / "code_lane_split.v1.json"
 
 REQUIRED_GOLDEN_KEYS = {
     "question_id",
@@ -171,3 +173,31 @@ def test_no_span_appears_in_more_than_three_distinct_attempts() -> None:
         assert not clm.too_generic(span, corpus_index, threshold=3), (
             f"{g['question_id']}: span appears in more than 3 distinct attempts"
         )
+
+
+def test_code_lane_split_is_whole_attempt_disjoint_and_hash_paired() -> None:
+    _skip_if_absent(GOLDEN)
+    _skip_if_absent(CORPUS)
+    split = json.loads(SPLIT.read_text())
+    assert hashlib.sha256(CORPUS.read_bytes()).hexdigest() == split["corpus_sha256"]
+    assert hashlib.sha256(GOLDEN.read_bytes()).hexdigest() == split["golden_sha256"]
+    corpus_rows = _rows(CORPUS)
+    goldens = _rows(GOLDEN)
+    groups = split["groups"]
+    development = set(groups["development"]["attempt_sha256"])
+    held_out = set(groups["held_out_retrieval_only"]["attempt_sha256"])
+    assert development.isdisjoint(held_out)
+    actual = {hashlib.sha256(row["attempt_id"].encode()).hexdigest() for row in corpus_rows}
+    assert development | held_out == actual
+    question_counts = {"development": 0, "held_out_retrieval_only": 0}
+    for golden in goldens:
+        attempt_hash = hashlib.sha256(
+            golden["provenance"][0]["attempt_id"].encode()
+        ).hexdigest()
+        group = "development" if attempt_hash in development else "held_out_retrieval_only"
+        question_counts[group] += 1
+    assert question_counts == {
+        name: value["question_count"] for name, value in groups.items()
+    }
+    assert split["readiness"]["outcome_marked_memphant"] is False
+    assert split["readiness"]["validator_backed_held_out"] is False

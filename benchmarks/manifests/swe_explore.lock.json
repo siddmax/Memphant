@@ -1,0 +1,47 @@
+{
+  "benchmark": "SWE-Explore",
+  "paper": "https://arxiv.org/abs/2606.07297v1",
+  "released_at": "2026-06-08",
+  "code": {
+    "repository": "https://github.com/Qiushao-E/SWE-Explore-Bench",
+    "commit": "3c12dc5a551937038afcbdb6eb6bbf19f3ddd8c1",
+    "license": "MIT",
+    "files": {
+      "README.md": "34e4e785388ba38f775ee27ea0bbb3f0ee4ea2f88ea376d6897cb81b00473c77",
+      "eval.py": "feea0a7fe67b08e68c940e10887d5b4feaae0b8c58e256eb09f253e65492d745",
+      "eval_runner.py": "1af0ae390e098f9f6190be61b3ac08a266330fb6d06dba5f0faa8d9c4315ef13",
+      "pyproject.toml": "f7bfb54bec8c91131438f54c325bd38f1d53313845bac6634e177cd4fe47dace"
+    }
+  },
+  "dataset": {
+    "repository": "SWE-Explore-Bench/SWE-Explore-Bench",
+    "revision": "bdb0ae45d7c337d9e1dc3ebfe2a0af6bc7c1fbd9",
+    "file": {
+      "path": "bench.final.public.jsonl",
+      "sha256": "dc4f114ececd0bfb987361c26ae5e2440456e2cccb36adfccb09ea5385aec202",
+      "bytes": 13683678,
+      "rows": 848
+    }
+  },
+  "protocol": {
+    "top_k": 5,
+    "primary_metrics": [
+      "precision",
+      "ndcg_at_500",
+      "hit_file_rate",
+      "context_efficiency"
+    ],
+    "metric_implementation": "official eval.py at code.commit"
+  },
+  "public_execution_ready": false,
+  "observed_release_gaps": {
+    "problem_statement_rows": 0,
+    "base_commit_rows": 0,
+    "notes": [
+      "The released 848-row JSONL contains neither problem_statement nor base_commit.",
+      "The code release contains no issue_map.json, commit_map.json, or unify_trajs directory.",
+      "eval_runner.py therefore falls back to an empty issue when no private trajectories or external issue map are supplied.",
+      "build_commit_map.py loads unpinned external SWE-bench Verified and SWE-rebench datasets and does not cover the released pro and multilingual cells as a complete immutable input bundle."
+    ]
+  }
+}

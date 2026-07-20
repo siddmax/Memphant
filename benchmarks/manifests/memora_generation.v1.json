@@ -1,0 +1,63 @@
+{
+  "allowed_session_fields": ["date", "persona", "session_id"],
+  "allowed_turn_fields": ["message", "speaker", "turn"],
+  "dataset_lock_sha256": "5d23f0d49927f1ff7c18b860efb8099fb68a35827e4a0f0ff0976515eb5fe2e7",
+  "forbidden_fields": [
+    "evaluation",
+    "forgetting_evidence",
+    "memory_evidence",
+    "operation",
+    "operation_details",
+    "session_type",
+    "share_memory"
+  ],
+  "isolation": "one MemPhant tenant/scope/actor identity per period/persona",
+  "output_schema_sha256": "01b8dd9498dabd008a7ec0315e782a02163da76e2f5c3e744ecbe221c8c777c6",
+  "prompt_sha256": "b24cf1212b409ee1d41e3f3207ff8e3535e9bc28a5c3a1bf869db259b26d3284",
+  "protocol": "memora-memphant-generation-v1",
+  "reader": {
+    "candidates": [
+      {
+        "canonical_model_snapshot": "openai/gpt-5.6-luna-pro-20260709",
+        "prior_screen": "normal-development-reader",
+        "reasoning_effort": "high",
+        "requested_model": "openai/gpt-5.6-luna-pro"
+      },
+      {
+        "prior_screen": "rejected-contract-invalid",
+        "reasoning_effort": "high",
+        "requested_model": "google/gemini-3.5-flash"
+      }
+    ],
+    "selection": "paired-memora-capability-cost-screen"
+  },
+  "reader_lattice_sha256": "445706ee32422d1339e6fd5191b3dc745c364946813fcc89d929f26fae2e50b5",
+  "retrieval": {
+    "aggregation_window": "official_group_date_range",
+    "budget_tokens": 8192,
+    "cross_rerank": false,
+    "embed_model": "small",
+    "limit": 10,
+    "mode": "exhaustive"
+  },
+  "runtime_contract": [
+    "ingest sanitized dialogue sessions chronologically",
+    "drain reflection before any query",
+    "retrieve independently for each sealed query",
+    "record non-degraded trace and evidence digest",
+    "freeze server and worker behavior environment before launch",
+    "validate actual served model, provider, usage, and cost from every reader response",
+    "atomically ledger provider attempt start and result before cache/checkpoint return",
+    "require checkpoint attempt history as an exact prefix of the run ledger",
+    "bind output and attempt-ledger paths into the generation fingerprint",
+    "publish reader cache entries by atomic replace",
+    "enforce cumulative provider attempts and reported cost across checkpoint resumes",
+    "write answer and proof checkpoints atomically"
+  ],
+  "temporal_contract": {
+    "evaluation_snapshot": "final state after full period/persona ingest and reflection drain",
+    "official_question_date_semantics": "context only, not retrieval filtering",
+    "question_date_use": "reader prompt context only",
+    "session_date_use": "chronological ordering, retained dialogue text, and the explicit half-open group aggregation window"
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "persona": "software_engineer",
+  "date_range": {
+    "start_date": "2025-06-01",
+    "end_date": "2025-06-02"
+  },
+  "sessions": [
+    {
+      "session_id": 2,
+      "session_type": "memory_update",
+      "operation": "update",
+      "operation_details": {"secret_gold": "DO_NOT_EXPOSE_OPERATION_DETAILS"},
+      "date": "2025-06-02",
+      "persona": "software_engineer",
+      "conversation": [
+        {"turn": 1, "speaker": "user_agent", "message": "Use Rust now.", "share_memory": true},
+        {"turn": 2, "speaker": "ai_agent", "message": "Understood.", "share_memory": false}
+      ]
+    },
+    {
+      "session_id": 1,
+      "session_type": "memory_introduction",
+      "operation": "add",
+      "operation_details": {"secret_gold": "DO_NOT_EXPOSE_OPERATION_DETAILS"},
+      "date": "2025-06-01",
+      "persona": "software_engineer",
+      "conversation": [
+        {"turn": 1, "speaker": "user_agent", "message": "I use Python.", "share_memory": true}
+      ]
+    }
+  ],
+  "questions": {
+    "remembering": [
+      {
+        "question_id": "fixture_q1",
+        "question": "Which language do I use now?",
+        "question_date": "2025-06-07",
+        "memory_evidence": {"secret_gold": "DO_NOT_EXPOSE_MEMORY_EVIDENCE"},
+        "forgetting_evidence": {"secret_gold": "DO_NOT_EXPOSE_FORGETTING_EVIDENCE"},
+        "evaluation": {
+          "evaluation_questions": [
+            {
+              "evaluation_question_id": "fixture_q1_eval_0",
+              "evaluation_question": "Does the answer say Rust?",
+              "expected_answer": "yes",
+              "evaluation_type": "memory_presence"
+            }
+          ]
+        }
+      }
+    ],
+    "reasoning": [],
+    "recommending": []
+  }
+}

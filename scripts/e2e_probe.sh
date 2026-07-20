@@ -36,8 +36,6 @@ BASE="http://127.0.0.1:${PORT}"
 SERVER="$ROOT/target/debug/memphant-server"
 WORKER="$ROOT/target/debug/memphant-worker"
 CLI="$ROOT/target/debug/memphant-cli"
-SCOPE="7c000000-0000-4000-8000-000000000001"
-ACTOR="7c000000-0000-4000-8000-000000000002"
 SERVER_PID=""
 
 log()  { printf '\n### %s\n' "$*"; }
@@ -48,25 +46,39 @@ trap cleanup EXIT
 jget() { python3 -c "import json,sys;d=json.load(sys.stdin);print(d$1)"; }
 
 start_server() {
-  DATABASE_URL="$DATABASE_URL" MEMPHANT_BIND="127.0.0.1:${PORT}" "$SERVER" &
+  env -u DATABASE_URL MEMPHANT_APP_DATABASE_URL="$DATABASE_URL" MEMPHANT_AUTHN_DATABASE_URL="$DATABASE_URL" MEMPHANT_BIND="127.0.0.1:${PORT}" "$SERVER" &
   SERVER_PID=$!
-  for _ in $(seq 1 40); do
+  # 60s window: first boot loads embedding weights and a loaded machine
+  # (parallel cargo builds) can push startup past the old 10s budget.
+  for _ in $(seq 1 120); do
     curl -sf "$BASE/v1/health" >/dev/null 2>&1 && return 0
-    sleep 0.25
+    sleep 0.5
   done
   fail "server did not become healthy on :$PORT"
 }
 
-worker_once() { DATABASE_URL="$DATABASE_URL" MEMPHANT_WORKER_ONCE=1 "$WORKER" >/dev/null; }
+worker_once() { env -u DATABASE_URL MEMPHANT_WORKER_DATABASE_URL="$DATABASE_URL" MEMPHANT_WORKER_ONCE=1 "$WORKER" >/dev/null; }
 
 api() { # api KEY METHOD PATH [JSON]
   local key="$1" method="$2" path="$3" body="${4:-}"
+  # Every mutating verb requires a unique Idempotency-Key; it is ignored by the
+  # read verbs, so send it unconditionally. Derived per-call via uuidgen:
+  # `api` runs inside $(...) subshells, so a shared IDEM_SEQ counter never
+  # increments in the parent and every call would silently reuse key #1.
+  local idem="probe-$(uuidgen)"
   if [ -n "$body" ]; then
-    curl -s -X "$method" -H "Authorization: Bearer $key" -H 'content-type: application/json' \
-      -d "$body" "$BASE$path"
+    curl -s -X "$method" -H "Authorization: Bearer $key" -H "Idempotency-Key: $idem" \
+      -H 'content-type: application/json' -d "$body" "$BASE$path"
   else
-    curl -s -X "$method" -H "Authorization: Bearer $key" "$BASE$path"
+    curl -s -X "$method" -H "Authorization: Bearer $key" -H "Idempotency-Key: $idem" "$BASE$path"
   fi
+}
+
+# Bind a tenant's context (subject/actor/scope/agent-node) and echo the binding
+# JSON. All verbs resolve their memory context from these server-assigned ids.
+bind_context() { # bind_context KEY REF
+  api "$1" PUT "/v1/context-bindings/$2" \
+    "{\"subject\":{\"external_ref\":\"subject:$2\",\"kind\":\"user\"},\"actor\":{\"external_ref\":\"actor:$2\",\"kind\":\"system\"},\"scope\":{\"external_ref\":\"scope:$2\",\"kind\":\"user_root\"},\"agent_node\":{\"external_ref\":\"agent:$2\"}}"
 }
 api_status() { # like api, but prints only the HTTP status
   local key="$1" method="$2" path="$3"
@@ -82,8 +94,8 @@ python3 "$ROOT/scripts/apply_memphant_migrations.py" --database-url "$DATABASE_U
 log "provision tenants + keys via admin CLI"
 TENANT_A=$("$CLI" admin create-tenant --name "probe-a-$RANDOM" --database-url "$DATABASE_URL" | sed -n 's/^tenant_created id=\([^ ]*\).*/\1/p')
 TENANT_B=$("$CLI" admin create-tenant --name "probe-b-$RANDOM" --database-url "$DATABASE_URL" | sed -n 's/^tenant_created id=\([^ ]*\).*/\1/p')
-KEY_A=$("$CLI" admin create-key --tenant "$TENANT_A" --database-url "$DATABASE_URL" | tail -1)
-KEY_B=$("$CLI" admin create-key --tenant "$TENANT_B" --database-url "$DATABASE_URL" | tail -1)
+KEY_A=$("$CLI" admin create-key --tenant "$TENANT_A" --max-trust trusted_system --database-url "$DATABASE_URL" | tail -1)
+KEY_B=$("$CLI" admin create-key --tenant "$TENANT_B" --max-trust trusted_system --database-url "$DATABASE_URL" | tail -1)
 [ -n "$TENANT_A" ] && [ -n "$KEY_A" ] && [ -n "$KEY_B" ] || fail "provisioning failed"
 echo "tenant_a=$TENANT_A tenant_b=$TENANT_B"
 
@@ -91,58 +103,72 @@ start_server
 log "health reports postgres"
 api "$KEY_A" GET /v1/health | tee /dev/stderr | grep -q '"store":"postgres"' || fail "health lacks store=postgres"
 
-log "retain episode (A, explicit subject)"
-RETAIN=$(api "$KEY_A" POST /v1/episodes "{\"tenant_id\":\"$TENANT_A\",\"scope_id\":\"$SCOPE\",\"actor_id\":\"$ACTOR\",\"source_kind\":\"user\",\"source_trust\":\"trusted_user\",\"subject\":\"release region\",\"predicate\":\"value\",\"body\":\"Release region is Taipei.\"}")
+log "bind context for both tenants"
+BIND_A=$(bind_context "$KEY_A" "probe-a")
+SUBJ_A=$(echo "$BIND_A" | jget "['subject_id']") || fail "context binding A failed: $BIND_A"
+SCOPE_A=$(echo "$BIND_A" | jget "['scope_id']")
+ACTOR_A=$(echo "$BIND_A" | jget "['actor_id']")
+AGENT_A=$(echo "$BIND_A" | jget "['agent_node_id']")
+GEN_A=$(echo "$BIND_A" | jget "['subject_generation']")
+CTX_A="\"subject_id\":\"$SUBJ_A\",\"scope_id\":\"$SCOPE_A\",\"actor_id\":\"$ACTOR_A\",\"agent_node_id\":\"$AGENT_A\",\"subject_generation\":$GEN_A"
+QS_A="subject_id=$SUBJ_A&subject_generation=$GEN_A&scope_id=$SCOPE_A&actor_id=$ACTOR_A&agent_node_id=$AGENT_A"
+
+BIND_B=$(bind_context "$KEY_B" "probe-b")
+SUBJ_B=$(echo "$BIND_B" | jget "['subject_id']") || fail "context binding B failed: $BIND_B"
+QS_B="subject_id=$SUBJ_B&subject_generation=$(echo "$BIND_B" | jget "['subject_generation']")&scope_id=$(echo "$BIND_B" | jget "['scope_id']")&actor_id=$(echo "$BIND_B" | jget "['actor_id']")&agent_node_id=$(echo "$BIND_B" | jget "['agent_node_id']")"
+
+log "retain episode (A)"
+RETAIN=$(api "$KEY_A" POST /v1/episodes "{$CTX_A,\"source_ref\":\"probe:episode:1\",\"observed_at\":\"2026-07-15T00:00:00Z\",\"payload\":{\"episode\":{\"source_kind\":\"user\",\"body\":\"Release region is Taipei.\"}}}")
 EPISODE_ID=$(echo "$RETAIN" | jget "['episode_id']")
 [ -n "$EPISODE_ID" ] || fail "retain returned no episode_id: $RETAIN"
 
 log "read-your-own-writes: recall before worker runs -> degraded hit"
-RECALL0=$(api "$KEY_A" POST /v1/recall "{\"tenant_id\":\"$TENANT_A\",\"scope_id\":\"$SCOPE\",\"actor_id\":\"$ACTOR\",\"query\":\"Where is the release region?\"}")
+RECALL0=$(api "$KEY_A" POST /v1/recall "{$CTX_A,\"query\":\"Where is the release region?\"}")
 echo "$RECALL0" | jget "['degraded']" | grep -qi true || fail "expected degraded read-your-own-writes: $RECALL0"
 
 log "worker tick compiles"
 worker_once
-RECALL1=$(api "$KEY_A" POST /v1/recall "{\"tenant_id\":\"$TENANT_A\",\"scope_id\":\"$SCOPE\",\"actor_id\":\"$ACTOR\",\"query\":\"Where is the release region?\"}")
+RECALL1=$(api "$KEY_A" POST /v1/recall "{$CTX_A,\"query\":\"Where is the release region?\"}")
 echo "$RECALL1" | jget "['items'][0]['body']" | grep -q "Taipei" || fail "recall missed compiled unit: $RECALL1"
 echo "$RECALL1" | jget "['degraded']" | grep -qi false || fail "recall still degraded after compile"
 TRACE_ID=$(echo "$RECALL1" | jget "['trace_id']")
 UNIT_ID=$(echo "$RECALL1" | jget "['items'][0]['unit_id']")
 
 log "retain code resource (A) with commit revision"
-RES=$(api "$KEY_A" POST /v1/episodes "{\"tenant_id\":\"$TENANT_A\",\"scope_id\":\"$SCOPE\",\"actor_id\":\"$ACTOR\",\"source_kind\":\"repo\",\"source_trust\":\"trusted_system\",\"resource\":{\"uri\":\"repo://demo/src/main.rs\",\"mime_type\":\"text/x-rust\",\"content_hash\":\"sha256:probe\",\"kind\":\"code\",\"revision\":\"abc123def\",\"body\":\"fn deploy() { /* canary first, then roll forward */ }\"}}")
+RES=$(api "$KEY_A" POST /v1/episodes "{$CTX_A,\"source_ref\":\"probe:resource:1\",\"observed_at\":\"2026-07-15T00:00:00Z\",\"payload\":{\"resource\":{\"uri\":\"repo://demo/src/main.rs\",\"mime_type\":\"text/x-rust\",\"content_hash\":\"sha256:probe\",\"kind\":\"code\",\"revision\":\"abc123def\",\"body\":\"fn deploy() { /* canary first, then roll forward */ }\"}}}")
 echo "$RES" | jget "['enqueued'][0]" | grep -q reflect_resource || fail "resource retain not enqueued: $RES"
 worker_once
-RECALL_RES=$(api "$KEY_A" POST /v1/recall "{\"tenant_id\":\"$TENANT_A\",\"scope_id\":\"$SCOPE\",\"actor_id\":\"$ACTOR\",\"query\":\"canary deploy roll forward\"}")
+RECALL_RES=$(api "$KEY_A" POST /v1/recall "{$CTX_A,\"query\":\"canary deploy roll forward\"}")
 echo "$RECALL_RES" | python3 -c "import json,sys;d=json.load(sys.stdin);assert any(i['kind']=='resource' for i in d['items']),d" || fail "resource-derived unit not recalled"
 
 log "cross-tenant: B fetching A's trace must 404"
-STATUS_B=$(api_status "$KEY_B" GET "/v1/traces/$TRACE_ID")
+STATUS_B=$(api_status "$KEY_B" GET "/v1/traces/$TRACE_ID?$QS_B")
 [ "$STATUS_B" = "404" ] || fail "tenant B got $STATUS_B for tenant A's trace (must be 404)"
-STATUS_A=$(api_status "$KEY_A" GET "/v1/traces/$TRACE_ID")
+STATUS_A=$(api_status "$KEY_A" GET "/v1/traces/$TRACE_ID?$QS_A")
 [ "$STATUS_A" = "200" ] || fail "tenant A cannot read own trace ($STATUS_A)"
 
 log "restart durability"
 kill "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null || true; SERVER_PID=""
 start_server
-RECALL2=$(api "$KEY_A" POST /v1/recall "{\"tenant_id\":\"$TENANT_A\",\"scope_id\":\"$SCOPE\",\"actor_id\":\"$ACTOR\",\"query\":\"Where is the release region?\"}")
+RECALL2=$(api "$KEY_A" POST /v1/recall "{$CTX_A,\"query\":\"Where is the release region?\"}")
 echo "$RECALL2" | jget "['items'][0]['body']" | grep -q "Taipei" || fail "memory lost across restart: $RECALL2"
-[ "$(api_status "$KEY_A" GET "/v1/traces/$TRACE_ID")" = "200" ] || fail "trace lost across restart"
+[ "$(api_status "$KEY_A" GET "/v1/traces/$TRACE_ID?$QS_A")" = "200" ] || fail "trace lost across restart"
 
 log "correct supersedes"
-api "$KEY_A" POST /v1/correct "{\"tenant_id\":\"$TENANT_A\",\"scope_id\":\"$SCOPE\",\"actor_id\":\"$ACTOR\",\"selector\":{\"memory_unit_id\":\"$UNIT_ID\"},\"correction\":{\"value\":\"Release region is Osaka.\",\"reason\":\"probe correction\"}}" >/dev/null
-RECALL3=$(api "$KEY_A" POST /v1/recall "{\"tenant_id\":\"$TENANT_A\",\"scope_id\":\"$SCOPE\",\"actor_id\":\"$ACTOR\",\"query\":\"Where is the release region?\"}")
+api "$KEY_A" POST /v1/correct "{$CTX_A,\"selector\":{\"memory_unit_id\":\"$UNIT_ID\"},\"correction\":{\"value\":\"Release region is Osaka.\",\"reason\":\"probe correction\",\"source_ref\":\"probe:correction\",\"observed_at\":\"2026-07-15T00:00:00Z\"}}" >/dev/null
+RECALL3=$(api "$KEY_A" POST /v1/recall "{$CTX_A,\"query\":\"Where is the release region?\"}")
 echo "$RECALL3" | jget "['items'][0]['body']" | grep -q "Osaka" || fail "correction not reflected: $RECALL3"
 
 log "forget episode + no resurrection"
-FORGET=$(api "$KEY_A" POST /v1/forget "{\"tenant_id\":\"$TENANT_A\",\"scope_id\":\"$SCOPE\",\"actor_id\":\"$ACTOR\",\"selector\":{\"episode_id\":\"$EPISODE_ID\",\"scope_id\":\"$SCOPE\"},\"reason\":\"probe forget\"}")
-echo "$FORGET" | jget "['verification']" | grep -q "probe_hits=0" || fail "forget verification not clean: $FORGET"
-api "$KEY_A" POST /v1/reflect "{\"tenant_id\":\"$TENANT_A\",\"scope_id\":\"$SCOPE\",\"actor_id\":\"$ACTOR\"}" >/dev/null
+FORGET=$(api "$KEY_A" POST /v1/forget "{$CTX_A,\"selector\":{\"episode_id\":\"$EPISODE_ID\",\"scope_id\":\"$SCOPE_A\"},\"reason\":\"probe forget\"}")
+echo "$FORGET" | jget "['verification']" | grep -q "authorized_transaction_committed" || fail "forget verification not clean: $FORGET"
+api "$KEY_A" POST /v1/reflect "{$CTX_A}" >/dev/null
 worker_once
-RECALL4=$(api "$KEY_A" POST /v1/recall "{\"tenant_id\":\"$TENANT_A\",\"scope_id\":\"$SCOPE\",\"actor_id\":\"$ACTOR\",\"query\":\"release region Taipei Osaka\"}")
+RECALL4=$(api "$KEY_A" POST /v1/recall "{$CTX_A,\"query\":\"release region Taipei Osaka\"}")
 echo "$RECALL4" | python3 -c "import json,sys;d=json.load(sys.stdin);assert not any('egion is' in i['body'] for i in d['items']),d" || fail "forgotten memory resurfaced: $RECALL4"
 
 log "mark outcome feedback"
-MARK=$(api "$KEY_A" POST /v1/mark "{\"tenant_id\":\"$TENANT_A\",\"trace_id\":\"$TRACE_ID\",\"caller_id\":\"e2e-probe\",\"used_ids\":[],\"outcome\":\"success\"}")
+MARK=$(api "$KEY_A" POST /v1/mark "{$CTX_A,\"trace_id\":\"$TRACE_ID\",\"caller_id\":\"e2e-probe\",\"used_ids\":[],\"outcome\":\"success\"}")
 echo "$MARK" | jget "['accepted']" | grep -qi true || fail "mark rejected: $MARK"
 
 log "unauthenticated request is refused"

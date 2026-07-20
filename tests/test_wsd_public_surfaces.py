@@ -63,6 +63,10 @@ def test_python_sdk_round_trips_all_public_verbs() -> None:
             scope_id="00000000-0000-0000-0000-0000000186a1",
             actor_id="00000000-0000-0000-0000-0000000186a2",
             query="Where is the release region?",
+            aggregation_window={
+                "from": "2025-06-01T00:00:00Z",
+                "to": "2025-06-08T00:00:00Z",
+            },
         )
         assert recalled["items"][0]["body"] == "Release region is Taipei."
 
@@ -122,6 +126,10 @@ def test_python_sdk_round_trips_all_public_verbs() -> None:
         unit_request = server.requests[2]["body"]
         assert unit_request["unit"]["subject"] == "release region"
         assert unit_request["unit"]["kind"] == "semantic"
+        assert server.requests[4]["body"]["aggregation_window"] == {
+            "from": "2025-06-01T00:00:00Z",
+            "to": "2025-06-08T00:00:00Z",
+        }
     finally:
         server.close()
 

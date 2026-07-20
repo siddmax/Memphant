@@ -21,8 +21,8 @@
 
 use memphant_core::{FixedClock, InMemoryStore, MemoryStore, recall};
 use memphant_types::{
-    ActorId, MemoryKind, NewMemoryUnit, RecallMode, RecallRequest, ScopeId, TenantId, TrustLevel,
-    UnitId, UnitState,
+    MemoryKind, NewMemoryUnit, RecallMode, RecallRequest, ResolvedMemoryContext, TenantId,
+    TrustLevel, UnitId, UnitState,
 };
 
 const CLOCK: FixedClock = FixedClock("2026-07-12T00:00:00Z");
@@ -31,33 +31,26 @@ fn tenant(value: u128) -> TenantId {
     TenantId::from_u128(value)
 }
 
-fn scope(value: u128) -> ScopeId {
-    ScopeId::from_u128(value)
-}
-
-fn actor(value: u128) -> ActorId {
-    ActorId::from_u128(value)
-}
-
-fn new_unit(
-    tenant_id: TenantId,
-    scope_id: ScopeId,
-    actor_id: ActorId,
-    subject_key: &str,
-    body: String,
-) -> NewMemoryUnit {
+fn new_unit(context: &ResolvedMemoryContext, fact_key: &str, body: String) -> NewMemoryUnit {
     NewMemoryUnit {
-        tenant_id,
-        scope_id,
+        tenant_id: context.tenant_id,
+        data_subject_id: context.data_subject_id,
+        scope_id: context.scope_id,
+        agent_node_id: context.agent_node_id,
+        subject_generation: context.subject_generation,
         kind: MemoryKind::Semantic,
         state: UnitState::Active,
-        subject_key: Some(subject_key.to_string()),
+        fact_key: Some(fact_key.to_string()),
+        predicate: None,
         body,
+        confidence: Some(1.0),
         trust_level: TrustLevel::TrustedSystem,
         churn_class: None,
         freshness_due_at: None,
-        actor_id: Some(actor_id),
+        actor_id: Some(context.actor_id),
         source_kind: Some("fixture".to_string()),
+        source_ref: "test:fixture".to_string(),
+        observed_at: "2026-07-09T00:00:00Z".to_string(),
         source_episode_id: None,
         source_resource_id: None,
         deletion_generation: None,
@@ -69,18 +62,9 @@ fn new_unit(
     }
 }
 
-fn request(
-    tenant_id: TenantId,
-    scope_id: ScopeId,
-    actor_id: ActorId,
-    query: &str,
-    k: usize,
-) -> RecallRequest {
+fn request(context: &ResolvedMemoryContext, query: &str, k: usize) -> RecallRequest {
     RecallRequest {
-        tenant_id,
-        scope_id,
-        actor_id,
-        allowed_scope_ids: vec![scope_id],
+        context: context.clone(),
         query: query.to_string(),
         k,
         budget_tokens: 20_000,
@@ -94,21 +78,22 @@ fn request(
         procedure_recall_enabled: true,
         decay_enabled: true,
         engine_version: "engine-r15t0-test".to_string(),
+        transaction_as_of: None,
+        valid_at: None,
+        aggregation_window: None,
     }
 }
 
 /// Seeds a corpus shaped to exercise the D1 mechanism: 5 units that all share
-/// ONE `subject_key` (so subject-dedup admits only the best-ranked one and
+/// ONE `fact_key` (so subject-dedup admits only the best-ranked one and
 /// drops the other 4) ranked strictly ABOVE 70 distinct-subject "filler"
 /// units the fill must backfill from. Returns `(dup_survivor_id, filler_ids
 /// in rank order)`.
 async fn seed_dedup_monopoly_corpus(
     store: &InMemoryStore,
-    tenant_id: TenantId,
-    scope_id: ScopeId,
-    actor_id: ActorId,
+    context: &ResolvedMemoryContext,
 ) -> (UnitId, Vec<UnitId>) {
-    let mut tx = store.begin().await.expect("begin transaction");
+    let mut tx = store.begin(context).await.expect("begin transaction");
 
     // The 5 candidates ranked 1..5 by lexical overlap ratio: pure signal
     // tokens ("gamma trench outpost") plus one distinguishing suffix token
@@ -122,9 +107,7 @@ async fn seed_dedup_monopoly_corpus(
             .stage_memory_unit(
                 &mut tx,
                 new_unit(
-                    tenant_id,
-                    scope_id,
-                    actor_id,
+                    context,
                     "dup-subject-key",
                     format!("gamma trench outpost note {suffix}"),
                 ),
@@ -148,9 +131,7 @@ async fn seed_dedup_monopoly_corpus(
             .stage_memory_unit(
                 &mut tx,
                 new_unit(
-                    tenant_id,
-                    scope_id,
-                    actor_id,
+                    context,
                     &format!("filler-subject-{index:03}"),
                     format!(
                         "gamma trench outpost filler entry {index:03} with additional \
@@ -173,29 +154,17 @@ async fn seed_dedup_monopoly_corpus(
 async fn k5_and_k50_over_the_same_corpus_produce_identical_top5() {
     let store = InMemoryStore::default();
     let tenant_id = tenant(90_000);
-    let scope_id = scope(90_001);
-    let actor_id = actor(90_002);
-    let (dup_survivor_id, _filler_ids) =
-        seed_dedup_monopoly_corpus(&store, tenant_id, scope_id, actor_id).await;
+    let context = memphant_store_testkit::bind_context(&store, tenant_id).await;
+    let (dup_survivor_id, _filler_ids) = seed_dedup_monopoly_corpus(&store, &context).await;
 
     let query = "gamma trench outpost";
 
-    let k5 = recall(
-        &store,
-        request(tenant_id, scope_id, actor_id, query, 5),
-        None,
-        &CLOCK,
-    )
-    .await
-    .expect("k=5 recall succeeds");
-    let k50 = recall(
-        &store,
-        request(tenant_id, scope_id, actor_id, query, 50),
-        None,
-        &CLOCK,
-    )
-    .await
-    .expect("k=50 recall succeeds");
+    let k5 = recall(&store, request(&context, query, 5), None, &CLOCK)
+        .await
+        .expect("k=5 recall succeeds");
+    let k50 = recall(&store, request(&context, query, 50), None, &CLOCK)
+        .await
+        .expect("k=50 recall succeeds");
 
     // Sanity: the dedup monopoly actually fired (only ONE of the 5
     // same-subject duplicates survives packing) and both responses saw it —
@@ -248,18 +217,15 @@ async fn k5_and_k50_over_the_same_corpus_produce_identical_top5() {
 async fn k5_and_k50_agree_trivially_without_dedup_pressure() {
     let store = InMemoryStore::default();
     let tenant_id = tenant(90_100);
-    let scope_id = scope(90_101);
-    let actor_id = actor(90_102);
+    let context = memphant_store_testkit::bind_context(&store, tenant_id).await;
 
-    let mut tx = store.begin().await.expect("begin transaction");
+    let mut tx = store.begin(&context).await.expect("begin transaction");
     for index in 0..75u32 {
         store
             .stage_memory_unit(
                 &mut tx,
                 new_unit(
-                    tenant_id,
-                    scope_id,
-                    actor_id,
+                    &context,
                     &format!("distinct-subject-{index:03}"),
                     format!("gamma trench outpost distinct entry {index:03}"),
                 ),
@@ -270,22 +236,12 @@ async fn k5_and_k50_agree_trivially_without_dedup_pressure() {
     store.commit(tx).await.expect("seed committed");
 
     let query = "gamma trench outpost";
-    let k5 = recall(
-        &store,
-        request(tenant_id, scope_id, actor_id, query, 5),
-        None,
-        &CLOCK,
-    )
-    .await
-    .expect("k=5 recall succeeds");
-    let k50 = recall(
-        &store,
-        request(tenant_id, scope_id, actor_id, query, 50),
-        None,
-        &CLOCK,
-    )
-    .await
-    .expect("k=50 recall succeeds");
+    let k5 = recall(&store, request(&context, query, 5), None, &CLOCK)
+        .await
+        .expect("k=5 recall succeeds");
+    let k50 = recall(&store, request(&context, query, 50), None, &CLOCK)
+        .await
+        .expect("k=50 recall succeeds");
 
     let k5_top5: Vec<UnitId> = k5.items.iter().map(|item| item.unit_id).collect();
     let k50_top5: Vec<UnitId> = k50.items[..5].iter().map(|item| item.unit_id).collect();
@@ -318,10 +274,9 @@ async fn k5_and_k50_agree_trivially_without_dedup_pressure() {
 async fn decomposed_balanced_k5_and_k50_produce_identical_top5() {
     let store = InMemoryStore::default();
     let tenant_id = tenant(90_200);
-    let scope_id = scope(90_201);
-    let actor_id = actor(90_202);
+    let context = memphant_store_testkit::bind_context(&store, tenant_id).await;
 
-    let mut tx = store.begin().await.expect("begin transaction");
+    let mut tx = store.begin(&context).await.expect("begin transaction");
     // Six sq1 monopolists: identical sq1/lexical shape (2 signal tokens of 3
     // ⇒ ratio 2/3), distinct bodies for the deterministic tie-break.
     for index in 1..=6u32 {
@@ -329,9 +284,7 @@ async fn decomposed_balanced_k5_and_k50_produce_identical_top5() {
             .stage_memory_unit(
                 &mut tx,
                 new_unit(
-                    tenant_id,
-                    scope_id,
-                    actor_id,
+                    &context,
                     &format!("zk-a{index}"),
                     format!("alpha crucible a{index}"),
                 ),
@@ -345,9 +298,7 @@ async fn decomposed_balanced_k5_and_k50_produce_identical_top5() {
             .stage_memory_unit(
                 &mut tx,
                 new_unit(
-                    tenant_id,
-                    scope_id,
-                    actor_id,
+                    &context,
                     &format!("zk-b{index}"),
                     format!("beta lantern b{index}"),
                 ),
@@ -361,23 +312,17 @@ async fn decomposed_balanced_k5_and_k50_produce_identical_top5() {
     let hybrid_id = store
         .stage_memory_unit(
             &mut tx,
-            new_unit(
-                tenant_id,
-                scope_id,
-                actor_id,
-                "zk-h",
-                "alpha and beta h1".to_string(),
-            ),
+            new_unit(&context, "zk-h", "alpha and beta h1".to_string()),
         )
         .await
         .expect("hybrid unit seeded");
     store.commit(tx).await.expect("seed committed");
 
     let query = "alpha crucible and beta lantern";
-    let mut k5_request = request(tenant_id, scope_id, actor_id, query, 5);
+    let mut k5_request = request(&context, query, 5);
     k5_request.mode = RecallMode::Balanced;
     k5_request.query_decomposition_enabled = true;
-    let mut k50_request = request(tenant_id, scope_id, actor_id, query, 50);
+    let mut k50_request = request(&context, query, 50);
     k50_request.mode = RecallMode::Balanced;
     k50_request.query_decomposition_enabled = true;
 

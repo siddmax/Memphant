@@ -4,6 +4,7 @@ import argparse
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,6 +50,7 @@ def applied_versions(database_url: str) -> set[str]:
 
 
 def apply_migration(database_url: str, path: Path) -> None:
+    version = path.stem
     subprocess.run(
         [
             "psql",
@@ -57,25 +59,27 @@ def apply_migration(database_url: str, path: Path) -> None:
             "ON_ERROR_STOP=1",
             "--dbname",
             database_url,
+            "--single-transaction",
             "--file",
             str(path),
+            "--command",
+            "insert into memphant.schema_migrations (version, schema_compat_revision) "
+            f"values ('{version}', '{version}') on conflict (version) do nothing",
         ],
         cwd=ROOT,
         check=True,
     )
 
 
-def record_version(database_url: str, version: str) -> None:
-    """Fallback ledger insert for migrations that do not self-register."""
-    result = psql(
-        database_url,
-        "--command",
-        "insert into memphant.schema_migrations (version, schema_compat_revision) "
-        f"values ('{version}', '{version}') on conflict (version) do nothing",
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"failed to record migration {version}: {result.stdout}{result.stderr}"
+def validate_database_url(database_url: str) -> None:
+    try:
+        port = urlsplit(database_url).port
+    except ValueError as error:
+        raise ValueError(f"invalid database URL: {error}") from error
+    if port == 6543:
+        raise ValueError(
+            "transaction pooler port 6543 is not supported for migrations; "
+            "use a direct or session connection on port 5432"
         )
 
 
@@ -84,6 +88,10 @@ def main() -> int:
     parser.add_argument("--database-url", required=True)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    try:
+        validate_database_url(args.database_url)
+    except ValueError as error:
+        parser.error(str(error))
 
     files = migration_files()
     print(f"migration_plan={len(files)}")
@@ -101,7 +109,6 @@ def main() -> int:
             print(f"migration_skip={version} reason=already_applied")
             continue
         apply_migration(args.database_url, path)
-        record_version(args.database_url, version)
         applied_count += 1
     print(f"migration_apply=complete applied={applied_count} skipped={len(files) - applied_count}")
     return 0

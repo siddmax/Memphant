@@ -2114,7 +2114,9 @@ name = "memphant-core"
 version = "0.1.0"
 dependencies = [
  "fsrs",
+ "futures",
  "jiff",
+ "memphant-store-testkit",
  "memphant-types",
  "serde",
  "serde_json",
@@ -2166,11 +2168,14 @@ version = "0.1.0"
 dependencies = [
  "candle-core",
  "fastembed",
+ "jiff",
  "memphant-core",
  "memphant-store-postgres",
  "memphant-types",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "tokio",
  "ureq",
  "uuid",
 ]
@@ -2198,11 +2203,22 @@ name = "memphant-store-postgres"
 version = "0.1.0"
 dependencies = [
  "memphant-core",
+ "memphant-store-testkit",
  "memphant-types",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sqlx",
  "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "memphant-store-testkit"
+version = "0.1.0"
+dependencies = [
+ "memphant-core",
+ "memphant-types",
  "uuid",
 ]
 

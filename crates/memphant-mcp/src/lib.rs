@@ -6,11 +6,11 @@
 //! to start rather than serving an unauthenticated session.
 
 use memphant_core::service::{MemoryService, ServiceError, clamp_trust};
-use memphant_core::{CoreError, MemoryStore};
+use memphant_core::{CoreError, MemoryStore, MutationResponse, StoreError};
 use memphant_runtime::AnyStore;
 use memphant_types::{
     CorrectRequest, CorrectResult, ENGINE_VERSION, ForgetRequest, ForgetResult, MarkRequest,
-    MarkResult, RecallHttpRequest, RecallResponse, ReflectRequest, ReflectResult,
+    MarkResult, RecallHttpRequest, RecallResponse, ReflectAccepted, ReflectRequest,
     RetainEpisodeHttpRequest, RetainEpisodeHttpResponse, RetrievalTrace, TenantId, TraceRequest,
     TrustLevel,
 };
@@ -18,6 +18,9 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{Json, ServerHandler, tool, tool_handler, tool_router};
+use schemars::JsonSchema;
+use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -38,9 +41,37 @@ pub fn api_key_hash(token: &str) -> String {
 /// not-found, and policy errors carry caller-relevant, safe-to-surface text.
 pub fn mcp_error(error: ServiceError) -> String {
     match error {
+        ServiceError::Core(CoreError::Store(StoreError::IdempotencyConflict)) => {
+            "idempotency_conflict: key was already used with a different request".to_string()
+        }
+        ServiceError::Core(CoreError::Store(StoreError::StaleSubjectGeneration)) => {
+            "stale_subject_generation: subject generation is stale".to_string()
+        }
+        ServiceError::Core(CoreError::Store(StoreError::SubjectErased)) => {
+            "subject_erased: subject has been erased".to_string()
+        }
+        ServiceError::Core(CoreError::Store(StoreError::PolicyDenied(_))) => {
+            "scope_denied: request is outside the resolved memory policy".to_string()
+        }
         ServiceError::Core(CoreError::Store(_)) => "backend unavailable".to_string(),
         other => other.to_string(),
     }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct McpMutation<T> {
+    #[schemars(length(min = 1, max = 255))]
+    idempotency_key: String,
+    request: T,
+}
+
+fn decode_mutation_response<T: DeserializeOwned>(
+    response: MutationResponse,
+) -> Result<Json<T>, String> {
+    serde_json::from_slice(response.body())
+        .map(Json)
+        .map_err(|_| "backend unavailable".to_string())
 }
 
 /// Constant-time string equality (length may leak). Compares a presented bearer
@@ -89,6 +120,8 @@ pub fn mcp_http_authorized(
 pub struct BoundTenant {
     pub tenant: TenantId,
     pub max_trust: TrustLevel,
+    pub actor_id: Option<memphant_types::ActorId>,
+    pub scope_id: Option<memphant_types::ScopeId>,
     pub dev_mode: bool,
 }
 
@@ -112,6 +145,8 @@ pub async fn resolve_tenant(store: &AnyStore) -> Result<BoundTenant, String> {
         return Ok(BoundTenant {
             tenant,
             max_trust: TrustLevel::TrustedSystem,
+            actor_id: None,
+            scope_id: None,
             dev_mode: true,
         });
     }
@@ -131,6 +166,8 @@ pub async fn resolve_tenant(store: &AnyStore) -> Result<BoundTenant, String> {
     Ok(BoundTenant {
         tenant: row.tenant_id,
         max_trust: row.max_trust,
+        actor_id: row.actor_id,
+        scope_id: row.scope_id,
         dev_mode: false,
     })
 }
@@ -162,18 +199,23 @@ impl MemphantMcp {
         }
     }
 
-    /// All tool calls are bound server-side to the startup tenant; a body
-    /// tenant id that disagrees is rejected (ignored entirely in dev mode).
-    fn bind_tenant(&self, body_tenant: TenantId) -> Result<TenantId, String> {
-        if self.bound.dev_mode || body_tenant == self.bound.tenant {
-            Ok(self.bound.tenant)
+    fn bind_principal(
+        &self,
+        actor_id: memphant_types::ActorId,
+        scope_id: memphant_types::ScopeId,
+    ) -> Result<(), String> {
+        if self.bound.dev_mode
+            || (self.bound.actor_id.is_none() && self.bound.scope_id.is_none())
+            || (self.bound.actor_id == Some(actor_id) && self.bound.scope_id == Some(scope_id))
+        {
+            Ok(())
         } else {
-            Err("tenant_mismatch: body tenant_id does not match the session's tenant".to_string())
+            Err("scope_denied: request is outside the API key principal binding".to_string())
         }
     }
 
     #[tool(
-        description = "Store memory: an episode body (default), a resource {uri, mime_type, content_hash, revision?, body} or a direct pre-compiled unit {kind, subject, predicate, body}.",
+        description = "Store exactly one episode, resource, or direct unit with provenance.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -183,16 +225,39 @@ impl MemphantMcp {
     )]
     async fn retain(
         &self,
-        Parameters(mut request): Parameters<RetainEpisodeHttpRequest>,
+        Parameters(McpMutation {
+            idempotency_key,
+            request,
+        }): Parameters<McpMutation<RetainEpisodeHttpRequest>>,
     ) -> Result<Json<RetainEpisodeHttpResponse>, String> {
-        let tenant = self.bind_tenant(request.tenant_id)?;
-        // Caller-declared trust is a hint, capped at the key's ceiling.
-        request.source_trust = clamp_trust(request.source_trust, self.bound.max_trust);
-        self.service
-            .retain(tenant, request)
+        let tenant = self.bound.tenant;
+        self.bind_principal(request.actor_id, request.scope_id)?;
+        let context = self
+            .service
+            .store()
+            .resolve_memory_context(
+                tenant,
+                request.subject_id,
+                request.actor_id,
+                request.scope_id,
+                request.agent_node_id,
+            )
             .await
-            .map(Json)
-            .map_err(mcp_error)
+            .map_err(|_| "scope_denied: unresolved memory context".to_string())?;
+        if request.subject_generation != context.subject_generation {
+            return Err("context_binding_conflict: subject generation is stale".to_string());
+        }
+        let response = self
+            .service
+            .retain(
+                &context,
+                &idempotency_key,
+                clamp_trust(context.actor_trust, self.bound.max_trust),
+                request,
+            )
+            .await
+            .map_err(mcp_error)?;
+        decode_mutation_response(response)
     }
 
     #[tool(
@@ -208,9 +273,25 @@ impl MemphantMcp {
         &self,
         Parameters(request): Parameters<RecallHttpRequest>,
     ) -> Result<Json<RecallResponse>, String> {
-        let tenant = self.bind_tenant(request.tenant_id)?;
+        let tenant = self.bound.tenant;
+        self.bind_principal(request.actor_id, request.scope_id)?;
+        let context = self
+            .service
+            .store()
+            .resolve_memory_context(
+                tenant,
+                request.subject_id,
+                request.actor_id,
+                request.scope_id,
+                request.agent_node_id,
+            )
+            .await
+            .map_err(|_| "scope_denied: unresolved memory context".to_string())?;
+        if request.subject_generation != context.subject_generation {
+            return Err("context_binding_conflict: subject generation is stale".to_string());
+        }
         self.service
-            .recall(tenant, request)
+            .recall(context, request)
             .await
             .map(Json)
             .map_err(mcp_error)
@@ -227,14 +308,34 @@ impl MemphantMcp {
     )]
     async fn reflect(
         &self,
-        Parameters(request): Parameters<ReflectRequest>,
-    ) -> Result<Json<ReflectResult>, String> {
-        let tenant = self.bind_tenant(request.tenant_id)?;
-        self.service
-            .reflect(tenant, request.scope_id, request.compiler_version)
+        Parameters(McpMutation {
+            idempotency_key,
+            request,
+        }): Parameters<McpMutation<ReflectRequest>>,
+    ) -> Result<Json<ReflectAccepted>, String> {
+        let tenant = self.bound.tenant;
+        self.bind_principal(request.actor_id, request.scope_id)?;
+        let context = self
+            .service
+            .store()
+            .resolve_memory_context(
+                tenant,
+                request.subject_id,
+                request.actor_id,
+                request.scope_id,
+                request.agent_node_id,
+            )
             .await
-            .map(Json)
-            .map_err(mcp_error)
+            .map_err(|_| "scope_denied: unresolved memory context".to_string())?;
+        if request.subject_generation != context.subject_generation {
+            return Err("context_binding_conflict: subject generation is stale".to_string());
+        }
+        let response = self
+            .service
+            .reflect(&context, &idempotency_key, request)
+            .await
+            .map_err(mcp_error)?;
+        decode_mutation_response(response)
     }
 
     #[tool(
@@ -248,14 +349,34 @@ impl MemphantMcp {
     )]
     async fn correct(
         &self,
-        Parameters(request): Parameters<CorrectRequest>,
+        Parameters(McpMutation {
+            idempotency_key,
+            request,
+        }): Parameters<McpMutation<CorrectRequest>>,
     ) -> Result<Json<CorrectResult>, String> {
-        let tenant = self.bind_tenant(request.tenant_id)?;
-        self.service
-            .correct(tenant, request)
+        let tenant = self.bound.tenant;
+        self.bind_principal(request.actor_id, request.scope_id)?;
+        let context = self
+            .service
+            .store()
+            .resolve_memory_context(
+                tenant,
+                request.subject_id,
+                request.actor_id,
+                request.scope_id,
+                request.agent_node_id,
+            )
             .await
-            .map(Json)
-            .map_err(mcp_error)
+            .map_err(|_| "scope_denied: unresolved memory context".to_string())?;
+        if request.subject_generation != context.subject_generation {
+            return Err("context_binding_conflict: subject generation is stale".to_string());
+        }
+        decode_mutation_response(
+            self.service
+                .correct(&context, &idempotency_key, request)
+                .await
+                .map_err(mcp_error)?,
+        )
     }
 
     #[tool(
@@ -269,14 +390,39 @@ impl MemphantMcp {
     )]
     async fn forget(
         &self,
-        Parameters(request): Parameters<ForgetRequest>,
+        Parameters(McpMutation {
+            idempotency_key,
+            request,
+        }): Parameters<McpMutation<ForgetRequest>>,
     ) -> Result<Json<ForgetResult>, String> {
-        let tenant = self.bind_tenant(request.tenant_id)?;
-        self.service
-            .forget(tenant, request)
+        let tenant = self.bound.tenant;
+        if request.scope_id != request.selector.scope_id {
+            return Err(
+                "context_binding_conflict: forget scope does not match selector scope".to_string(),
+            );
+        }
+        self.bind_principal(request.actor_id, request.selector.scope_id)?;
+        let context = self
+            .service
+            .store()
+            .resolve_memory_context(
+                tenant,
+                request.subject_id,
+                request.actor_id,
+                request.scope_id,
+                request.agent_node_id,
+            )
             .await
-            .map(Json)
-            .map_err(mcp_error)
+            .map_err(|_| "scope_denied: unresolved memory context".to_string())?;
+        if request.subject_generation != context.subject_generation {
+            return Err("context_binding_conflict: subject generation is stale".to_string());
+        }
+        decode_mutation_response(
+            self.service
+                .forget(&context, &idempotency_key, request)
+                .await
+                .map_err(mcp_error)?,
+        )
     }
 
     #[tool(
@@ -292,13 +438,31 @@ impl MemphantMcp {
         &self,
         Parameters(request): Parameters<TraceRequest>,
     ) -> Result<Json<RetrievalTrace>, String> {
-        let tenant = self.bind_tenant(request.tenant_id)?;
-        self.service
-            .trace(tenant, request.trace_id)
+        let tenant = self.bound.tenant;
+        self.bind_principal(request.actor_id, request.scope_id)?;
+        let context = self
+            .service
+            .store()
+            .resolve_memory_context(
+                tenant,
+                request.subject_id,
+                request.actor_id,
+                request.scope_id,
+                request.agent_node_id,
+            )
+            .await
+            .map_err(|_| "scope_denied: unresolved memory context".to_string())?;
+        if request.subject_generation != context.subject_generation {
+            return Err("context_binding_conflict: subject generation is stale".to_string());
+        }
+        let trace = self
+            .service
+            .trace(&context, request.trace_id)
             .await
             .map_err(mcp_error)?
-            .map(Json)
-            .ok_or_else(|| "trace not found".to_string())
+            .ok_or_else(|| "trace not found".to_string())?;
+        self.bind_principal(trace.actor_id, trace.scope_id)?;
+        Ok(Json(trace))
     }
 
     #[tool(
@@ -312,14 +476,34 @@ impl MemphantMcp {
     )]
     async fn mark(
         &self,
-        Parameters(request): Parameters<MarkRequest>,
+        Parameters(McpMutation {
+            idempotency_key,
+            request,
+        }): Parameters<McpMutation<MarkRequest>>,
     ) -> Result<Json<MarkResult>, String> {
-        let tenant = self.bind_tenant(request.tenant_id)?;
-        self.service
-            .mark(tenant, request)
+        let tenant = self.bound.tenant;
+        self.bind_principal(request.actor_id, request.scope_id)?;
+        let context = self
+            .service
+            .store()
+            .resolve_memory_context(
+                tenant,
+                request.subject_id,
+                request.actor_id,
+                request.scope_id,
+                request.agent_node_id,
+            )
             .await
-            .map(Json)
-            .map_err(mcp_error)
+            .map_err(|_| "scope_denied: unresolved memory context".to_string())?;
+        if request.subject_generation != context.subject_generation {
+            return Err("context_binding_conflict: subject generation is stale".to_string());
+        }
+        decode_mutation_response(
+            self.service
+                .mark(&context, &idempotency_key, request)
+                .await
+                .map_err(mcp_error)?,
+        )
     }
 }
 

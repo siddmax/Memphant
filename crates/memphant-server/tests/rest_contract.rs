@@ -2,15 +2,36 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use memphant_types::{
-    ActorId, CorrectRequest, CorrectSelector, CorrectionPayload, ForgetRequest, ForgetSelector,
-    HealthResponse, MarkOutcome, MarkRequest, MemoryKind, RecallHttpRequest, RecallResponse,
-    ReflectRequest, RetainEpisodeHttpRequest, RetainEpisodeHttpResponse, RetainResourcePayload,
-    ScopeId, ScopeMemoryResponse, TenantId, TrustLevel,
+    ActorId, ContextBindingAgentRef, ContextBindingEntityRef, ContextBindingRequest,
+    ContextBindingResponse, ContextBindingScopeRef, CorrectRequest, CorrectSelector,
+    CorrectionPayload, ForgetRequest, ForgetSelector, HealthResponse, MarkOutcome, MarkRequest,
+    MemoryKind, RecallHttpRequest, RecallResponse, ReflectRequest, RetainEpisodeHttpRequest,
+    RetainEpisodeHttpResponse, RetainEpisodePayload, RetainPayload, RetainResourcePayload, ScopeId,
+    ScopeMemoryResponse, TenantId,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tower::ServiceExt;
+
+static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+fn add_idempotency_header(
+    mut builder: axum::http::request::Builder,
+    path: &str,
+) -> axum::http::request::Builder {
+    if matches!(
+        path,
+        "/v1/episodes" | "/v1/reflect" | "/v1/correct" | "/v1/forget" | "/v1/mark"
+    ) {
+        builder = builder.header(
+            "idempotency-key",
+            format!("rest-test-{}", REQUEST_ID.fetch_add(1, Ordering::Relaxed)),
+        );
+    }
+    builder
+}
 
 fn tenant(value: u128) -> TenantId {
     TenantId::from_u128(value)
@@ -28,26 +49,34 @@ fn dev_app(tenant_id: TenantId) -> axum::Router {
     memphant_server::app(memphant_server::AppState::new_in_memory().with_dev_tenant(tenant_id))
 }
 
-fn episode_request(
+fn dev_app_with_state(
     tenant_id: TenantId,
+) -> (
+    axum::Router,
+    memphant_server::AppState<memphant_core::InMemoryStore>,
+) {
+    let state = memphant_server::AppState::new_in_memory().with_dev_tenant(tenant_id);
+    (memphant_server::app(state.clone()), state)
+}
+
+fn episode_request(
     scope_id: ScopeId,
     actor_id: ActorId,
     body: &str,
-    subject: Option<&str>,
+    _subject: Option<&str>,
 ) -> RetainEpisodeHttpRequest {
     RetainEpisodeHttpRequest {
-        tenant_id,
+        subject_id: memphant_types::SubjectId::new(),
         scope_id,
         actor_id,
-        source_kind: "user".to_string(),
-        source_trust: TrustLevel::TrustedUser,
-        subject_hint: subject.map(str::to_string),
-        subject: subject.map(str::to_string),
-        predicate: subject.map(|_| "value".to_string()),
-        body: Some(body.to_string()),
-        resource: None,
-        unit: None,
-        compiler_version: None,
+        agent_node_id: memphant_types::AgentNodeId::new(),
+        subject_generation: 0,
+        source_ref: format!("rest:test:{}", REQUEST_ID.fetch_add(1, Ordering::Relaxed)),
+        observed_at: "2026-07-15T00:00:00Z".to_string(),
+        payload: RetainPayload::Episode(RetainEpisodePayload {
+            source_kind: "user".to_string(),
+            body: body.to_string(),
+        }),
     }
 }
 
@@ -58,22 +87,74 @@ fn recall_request(
     query: &str,
 ) -> RecallHttpRequest {
     RecallHttpRequest {
-        tenant_id,
+        subject_id: memphant_types::SubjectId::from_u128(tenant_id.as_uuid().as_u128()),
         scope_id,
+        agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+        subject_generation: 0,
         actor_id,
-        allowed_scope_ids: Some(vec![scope_id]),
         query: query.to_string(),
         limit: Some(4),
         budget_tokens: Some(120),
         mode: None,
         include_beliefs: None,
-        edge_expansion_enabled: None,
-        context_packing_abstention_enabled: None,
-        rerank_enabled: None,
-        query_decomposition_enabled: None,
-        procedure_recall_enabled: None,
-        decay_enabled: None,
+        transaction_as_of: None,
+        valid_at: None,
+        aggregation_window: None,
     }
+}
+
+async fn bind_context(app: &axum::Router, client_ref: &str) -> ContextBindingResponse {
+    json_request(
+        app,
+        "PUT",
+        &format!("/v1/context-bindings/{client_ref}"),
+        Some(ContextBindingRequest {
+            subject: ContextBindingEntityRef {
+                external_ref: format!("subject:{client_ref}"),
+                kind: "user".to_string(),
+            },
+            actor: ContextBindingEntityRef {
+                external_ref: format!("actor:{client_ref}"),
+                kind: "system".to_string(),
+            },
+            scope: ContextBindingScopeRef {
+                external_ref: format!("scope:{client_ref}"),
+                kind: "user_root".to_string(),
+                parent_external_ref: None,
+            },
+            agent_node: ContextBindingAgentRef {
+                external_ref: format!("agent:{client_ref}"),
+                parent_external_ref: None,
+            },
+            access_policies: vec![],
+        }),
+    )
+    .await
+    .1
+}
+
+fn bind_episode_request(
+    mut request: RetainEpisodeHttpRequest,
+    binding: &ContextBindingResponse,
+) -> RetainEpisodeHttpRequest {
+    request.subject_id = binding.subject_id;
+    request.scope_id = binding.scope_id;
+    request.actor_id = binding.actor_id;
+    request.agent_node_id = binding.agent_node_id;
+    request.subject_generation = binding.subject_generation;
+    request
+}
+
+fn bind_recall_request(
+    mut request: RecallHttpRequest,
+    binding: &ContextBindingResponse,
+) -> RecallHttpRequest {
+    request.subject_id = binding.subject_id;
+    request.scope_id = binding.scope_id;
+    request.actor_id = binding.actor_id;
+    request.agent_node_id = binding.agent_node_id;
+    request.subject_generation = binding.subject_generation;
+    request
 }
 
 #[tokio::test]
@@ -81,7 +162,8 @@ async fn rest_examples_round_trip_through_retain_reflect_recall_trace_and_mutati
     let tenant_id = tenant(90_000);
     let scope_id = scope(90_001);
     let actor_id = actor(90_002);
-    let app = dev_app(tenant_id);
+    let (app, state) = dev_app_with_state(tenant_id);
+    let binding = bind_context(&app, "rest-roundtrip").await;
 
     let health: HealthResponse = json_request(&app, "GET", "/v1/health", None::<()>).await.1;
     assert_eq!(health.status, "ok");
@@ -91,12 +173,14 @@ async fn rest_examples_round_trip_through_retain_reflect_recall_trace_and_mutati
         &app,
         "POST",
         "/v1/episodes",
-        Some(episode_request(
-            tenant_id,
-            scope_id,
-            actor_id,
-            "Release region is Taipei.",
-            Some("release region"),
+        Some(bind_episode_request(
+            episode_request(
+                scope_id,
+                actor_id,
+                "Release region is Taipei.",
+                Some("release region"),
+            ),
+            &binding,
         )),
     )
     .await
@@ -104,30 +188,39 @@ async fn rest_examples_round_trip_through_retain_reflect_recall_trace_and_mutati
     assert_eq!(retained.enqueued, vec!["reflect_episode"]);
     assert!(retained.episode_id.is_some());
 
-    let reflected: Value = json_request(
+    let (status, reflected): (_, Value) = json_request(
         &app,
         "POST",
         "/v1/reflect",
         Some(ReflectRequest {
-            tenant_id,
-            scope_id,
-            actor_id,
-            compiler_version: None,
+            subject_id: binding.subject_id,
+            scope_id: binding.scope_id,
+            agent_node_id: binding.agent_node_id,
+            subject_generation: binding.subject_generation,
+            actor_id: binding.actor_id,
         }),
     )
-    .await
-    .1;
-    assert_eq!(reflected["episodes_consumed"], 1);
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert!(reflected["job_id"].is_string());
+    state
+        .service()
+        .run_worker_tick(usize::MAX)
+        .await
+        .expect("worker reflects accepted job");
 
     let recalled: RecallResponse = json_request(
         &app,
         "POST",
         "/v1/recall",
-        Some(recall_request(
-            tenant_id,
-            scope_id,
-            actor_id,
-            "Where is the release region?",
+        Some(bind_recall_request(
+            recall_request(
+                tenant_id,
+                scope_id,
+                actor_id,
+                "Where is the release region?",
+            ),
+            &binding,
         )),
     )
     .await
@@ -135,7 +228,15 @@ async fn rest_examples_round_trip_through_retain_reflect_recall_trace_and_mutati
     assert_eq!(recalled.items[0].body, "Release region is Taipei.");
     assert!(!recalled.degraded);
 
-    let trace_path = format!("/v1/traces/{}", recalled.trace_id.as_uuid());
+    let trace_path = format!(
+        "/v1/traces/{}?subject_id={}&subject_generation={}&scope_id={}&actor_id={}&agent_node_id={}",
+        recalled.trace_id.as_uuid(),
+        binding.subject_id.as_uuid(),
+        binding.subject_generation,
+        binding.scope_id.as_uuid(),
+        binding.actor_id.as_uuid(),
+        binding.agent_node_id.as_uuid(),
+    );
     let trace: Value = json_request(&app, "GET", &trace_path, None::<()>).await.1;
     assert_eq!(trace["id"], recalled.trace_id.as_uuid().to_string());
 
@@ -144,15 +245,19 @@ async fn rest_examples_round_trip_through_retain_reflect_recall_trace_and_mutati
         "POST",
         "/v1/correct",
         Some(CorrectRequest {
-            tenant_id,
-            scope_id,
-            actor_id,
+            subject_id: binding.subject_id,
+            scope_id: binding.scope_id,
+            agent_node_id: binding.agent_node_id,
+            subject_generation: binding.subject_generation,
+            actor_id: binding.actor_id,
             selector: CorrectSelector {
                 memory_unit_id: recalled.items[0].unit_id,
             },
             correction: CorrectionPayload {
                 value: "Release region is Singapore.".to_string(),
                 reason: "stale_fact".to_string(),
+                source_ref: "rest:correction:release-region".to_string(),
+                observed_at: "2026-07-15T00:00:00Z".to_string(),
                 valid_from: None,
                 valid_to: None,
             },
@@ -170,28 +275,37 @@ async fn rest_examples_round_trip_through_retain_reflect_recall_trace_and_mutati
         "POST",
         "/v1/forget",
         Some(ForgetRequest {
-            tenant_id,
-            scope_id,
-            actor_id,
+            subject_id: binding.subject_id,
+            scope_id: binding.scope_id,
+            agent_node_id: binding.agent_node_id,
+            subject_generation: binding.subject_generation,
+            actor_id: binding.actor_id,
             selector: ForgetSelector {
                 memory_unit_id: Some(recalled.items[0].unit_id),
                 episode_id: None,
                 resource_id: None,
-                scope_id,
+                scope_id: binding.scope_id,
             },
             reason: "user_request".to_string(),
         }),
     )
     .await
     .1;
-    assert_eq!(forgotten["verification"], "post_forget_recall_probe_hits=0");
+    assert_eq!(
+        forgotten["verification"],
+        "authorized_transaction_committed"
+    );
 
     let marked: Value = json_request(
         &app,
         "POST",
         "/v1/mark",
         Some(MarkRequest {
-            tenant_id,
+            subject_id: binding.subject_id,
+            scope_id: binding.scope_id,
+            actor_id: binding.actor_id,
+            agent_node_id: binding.agent_node_id,
+            subject_generation: binding.subject_generation,
             trace_id: recalled.trace_id,
             caller_id: "rest-contract".to_string(),
             used_ids: vec![recalled.items[0].unit_id],
@@ -208,11 +322,11 @@ async fn resource_retain_reflect_recall_returns_resource_kind_item() {
     let tenant_id = tenant(91_000);
     let scope_id = scope(91_001);
     let actor_id = actor(91_002);
-    let app = dev_app(tenant_id);
+    let (app, state) = dev_app_with_state(tenant_id);
+    let binding = bind_context(&app, "resource-roundtrip").await;
 
-    let mut request = episode_request(tenant_id, scope_id, actor_id, "", None);
-    request.body = None;
-    request.resource = Some(RetainResourcePayload {
+    let mut request = bind_episode_request(episode_request(scope_id, actor_id, "", None), &binding);
+    request.payload = RetainPayload::Resource(RetainResourcePayload {
         uri: "https://example.test/runbooks/deploy.md".to_string(),
         mime_type: "text/markdown".to_string(),
         content_hash: "sha256:deploy-runbook".to_string(),
@@ -227,30 +341,39 @@ async fn resource_retain_reflect_recall_returns_resource_kind_item() {
     assert_eq!(retained.enqueued, vec!["reflect_resource"]);
     assert!(retained.resource_id.is_some());
 
-    let reflected: Value = json_request(
+    let (status, reflected): (_, Value) = json_request(
         &app,
         "POST",
         "/v1/reflect",
         Some(ReflectRequest {
-            tenant_id,
-            scope_id,
-            actor_id,
-            compiler_version: None,
+            subject_id: binding.subject_id,
+            scope_id: binding.scope_id,
+            agent_node_id: binding.agent_node_id,
+            subject_generation: binding.subject_generation,
+            actor_id: binding.actor_id,
         }),
     )
-    .await
-    .1;
-    assert_eq!(reflected["episodes_consumed"], 1);
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert!(reflected["job_id"].is_string());
+    state
+        .service()
+        .run_worker_tick(usize::MAX)
+        .await
+        .expect("worker reflects accepted job");
 
     let recalled: RecallResponse = json_request(
         &app,
         "POST",
         "/v1/recall",
-        Some(recall_request(
-            tenant_id,
-            scope_id,
-            actor_id,
-            "How does the deploy runbook roll forward?",
+        Some(bind_recall_request(
+            recall_request(
+                tenant_id,
+                scope_id,
+                actor_id,
+                "How does the deploy runbook roll forward?",
+            ),
+            &binding,
         )),
     )
     .await
@@ -268,18 +391,21 @@ async fn forget_by_episode_empties_recall_and_second_reflect_does_not_resurrect(
     let tenant_id = tenant(92_000);
     let scope_id = scope(92_001);
     let actor_id = actor(92_002);
-    let app = dev_app(tenant_id);
+    let (app, state) = dev_app_with_state(tenant_id);
+    let binding = bind_context(&app, "forget-roundtrip").await;
 
     let retained: RetainEpisodeHttpResponse = json_request(
         &app,
         "POST",
         "/v1/episodes",
-        Some(episode_request(
-            tenant_id,
-            scope_id,
-            actor_id,
-            "Payment processor is AcmePay.",
-            Some("payment processor"),
+        Some(bind_episode_request(
+            episode_request(
+                scope_id,
+                actor_id,
+                "Payment processor is AcmePay.",
+                Some("payment processor"),
+            ),
+            &binding,
         )),
     )
     .await
@@ -287,45 +413,59 @@ async fn forget_by_episode_empties_recall_and_second_reflect_does_not_resurrect(
     let episode_id = retained.episode_id.expect("episode id");
 
     let reflect = ReflectRequest {
-        tenant_id,
-        scope_id,
-        actor_id,
-        compiler_version: None,
+        subject_id: binding.subject_id,
+        scope_id: binding.scope_id,
+        agent_node_id: binding.agent_node_id,
+        subject_generation: binding.subject_generation,
+        actor_id: binding.actor_id,
     };
     let _: Value = json_request(&app, "POST", "/v1/reflect", Some(reflect.clone()))
         .await
         .1;
+    state
+        .service()
+        .run_worker_tick(usize::MAX)
+        .await
+        .expect("worker reflects episode before forgetting it");
 
     let forgotten: Value = json_request(
         &app,
         "POST",
         "/v1/forget",
         Some(ForgetRequest {
-            tenant_id,
-            scope_id,
-            actor_id,
+            subject_id: binding.subject_id,
+            scope_id: binding.scope_id,
+            agent_node_id: binding.agent_node_id,
+            subject_generation: binding.subject_generation,
+            actor_id: binding.actor_id,
             selector: ForgetSelector {
                 memory_unit_id: None,
                 episode_id: Some(episode_id),
                 resource_id: None,
-                scope_id,
+                scope_id: binding.scope_id,
             },
             reason: "user_request".to_string(),
         }),
     )
     .await
     .1;
-    assert_eq!(forgotten["verification"], "post_forget_recall_probe_hits=0");
+    assert_eq!(
+        forgotten["verification"],
+        "authorized_transaction_committed"
+    );
 
     let recalled: RecallResponse = json_request(
         &app,
         "POST",
         "/v1/recall",
-        Some(recall_request(
-            tenant_id,
-            scope_id,
-            actor_id,
-            "Which payment processor do we use?",
+        Some(bind_recall_request(
+            recall_request(
+                tenant_id,
+                scope_id,
+                actor_id,
+                "Which payment processor do we use?",
+            ),
+            &binding,
         )),
     )
     .await
@@ -340,11 +480,14 @@ async fn forget_by_episode_empties_recall_and_second_reflect_does_not_resurrect(
         &app,
         "POST",
         "/v1/recall",
-        Some(recall_request(
-            tenant_id,
-            scope_id,
-            actor_id,
-            "Which payment processor do we use?",
+        Some(bind_recall_request(
+            recall_request(
+                tenant_id,
+                scope_id,
+                actor_id,
+                "Which payment processor do we use?",
+            ),
+            &binding,
         )),
     )
     .await
@@ -360,19 +503,22 @@ async fn scope_memory_cursor_pagination_yields_two_disjoint_pages() {
     let tenant_id = tenant(93_000);
     let scope_id = scope(93_001);
     let actor_id = actor(93_002);
-    let app = dev_app(tenant_id);
+    let (app, state) = dev_app_with_state(tenant_id);
+    let binding = bind_context(&app, "scope-pagination").await;
 
     for index in 0..5 {
         let _: RetainEpisodeHttpResponse = json_request(
             &app,
             "POST",
             "/v1/episodes",
-            Some(episode_request(
-                tenant_id,
-                scope_id,
-                actor_id,
-                &format!("Paginated fact number {index} for the export surface."),
-                Some(&format!("paginated fact {index}")),
+            Some(bind_episode_request(
+                episode_request(
+                    scope_id,
+                    actor_id,
+                    &format!("Paginated fact number {index} for the export surface."),
+                    Some(&format!("paginated fact {index}")),
+                ),
+                &binding,
             )),
         )
         .await
@@ -383,16 +529,34 @@ async fn scope_memory_cursor_pagination_yields_two_disjoint_pages() {
         "POST",
         "/v1/reflect",
         Some(ReflectRequest {
-            tenant_id,
-            scope_id,
-            actor_id,
-            compiler_version: None,
+            subject_id: binding.subject_id,
+            scope_id: binding.scope_id,
+            agent_node_id: binding.agent_node_id,
+            subject_generation: binding.subject_generation,
+            actor_id: binding.actor_id,
         }),
     )
     .await
     .1;
+    while state
+        .service()
+        .run_worker_tick(usize::MAX)
+        .await
+        .expect("worker reflects paginated episodes")
+        > 0
+    {}
 
-    let base = format!("/v1/scopes/{}/memory?limit=3", scope_id.as_uuid());
+    let context_query = format!(
+        "subject_id={}&actor_id={}&agent_node_id={}&subject_generation={}",
+        binding.subject_id.as_uuid(),
+        binding.actor_id.as_uuid(),
+        binding.agent_node_id.as_uuid(),
+        binding.subject_generation,
+    );
+    let base = format!(
+        "/v1/scopes/{}/memory?{context_query}&limit=3",
+        binding.scope_id.as_uuid()
+    );
     let page_one: ScopeMemoryResponse = json_request(&app, "GET", &base, None::<()>).await.1;
     assert_eq!(page_one.items.len(), 3);
     assert!(page_one.has_more);
@@ -402,8 +566,8 @@ async fn scope_memory_cursor_pagination_yields_two_disjoint_pages() {
         &app,
         "GET",
         &format!(
-            "/v1/scopes/{}/memory?limit=3&cursor={cursor}",
-            scope_id.as_uuid()
+            "/v1/scopes/{}/memory?{context_query}&limit=3&cursor={cursor}",
+            binding.scope_id.as_uuid()
         ),
         None::<()>,
     )
@@ -432,17 +596,20 @@ async fn retain_then_immediate_recall_serves_degraded_read_your_own_writes() {
     let scope_id = scope(94_001);
     let actor_id = actor(94_002);
     let app = dev_app(tenant_id);
+    let binding = bind_context(&app, "degraded-roundtrip").await;
 
     let _: RetainEpisodeHttpResponse = json_request(
         &app,
         "POST",
         "/v1/episodes",
-        Some(episode_request(
-            tenant_id,
-            scope_id,
-            actor_id,
-            "Fallback rollout window is Thursday night.",
-            Some("rollout window"),
+        Some(bind_episode_request(
+            episode_request(
+                scope_id,
+                actor_id,
+                "Fallback rollout window is Thursday night.",
+                Some("rollout window"),
+            ),
+            &binding,
         )),
     )
     .await
@@ -453,11 +620,14 @@ async fn retain_then_immediate_recall_serves_degraded_read_your_own_writes() {
         &app,
         "POST",
         "/v1/recall",
-        Some(recall_request(
-            tenant_id,
-            scope_id,
-            actor_id,
-            "When is the fallback rollout window?",
+        Some(bind_recall_request(
+            recall_request(
+                tenant_id,
+                scope_id,
+                actor_id,
+                "When is the fallback rollout window?",
+            ),
+            &binding,
         )),
     )
     .await
@@ -467,7 +637,55 @@ async fn retain_then_immediate_recall_serves_degraded_read_your_own_writes() {
         recalled.items[0].body,
         "Fallback rollout window is Thursday night."
     );
-    assert!(recalled.items[0].citation_episode_id.is_some());
+    assert!(recalled.items[0].citation_episode_id.is_none());
+    assert!(recalled.items[0].citation_resource_id.is_none());
+    assert!(recalled.citations.is_empty());
+    assert!(recalled.candidate_whitelist.is_empty());
+    assert_eq!(recalled.consolidation_lag_ms, 1);
+    let trace_path = format!(
+        "/v1/traces/{}?subject_id={}&subject_generation={}&scope_id={}&actor_id={}&agent_node_id={}",
+        recalled.trace_id.as_uuid(),
+        binding.subject_id.as_uuid(),
+        binding.subject_generation,
+        binding.scope_id.as_uuid(),
+        binding.actor_id.as_uuid(),
+        binding.agent_node_id.as_uuid(),
+    );
+    let trace: Value = json_request(&app, "GET", &trace_path, None::<()>).await.1;
+    assert_eq!(trace["citations"], serde_json::json!([]));
+    assert_eq!(trace["context_items"], serde_json::json!([]));
+    assert_eq!(trace["consolidation_lag_ms"], 1);
+    assert_eq!(
+        trace["degradation"]["reason"],
+        "pending_reflection_read_your_own_writes"
+    );
+    assert_eq!(
+        trace["degradation"]["items"][0]["body"],
+        "Fallback rollout window is Thursday night."
+    );
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/mark")
+        .header("content-type", "application/json")
+        .header("idempotency-key", "degraded-mark")
+        .body(Body::from(
+            serde_json::to_vec(&MarkRequest {
+                subject_id: binding.subject_id,
+                scope_id: binding.scope_id,
+                actor_id: binding.actor_id,
+                agent_node_id: binding.agent_node_id,
+                subject_generation: binding.subject_generation,
+                trace_id: recalled.trace_id,
+                caller_id: "degraded-rest-contract".to_string(),
+                used_ids: vec![recalled.items[0].unit_id],
+                outcome: MarkOutcome::Success,
+            })
+            .expect("serialize degraded mark"),
+        ))
+        .expect("degraded mark request");
+    let response = app.clone().oneshot(request).await.expect("mark response");
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 #[test]
@@ -512,6 +730,58 @@ fn openapi_document_contains_wsd_paths_and_component_schemas() {
 }
 
 #[test]
+fn openapi_request_schemas_exclude_server_derived_and_engine_control_fields() {
+    let document = memphant_server::openapi_document();
+    for name in [
+        "RetainEpisodeHttpRequest",
+        "ReflectRequest",
+        "RecallHttpRequest",
+        "CorrectRequest",
+        "ForgetRequest",
+        "MarkRequest",
+    ] {
+        let encoded =
+            serde_json::to_string(&document["components"]["schemas"][name]).expect("schema JSON");
+        for forbidden in [
+            "tenant_id",
+            "allowed_scope_ids",
+            "edge_expansion_enabled",
+            "rerank_enabled",
+            "query_decomposition_enabled",
+            "decay_enabled",
+        ] {
+            assert!(
+                !encoded.contains(forbidden),
+                "schema {name} exposes {forbidden}"
+            );
+        }
+    }
+    let retain =
+        serde_json::to_string(&document["components"]["schemas"]["RetainEpisodeHttpRequest"])
+            .expect("retain schema");
+    assert!(!retain.contains("source_trust"));
+    assert!(!retain.contains("compiler_version"));
+}
+
+#[test]
+fn reflect_openapi_declares_accepted_instead_of_ok() {
+    let document = memphant_server::openapi_document();
+    let responses = &document["paths"]["/v1/reflect"]["post"]["responses"];
+    assert!(responses.get("202").is_some());
+    assert!(responses.get("200").is_none());
+    for path in ["/v1/episodes", "/v1/reflect"] {
+        let parameters = document["paths"][path]["post"]["parameters"]
+            .as_array()
+            .expect("mutation header parameters");
+        assert!(parameters.iter().any(|parameter| {
+            parameter["name"] == "Idempotency-Key"
+                && parameter["in"] == "header"
+                && parameter["required"] == true
+        }));
+    }
+}
+
+#[test]
 fn openapi_paths_match_public_contract_and_gets_have_no_request_body() {
     let document = memphant_server::openapi_document();
     let paths = document["paths"].as_object().expect("paths object");
@@ -535,19 +805,25 @@ fn openapi_paths_match_public_contract_and_gets_have_no_request_body() {
             );
         }
         for name in path_template_names(path) {
-            let parameters = item
-                .get("get")
-                .and_then(|operation| operation.get("parameters"))
-                .and_then(Value::as_array)
-                .expect("templated path has parameters");
-            assert!(
-                parameters.iter().any(|parameter| {
-                    parameter["name"] == name
-                        && parameter["in"] == "path"
-                        && parameter["required"] == true
-                }),
-                "{path} is missing required path parameter {name}"
-            );
+            for operation in item
+                .as_object()
+                .expect("path item object")
+                .values()
+                .filter(|value| value.is_object())
+            {
+                let parameters = operation
+                    .get("parameters")
+                    .and_then(Value::as_array)
+                    .expect("templated operation has parameters");
+                assert!(
+                    parameters.iter().any(|parameter| {
+                        parameter["name"] == name
+                            && parameter["in"] == "path"
+                            && parameter["required"] == true
+                    }),
+                    "{path} is missing required path parameter {name}"
+                );
+            }
         }
     }
     assert_eq!(
@@ -562,7 +838,7 @@ fn openapi_paths_match_public_contract_and_gets_have_no_request_body() {
             .as_array()
             .expect("scope params")
             .len(),
-        3
+        7
     );
 }
 
@@ -574,6 +850,225 @@ async fn openapi_endpoint_serves_generated_document() {
         .1;
 
     assert_eq!(served, memphant_server::openapi_document());
+}
+
+#[tokio::test]
+async fn direct_unit_retain_rejects_malformed_and_empty_valid_intervals() {
+    let tenant_id = tenant(95_000);
+    let app = dev_app(tenant_id);
+    let binding = bind_context(&app, "direct-intervals").await;
+    for (valid_from, valid_to) in [
+        ("bad", "2025-02-01T00:00:00Z"),
+        ("2025-02-01T00:00:00Z", "2025-02-01T00:00:00Z"),
+        ("2025-03-01T00:00:00Z", "2025-02-01T00:00:00Z"),
+    ] {
+        let (status, body) = error_json_request(
+            &app,
+            "POST",
+            "/v1/episodes",
+            Some(serde_json::json!({
+                "subject_id": binding.subject_id,
+                "scope_id": binding.scope_id,
+                "actor_id": binding.actor_id,
+                "agent_node_id": binding.agent_node_id,
+                "subject_generation": binding.subject_generation,
+                "source_ref": "rest:direct:interval",
+                "observed_at": "2026-07-15T00:00:00Z",
+                "payload": { "unit": {
+                    "kind": "semantic",
+                    "fact_key": "profile:city",
+                    "predicate": "is",
+                    "body": "lives in Oslo",
+                    "confidence": 0.9,
+                    "valid_from": valid_from,
+                    "valid_to": valid_to
+                }}
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"]["code"], "invalid_request");
+    }
+}
+
+#[tokio::test]
+async fn episode_retain_rejects_source_kinds_outside_the_database_contract() {
+    let tenant_id = tenant(96_000);
+    let scope_id = scope(96_001);
+    let actor_id = actor(96_002);
+    let app = dev_app(tenant_id);
+    let binding = bind_context(&app, "invalid-source-kind").await;
+    let mut request = episode_request(scope_id, actor_id, "hello", None);
+    request = bind_episode_request(request, &binding);
+    request.payload = RetainPayload::Episode(RetainEpisodePayload {
+        source_kind: "memora-dialogue".to_string(),
+        body: "hello".to_string(),
+    });
+
+    let (status, body) = error_json_request(&app, "POST", "/v1/episodes", Some(request)).await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "invalid_request");
+}
+
+#[tokio::test]
+async fn public_requests_reject_unknown_fields_with_the_standard_error_envelope() {
+    let tenant_id = tenant(96_100);
+    let scope_id = scope(96_101);
+    let actor_id = actor(96_102);
+    let app = dev_app(tenant_id);
+    for (field, value) in [
+        ("tenant_id", serde_json::json!(tenant_id)),
+        ("allowed_scope_ids", serde_json::json!([scope_id])),
+        ("edge_expansion_enabled", serde_json::json!(true)),
+        ("rerank_enabled", serde_json::json!(true)),
+        ("query_decomposition_enabled", serde_json::json!(false)),
+        ("decay_enabled", serde_json::json!(false)),
+    ] {
+        let mut request = serde_json::to_value(recall_request(
+            tenant_id,
+            scope_id,
+            actor_id,
+            "strict contract",
+        ))
+        .expect("serialize request");
+        request[field] = value;
+
+        let (status, body) = error_json_request(&app, "POST", "/v1/recall", Some(request)).await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "field {field}");
+        assert_eq!(body["error"]["code"], "invalid_request");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("unknown field"))
+        );
+    }
+}
+
+#[tokio::test]
+async fn ledger_backed_mutations_require_one_valid_idempotency_header() {
+    let app = dev_app(tenant(96_200));
+    for path in [
+        "/v1/episodes",
+        "/v1/reflect",
+        "/v1/correct",
+        "/v1/forget",
+        "/v1/mark",
+    ] {
+        let request = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .expect("request");
+        let response = app.clone().oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "path {path}");
+    }
+
+    for path in ["/v1/episodes", "/v1/reflect", "/v1/correct"] {
+        for key in ["", "   "] {
+            let request = Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("content-type", "application/json")
+                .header("idempotency-key", key)
+                .body(Body::from("{}"))
+                .expect("request");
+            let response = app.clone().oneshot(request).await.expect("response");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "path {path}");
+        }
+    }
+
+    for path in ["/v1/episodes", "/v1/reflect"] {
+        let request = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json")
+            .header("idempotency-key", "first")
+            .header("idempotency-key", "second")
+            .body(Body::from("{}"))
+            .expect("request");
+        let response = app.clone().oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "path {path}");
+    }
+}
+
+#[tokio::test]
+async fn retain_and_reflect_replay_exact_http_receipts() {
+    let app = dev_app(tenant(96_300));
+    let binding = bind_context(&app, "mutation-replay").await;
+    let retain = bind_episode_request(
+        episode_request(binding.scope_id, binding.actor_id, "replay", None),
+        &binding,
+    );
+    let reflect = ReflectRequest {
+        subject_id: binding.subject_id,
+        scope_id: binding.scope_id,
+        actor_id: binding.actor_id,
+        agent_node_id: binding.agent_node_id,
+        subject_generation: binding.subject_generation,
+    };
+
+    for (path, key, expected_status, body) in [
+        (
+            "/v1/episodes",
+            "rest-retain-replay",
+            StatusCode::OK,
+            serde_json::to_vec(&retain).expect("retain body"),
+        ),
+        (
+            "/v1/reflect",
+            "rest-reflect-replay",
+            StatusCode::ACCEPTED,
+            serde_json::to_vec(&reflect).expect("reflect body"),
+        ),
+    ] {
+        let mut receipts = Vec::new();
+        for _ in 0..2 {
+            let request = Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("content-type", "application/json")
+                .header("idempotency-key", key)
+                .body(Body::from(body.clone()))
+                .expect("request");
+            let response = app.clone().oneshot(request).await.expect("response");
+            let status = response.status();
+            let bytes = response
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes();
+            receipts.push((status, bytes));
+        }
+        assert_eq!(receipts[0].0, expected_status);
+        assert_eq!(receipts[0], receipts[1]);
+    }
+}
+
+async fn error_json_request<T: Serialize>(
+    app: &axum::Router,
+    method: &str,
+    path: &str,
+    body: T,
+) -> (StatusCode, Value) {
+    let request = add_idempotency_header(Request::builder().method(method).uri(path), path)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&body).expect("serialize body"),
+        ))
+        .expect("request");
+    let response = app.clone().oneshot(request).await.expect("response");
+    let status = response.status();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    (status, serde_json::from_slice(&bytes).expect("error json"))
 }
 
 #[test]
@@ -683,7 +1178,7 @@ where
     T: Serialize,
     R: DeserializeOwned,
 {
-    let mut builder = Request::builder().method(method).uri(path);
+    let mut builder = add_idempotency_header(Request::builder().method(method).uri(path), path);
     let request = if let Some(body) = body {
         builder = builder.header("content-type", "application/json");
         builder

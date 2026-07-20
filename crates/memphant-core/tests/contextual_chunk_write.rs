@@ -34,24 +34,19 @@ fn service(store: InMemoryStore, chunks_write: bool) -> MemoryService<InMemorySt
     .with_contextual_chunks_write_enabled(chunks_write)
 }
 
-fn retain_request(
-    tenant_id: TenantId,
-    scope_id: ScopeId,
-    actor_id: ActorId,
-) -> RetainEpisodeHttpRequest {
+fn retain_request(context: &memphant_types::ResolvedMemoryContext) -> RetainEpisodeHttpRequest {
     RetainEpisodeHttpRequest {
-        tenant_id,
-        scope_id,
-        actor_id,
-        source_kind: "user".to_string(),
-        source_trust: TrustLevel::TrustedUser,
-        subject_hint: None,
-        subject: None,
-        predicate: None,
-        body: Some(EPISODE_BODY.to_string()),
-        resource: None,
-        unit: None,
-        compiler_version: None,
+        subject_id: context.data_subject_id,
+        scope_id: context.scope_id,
+        actor_id: context.actor_id,
+        agent_node_id: context.agent_node_id,
+        subject_generation: context.subject_generation,
+        source_ref: "test:fixture".to_string(),
+        observed_at: "2026-07-09T00:00:00Z".to_string(),
+        payload: memphant_types::RetainPayload::Episode(memphant_types::RetainEpisodePayload {
+            source_kind: "user".to_string(),
+            body: EPISODE_BODY.to_string(),
+        }),
     }
 }
 
@@ -62,21 +57,19 @@ fn recall_request(
     query: &str,
 ) -> RecallHttpRequest {
     RecallHttpRequest {
-        tenant_id,
+        subject_id: memphant_types::SubjectId::from_u128(tenant_id.as_uuid().as_u128()),
         scope_id,
+        agent_node_id: memphant_types::AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+        subject_generation: 0,
         actor_id,
-        allowed_scope_ids: None,
         query: query.to_string(),
         limit: None,
         budget_tokens: None,
         mode: None,
         include_beliefs: None,
-        edge_expansion_enabled: None,
-        context_packing_abstention_enabled: None,
-        rerank_enabled: None,
-        query_decomposition_enabled: None,
-        procedure_recall_enabled: None,
-        decay_enabled: None,
+        transaction_as_of: None,
+        valid_at: None,
+        aggregation_window: None,
     }
 }
 
@@ -87,16 +80,29 @@ async fn reflect_mints_contextual_chunks_when_write_enabled() {
     let tenant = TenantId::new();
     let scope = ScopeId::new();
     let actor = ActorId::new();
+    store.seed_context_binding(&memphant_store_testkit::resolved_context(
+        tenant, scope, actor,
+    ));
 
     let retained = service
-        .retain(tenant, retain_request(tenant, scope, actor))
+        .retain(
+            &memphant_store_testkit::resolved_context(tenant, scope, actor),
+            concat!("test:", line!()),
+            TrustLevel::TrustedUser,
+            retain_request(&memphant_store_testkit::resolved_context(
+                tenant, scope, actor,
+            )),
+        )
         .await
         .expect("retain");
+    let retained: memphant_types::RetainEpisodeHttpResponse =
+        serde_json::from_slice(retained.body()).expect("retain response");
     let episode_id = retained.episode_id.expect("episode retained");
-    service.reflect(tenant, scope, None).await.expect("reflect");
+    service.run_worker_tick(usize::MAX).await.expect("reflect");
 
+    let context = memphant_store_testkit::resolved_context(tenant, scope, actor);
     let page = store
-        .scope_memory_page(tenant, scope, None, 100)
+        .scope_memory_page(&context, None, 100)
         .await
         .expect("page");
     let unit = page
@@ -163,16 +169,36 @@ async fn reflect_mints_contextual_chunks_by_default() {
     let tenant = TenantId::new();
     let scope = ScopeId::new();
     let actor = ActorId::new();
+    store.seed_context_binding(&memphant_store_testkit::resolved_context(
+        tenant, scope, actor,
+    ));
 
+    let mut request = retain_request(&memphant_store_testkit::resolved_context(
+        tenant, scope, actor,
+    ));
+    let memphant_types::RetainPayload::Episode(episode) = &mut request.payload else {
+        unreachable!()
+    };
+    episode.body = SESSION_BODY.to_string();
     let retained = service
-        .retain(tenant, retain_request(tenant, scope, actor))
+        .retain(
+            &memphant_store_testkit::resolved_context(tenant, scope, actor),
+            concat!("test:", line!()),
+            TrustLevel::TrustedUser,
+            retain_request(&memphant_store_testkit::resolved_context(
+                tenant, scope, actor,
+            )),
+        )
         .await
         .expect("retain");
+    let retained: memphant_types::RetainEpisodeHttpResponse =
+        serde_json::from_slice(retained.body()).expect("retain response");
     let episode_id = retained.episode_id.expect("episode retained");
-    service.reflect(tenant, scope, None).await.expect("reflect");
+    service.run_worker_tick(usize::MAX).await.expect("reflect");
 
+    let context = memphant_store_testkit::resolved_context(tenant, scope, actor);
     let page = store
-        .scope_memory_page(tenant, scope, None, 100)
+        .scope_memory_page(&context, None, 100)
         .await
         .expect("page");
     let unit = page
@@ -199,16 +225,29 @@ async fn reflect_stays_chunk_free_when_write_disabled() {
     let tenant = TenantId::new();
     let scope = ScopeId::new();
     let actor = ActorId::new();
+    store.seed_context_binding(&memphant_store_testkit::resolved_context(
+        tenant, scope, actor,
+    ));
 
     let retained = service
-        .retain(tenant, retain_request(tenant, scope, actor))
+        .retain(
+            &memphant_store_testkit::resolved_context(tenant, scope, actor),
+            concat!("test:", line!()),
+            TrustLevel::TrustedUser,
+            retain_request(&memphant_store_testkit::resolved_context(
+                tenant, scope, actor,
+            )),
+        )
         .await
         .expect("retain");
+    let retained: memphant_types::RetainEpisodeHttpResponse =
+        serde_json::from_slice(retained.body()).expect("retain response");
     let episode_id = retained.episode_id.expect("episode retained");
-    service.reflect(tenant, scope, None).await.expect("reflect");
+    service.run_worker_tick(usize::MAX).await.expect("reflect");
 
+    let context = memphant_store_testkit::resolved_context(tenant, scope, actor);
     let page = store
-        .scope_memory_page(tenant, scope, None, 100)
+        .scope_memory_page(&context, None, 100)
         .await
         .expect("page");
     let unit = page
@@ -251,23 +290,34 @@ async fn recall_chunk_renders_matched_window_plus_neighbour() {
     let tenant = TenantId::new();
     let scope = ScopeId::new();
     let actor = ActorId::new();
+    store.seed_context_binding(&memphant_store_testkit::resolved_context(
+        tenant, scope, actor,
+    ));
 
+    let mut request = retain_request(&memphant_store_testkit::resolved_context(
+        tenant, scope, actor,
+    ));
+    let memphant_types::RetainPayload::Episode(episode) = &mut request.payload else {
+        unreachable!()
+    };
+    episode.body = SESSION_BODY.to_string();
     let retained = service
         .retain(
-            tenant,
-            RetainEpisodeHttpRequest {
-                body: Some(SESSION_BODY.to_string()),
-                ..retain_request(tenant, scope, actor)
-            },
+            &memphant_store_testkit::resolved_context(tenant, scope, actor),
+            concat!("test:", line!()),
+            TrustLevel::TrustedUser,
+            request,
         )
         .await
         .expect("retain");
+    let retained: memphant_types::RetainEpisodeHttpResponse =
+        serde_json::from_slice(retained.body()).expect("retain response");
     let episode_id = retained.episode_id.expect("episode retained");
-    service.reflect(tenant, scope, None).await.expect("reflect");
+    service.run_worker_tick(usize::MAX).await.expect("reflect");
 
     let response = service
         .recall(
-            tenant,
+            memphant_store_testkit::resolved_context(tenant, scope, actor),
             recall_request(tenant, scope, actor, "quantum harmonica"),
         )
         .await
@@ -315,16 +365,31 @@ async fn recall_cites_chunk_matched_item_to_parent_episode() {
     let tenant = TenantId::new();
     let scope = ScopeId::new();
     let actor = ActorId::new();
+    store.seed_context_binding(&memphant_store_testkit::resolved_context(
+        tenant, scope, actor,
+    ));
 
     let retained = service
-        .retain(tenant, retain_request(tenant, scope, actor))
+        .retain(
+            &memphant_store_testkit::resolved_context(tenant, scope, actor),
+            concat!("test:", line!()),
+            TrustLevel::TrustedUser,
+            retain_request(&memphant_store_testkit::resolved_context(
+                tenant, scope, actor,
+            )),
+        )
         .await
         .expect("retain");
+    let retained: memphant_types::RetainEpisodeHttpResponse =
+        serde_json::from_slice(retained.body()).expect("retain response");
     let episode_id = retained.episode_id.expect("episode retained");
-    service.reflect(tenant, scope, None).await.expect("reflect");
+    service.run_worker_tick(usize::MAX).await.expect("reflect");
 
     let response = service
-        .recall(tenant, recall_request(tenant, scope, actor, "oolong tea"))
+        .recall(
+            memphant_store_testkit::resolved_context(tenant, scope, actor),
+            recall_request(tenant, scope, actor, "oolong tea"),
+        )
         .await
         .expect("recall");
     let item = response

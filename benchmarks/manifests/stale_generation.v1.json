@@ -1,0 +1,27 @@
+{
+  "dataset_lock_sha256": "fbd08253e4c89d39f1fbce64225bb25a8db0f3a541b0c7b15d459ab16bfcfe88",
+  "output_schema_sha256": "59a35cf20c9b90b7bd55e8bc1a9a48683407150cc61acde7c16e2b84144ea061",
+  "prompt_sha256": {
+    "dim1": "50549ef313bc8d36ec98b739e5bd996d37f53c54345d6741516d74974f5d88ff",
+    "dim2": "9e6eb5f852aff34d39560204591f729c5b163194fc2501c83374d2baafeca98d",
+    "dim3": "bdd7624a8531c7d7643a620934daa92d5baebb7c2f43e6f7e1398bf3e7f4599f"
+  },
+  "protocol": "stale-memphant-generation-v1",
+  "reader": {
+    "canonical_model_snapshot": "openai/gpt-5.6-luna-pro-20260709",
+    "reasoning_effort": "high",
+    "requested_model": "openai/gpt-5.6-luna-pro"
+  },
+  "reader_response_contract_sha256": "fe755399f52073b88c2646982c4657614c8f9da747e221611c350153b56ef031",
+  "reader_lattice_sha256": "445706ee32422d1339e6fd5191b3dc745c364946813fcc89d929f26fae2e50b5",
+  "smoke": {
+    "structured_state": "off"
+  },
+  "retrieval": {
+    "budget_tokens": 8192,
+    "cross_rerank": false,
+    "embed_model": "small",
+    "limit": 10,
+    "mode": "exhaustive"
+  }
+}

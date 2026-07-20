@@ -253,84 +253,6 @@ GEN_SYSTEM_MULTI = (
 )
 
 
-class MinerCli(gc._RUN_READER.ReaderCli):
-    """ReaderCli with a raised OpenRouter completion cap for GENERATION.
-
-    run_reader's ``_call_openrouter`` caps ``max_tokens`` at 1024 — right for
-    terse reader/judge replies, but Gemini 3.1's reasoning tokens count against
-    that cap and the two-section multi-hop prompts got truncated mid-JSON
-    (0/48 accepted on the first full mine). run_reader must stay byte-unchanged
-    for scoring (brief req 4), so the miner overrides the one method here.
-    Cache keys are inherited unchanged, so previously mined replies stay valid.
-    """
-
-    OPENROUTER_MAX_TOKENS = 8192
-
-    def _call_openrouter(self, kind: str, system_prompt: str, prompt: str) -> str:
-        rr = gc._RUN_READER
-        payload = {
-            "model": self.model_for(kind),
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0,
-            "max_tokens": self.OPENROUTER_MAX_TOKENS,
-        }
-        if self.reasoning_effort is not None:
-            payload["reasoning"] = {"effort": self.reasoning_effort}
-        body = json.dumps(payload).encode()
-        request = rr.urllib.request.Request(
-            rr.OPENROUTER_URL,
-            data=body,
-            method="POST",
-            headers={
-                "Authorization": f"Bearer {self._openrouter_api_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://github.com/memphant",
-                "X-Title": "memphant-gate-miner",
-            },
-        )
-        last_error: Exception | None = None
-        for attempt, delay in enumerate((0, *rr.OPENROUTER_RETRY_DELAYS)):
-            if delay:
-                rr.time.sleep(delay)
-            try:
-                with rr.urllib.request.urlopen(
-                    request, timeout=rr.OPENROUTER_TIMEOUT
-                ) as response:
-                    data = json.loads(response.read())
-                content = (
-                    (data.get("choices") or [{}])[0].get("message", {}).get("content")
-                )
-                if not content:
-                    last_error = RuntimeError(
-                        f"openrouter returned empty content (attempt "
-                        f"{attempt + 1}/4): {json.dumps(data)[:500]}"
-                    )
-                    continue
-                return content.strip()
-            except rr.urllib.error.HTTPError as error:
-                body_text = error.read().decode(errors="replace")[:500]
-                last_error = RuntimeError(
-                    f"openrouter request failed (HTTP {error.code}, attempt "
-                    f"{attempt + 1}/4): {body_text}"
-                )
-                if error.code != 429 and error.code < 500:
-                    raise last_error from error
-            except (
-                rr.urllib.error.URLError,
-                TimeoutError,
-                OSError,
-                ValueError,
-            ) as error:
-                last_error = RuntimeError(
-                    f"openrouter request failed (attempt {attempt + 1}/4): {error}"
-                )
-        assert last_error is not None
-        raise last_error
-
-
 def single_prompt(section: gc.Section) -> str:
     return (
         f"Section heading path: {' > '.join(section.heading_path)}\n"
@@ -419,12 +341,15 @@ def mine(cli, single_sections, multi_pairs, n_single, n_multi, id_prefix: str = 
 
 def build_manifest(root: Path, files: list[str]) -> dict:
     entries = {}
+    total_bytes = 0
     for rel in files:
         data = (root / rel).read_bytes()
         entries[rel] = {"sha256": gc.sha256_hex(data), "bytes": len(data)}
+        total_bytes += len(data)
+    sections = gc.all_sections(root, files)
     return {
         "corpus": "syndai_product_docs",
-        "syndai_root": str(root),
+        "syndai_repo": root.name,
         "git_commit": gc.git_commit(root),
         "globs": list(gc.CORPUS_GLOBS),
         "excluded_prefixes": list(gc.EXCLUDE_PREFIXES),
@@ -434,6 +359,16 @@ def build_manifest(root: Path, files: list[str]) -> dict:
             "the real product/architecture/spec docs."
         ),
         "file_count": len(files),
+        "total_bytes": total_bytes,
+        "sectionizer": "markdown_heading_leaf_v1",
+        "section_count": len(sections),
+        "section_chars": sum(len(section.body) for section in sections),
+        "section_revision": gc.corpus_revision(sections),
+        "mining_candidate_section_count": len(gc.candidate_sections(sections)),
+        "mining_candidate_rule": (
+            "content chars >= 240 and section body chars <= 3200; "
+            "mining only, never indexing"
+        ),
         "files": entries,
     }
 
@@ -577,7 +512,7 @@ def main() -> int:
             a, b = b, a
         multi_pairs.append((a, b))
 
-    cli = MinerCli(
+    cli = gc._RUN_READER.ReaderCli(
         args.engine, args.model, args.model, Path(args.cache_dir), args.max_calls
     )
     goldens = mine(cli, single_candidates, multi_pairs, n_single, n_multi, args.id_prefix)

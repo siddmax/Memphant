@@ -1,5 +1,5 @@
 //! Concurrency guard for `persist_compiled_units`: a reflect job stalled past
-//! the 5-minute reclaim window (see `claim_reflect_jobs`) can be compiled by two
+//! the 15-minute reclaim window (see `claim_reflect_jobs`) can be compiled by two
 //! workers at once. Semantic units are protected from a duplicate open
 //! generation by the partial unique index `memphant_memory_unit_scope_subject_idx`
 //! (`kind = 'semantic'`); `resource`-kind units have NO such index, so the
@@ -14,12 +14,12 @@
 use std::sync::Arc;
 
 use memphant_core::{
-    FixedClock, JobFilter, MemoryStore, NoopEmbedding, reflect_recorded, retain_resource,
+    FixedClock, JobFilter, MemoryStore, NoopEmbedding, reflect_recorded_claimed, retain_resource,
 };
 use memphant_store_postgres::PgStore;
 use memphant_types::{
-    ActorId, MemoryKind, ReflectCandidate, ReflectInput, ResourceKind, RetainResourceRequest,
-    ScopeId, TenantId, TrustLevel,
+    MemoryKind, ReflectCandidate, ReflectInput, ResourceKind, RetainResourceRequest, TenantId,
+    TrustLevel,
 };
 use uuid::Uuid;
 
@@ -52,16 +52,23 @@ async fn reclaimed_resource_job_recompile_does_not_double_insert_units() {
     let tenant = fresh_tenant(&store).await;
 
     for iteration in 0..RECLAIM_RACE_ITERATIONS {
-        let scope = ScopeId::new();
-        let actor = ActorId::new();
+        let context = memphant_store_testkit::bind_context(&*store, tenant).await;
+        let scope = context.scope_id;
+        let actor = context.actor_id;
         let body = format!("Deploy runbook {iteration}: canary first, then roll forward regions.");
         let retained = retain_resource(
             &*store,
+            &context,
             RetainResourceRequest {
                 tenant_id: tenant,
+                data_subject_id: context.data_subject_id,
                 scope_id: scope,
                 actor_id: actor,
+                agent_node_id: context.agent_node_id,
+                subject_generation: context.subject_generation,
                 uri: format!("https://example.test/runbooks/deploy-{iteration}.md"),
+                source_ref: "test:reclaim".to_string(),
+                observed_at: CLOCK.0.to_string(),
                 kind: Some(ResourceKind::Document),
                 content_hash: format!("sha256:reclaim-runbook-{iteration}"),
                 mime_type: "text/markdown".to_string(),
@@ -89,15 +96,22 @@ async fn reclaimed_resource_job_recompile_does_not_double_insert_units() {
         let job = jobs
             .iter()
             .find(|row| row.job.resource_id == Some(retained.resource_id))
-            .expect("resource reflect job was enqueued");
+            .expect("resource reflect job was enqueued")
+            .clone();
 
         // Both workers rebuild the SAME ReflectInput (compile_job's resource
         // branch). Each compile mints fresh random unit ids, so a double insert
         // is two rows with distinct UUIDs — what the guard must collapse to one.
         let input = ReflectInput {
             tenant_id: tenant,
+            data_subject_id: context.data_subject_id,
             scope_id: scope,
+            agent_node_id: context.agent_node_id,
+            subject_generation: context.subject_generation,
             actor_id: actor,
+            source_ref: "test:reflect".to_string(),
+            observed_at: CLOCK.0.to_string(),
+            source_body: None,
             episode_id: None,
             resource_id: Some(retained.resource_id),
             job_id: job.job.id,
@@ -108,10 +122,13 @@ async fn reclaimed_resource_job_recompile_does_not_double_insert_units() {
                 actor_id: actor,
                 subject: None,
                 predicate: None,
+                fact_key: None,
                 kind: Some(MemoryKind::Resource),
                 body,
+                confidence: None,
                 churn_class: None,
                 admission_hint: None,
+                target_unit_ids: None,
                 contextual_chunks: Vec::new(),
                 valid_from: None,
                 valid_to: None,
@@ -120,11 +137,29 @@ async fn reclaimed_resource_job_recompile_does_not_double_insert_units() {
 
         let (store_a, store_b) = (store.clone(), store.clone());
         let (input_a, input_b) = (input.clone(), input);
+        let (context_a, context_b) = (context.clone(), context.clone());
+        let (job_a, job_b) = (job.clone(), job);
         let worker_a = tokio::spawn(async move {
-            reflect_recorded(&*store_a, input_a, &NoopEmbedding, &CLOCK).await
+            reflect_recorded_claimed(
+                &*store_a,
+                input_a,
+                &NoopEmbedding,
+                &CLOCK,
+                &context_a,
+                &job_a,
+            )
+            .await
         });
         let worker_b = tokio::spawn(async move {
-            reflect_recorded(&*store_b, input_b, &NoopEmbedding, &CLOCK).await
+            reflect_recorded_claimed(
+                &*store_b,
+                input_b,
+                &NoopEmbedding,
+                &CLOCK,
+                &context_b,
+                &job_b,
+            )
+            .await
         });
         worker_a.await.expect("join A").expect("compile A");
         worker_b.await.expect("join B").expect("compile B");

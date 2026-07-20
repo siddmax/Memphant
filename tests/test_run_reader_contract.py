@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,6 +19,114 @@ def _load_run_reader():
     return module
 
 
+def _load_provider_attempts():
+    spec = importlib.util.spec_from_file_location(
+        "provider_attempts_reader_test", ROOT / "scripts" / "provider_attempts.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_fetch_longmemeval():
+    spec = importlib.util.spec_from_file_location(
+        "fetch_longmemeval", ROOT / "scripts" / "fetch_longmemeval.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_longmemeval_downloads_use_cleaned_files_at_immutable_revision() -> None:
+    fetch = _load_fetch_longmemeval()
+    assert fetch.REPO == "xiaowu0162/longmemeval-cleaned"
+    assert len(fetch.REVISION) == 40 and fetch.REVISION != "main"
+    assert fetch.resolve_url("longmemeval_s").endswith(
+        f"/{fetch.REVISION}/longmemeval_s_cleaned.json"
+    )
+    assert fetch.resolve_url("longmemeval_oracle").endswith(
+        f"/{fetch.REVISION}/longmemeval_oracle.json"
+    )
+
+
+def test_dataset_download_verifies_pin_before_replacing_destination(tmp_path, monkeypatch) -> None:
+    fetch = _load_fetch_longmemeval()
+    monkeypatch.setattr(fetch, "DATA_DIR", tmp_path)
+    dest = tmp_path / "longmemeval_s.json"
+    dest.write_bytes(b"known-good")
+
+    class CorruptResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, size):
+            if getattr(self, "done", False):
+                return b""
+            self.done = True
+            return b"corrupt"
+
+    monkeypatch.setattr(fetch.urllib.request, "urlopen", lambda request: CorruptResponse())
+    expected = hashlib.sha256(b"known-good").hexdigest()
+    try:
+        fetch.download("longmemeval_s", expected)
+        raise AssertionError("expected pin mismatch")
+    except ValueError as error:
+        assert "sha256" in str(error)
+    assert dest.read_bytes() == b"known-good"
+
+
+def test_corrupt_first_download_leaves_no_dataset_file(tmp_path, monkeypatch) -> None:
+    fetch = _load_fetch_longmemeval()
+    monkeypatch.setattr(fetch, "DATA_DIR", tmp_path)
+
+    class CorruptResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, size):
+            if getattr(self, "done", False):
+                return b""
+            self.done = True
+            return b"corrupt"
+
+    monkeypatch.setattr(fetch.urllib.request, "urlopen", lambda request: CorruptResponse())
+    try:
+        fetch.download("longmemeval_s", hashlib.sha256(b"expected").hexdigest())
+        raise AssertionError("expected pin mismatch")
+    except ValueError:
+        pass
+    assert not (tmp_path / "longmemeval_s.json").exists()
+
+
+def test_cleaned_split_manifest_recomputes_exposure_and_answer_session_disjointness() -> None:
+    dataset_path = ROOT / "benchmarks" / "data" / "longmemeval_s.json"
+    if not dataset_path.exists():
+        return
+    fetch = _load_fetch_longmemeval()
+    split = fetch.build_split_manifest(dataset_path)
+    assert split["exposed_development"]["count"] == 178
+    assert split["answer_bearing_session_disjoint_confirmation"]["count"] == 319
+    assert split["strict_all_haystack_session_disjoint_confirmation"]["count"] == 0
+    rows = {row["question_id"]: row for row in json.loads(dataset_path.read_text())}
+    exposed_answers = {
+        session_id
+        for question_id in split["exposed_development"]["question_ids"]
+        for session_id in rows[question_id]["answer_session_ids"]
+    }
+    for question_id in split["answer_bearing_session_disjoint_confirmation"][
+        "question_ids"
+    ]:
+        assert exposed_answers.isdisjoint(rows[question_id]["answer_session_ids"])
+
+
 def test_normalized_containment_is_case_and_punct_insensitive() -> None:
     reader = _load_run_reader()
     assert reader.contains_gold("The answer is Business Administration.", "business administration")
@@ -29,29 +139,95 @@ def test_normalized_containment_is_case_and_punct_insensitive() -> None:
     assert reader.contains_gold("The answer is 2 miles", "2")
 
 
-def test_abstention_reply_detection() -> None:
+def test_reader_output_is_strict_json_with_exact_schema() -> None:
     reader = _load_run_reader()
-    assert reader.is_abstention_reply("I don't know")
-    assert reader.is_abstention_reply("  i don't know.  ")
-    assert not reader.is_abstention_reply("The user's dog is called Waffles")
+    assert reader.parse_reader_output(
+        '{"notes":"The evidence says Paris.","answer":"Paris","abstain":false}'
+    ) == {"notes": "The evidence says Paris.", "answer": "Paris", "abstain": False}
+    for invalid in [
+        '```json\n{"notes":"","answer":"Paris","abstain":false}\n```',
+        '{"notes":"","answer":"Paris","abstain":false,"extra":1}',
+        '{"notes":[],"answer":"Paris","abstain":false}',
+        '{"notes":"","answer":"","abstain":false}',
+        '{"notes":"","answer":null,"abstain":false}',
+        '{"notes":"","answer":"Paris","abstain":true}',
+    ]:
+        try:
+            reader.parse_reader_output(invalid)
+            raise AssertionError(f"expected invalid output: {invalid}")
+        except ValueError:
+            pass
 
 
-def test_cot_reply_with_mid_reasoning_hedge_is_not_final_line_abstention() -> None:
+def test_judge_grades_only_structured_answer_not_notes_or_negated_gold(tmp_path) -> None:
     reader = _load_run_reader()
-    reply = (
-        "I don't know the exact currency format they used, but the math is "
-        "straightforward.\n60 - 10 = 50.\n50"
+    cli = reader.ReaderCli("codex", "reader", "judge", tmp_path, 0)
+    calls = []
+    cli.call = lambda kind, system, prompt: calls.append(prompt) or "no"
+    row = {
+        "question": "Where did I go?",
+        "question_type": "single-session-user",
+        "gold_answer": "Paris",
+        "is_abstention": False,
+    }
+    correct, method = reader.judge_row(
+        cli,
+        row,
+        {"notes": "Paris appears in evidence.", "answer": "London", "abstain": False},
     )
-    assert not reader.is_final_line_abstention(reply)
-    # Whole-reply containment would have wrongly scored this as abstention.
-    assert reader.is_abstention_reply(reply)
-    assert reader.contains_gold(reply, "50")
+    assert (correct, method) == (False, "llm_judge")
+    assert "Paris appears in evidence" not in calls[0]
+    correct, method = reader.judge_row(
+        cli, row, {"notes": "", "answer": "not Paris", "abstain": False}
+    )
+    assert (correct, method) == (False, "llm_judge")
 
 
-def test_reply_whose_final_line_is_i_dont_know_is_final_line_abstention() -> None:
+def test_mismatched_final_number_and_exact_abstention_are_incorrect(tmp_path) -> None:
     reader = _load_run_reader()
-    reply = "Let me think through this...\nI don't know"
-    assert reader.is_final_line_abstention(reply)
+    cli = reader.ReaderCli("codex", "reader", "judge", tmp_path, 0)
+    cli.call = lambda kind, system, prompt: "no"
+    row = {
+        "question": "How many?",
+        "question_type": "multi-session",
+        "gold_answer": "50",
+        "is_abstention": False,
+    }
+    assert reader.judge_row(
+        cli, row, {"notes": "60 - 10 = 50", "answer": "40", "abstain": False}
+    ) == (False, "llm_judge")
+    abstention = {
+        "question": "Unknown?",
+        "question_type": "single-session-user",
+        "gold_answer": "",
+        "is_abstention": True,
+    }
+    assert reader.judge_row(
+        cli, abstention, {"notes": "", "answer": None, "abstain": True}
+    ) == (True, "abstention_exact")
+    assert reader.judge_row(
+        cli, abstention, {"notes": "", "answer": "I don't know", "abstain": False}
+    ) == (False, "abstention_exact")
+
+
+def test_non_exact_judge_verdict_is_a_failure(tmp_path) -> None:
+    reader = _load_run_reader()
+    cli = reader.ReaderCli("codex", "reader", "judge", tmp_path, 0)
+    cli.call = lambda kind, system, prompt: "yes, because it is equivalent"
+    try:
+        reader.judge_row(
+            cli,
+            {
+                "question": "Where?",
+                "question_type": "single-session-user",
+                "gold_answer": "Paris",
+                "is_abstention": False,
+            },
+            {"notes": "", "answer": "the French capital", "abstain": False},
+        )
+        raise AssertionError("expected JudgeFailure")
+    except reader.JudgeFailure:
+        pass
 
 
 def test_bootstrap_ci_is_deterministic_and_brackets_mean() -> None:
@@ -104,12 +280,7 @@ def test_reader_cli_cache_is_keyed_by_engine_and_model(tmp_path) -> None:
     codex_key.write_text('{"reply": "cached-answer"}')
     assert codex.call("reader", "sys", "prompt") == "cached-answer"
     assert codex.fresh_calls == 0 and codex.cached_calls == 1
-    # Legacy (pre-engine) cache entries stay readable for the claude engine.
-    claude._legacy_cache_path("reader", "sys", "prompt").write_text(
-        '{"reply": "legacy-answer"}'
-    )
-    assert claude.call("reader", "sys", "prompt") == "legacy-answer"
-    # ...but never for codex: exhausted budget must raise, not fall through.
+    # Exhausted budget must raise rather than fall through.
     codex_judge = codex._cache_path("judge", "sys", "prompt")
     assert not codex_judge.exists()
     try:
@@ -155,6 +326,356 @@ def test_openrouter_cache_key_includes_engine_model_and_effort(tmp_path, monkeyp
     assert codex._cache_path("reader", "sys", "prompt") != a._cache_path("reader", "sys", "prompt")
 
 
+def test_cache_key_includes_response_schema_and_decoding_identity(tmp_path, monkeypatch) -> None:
+    reader = _load_run_reader()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-not-real")
+    cli = reader.ReaderCli("openrouter", "reader", "judge", tmp_path, 0)
+    original = cli._cache_path("reader", "sys", "prompt")
+    monkeypatch.setitem(reader.OPENROUTER_DECODING, "max_tokens", 2048)
+    assert cli._cache_path("reader", "sys", "prompt") != original
+    monkeypatch.setitem(
+        reader.READER_JSON_SCHEMA["properties"]["notes"], "maxLength", 10
+    )
+    assert cli._cache_path("reader", "sys", "prompt") != original
+
+
+def test_openrouter_uses_strict_provider_schemas_for_reader_and_judge(
+    tmp_path, monkeypatch
+) -> None:
+    reader = _load_run_reader()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-not-real")
+    payloads = []
+
+    def fake_urlopen(request, timeout=None):
+        payload = json.loads(request.data)
+        payloads.append(payload)
+        content = (
+            '{"notes":"","answer":"Paris","abstain":false}'
+            if payload["response_format"]["json_schema"]["name"] == "reader_output"
+            else '{"verdict":"yes"}'
+        )
+        return _FakeHttpResponse({"choices": [{"message": {"content": content}}]})
+
+    monkeypatch.setattr(reader.urllib.request, "urlopen", fake_urlopen)
+    cli = reader.ReaderCli("openrouter", "reader", "judge", tmp_path, 2)
+    assert cli._call_openrouter("reader", "sys", "prompt").startswith("{")
+    assert cli._call_openrouter("judge", "sys", "prompt") == '{"verdict":"yes"}'
+    reader_format, judge_format = [p["response_format"] for p in payloads]
+    assert reader_format["type"] == judge_format["type"] == "json_schema"
+    assert reader_format["json_schema"]["strict"] is True
+    assert reader_format["json_schema"]["schema"] == reader.READER_JSON_SCHEMA
+    assert judge_format["json_schema"]["strict"] is True
+    assert judge_format["json_schema"]["schema"] == reader.JUDGE_JSON_SCHEMA
+    assert all(payload["provider"]["require_parameters"] is True for payload in payloads)
+
+
+def test_flash_reader_pins_ai_studio_and_has_reasoning_headroom(
+    tmp_path, monkeypatch
+) -> None:
+    reader = _load_run_reader()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-not-real")
+    payloads = []
+
+    def fake_urlopen(request, timeout=None):
+        payloads.append(json.loads(request.data))
+        return _FakeHttpResponse(
+            {
+                "model": reader.FLASH_MODEL,
+                "provider": "Google AI Studio",
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"notes":"","answer":"7640","abstain":false}'
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 2, "cost": 0.01},
+            }
+        )
+
+    monkeypatch.setattr(reader.urllib.request, "urlopen", fake_urlopen)
+    cli = reader.ReaderCli(
+        "openrouter", reader.FLASH_MODEL, reader.FLASH_MODEL, tmp_path, 1,
+        reasoning_effort="high",
+    )
+    assert reader.parse_reader_output(cli._call_openrouter("reader", "sys", "prompt"))["answer"] == "7640"
+    assert payloads[0]["max_tokens"] == 8192
+    assert payloads[0]["provider"] == {
+        "require_parameters": True,
+        "only": [reader.FLASH_PROVIDER],
+        "allow_fallbacks": True,
+    }
+
+
+def test_luna_reader_omits_unsupported_temperature(tmp_path, monkeypatch) -> None:
+    reader = _load_run_reader()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-not-real")
+    payloads = []
+
+    def fake_urlopen(request, timeout=None):
+        payloads.append(json.loads(request.data))
+        return _FakeHttpResponse({
+            "model": "openai/gpt-5.6-luna-pro",
+            "provider": "OpenAI",
+            "choices": [{"message": {"content": '{"notes":"","answer":"ok","abstain":false}'}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "cost": 0.01},
+        })
+
+    monkeypatch.setattr(reader.urllib.request, "urlopen", fake_urlopen)
+    cli = reader.ReaderCli(
+        "openrouter", "openai/gpt-5.6-luna-pro", "openai/gpt-5.6-luna-pro",
+        tmp_path, 1, reasoning_effort="high",
+    )
+    cli._call_openrouter("reader", "sys", "prompt")
+
+    assert payloads[0]["max_tokens"] == 8192
+    assert "temperature" not in payloads[0]
+
+
+def test_judge_parser_requires_schema_valid_exact_enum() -> None:
+    reader = _load_run_reader()
+    assert reader.parse_judge_output('{"verdict":"yes"}', "openrouter") == "yes"
+    assert reader.parse_judge_output("no", "codex") == "no"
+    for invalid in [
+        '{"verdict":"maybe"}',
+        '{"verdict":"yes","reason":"ok"}',
+        '{"verdict":true}',
+        "yes",
+    ]:
+        try:
+            reader.parse_judge_output(invalid, "openrouter")
+            raise AssertionError(f"expected invalid judge output: {invalid}")
+        except reader.JudgeFailure:
+            pass
+
+
+def test_rag_supported_parser_is_strict_and_validates_evidence_ranks() -> None:
+    reader = _load_run_reader()
+    raw = (
+        '{"answer_correct":true,"fully_supported":true,'
+        '"supporting_evidence_ranks":[1,3]}'
+    )
+    assert reader.parse_rag_supported_judge_output(raw, {1, 2, 3}) == {
+        "answer_correct": True,
+        "fully_supported": True,
+        "supporting_evidence_ranks": [1, 3],
+    }
+    invalid = [
+        '{"answer_correct":true,"fully_supported":true,"supporting_evidence_ranks":[]}',
+        '{"answer_correct":true,"fully_supported":true,"supporting_evidence_ranks":[4]}',
+        '{"answer_correct":true,"fully_supported":true,"supporting_evidence_ranks":[1,1]}',
+        '{"answer_correct":1,"fully_supported":true,"supporting_evidence_ranks":[1]}',
+        '{"answer_correct":true,"fully_supported":true,"supporting_evidence_ranks":[1],"extra":1}',
+    ]
+    for reply in invalid:
+        try:
+            reader.parse_rag_supported_judge_output(reply, {1, 2, 3})
+            raise AssertionError(f"expected invalid RAG judge output: {reply}")
+        except reader.JudgeFailure:
+            pass
+
+
+def test_rag_supported_openrouter_schema_uses_provider_supported_subset() -> None:
+    reader = _load_run_reader()
+    ranks = reader.RAG_SUPPORTED_JUDGE_JSON_SCHEMA["properties"][
+        "supporting_evidence_ranks"
+    ]
+    assert "uniqueItems" not in ranks
+    try:
+        reader.parse_rag_supported_judge_output(
+            '{"answer_correct":true,"fully_supported":true,'
+            '"supporting_evidence_ranks":[1,1]}',
+            {1},
+        )
+        raise AssertionError("duplicate ranks must remain invalid")
+    except reader.JudgeFailure:
+        pass
+
+
+def test_rag_supported_judge_records_raw_parse_and_no_fallback(tmp_path) -> None:
+    reader = _load_run_reader()
+    cli = reader.ReaderCli("codex", "reader", "judge", tmp_path, 0)
+    calls = []
+    cli.call = lambda kind, system, prompt: calls.append((kind, prompt)) or "not-json"
+    row = {
+        "question": "Which store is used?",
+        "question_type": "specs",
+        "gold_answer": "Postgres",
+        "is_abstention": False,
+        "evidence": [{"rank": 1, "body": "The service uses Postgres."}],
+    }
+    result = reader.judge_rag_row(
+        cli, row, {"notes": "hidden", "answer": "Postgres", "abstain": False}
+    )
+    assert result["correct"] is False
+    assert result["judge_raw_response"] == "not-json"
+    assert result["judge_parse_status"] == "invalid"
+    assert result["judge_fallback_used"] is False
+    assert result["judge_error"]
+    assert calls[0][0] == "rag_judge"
+    assert "The service uses Postgres." in calls[0][1]
+    assert "Reference answer: Postgres" in calls[0][1]
+    assert "hidden" not in calls[0][1]
+
+
+def test_openrouter_rag_and_pair_judges_use_distinct_strict_contracts(
+    tmp_path, monkeypatch
+) -> None:
+    reader = _load_run_reader()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-not-real")
+    cli = reader.ReaderCli("openrouter", "reader", "judge", tmp_path, 0)
+    assert reader.response_contract("openrouter", "rag_judge")["response_format"][
+        "json_schema"
+    ]["schema"] == reader.RAG_SUPPORTED_JUDGE_JSON_SCHEMA
+    assert reader.response_contract("openrouter", "pair_judge")["response_format"][
+        "json_schema"
+    ]["schema"] == reader.PAIRED_RAG_JUDGE_JSON_SCHEMA
+    keys = {
+        cli._cache_path(kind, "sys", "prompt")
+        for kind in ("judge", "rag_judge", "pair_judge")
+    }
+    assert len(keys) == 3
+    assert cli.model_for("rag_judge") == cli.model_for("pair_judge") == "judge"
+
+
+def test_swapped_pair_adjudication_requires_position_consistency(tmp_path) -> None:
+    reader = _load_run_reader()
+    cli = reader.ReaderCli("codex", "reader", "judge", tmp_path, 0)
+    prompts = []
+
+    def position_consistent_reply(kind, system, prompt):
+        prompts.append(prompt)
+        current_is_a = prompt.index("Current evidence") < prompt.index("Answer B")
+        return json.dumps({"verdict": "a" if current_is_a else "b"})
+
+    cli.call = position_consistent_reply
+    common = {
+        "question_id": "docs-q1",
+        "question": "Which store is used?",
+        "gold_answer": "Postgres",
+    }
+    current = {
+        "answer": "Postgres",
+        "evidence": [{"rank": 1, "body": "Current evidence says Postgres."}],
+        "correct": True,
+    }
+    baseline = {
+        "answer": "SQLite",
+        "evidence": [{"rank": 1, "body": "Baseline evidence says SQLite."}],
+        "correct": False,
+    }
+    result = reader.adjudicate_supported_flip(
+        cli, common, current, baseline, seed=20260713
+    )
+    assert result["status"] == "resolved"
+    assert result["canonical_verdicts"] == ["current", "current"]
+    assert len(result["raw_responses"]) == 2
+    assert result["orders"][0] != result["orders"][1]
+    assert all("Current evidence says Postgres." in prompt for prompt in prompts)
+
+    cli2 = reader.ReaderCli("codex", "reader", "judge", tmp_path / "other", 0)
+    inconsistent = iter(['{"verdict":"a"}', '{"verdict":"a"}'])
+    cli2.call = lambda kind, system, prompt: next(inconsistent)
+    result = reader.adjudicate_supported_flip(
+        cli2, common, current, baseline, seed=20260713
+    )
+    assert result["status"] == "position_disagreement"
+    assert set(result["canonical_verdicts"]) == {"current", "baseline"}
+
+
+def test_rag_supported_main_binds_audit_and_swapped_flip_adjudication(
+    tmp_path, monkeypatch
+) -> None:
+    reader = _load_run_reader()
+
+    def write_evidence(path, body):
+        path.write_text(
+            json.dumps(
+                {
+                    "question_id": "docs-q1",
+                    "question_type": "specs",
+                    "is_abstention": False,
+                    "question": "Which store is used?",
+                    "question_date": None,
+                    "gold_answer": "Postgres",
+                    "evidence": [{"rank": 1, "session_id": None, "body": body}],
+                }
+            )
+            + "\n"
+        )
+
+    baseline_evidence = tmp_path / "baseline-evidence.jsonl"
+    current_evidence = tmp_path / "current-evidence.jsonl"
+    write_evidence(baseline_evidence, "The old draft says SQLite.")
+    write_evidence(current_evidence, "The current specification says Postgres.")
+    baseline_report = tmp_path / "baseline-report.json"
+    current_report = tmp_path / "current-report.json"
+
+    def fake_call(self, kind, system_prompt, prompt):
+        if kind == "reader":
+            answer = "Postgres" if "current specification" in prompt else "SQLite"
+            return json.dumps({"notes": "", "answer": answer, "abstain": False})
+        if kind == "rag_judge":
+            correct = "Candidate answer: Postgres" in prompt
+            return json.dumps(
+                {
+                    "answer_correct": correct,
+                    "fully_supported": True,
+                    "supporting_evidence_ranks": [1],
+                }
+            )
+        if kind == "pair_judge":
+            a_is_current = prompt.index("current specification") < prompt.index("Answer B")
+            return json.dumps({"verdict": "a" if a_is_current else "b"})
+        raise AssertionError(kind)
+
+    monkeypatch.setattr(reader.ReaderCli, "call", fake_call)
+
+    def run(evidence, out, label, baseline=None):
+        argv = [
+            "run_reader.py",
+            "--evidence",
+            str(evidence),
+            "--out",
+            str(out),
+            "--label",
+            label,
+            "--judge-profile",
+            "rag-supported-v1",
+            "--cache-dir",
+            str(tmp_path / "cache"),
+            "--seed",
+            "20260713",
+        ]
+        if baseline is not None:
+            argv.extend(["--baseline", str(baseline)])
+        monkeypatch.setattr(reader.sys, "argv", argv)
+        assert reader.main() == 0
+
+    run(baseline_evidence, baseline_report, "baseline")
+    run(current_evidence, current_report, "current", baseline_report)
+    report = json.loads(current_report.read_text())
+    row = report["per_question"][0]
+    assert report["judge_profile"] == "rag-supported-v1"
+    assert row["answer_correct"] is True and row["fully_supported"] is True
+    assert row["judge_parse_status"] == "strict_valid"
+    assert row["judge_fallback_used"] is False
+    assert row["judge_raw_response"]
+    adjudication = report["paired_vs_baseline"]["supported_flip_adjudication"]
+    assert adjudication[0]["status"] == "resolved"
+    assert len(adjudication[0]["raw_responses"]) == 2
+    fingerprint = report["evaluator_fingerprint"]
+    assert fingerprint["judge_profile"] == "rag-supported-v1"
+    assert fingerprint["fallback_policy"] == "none_fail_closed"
+    assert fingerprint["rag_supported_judge_schema_sha256"] == reader.sha256_text(
+        json.dumps(
+            reader.RAG_SUPPORTED_JUDGE_JSON_SCHEMA,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+
+
 def test_reasoning_effort_is_part_of_cache_identity_and_codex_or_openrouter_only(tmp_path) -> None:
     reader = _load_run_reader()
     default = reader.ReaderCli("codex", "gpt-5.6-terra", "gpt-5.6-terra", tmp_path, 0)
@@ -174,20 +695,32 @@ def test_reasoning_effort_is_part_of_cache_identity_and_codex_or_openrouter_only
         pass
 
 
-def test_reader_system_prompt_v1_is_unchanged_and_v2_differs() -> None:
+def test_every_reader_system_prompt_requires_the_structured_output_contract() -> None:
     reader = _load_run_reader()
-    # Regression pin: v1 is the live default served to today's scoring queue
-    # whenever --prompt-version is not passed. If this literal ever needs to
-    # change, that is a deliberate v1 behavior change, not an accident.
-    v1_pinned = (
-        "You answer questions using ONLY the evidence provided in the prompt. "
-        "Be terse: reply with the answer itself, a short phrase, no preamble. "
-        "If the evidence is insufficient to answer, reply exactly: I don't know."
-    )
-    assert reader.READER_SYSTEM_PROMPT == v1_pinned
+    for prompt in (
+        reader.READER_SYSTEM_PROMPT,
+        reader.READER_SYSTEM_PROMPT_V2,
+        reader.READER_SYSTEM_PROMPT_V3_TERSE,
+    ):
+        assert '{"notes": string, "answer": string|null, "abstain": boolean}' in prompt
+        assert "reply exactly: I don't know" not in prompt
+        assert "final line" not in prompt
     assert reader.READER_SYSTEM_PROMPTS[1] is reader.READER_SYSTEM_PROMPT
     assert reader.READER_SYSTEM_PROMPTS[2] == reader.READER_SYSTEM_PROMPT_V2
     assert reader.READER_SYSTEM_PROMPT_V2 != reader.READER_SYSTEM_PROMPT
+
+
+def test_reader_prompt_hashes_are_stable() -> None:
+    reader = _load_run_reader()
+    assert {
+        "v1": reader.sha256_text(reader.READER_SYSTEM_PROMPT),
+        "v2": reader.sha256_text(reader.READER_SYSTEM_PROMPT_V2),
+        "v3_terse": reader.sha256_text(reader.READER_SYSTEM_PROMPT_V3_TERSE),
+    } == {
+        "v1": "60a7d7da236692982f9ad7d127bc5fcf358edbd07a5f7eb55ca540dd5b68c7fb",
+        "v2": "eeb2e2c42a4d603f90ef3bd75f380e3d946b047ffb68649c26fdc6136d41ae99",
+        "v3_terse": "97eeeae3e9cffe3485d7fa19db8eeedb6407bbd9c5f3759980c89621786327e1",
+    }
 
 
 def test_prompt_v3_router_table() -> None:
@@ -243,7 +776,7 @@ def test_prompt_v3_abstention_text_present_in_both_routes() -> None:
 def test_prompt_v3_terse_route_keeps_terse_phrasing_but_not_v1_abstention() -> None:
     reader = _load_run_reader()
     assert (
-        "Be terse: reply with the answer itself"
+        "Be terse: put only the concise answer"
         in reader.READER_SYSTEM_PROMPT_V3_TERSE
     )
     # v3's terse route does NOT carry v1's plain abstention line -- it uses
@@ -254,33 +787,6 @@ def test_prompt_v3_terse_route_keeps_terse_phrasing_but_not_v1_abstention() -> N
     )
     assert reader.READER_SYSTEM_PROMPT_V3_TERSE != reader.READER_SYSTEM_PROMPT
     assert reader.READER_SYSTEM_PROMPT_V3_TERSE != reader.READER_SYSTEM_PROMPT_V2
-
-
-def test_prompt_v1_and_v2_unchanged_after_v3_factoring() -> None:
-    """Regression pin: factoring v1/v2/v3 out of shared components must not
-    change v1's or v2's byte-for-byte prompt text."""
-    reader = _load_run_reader()
-    v1_pinned = (
-        "You answer questions using ONLY the evidence provided in the prompt. "
-        "Be terse: reply with the answer itself, a short phrase, no preamble. "
-        "If the evidence is insufficient to answer, reply exactly: I don't know."
-    )
-    v2_pinned = (
-        "You answer questions using ONLY the evidence provided in the prompt. "
-        "First, identify every evidence item that bears on the question, even "
-        "partially. Then reason step by step over those items: for questions "
-        "that require combining values, doing arithmetic, or counting "
-        "occurrences, work the calculation through explicitly before answering. "
-        "Abstain only if NO evidence item bears on the question at all; if at "
-        "least one item is partially relevant, give your best-supported answer "
-        "instead of abstaining, and never use the phrase \"I don't know\" "
-        "anywhere in your reply except as the abstention reply itself. "
-        "Finish with a final line, on its own, containing ONLY the concise "
-        "answer — a short phrase, no preamble, no restated reasoning — or, if "
-        "truly abstaining, reply with exactly: I don't know."
-    )
-    assert reader.READER_SYSTEM_PROMPT == v1_pinned
-    assert reader.READER_SYSTEM_PROMPT_V2 == v2_pinned
 
 
 def test_prompt_v3_routing_counts_in_report(tmp_path, monkeypatch) -> None:
@@ -318,13 +824,13 @@ def test_prompt_v3_routing_counts_in_report(tmp_path, monkeypatch) -> None:
     evidence_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
     out_path = tmp_path / "report.json"
 
-    # Every reader call just abstains; judge_row short-circuits abstention
-    # replies via containment, so no "judge"-kind call is ever made -- this
+    # Every reader call just abstains; judge_row handles structured abstention
+    # without a "judge"-kind call, so this
     # stub only needs to handle "reader".
     monkeypatch.setattr(
         reader.ReaderCli,
         "call",
-        lambda self, kind, system_prompt, prompt: "I don't know",
+        lambda self, kind, system_prompt, prompt: '{"notes":"","answer":null,"abstain":true}',
     )
     monkeypatch.setattr(
         reader.sys,
@@ -347,6 +853,22 @@ def test_prompt_v3_routing_counts_in_report(tmp_path, monkeypatch) -> None:
     report = json.loads(out_path.read_text())
     assert report["prompt_version"] == 3
     assert report["routing"] == {"cot": 2, "terse": 1}
+    assert report["evaluator_fingerprint"]["response_contract"] == {
+        "reader": reader.response_contract("claude", "reader"),
+        "judge": reader.response_contract("claude", "judge"),
+    }
+    fingerprint = report["evaluator_fingerprint"]
+    payload = {key: value for key, value in fingerprint.items() if key != "sha256"}
+    assert fingerprint["sha256"] == reader.sha256_text(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    )
+    assert fingerprint["judge_system_prompt_sha256"] == reader.sha256_text(
+        reader.JUDGE_SYSTEM_PROMPT
+    )
+    assert fingerprint["active_reader_prompt_sha256"] == {
+        "cot": reader.sha256_text(reader.READER_SYSTEM_PROMPT_V2),
+        "terse": reader.sha256_text(reader.READER_SYSTEM_PROMPT_V3_TERSE),
+    }
 
 
 def test_prompt_v1_and_v2_reports_carry_no_routing_breakdown(tmp_path, monkeypatch) -> None:
@@ -368,7 +890,7 @@ def test_prompt_v1_and_v2_reports_carry_no_routing_breakdown(tmp_path, monkeypat
     monkeypatch.setattr(
         reader.ReaderCli,
         "call",
-        lambda self, kind, system_prompt, prompt: "I don't know",
+        lambda self, kind, system_prompt, prompt: '{"notes":"","answer":null,"abstain":true}',
     )
     monkeypatch.setattr(
         reader.sys,
@@ -391,15 +913,149 @@ def test_prompt_v1_and_v2_reports_carry_no_routing_breakdown(tmp_path, monkeypat
     assert report["routing"] is None
 
 
-def test_accuracy_excludes_unscored_rows() -> None:
+def test_invalid_baseline_still_writes_ineligible_report(tmp_path, monkeypatch) -> None:
+    reader = _load_run_reader()
+    row = {
+        "question_id": "q1",
+        "question_type": "single-session-user",
+        "is_abstention": True,
+        "question": "What cannot be known?",
+        "question_date": None,
+        "gold_answer": "",
+        "evidence": [],
+    }
+    evidence_path = tmp_path / "evidence.jsonl"
+    evidence_path.write_text(json.dumps(row) + "\n")
+    baseline_path = tmp_path / "invalid-baseline.json"
+    baseline_path.write_text("{}")
+    out_path = tmp_path / "report.json"
+    monkeypatch.setattr(
+        reader.ReaderCli,
+        "call",
+        lambda self, kind, system_prompt, prompt: '{"notes":"","answer":null,"abstain":true}',
+    )
+    monkeypatch.setattr(
+        reader.sys,
+        "argv",
+        [
+            "run_reader.py",
+            "--evidence",
+            str(evidence_path),
+            "--out",
+            str(out_path),
+            "--label",
+            "invalid-baseline",
+            "--baseline",
+            str(baseline_path),
+            "--cache-dir",
+            str(tmp_path / "cache"),
+        ],
+    )
+
+    assert reader.main() == 1
+    report = json.loads(out_path.read_text())
+    assert report["promotion_ineligible"] is True
+    assert report["paired_vs_baseline"]["decision"].startswith("HOLD/INVALID")
+    assert report["baseline_validation_error"]
+    assert report["per_question"][0]["correct"] is True
+
+
+def test_reader_report_binds_question_and_date_and_rejects_pair_mismatch(tmp_path, monkeypatch) -> None:
+    reader = _load_run_reader()
+    row = {
+        "question_id": "q1",
+        "question_type": "single-session-user",
+        "is_abstention": True,
+        "question": "What cannot be known?",
+        "question_date": "2026/07/12",
+        "gold_answer": "",
+        "evidence": [],
+    }
+    evidence_path = tmp_path / "evidence.jsonl"
+    evidence_path.write_text(json.dumps(row) + "\n")
+    out_path = tmp_path / "report.json"
+    monkeypatch.setattr(
+        reader.ReaderCli,
+        "call",
+        lambda self, kind, system_prompt, prompt: '{"notes":"","answer":null,"abstain":true}',
+    )
+    monkeypatch.setattr(
+        reader.sys,
+        "argv",
+        [
+            "run_reader.py", "--evidence", str(evidence_path), "--out", str(out_path),
+            "--label", "immutable-inputs", "--cache-dir", str(tmp_path / "cache"),
+        ],
+    )
+    assert reader.main() == 0
+    report = json.loads(out_path.read_text())
+    assert report["per_question"][0]["question"] == row["question"]
+    assert report["per_question"][0]["question_date"] == row["question_date"]
+    altered = json.loads(json.dumps(report))
+    altered["per_question"][0]["question_date"] = "2026/07/13"
+    try:
+        reader.validate_and_pair_reports(report, altered, "reader")
+        raise AssertionError("expected immutable input mismatch")
+    except ValueError as error:
+        assert "question_date" in str(error)
+
+
+def test_limit_is_smoke_only_and_never_promotion_eligible(tmp_path, monkeypatch) -> None:
+    reader = _load_run_reader()
+    rows = [
+        {
+            "question_id": f"q{index}",
+            "question_type": "single-session-user",
+            "is_abstention": True,
+            "question": f"Question {index}?",
+            "question_date": None,
+            "gold_answer": "",
+            "evidence": [],
+        }
+        for index in range(2)
+    ]
+    source = "".join(json.dumps(row) + "\n" for row in rows).encode()
+    evidence_path = tmp_path / "evidence.jsonl"
+    evidence_path.write_bytes(source)
+    out_path = tmp_path / "report.json"
+    monkeypatch.setattr(
+        reader.ReaderCli,
+        "call",
+        lambda self, kind, system_prompt, prompt: '{"notes":"","answer":null,"abstain":true}',
+    )
+    monkeypatch.setattr(
+        reader.sys,
+        "argv",
+        [
+            "run_reader.py", "--evidence", str(evidence_path), "--out", str(out_path),
+            "--label", "smoke", "--limit", "1", "--cache-dir", str(tmp_path / "cache"),
+        ],
+    )
+    assert reader.main() == 0
+    report = json.loads(out_path.read_text())
+    assert report["smoke_only"] is True
+    assert report["promotion_ineligible"] is True
+    assert report["source_expected_n"] == 2
+    assert report["evaluated_expected_n"] == report["expected_n"] == 1
+    assert report["source_evidence_sha256"] == hashlib.sha256(source).hexdigest()
+    evaluated = (json.dumps(rows[0]) + "\n").encode()
+    assert report["evaluated_evidence_sha256"] == hashlib.sha256(evaluated).hexdigest()
+    try:
+        reader.validate_and_pair_reports(report, report, "reader")
+        raise AssertionError("expected smoke report rejection")
+    except ValueError as error:
+        assert "smoke" in str(error)
+
+
+def test_accuracy_counts_failures_as_incorrect() -> None:
     reader = _load_run_reader()
     rows = [
         {"correct": True},
         {"correct": False},
-        {"correct": None},  # reader_error / aborted rows never count
+        {"correct": False},
     ]
     result = reader.accuracy(rows)
-    assert result == {"n": 3, "n_scored": 2, "qa_accuracy": 0.5}
+    assert result == {"n": 3, "n_scored": 3, "qa_accuracy": 1 / 3}
 
 
 class _FakeHttpResponse:
@@ -459,6 +1115,193 @@ def test_openrouter_call_retries_urlerror_and_empty_choices_then_succeeds(
     assert sleeps == [2, 8], "backoff delays before attempts 2 and 3 (attempt 1 has no delay)"
 
 
+def test_openrouter_call_captures_and_caches_served_model_provider_usage_and_cost(
+    tmp_path, monkeypatch
+) -> None:
+    reader = _load_run_reader()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-not-real")
+    payload = {
+        "id": "gen-reader-1",
+        "model": "openai/gpt-5.6-luna-pro",
+        "openrouter_metadata": {
+            "endpoints": {
+                "available": [
+                    {
+                        "model": "openai/gpt-5.6-luna-pro",
+                        "provider": "OpenAI",
+                        "selected": True,
+                    }
+                ]
+            }
+        },
+        "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "cost": 0.0123,
+        },
+        "choices": [{"message": {"content": '{"notes":"","answer":"Rust","abstain":false}'}}],
+    }
+    generation = {
+        "data": {
+            "model": "openai/gpt-5.6-luna-pro-20260709",
+            "provider_name": "OpenAI",
+            "total_cost": 0.0123,
+        }
+    }
+    requests = []
+    def open_response(request, timeout=None):
+        requests.append(request)
+        if request.full_url == reader.OPENROUTER_URL:
+            return _FakeHttpResponse(payload)
+        return _FakeHttpResponse(generation)
+    monkeypatch.setattr(reader.urllib.request, "urlopen", open_response)
+    cli = reader.ReaderCli(
+        "openrouter", "openai/gpt-5.6-luna-pro", "judge", tmp_path, 1
+    )
+    assert cli.call("reader", "sys", "prompt").startswith("{")
+    assert cli.last_call_metadata == {
+        "response_id": "gen-reader-1",
+        "requested_model": "openai/gpt-5.6-luna-pro",
+        "served_model": "openai/gpt-5.6-luna-pro-20260709",
+        "provider": "OpenAI",
+        "usage": payload["usage"],
+            "elapsed_seconds": cli.last_call_metadata["elapsed_seconds"],
+            "retry_index": 0,
+            "parse_status": "provider_response_validated",
+            "request_sha256": cli.last_call_metadata["request_sha256"],
+            "result_sha256": cli.last_call_metadata["result_sha256"],
+        }
+    assert cli.last_call_metadata["elapsed_seconds"] >= 0
+    assert cli.provider_attempt_log == [{"response": cli.last_call_metadata}]
+    assert cli.provider_attempts == 1
+    assert len(requests) == 2
+    assert requests[0].get_header("X-openrouter-metadata") == "enabled"
+
+    cached = reader.ReaderCli(
+        "openrouter", "openai/gpt-5.6-luna-pro", "judge", tmp_path, 0
+    )
+    assert cached.call("reader", "sys", "prompt").startswith("{")
+    assert cached.last_call_metadata == cli.last_call_metadata
+    assert cached.provider_attempts == 0
+
+
+def test_openrouter_generation_lookup_failure_is_terminal_and_durable(
+    tmp_path, monkeypatch
+) -> None:
+    reader = _load_run_reader()
+    attempts = _load_provider_attempts()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-not-real")
+    payload = {
+        "id": "gen-paid-before-stats-failure",
+        "model": "openai/gpt-5.6-luna-pro",
+        "provider": "OpenAI",
+        "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "cost": 0.0123,
+        },
+        "choices": [
+            {"message": {"content": '{"notes":"","answer":"Rust","abstain":false}'}}
+        ],
+    }
+    requests = []
+    monkeypatch.setattr(attempts.time, "sleep", lambda _seconds: None)
+
+    def open_response(request, timeout=None):
+        requests.append(request.full_url)
+        if request.full_url == reader.OPENROUTER_URL:
+            return _FakeHttpResponse(payload)
+        raise reader.urllib.error.URLError("stats unavailable")
+
+    monkeypatch.setattr(reader.urllib.request, "urlopen", open_response)
+    cache_dir = tmp_path / "cache"
+    ledger_path = tmp_path / "attempts.json"
+    ledger = attempts.ProviderAttemptLedger(ledger_path, "reader-fingerprint")
+    cli = reader.ReaderCli(
+        "openrouter", "openai/gpt-5.6-luna-pro", "judge", cache_dir, 1
+    )
+    cli.set_provider_attempt_hook(ledger.record)
+
+    try:
+        cli.call("reader", "sys", "prompt")
+        raise AssertionError("expected generation statistics failure")
+    except RuntimeError as error:
+        assert "generation statistics" in str(error)
+
+    stored = json.loads(ledger_path.read_text(encoding="utf-8"))
+    assert len(stored["attempts"]) == 1
+    attempt = stored["attempts"][0]
+    assert attempt["status"] == "error"
+    assert attempt["result"] is None
+    response = attempt["error"]["response"]
+    assert response["response_id"] == payload["id"]
+    assert response["served_model"] == payload["model"]
+    assert response["provider"] == payload["provider"]
+    assert response["usage"] == payload["usage"]
+    assert response["retry_index"] == 0
+    assert response["parse_status"] == "generation_stats_lookup_failed"
+    assert len(response["request_sha256"]) == len(response["result_sha256"]) == 64
+    assert cli.provider_attempts == 1
+    assert len(requests) == 7
+    assert requests[0] == reader.OPENROUTER_URL
+    assert len(set(requests[1:])) == 1
+    assert not cache_dir.exists() or not list(cache_dir.iterdir())
+
+
+def test_openrouter_generation_lookup_retries_eventual_404(monkeypatch) -> None:
+    attempts = _load_provider_attempts()
+    calls = []
+    sleeps = []
+
+    def open_response(request, timeout=None):
+        calls.append(request.full_url)
+        if len(calls) < 3:
+            raise attempts.urllib.error.HTTPError(
+                request.full_url, 404, "Not Found", {}, None
+            )
+        return _FakeHttpResponse({"data": {"id": "gen-eventual"}})
+
+    monkeypatch.setattr(attempts.urllib.request, "urlopen", open_response)
+    monkeypatch.setattr(attempts.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    lookup = attempts.openrouter_generation_lookup("sk-test-not-real")
+    assert lookup("gen-eventual") == {"id": "gen-eventual"}
+    assert len(calls) == 3
+    assert sleeps == [1, 2]
+
+
+def test_openrouter_generation_lookup_retries_transient_metadata_failures(
+    monkeypatch,
+) -> None:
+    attempts = _load_provider_attempts()
+    calls = []
+    sleeps = []
+
+    def open_response(request, timeout=None):
+        calls.append(request.full_url)
+        if len(calls) == 1:
+            raise attempts.urllib.error.URLError("connection reset by peer")
+        if len(calls) == 2:
+            raise attempts.urllib.error.HTTPError(
+                request.full_url,
+                503,
+                "Service Unavailable",
+                {"Retry-After": "7"},
+                None,
+            )
+        return _FakeHttpResponse({"data": {"id": "gen-recovered"}})
+
+    monkeypatch.setattr(attempts.urllib.request, "urlopen", open_response)
+    monkeypatch.setattr(attempts.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    lookup = attempts.openrouter_generation_lookup("sk-test-not-real")
+    assert lookup("gen-recovered") == {"id": "gen-recovered"}
+    assert len(calls) == 3
+    assert sleeps == [1, 7]
+
+
 def test_openrouter_call_raises_runtime_error_after_four_failed_attempts(
     tmp_path, monkeypatch
 ) -> None:
@@ -483,3 +1326,50 @@ def test_openrouter_call_raises_runtime_error_after_four_failed_attempts(
     except RuntimeError as error:
         assert "4/4" in str(error), f"error must name the attempt count: {error}"
     assert sleeps == [2, 8, 30], "all three backoff delays are used before giving up"
+
+
+def test_openrouter_provider_attempt_limit_stops_internal_retries(
+    tmp_path, monkeypatch
+) -> None:
+    reader = _load_run_reader()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-not-real")
+    monkeypatch.setattr(reader.time, "sleep", lambda _seconds: None)
+    calls = {"n": 0}
+
+    def fail(_request, timeout=None):
+        calls["n"] += 1
+        raise reader.urllib.error.URLError("offline")
+
+    monkeypatch.setattr(reader.urllib.request, "urlopen", fail)
+    cli = reader.ReaderCli("openrouter", "reader", "judge", tmp_path, 1)
+    cli.set_provider_attempt_limit(2)
+    try:
+        cli._call_openrouter("reader", "sys", "prompt")
+        raise AssertionError("expected provider attempt budget exhaustion")
+    except reader.CallBudgetExceeded as error:
+        assert "provider attempt budget" in str(error)
+    assert calls["n"] == cli.provider_attempts == 2
+
+
+def test_reader_cache_write_is_atomic_on_replace_failure(tmp_path, monkeypatch) -> None:
+    reader = _load_run_reader()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-not-real")
+
+    def reply(cli, _kind, _system, _prompt):
+        cli.last_call_metadata = {
+            "model": "reader", "provider": "fixture",
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2, "cost": 0},
+        }
+        return '{"notes":"","answer":"ok","abstain":false}'
+
+    monkeypatch.setattr(reader.ReaderCli, "_call_openrouter", reply)
+    cli = reader.ReaderCli("openrouter", "reader", "judge", tmp_path, 1)
+    cache_path = cli._cache_path("reader", "sys", "prompt")
+    monkeypatch.setattr(reader.os, "replace", lambda _source, _target: (_ for _ in ()).throw(OSError("crash")))
+    try:
+        cli.call("reader", "sys", "prompt")
+        raise AssertionError("expected atomic replace failure")
+    except OSError as error:
+        assert "crash" in str(error)
+    assert not cache_path.exists()
+    assert list(tmp_path.iterdir()) == []

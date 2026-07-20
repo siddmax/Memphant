@@ -1,10 +1,11 @@
 use memphant_core::{
-    FixedClock, InMemoryStore, NoopEmbedding, correct_memory, reflect_recorded, retain_episode,
+    CoreError, FixedClock, InMemoryStore, NoopEmbedding, correct_memory, reflect_recorded,
+    retain_episode,
 };
 use memphant_types::{
-    ActorId, AdmissionAction, ContextualChunk, CorrectRequest, CorrectSelector, CorrectionPayload,
-    MemoryEdgeKind, MemoryKind, ReflectCandidate, ReflectInput, RetainRequest, ScopeId, TenantId,
-    TrustLevel, UnitState,
+    AdmissionAction, ContextualChunk, CorrectRequest, CorrectSelector, CorrectionPayload, JobId,
+    MemoryEdgeKind, MemoryKind, ReflectCandidate, ReflectInput, ResolvedMemoryContext,
+    RetainRequest, TenantId, TrustLevel, UnitId, UnitState,
 };
 use serde::Deserialize;
 
@@ -14,28 +15,24 @@ fn tenant(value: u128) -> TenantId {
     TenantId::from_u128(value)
 }
 
-fn scope(value: u128) -> ScopeId {
-    ScopeId::from_u128(value)
-}
-
-fn actor(value: u128) -> ActorId {
-    ActorId::from_u128(value)
-}
-
 async fn retain_and_reflect(
     store: &InMemoryStore,
-    tenant_id: TenantId,
-    scope_id: ScopeId,
-    actor_id: ActorId,
+    context: &ResolvedMemoryContext,
     seed: ReflectSeed<'_>,
 ) {
     let retained = retain_episode(
         store,
+        context,
         RetainRequest {
-            tenant_id,
-            scope_id,
-            actor_id,
+            tenant_id: context.tenant_id,
+            data_subject_id: context.data_subject_id,
+            scope_id: context.scope_id,
+            agent_node_id: context.agent_node_id,
+            subject_generation: context.subject_generation,
+            actor_id: context.actor_id,
             source_kind: seed.source_kind.to_string(),
+            source_ref: "test:fixture".to_string(),
+            observed_at: "2026-07-09T00:00:00Z".to_string(),
             source_trust: seed.trust_level,
             subject_hint: Some(seed.subject.to_string()),
             subject: None,
@@ -47,16 +44,22 @@ async fn retain_and_reflect(
     .await
     .expect("retain succeeds");
     let job = store
-        .reflect_jobs(tenant_id)
+        .reflect_jobs(context.tenant_id)
         .last()
         .cloned()
         .expect("reflect job queued");
     reflect_recorded(
         store,
         ReflectInput {
-            tenant_id,
-            scope_id,
-            actor_id,
+            tenant_id: context.tenant_id,
+            data_subject_id: context.data_subject_id,
+            scope_id: context.scope_id,
+            agent_node_id: context.agent_node_id,
+            subject_generation: context.subject_generation,
+            actor_id: context.actor_id,
+            source_ref: "test:reflect".to_string(),
+            observed_at: "2026-07-09T00:00:00Z".to_string(),
+            source_body: None,
             episode_id: Some(retained.episode_id),
             resource_id: None,
             job_id: job.id,
@@ -64,16 +67,19 @@ async fn retain_and_reflect(
             candidates: vec![ReflectCandidate {
                 source_kind: seed.source_kind.to_string(),
                 trust_level: seed.trust_level,
-                actor_id,
+                actor_id: context.actor_id,
                 subject: Some(seed.subject.to_string()),
                 predicate: Some(seed.predicate.to_string()),
+                fact_key: None,
                 kind: None,
                 body: seed.body.to_string(),
+                confidence: None,
                 churn_class: None,
                 admission_hint: None,
                 contextual_chunks: Vec::new(),
                 valid_from: None,
                 valid_to: None,
+                target_unit_ids: None,
             }],
         },
         &NoopEmbedding,
@@ -113,10 +119,18 @@ struct GoldenCase {
 struct GoldenEpisode {
     source_kind: String,
     trust_level: TrustLevel,
-    actor: u128,
+    // Retained for fixture-schema fidelity; the compiled unit's `actor_id`
+    // must equal the transaction's bound `context.actor_id` under the strict
+    // write-time contract (see `owned_unit` in
+    // memphant-core/src/lib.rs::persist_compiled_units), so this per-episode
+    // fixture value is no longer read.
+    #[serde(rename = "actor")]
+    _actor: u128,
     subject: Option<String>,
     predicate: Option<String>,
     body: String,
+    #[serde(rename = "confidence")]
+    _confidence: Option<f32>,
     churn_class: Option<String>,
     admission_hint: Option<AdmissionAction>,
 }
@@ -131,17 +145,30 @@ async fn write_compiler_golden_fixtures_pass() {
     for case in cases {
         let store = InMemoryStore::default();
         let tenant_id = tenant(10_000);
-        let scope_id = scope(20_000);
+        let context = memphant_store_testkit::bind_context(&store, tenant_id).await;
         let mut observed_actions = Vec::new();
 
-        for episode in &case.episodes {
+        for (episode_index, episode) in case.episodes.iter().enumerate() {
             let retained = retain_episode(
                 &store,
+                &context,
                 RetainRequest {
-                    tenant_id,
-                    scope_id,
-                    actor_id: actor(episode.actor),
+                    tenant_id: context.tenant_id,
+                    data_subject_id: context.data_subject_id,
+                    scope_id: context.scope_id,
+                    agent_node_id: context.agent_node_id,
+                    subject_generation: context.subject_generation,
+                    actor_id: context.actor_id,
                     source_kind: episode.source_kind.clone(),
+                    // Each fixture episode is a DISTINCT observation event, so it
+                    // gets a distinct `source_ref`. A shared `source_ref` would
+                    // make two same-body episodes collide on the episode dedup
+                    // key and coalesce to one idempotent reflect job — collapsing
+                    // corroboration cases (`duplicate_collapse`,
+                    // `corroboration_farming_resistance`) that must reflect twice
+                    // and merge.
+                    source_ref: format!("test:fixture:{episode_index}"),
+                    observed_at: "2026-07-09T00:00:00Z".to_string(),
                     source_trust: episode.trust_level,
                     subject_hint: episode.subject.clone(),
                     subject: None,
@@ -161,9 +188,15 @@ async fn write_compiler_golden_fixtures_pass() {
             let (trace, _) = reflect_recorded(
                 &store,
                 ReflectInput {
-                    tenant_id,
-                    scope_id,
-                    actor_id: actor(episode.actor),
+                    tenant_id: context.tenant_id,
+                    data_subject_id: context.data_subject_id,
+                    scope_id: context.scope_id,
+                    agent_node_id: context.agent_node_id,
+                    subject_generation: context.subject_generation,
+                    actor_id: context.actor_id,
+                    source_ref: "test:reflect".to_string(),
+                    observed_at: "2026-07-09T00:00:00Z".to_string(),
+                    source_body: None,
                     episode_id: Some(retained.episode_id),
                     resource_id: None,
                     job_id: job.id,
@@ -171,16 +204,29 @@ async fn write_compiler_golden_fixtures_pass() {
                     candidates: vec![ReflectCandidate {
                         source_kind: episode.source_kind.clone(),
                         trust_level: episode.trust_level,
-                        actor_id: actor(episode.actor),
+                        // Every compiled unit's `actor_id` must equal the
+                        // transaction's own bound `context.actor_id` (see
+                        // `owned_unit` in `persist_compiled_units`,
+                        // memphant-core/src/lib.rs) — the strict write-time
+                        // contract no longer permits attributing a unit to an
+                        // arbitrary per-fixture actor. Corroboration cases in
+                        // this golden set (`independent_corroboration_promotes_belief`,
+                        // `invalidate_action`) still exercise cross-source
+                        // independence via `episode.source_kind`, which
+                        // `is_independent_source` also checks.
+                        actor_id: context.actor_id,
                         subject: episode.subject.clone(),
                         predicate: episode.predicate.clone(),
+                        fact_key: None,
                         kind: None,
                         body: episode.body.clone(),
+                        confidence: None,
                         churn_class: episode.churn_class.clone(),
                         admission_hint: episode.admission_hint,
                         contextual_chunks: Vec::new(),
                         valid_from: None,
                         valid_to: None,
+                        target_unit_ids: None,
                     }],
                 },
                 &NoopEmbedding,
@@ -256,10 +302,69 @@ async fn write_compiler_golden_fixtures_pass() {
             case.id
         );
         assert_eq!(edge_kinds, case.expected_edge_kinds, "{}", case.id);
+        if case.id == "contradiction_detection" {
+            let units = store.memory_units(tenant_id);
+            let superseded = units
+                .iter()
+                .find(|unit| unit.state == UnitState::Superseded)
+                .expect("the prior transaction rectangle is superseded");
+            assert_eq!(superseded.body, "Callback token version is v1.");
+            assert_eq!(superseded.valid_from, None);
+            assert_eq!(superseded.valid_to, None);
+            assert_eq!(superseded.transaction_to.as_deref(), Some(CLOCK.0));
+
+            let historical = units
+                .iter()
+                .find(|unit| {
+                    unit.state == UnitState::Active && unit.body == "Callback token version is v1."
+                })
+                .expect("the prior value remains valid before the correction");
+            assert_eq!(historical.valid_from, None);
+            assert_eq!(historical.valid_to.as_deref(), Some(CLOCK.0));
+            assert_eq!(historical.transaction_to, None);
+
+            let current = units
+                .iter()
+                .find(|unit| {
+                    unit.state == UnitState::Active && unit.body == "Callback token version is v2."
+                })
+                .expect("the corrected value is current");
+            assert_eq!(current.valid_from.as_deref(), Some(CLOCK.0));
+            assert_eq!(current.valid_to, None);
+            assert_eq!(current.transaction_to, None);
+        }
         if case.id == "stale_fact_handling" {
-            let active = store.active_semantic_units(tenant_id);
-            assert_eq!(active[0].churn_class.as_deref(), Some("volatile"));
-            assert!(active[0].freshness_due_at.is_some());
+            let units = store.memory_units(tenant_id);
+            let superseded = units
+                .iter()
+                .find(|unit| unit.state == UnitState::Superseded)
+                .expect("the prior transaction rectangle is superseded");
+            assert_eq!(superseded.body, "Current project is Apollo.");
+            assert_eq!(superseded.valid_from, None);
+            assert_eq!(superseded.valid_to, None);
+            assert_eq!(superseded.transaction_to.as_deref(), Some(CLOCK.0));
+
+            let historical = units
+                .iter()
+                .find(|unit| {
+                    unit.state == UnitState::Active && unit.body == "Current project is Apollo."
+                })
+                .expect("the prior value remains valid before the correction");
+            assert_eq!(historical.valid_from, None);
+            assert_eq!(historical.valid_to.as_deref(), Some(CLOCK.0));
+            assert_eq!(historical.transaction_to, None);
+
+            let current = units
+                .iter()
+                .find(|unit| {
+                    unit.state == UnitState::Active && unit.body == "Current project is Borealis."
+                })
+                .expect("the corrected value is current");
+            assert_eq!(current.valid_from.as_deref(), Some(CLOCK.0));
+            assert_eq!(current.valid_to, None);
+            assert_eq!(current.transaction_to, None);
+            assert_eq!(current.churn_class.as_deref(), Some("volatile"));
+            assert!(current.freshness_due_at.is_some());
         }
     }
 }
@@ -268,15 +373,20 @@ async fn write_compiler_golden_fixtures_pass() {
 async fn reflect_recorded_is_idempotent_for_duplicate_job_delivery() {
     let store = InMemoryStore::default();
     let tenant_id = tenant(30_000);
-    let scope_id = scope(40_000);
-    let actor_id = actor(50_000);
+    let context = memphant_store_testkit::bind_context(&store, tenant_id).await;
     let retained = retain_episode(
         &store,
+        &context,
         RetainRequest {
-            tenant_id,
-            scope_id,
-            actor_id,
+            tenant_id: context.tenant_id,
+            data_subject_id: context.data_subject_id,
+            scope_id: context.scope_id,
+            agent_node_id: context.agent_node_id,
+            subject_generation: context.subject_generation,
+            actor_id: context.actor_id,
             source_kind: "user".to_string(),
+            source_ref: "test:fixture".to_string(),
+            observed_at: "2026-07-09T00:00:00Z".to_string(),
             source_trust: TrustLevel::TrustedUser,
             subject_hint: Some("deployment region".to_string()),
             subject: None,
@@ -289,9 +399,15 @@ async fn reflect_recorded_is_idempotent_for_duplicate_job_delivery() {
     .expect("retain succeeds");
     let job = store.reflect_jobs(tenant_id)[0].clone();
     let input = ReflectInput {
-        tenant_id,
-        scope_id,
-        actor_id,
+        tenant_id: context.tenant_id,
+        data_subject_id: context.data_subject_id,
+        scope_id: context.scope_id,
+        agent_node_id: context.agent_node_id,
+        subject_generation: context.subject_generation,
+        actor_id: context.actor_id,
+        source_ref: "test:reflect".to_string(),
+        observed_at: "2026-07-09T00:00:00Z".to_string(),
+        source_body: None,
         episode_id: Some(retained.episode_id),
         resource_id: None,
         job_id: job.id,
@@ -299,16 +415,19 @@ async fn reflect_recorded_is_idempotent_for_duplicate_job_delivery() {
         candidates: vec![ReflectCandidate {
             source_kind: "user".to_string(),
             trust_level: TrustLevel::TrustedUser,
-            actor_id,
+            actor_id: context.actor_id,
             subject: Some("deployment region".to_string()),
             predicate: Some("value".to_string()),
+            fact_key: None,
             kind: None,
             body: "Deployment region is Taipei.".to_string(),
+            confidence: None,
             churn_class: None,
             admission_hint: None,
             contextual_chunks: Vec::new(),
             valid_from: None,
             valid_to: None,
+            target_unit_ids: None,
         }],
     };
 
@@ -327,18 +446,180 @@ async fn reflect_recorded_is_idempotent_for_duplicate_job_delivery() {
 }
 
 #[tokio::test]
+async fn invalidation_without_an_open_exact_key_fails_closed() {
+    let store = InMemoryStore::default();
+    let tenant_id = tenant(30_001);
+    let context = memphant_store_testkit::bind_context(&store, tenant_id).await;
+    let retained = retain_episode(
+        &store,
+        &context,
+        RetainRequest {
+            tenant_id: context.tenant_id,
+            data_subject_id: context.data_subject_id,
+            scope_id: context.scope_id,
+            agent_node_id: context.agent_node_id,
+            subject_generation: context.subject_generation,
+            actor_id: context.actor_id,
+            source_kind: "system".to_string(),
+            source_ref: "test:fixture".to_string(),
+            observed_at: "2026-07-09T00:00:00Z".to_string(),
+            source_trust: TrustLevel::TrustedSystem,
+            subject_hint: Some("missing todo".to_string()),
+            subject: None,
+            predicate: None,
+            body: "Delete the missing todo now.".to_string(),
+            compiler_version: "compiler-invalidation".to_string(),
+        },
+    )
+    .await
+    .expect("retain succeeds");
+    let job = store.reflect_jobs(tenant_id)[0].clone();
+
+    let error = reflect_recorded(
+        &store,
+        ReflectInput {
+            tenant_id: context.tenant_id,
+            data_subject_id: context.data_subject_id,
+            scope_id: context.scope_id,
+            agent_node_id: context.agent_node_id,
+            subject_generation: context.subject_generation,
+            actor_id: context.actor_id,
+            source_ref: "test:reflect".to_string(),
+            observed_at: "2026-07-09T00:00:00Z".to_string(),
+            source_body: None,
+            episode_id: Some(retained.episode_id),
+            resource_id: None,
+            job_id: job.id,
+            compiler_version: "compiler-invalidation".to_string(),
+            candidates: vec![ReflectCandidate {
+                source_kind: "system".to_string(),
+                trust_level: TrustLevel::TrustedSystem,
+                actor_id: context.actor_id,
+                subject: Some("todos".to_string()),
+                predicate: Some("missing-todo".to_string()),
+                fact_key: None,
+                kind: None,
+                body: "Deleted structured item todos/missing-todo from memory".to_string(),
+                confidence: None,
+                churn_class: None,
+                admission_hint: Some(AdmissionAction::Invalidate),
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                target_unit_ids: None,
+            }],
+        },
+        &NoopEmbedding,
+        &CLOCK,
+    )
+    .await
+    .expect_err("a delete that matched nothing must not record success");
+
+    assert!(matches!(error, CoreError::ProviderInvalid(_)));
+    assert!(store.reflect_traces(tenant_id).is_empty());
+}
+
+#[tokio::test]
+async fn structured_replacement_requires_the_exact_active_target_id() {
+    let store = InMemoryStore::default();
+    let tenant_id = tenant(30_002);
+    let context = memphant_store_testkit::bind_context(&store, tenant_id).await;
+    retain_and_reflect(
+        &store,
+        &context,
+        ReflectSeed {
+            source_kind: "user",
+            trust_level: TrustLevel::TrustedUser,
+            subject: "profile",
+            predicate: "home_city",
+            body: "profile item home_city: {\"value\":\"Oslo\"}",
+        },
+    )
+    .await;
+    let active_id = store
+        .active_semantic_units(tenant_id)
+        .into_iter()
+        .find(|unit| unit.body.contains("Oslo"))
+        .expect("seeded target is active")
+        .id;
+    let replacement = |target| ReflectCandidate {
+        source_kind: "user".to_string(),
+        trust_level: TrustLevel::TrustedUser,
+        actor_id: context.actor_id,
+        subject: Some("profile".to_string()),
+        predicate: Some("home_city".to_string()),
+        fact_key: None,
+        kind: None,
+        body: "profile item home_city: {\"value\":\"Bergen\"}".to_string(),
+        confidence: None,
+        churn_class: None,
+        admission_hint: None,
+        contextual_chunks: Vec::new(),
+        valid_from: None,
+        valid_to: None,
+        target_unit_ids: Some(vec![target]),
+    };
+    let input = |job_id, target| ReflectInput {
+        tenant_id: context.tenant_id,
+        data_subject_id: context.data_subject_id,
+        scope_id: context.scope_id,
+        agent_node_id: context.agent_node_id,
+        subject_generation: context.subject_generation,
+        actor_id: context.actor_id,
+        source_ref: "test:reflect".to_string(),
+        observed_at: "2026-07-09T00:00:00Z".to_string(),
+        source_body: None,
+        episode_id: None,
+        resource_id: None,
+        job_id,
+        compiler_version: "compiler-exact-target".to_string(),
+        candidates: vec![replacement(target)],
+    };
+
+    let error = reflect_recorded(
+        &store,
+        input(JobId::new(), UnitId::new()),
+        &NoopEmbedding,
+        &CLOCK,
+    )
+    .await
+    .expect_err("a guessed target id must fail closed");
+    assert!(matches!(error, CoreError::ProviderInvalid(_)));
+
+    reflect_recorded(
+        &store,
+        input(JobId::new(), active_id),
+        &NoopEmbedding,
+        &CLOCK,
+    )
+    .await
+    .expect("the exact active target is replaceable");
+    let current = store
+        .active_semantic_units(tenant_id)
+        .into_iter()
+        .find(|unit| unit.body.contains("Bergen"))
+        .expect("replacement is active");
+    assert_ne!(current.id, active_id);
+}
+
+#[tokio::test]
 async fn reflect_candidate_contextual_chunks_are_stored_with_source_episode() {
     let store = InMemoryStore::default();
     let tenant_id = tenant(31_000);
-    let scope_id = scope(41_000);
-    let actor_id = actor(51_000);
+    let context = memphant_store_testkit::bind_context(&store, tenant_id).await;
     let retained = retain_episode(
         &store,
+        &context,
         RetainRequest {
-            tenant_id,
-            scope_id,
-            actor_id,
+            tenant_id: context.tenant_id,
+            data_subject_id: context.data_subject_id,
+            scope_id: context.scope_id,
+            agent_node_id: context.agent_node_id,
+            subject_generation: context.subject_generation,
+            actor_id: context.actor_id,
             source_kind: "system".to_string(),
+            source_ref: "test:fixture".to_string(),
+            observed_at: "2026-07-09T00:00:00Z".to_string(),
             source_trust: TrustLevel::TrustedSystem,
             subject_hint: Some("deployment runbook".to_string()),
             subject: None,
@@ -355,9 +636,15 @@ async fn reflect_candidate_contextual_chunks_are_stored_with_source_episode() {
     reflect_recorded(
         &store,
         ReflectInput {
-            tenant_id,
-            scope_id,
-            actor_id,
+            tenant_id: context.tenant_id,
+            data_subject_id: context.data_subject_id,
+            scope_id: context.scope_id,
+            agent_node_id: context.agent_node_id,
+            subject_generation: context.subject_generation,
+            actor_id: context.actor_id,
+            source_ref: "test:reflect".to_string(),
+            observed_at: "2026-07-09T00:00:00Z".to_string(),
+            source_body: None,
             episode_id: Some(retained.episode_id),
             resource_id: None,
             job_id: job.id,
@@ -365,11 +652,13 @@ async fn reflect_candidate_contextual_chunks_are_stored_with_source_episode() {
             candidates: vec![ReflectCandidate {
                 source_kind: "system".to_string(),
                 trust_level: TrustLevel::TrustedSystem,
-                actor_id,
+                actor_id: context.actor_id,
                 subject: Some("deployment runbook".to_string()),
                 predicate: Some("emergency breaker".to_string()),
+                fact_key: None,
                 kind: None,
                 body: "Runbook contains a gated switch.".to_string(),
+                confidence: None,
                 churn_class: None,
                 admission_hint: None,
                 contextual_chunks: vec![ContextualChunk {
@@ -380,6 +669,7 @@ async fn reflect_candidate_contextual_chunks_are_stored_with_source_episode() {
                 }],
                 valid_from: None,
                 valid_to: None,
+                target_unit_ids: None,
             }],
         },
         &NoopEmbedding,
@@ -399,14 +689,11 @@ async fn reflect_candidate_contextual_chunks_are_stored_with_source_episode() {
 async fn reflect_composes_inferred_belief_from_trusted_preference_sources() {
     let store = InMemoryStore::default();
     let tenant_id = tenant(32_000);
-    let scope_id = scope(42_000);
-    let actor_id = actor(52_000);
+    let context = memphant_store_testkit::bind_context(&store, tenant_id).await;
 
     retain_and_reflect(
         &store,
-        tenant_id,
-        scope_id,
-        actor_id,
+        &context,
         ReflectSeed {
             source_kind: "user",
             trust_level: TrustLevel::TrustedUser,
@@ -418,9 +705,7 @@ async fn reflect_composes_inferred_belief_from_trusted_preference_sources() {
     .await;
     retain_and_reflect(
         &store,
-        tenant_id,
-        scope_id,
-        actor_id,
+        &context,
         ReflectSeed {
             source_kind: "system",
             trust_level: TrustLevel::TrustedSystem,
@@ -456,14 +741,11 @@ async fn reflect_composes_inferred_belief_from_trusted_preference_sources() {
 async fn reflect_does_not_compose_low_trust_or_risky_preferences() {
     let store = InMemoryStore::default();
     let tenant_id = tenant(33_000);
-    let scope_id = scope(43_000);
-    let actor_id = actor(53_000);
+    let context = memphant_store_testkit::bind_context(&store, tenant_id).await;
 
     retain_and_reflect(
         &store,
-        tenant_id,
-        scope_id,
-        actor_id,
+        &context,
         ReflectSeed {
             source_kind: "web",
             trust_level: TrustLevel::WebContent,
@@ -475,9 +757,7 @@ async fn reflect_does_not_compose_low_trust_or_risky_preferences() {
     .await;
     retain_and_reflect(
         &store,
-        tenant_id,
-        scope_id,
-        actor_id,
+        &context,
         ReflectSeed {
             source_kind: "user",
             trust_level: TrustLevel::TrustedUser,
@@ -500,14 +780,11 @@ async fn reflect_does_not_compose_low_trust_or_risky_preferences() {
 async fn composed_belief_promotes_only_after_direct_observation() {
     let store = InMemoryStore::default();
     let tenant_id = tenant(34_000);
-    let scope_id = scope(44_000);
-    let actor_id = actor(54_000);
+    let context = memphant_store_testkit::bind_context(&store, tenant_id).await;
 
     retain_and_reflect(
         &store,
-        tenant_id,
-        scope_id,
-        actor_id,
+        &context,
         ReflectSeed {
             source_kind: "user",
             trust_level: TrustLevel::TrustedUser,
@@ -519,9 +796,7 @@ async fn composed_belief_promotes_only_after_direct_observation() {
     .await;
     retain_and_reflect(
         &store,
-        tenant_id,
-        scope_id,
-        actor_id,
+        &context,
         ReflectSeed {
             source_kind: "system",
             trust_level: TrustLevel::TrustedSystem,
@@ -539,11 +814,15 @@ async fn composed_belief_promotes_only_after_direct_observation() {
             .all(|unit| unit.body != "The user prefers keyboard-first and quiet review surfaces.")
     );
 
+    // The original fixture used a distinct actor id here to model a THIRD
+    // party directly observing the same fact. That distinction isn't actually
+    // load-bearing: `can_promote_belief` promotes on `TrustedUser`/
+    // `TrustedSystem` trust alone (see `is_independent_source`'s OR clause in
+    // memphant-core/src/lib.rs), so reusing the one bound actor here changes
+    // nothing about what this test proves.
     retain_and_reflect(
         &store,
-        tenant_id,
-        scope_id,
-        actor(54_001),
+        &context,
         ReflectSeed {
             source_kind: "user",
             trust_level: TrustLevel::TrustedUser,
@@ -576,14 +855,11 @@ async fn composed_belief_promotes_only_after_direct_observation() {
 async fn correcting_source_expires_dependent_composed_belief() {
     let store = InMemoryStore::default();
     let tenant_id = tenant(35_000);
-    let scope_id = scope(45_000);
-    let actor_id = actor(55_000);
+    let context = memphant_store_testkit::bind_context(&store, tenant_id).await;
 
     retain_and_reflect(
         &store,
-        tenant_id,
-        scope_id,
-        actor_id,
+        &context,
         ReflectSeed {
             source_kind: "user",
             trust_level: TrustLevel::TrustedUser,
@@ -595,9 +871,7 @@ async fn correcting_source_expires_dependent_composed_belief() {
     .await;
     retain_and_reflect(
         &store,
-        tenant_id,
-        scope_id,
-        actor_id,
+        &context,
         ReflectSeed {
             source_kind: "system",
             trust_level: TrustLevel::TrustedSystem,
@@ -622,16 +896,21 @@ async fn correcting_source_expires_dependent_composed_belief() {
 
     correct_memory(
         &store,
+        &context,
         CorrectRequest {
-            tenant_id,
-            scope_id,
-            actor_id,
+            subject_id: context.data_subject_id,
+            scope_id: context.scope_id,
+            agent_node_id: context.agent_node_id,
+            subject_generation: context.subject_generation,
+            actor_id: context.actor_id,
             selector: CorrectSelector {
                 memory_unit_id: source_id,
             },
             correction: CorrectionPayload {
                 value: "The user prefers detailed review surfaces.".to_string(),
                 reason: "preference_changed".to_string(),
+                source_ref: "test:correction".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
                 valid_from: None,
                 valid_to: None,
             },
@@ -658,8 +937,7 @@ async fn correcting_source_expires_dependent_composed_belief() {
 async fn two_trusted_retains_with_distinct_content_do_not_supersede() {
     let store = InMemoryStore::default();
     let tenant_id = tenant(36_000);
-    let scope_id = scope(46_000);
-    let actor_id = actor(56_000);
+    let context = memphant_store_testkit::bind_context(&store, tenant_id).await;
 
     // Two subject-less retains with DISTINCT content: auto content-hash keys
     // never collide and NEVER supersede — both facts stay Active.
@@ -669,11 +947,17 @@ async fn two_trusted_retains_with_distinct_content_do_not_supersede() {
     ] {
         let retained = retain_episode(
             &store,
+            &context,
             RetainRequest {
-                tenant_id,
-                scope_id,
-                actor_id,
+                tenant_id: context.tenant_id,
+                data_subject_id: context.data_subject_id,
+                scope_id: context.scope_id,
+                agent_node_id: context.agent_node_id,
+                subject_generation: context.subject_generation,
+                actor_id: context.actor_id,
                 source_kind: "user".to_string(),
+                source_ref: "test:fixture".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
                 source_trust: TrustLevel::TrustedUser,
                 subject_hint: None,
                 subject: None,
@@ -692,9 +976,15 @@ async fn two_trusted_retains_with_distinct_content_do_not_supersede() {
         reflect_recorded(
             &store,
             ReflectInput {
-                tenant_id,
-                scope_id,
-                actor_id,
+                tenant_id: context.tenant_id,
+                data_subject_id: context.data_subject_id,
+                scope_id: context.scope_id,
+                agent_node_id: context.agent_node_id,
+                subject_generation: context.subject_generation,
+                actor_id: context.actor_id,
+                source_ref: "test:reflect".to_string(),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
+                source_body: None,
                 episode_id: Some(retained.episode_id),
                 resource_id: None,
                 job_id: job.id,
@@ -702,16 +992,19 @@ async fn two_trusted_retains_with_distinct_content_do_not_supersede() {
                 candidates: vec![ReflectCandidate {
                     source_kind: "user".to_string(),
                     trust_level: TrustLevel::TrustedUser,
-                    actor_id,
+                    actor_id: context.actor_id,
                     subject: job.subject.clone(),
                     predicate: job.predicate.clone(),
+                    fact_key: None,
                     kind: None,
                     body: body.to_string(),
+                    confidence: None,
                     churn_class: None,
                     admission_hint: None,
                     contextual_chunks: Vec::new(),
                     valid_from: None,
                     valid_to: None,
+                    target_unit_ids: None,
                 }],
             },
             &NoopEmbedding,
@@ -732,7 +1025,7 @@ async fn two_trusted_retains_with_distinct_content_do_not_supersede() {
     );
     let keys: Vec<_> = active
         .iter()
-        .map(|unit| unit.subject_key.clone().expect("auto key derived"))
+        .map(|unit| unit.fact_key.clone().expect("auto key derived"))
         .collect();
     assert!(keys.iter().all(|key| key.contains(":auto:")));
     assert_ne!(keys[0], keys[1], "distinct content yields distinct keys");
@@ -742,15 +1035,12 @@ async fn two_trusted_retains_with_distinct_content_do_not_supersede() {
 async fn explicit_subject_updates_supersede_prior_generation() {
     let store = InMemoryStore::default();
     let tenant_id = tenant(37_000);
-    let scope_id = scope(47_000);
-    let actor_id = actor(57_000);
+    let context = memphant_store_testkit::bind_context(&store, tenant_id).await;
 
     for body in ["Deploy region is Taipei.", "Deploy region is Singapore."] {
         retain_and_reflect(
             &store,
-            tenant_id,
-            scope_id,
-            actor_id,
+            &context,
             ReflectSeed {
                 source_kind: "user",
                 trust_level: TrustLevel::TrustedUser,
@@ -763,40 +1053,57 @@ async fn explicit_subject_updates_supersede_prior_generation() {
     }
 
     let units = store.memory_units(tenant_id);
-    let active: Vec<_> = units
+    assert_eq!(units.len(), 3, "the update splits both time axes");
+    let superseded = units
         .iter()
-        .filter(|unit| unit.state == UnitState::Active)
-        .collect();
-    let superseded: Vec<_> = units
-        .iter()
-        .filter(|unit| unit.state == UnitState::Superseded)
-        .collect();
-    assert_eq!(active.len(), 1);
-    assert_eq!(active[0].body, "Deploy region is Singapore.");
-    assert_eq!(superseded.len(), 1);
-    assert_eq!(superseded[0].body, "Deploy region is Taipei.");
+        .find(|unit| unit.state == UnitState::Superseded)
+        .expect("the prior transaction rectangle is superseded");
+    assert_eq!(superseded.body, "Deploy region is Taipei.");
+    assert_eq!(superseded.valid_from, None);
+    assert_eq!(superseded.valid_to, None);
     assert_eq!(
-        superseded[0].transaction_to.as_deref(),
+        superseded.transaction_to.as_deref(),
         Some("2026-07-03T00:00:00Z"),
         "supersedence closes the transaction interval with the injected clock"
     );
+
+    let historical = units
+        .iter()
+        .find(|unit| unit.state == UnitState::Active && unit.body == "Deploy region is Taipei.")
+        .expect("the prior value remains valid before the correction");
+    assert_eq!(historical.valid_from, None);
+    assert_eq!(historical.valid_to.as_deref(), Some("2026-07-03T00:00:00Z"));
+    assert_eq!(historical.transaction_to, None);
+
+    let current = units
+        .iter()
+        .find(|unit| unit.state == UnitState::Active && unit.body == "Deploy region is Singapore.")
+        .expect("the corrected value is current");
+    assert_eq!(current.valid_from.as_deref(), Some("2026-07-03T00:00:00Z"));
+    assert_eq!(current.valid_to, None);
+    assert_eq!(current.transaction_to, None);
 }
 
 #[tokio::test]
 async fn unit_transaction_from_uses_injected_clock() {
     let store = InMemoryStore::default();
     let tenant_id = tenant(38_000);
-    let scope_id = scope(48_000);
-    let actor_id = actor(58_000);
+    let context = memphant_store_testkit::bind_context(&store, tenant_id).await;
     let future_clock = memphant_core::FixedClock("2031-01-01T00:00:00Z");
 
     let retained = retain_episode(
         &store,
+        &context,
         RetainRequest {
-            tenant_id,
-            scope_id,
-            actor_id,
+            tenant_id: context.tenant_id,
+            data_subject_id: context.data_subject_id,
+            scope_id: context.scope_id,
+            agent_node_id: context.agent_node_id,
+            subject_generation: context.subject_generation,
+            actor_id: context.actor_id,
             source_kind: "user".to_string(),
+            source_ref: "test:fixture".to_string(),
+            observed_at: "2026-07-09T00:00:00Z".to_string(),
             source_trust: TrustLevel::TrustedUser,
             subject_hint: None,
             subject: Some("release train".to_string()),
@@ -811,9 +1118,15 @@ async fn unit_transaction_from_uses_injected_clock() {
     reflect_recorded(
         &store,
         ReflectInput {
-            tenant_id,
-            scope_id,
-            actor_id,
+            tenant_id: context.tenant_id,
+            data_subject_id: context.data_subject_id,
+            scope_id: context.scope_id,
+            agent_node_id: context.agent_node_id,
+            subject_generation: context.subject_generation,
+            actor_id: context.actor_id,
+            source_ref: "test:reflect".to_string(),
+            observed_at: "2026-07-09T00:00:00Z".to_string(),
+            source_body: None,
             episode_id: Some(retained.episode_id),
             resource_id: None,
             job_id: job.id,
@@ -821,16 +1134,19 @@ async fn unit_transaction_from_uses_injected_clock() {
             candidates: vec![ReflectCandidate {
                 source_kind: "user".to_string(),
                 trust_level: TrustLevel::TrustedUser,
-                actor_id,
+                actor_id: context.actor_id,
                 subject: Some("release train".to_string()),
                 predicate: Some("cadence".to_string()),
+                fact_key: None,
                 kind: None,
                 body: "Release train ships every second Tuesday.".to_string(),
+                confidence: None,
                 churn_class: None,
                 admission_hint: None,
                 contextual_chunks: Vec::new(),
                 valid_from: None,
                 valid_to: None,
+                target_unit_ids: None,
             }],
         },
         &NoopEmbedding,

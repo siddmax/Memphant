@@ -7,18 +7,26 @@
 
 use std::sync::Arc;
 
-use memphant_core::service::MemoryService;
+#[cfg(any(feature = "fastembed", test))]
+use memphant_core::CrossRerankerConfig;
+use memphant_core::service::{
+    DEFAULT_STRUCTURED_STATE_PREFETCH_CONCURRENCY, MAX_STRUCTURED_STATE_PREFETCH_CONCURRENCY,
+    MemoryService,
+};
 use memphant_core::{
-    ApiKeyRow, CompiledWrite, CorrectOutcome, CorrectionWrite, CrossReranker,
-    DEFAULT_RECALL_POOL_DEPTH, EmbedError, EmbeddingProfileRow, EmbeddingProvider, EmbeddingRow,
-    ForgetOutcome, ForgetWrite, InMemoryStore, InMemoryTxn, JobFilter, MemoryStore, NoopEmbedding,
-    ReflectJobRow, ReviewEventRow, ScopePage, StoreError, SystemClock,
+    ApiKeyRow, CompiledWrite, CorrectOutcome, CorrectionWrite, CrossRerankCandidateSelection,
+    CrossReranker, DEFAULT_RECALL_POOL_DEPTH, EmbedError, EmbeddingProfileRow, EmbeddingProvider,
+    EmbeddingRow, ForgetOutcome, ForgetWrite, InMemoryStore, InMemoryTxn, JobFilter, MemoryStore,
+    MutationClaim, MutationClaimOutcome, MutationLedgerStore, MutationResponse, NoopEmbedding,
+    ReflectJobRow, ResolvedMemoryContext, ReviewEventRow, ScopePage, StoreError,
+    SubjectErasureReceipt, SystemClock,
 };
 use memphant_store_postgres::{PgStore, PgTxn};
 use memphant_types::{
-    EpisodeId, JobId, MemoryKind, NewEpisode, NewMemoryEdge, NewMemoryUnit, NewResource,
+    ActorId, AgentNodeId, ContextBindingRequest, ContextBindingResponse, EpisodeId, JobId,
+    MemoryKind, NewEpisode, NewMemoryEdge, NewMemoryUnit, NewResource, RecallTime, RecordMaterial,
     ReflectJob, ReflectTrace, ResourceId, RetainOutcome, RetrievalTrace, ScopeId, StoredEpisode,
-    StoredMemoryEdge, StoredMemoryUnit, StoredResource, TenantId, TraceId, UnitId,
+    StoredMemoryEdge, StoredMemoryUnit, StoredResource, SubjectId, TenantId, TraceId, UnitId,
 };
 use uuid::Uuid;
 
@@ -32,6 +40,11 @@ pub enum AnyStore {
     Pg(PgStore),
 }
 
+// ponytail: transient per-transaction dispatch wrapper — one live at a time,
+// created by begin() and consumed by commit()/rollback(), never collected.
+// Boxing the large variant would add a heap alloc per transaction and deref
+// churn across every match arm for no benefit. Box it if it's ever stored in bulk.
+#[allow(clippy::large_enum_variant)]
 pub enum AnyTxn {
     Mem(InMemoryTxn),
     Pg(PgTxn),
@@ -53,25 +66,66 @@ impl AnyStore {
     }
 }
 
-/// Builds the store from `DATABASE_URL`: present → `PgStore::connect` + ping
-/// (fails loudly), absent → EPHEMERAL in-memory store with a loud warning.
-pub async fn build_store() -> Result<AnyStore, StoreError> {
-    match std::env::var("DATABASE_URL") {
-        Ok(url) if !url.trim().is_empty() => {
-            let store = PgStore::connect(&url).await?;
+/// Builds the server/MCP store from separate tenant-data and authentication
+/// credentials. Both must be present together; neither process provisions.
+pub async fn build_app_store() -> Result<AnyStore, StoreError> {
+    match (
+        env_url("MEMPHANT_APP_DATABASE_URL"),
+        env_url("MEMPHANT_AUTHN_DATABASE_URL"),
+        env_url("DATABASE_URL"),
+    ) {
+        (Some(url), Some(auth_url), None) => {
+            let store = PgStore::connect_app(&url, &auth_url).await?;
             Ok(AnyStore::Pg(store))
         }
-        _ => {
-            eprintln!("memphant: EPHEMERAL in-memory store — set DATABASE_URL for durability");
+        (None, None, None) => {
+            eprintln!(
+                "memphant: EPHEMERAL in-memory store — set MEMPHANT_APP_DATABASE_URL and MEMPHANT_AUTHN_DATABASE_URL for durability"
+            );
             Ok(AnyStore::Mem(InMemoryStore::default()))
         }
+        _ => Err(StoreError::Backend(
+            "server/MCP database config requires MEMPHANT_APP_DATABASE_URL and MEMPHANT_AUTHN_DATABASE_URL together; DATABASE_URL is not accepted"
+                .to_string(),
+        )),
     }
+}
+
+/// Builds the worker store from its dedicated queue/data credential.
+pub async fn build_worker_store() -> Result<AnyStore, StoreError> {
+    match (
+        env_url("MEMPHANT_WORKER_DATABASE_URL"),
+        env_url("DATABASE_URL"),
+    ) {
+        (Some(url), None) => {
+            let store = PgStore::connect_worker(&url).await?;
+            Ok(AnyStore::Pg(store))
+        }
+        (None, None) => {
+            eprintln!(
+                "memphant: EPHEMERAL in-memory worker store — set MEMPHANT_WORKER_DATABASE_URL for durability"
+            );
+            Ok(AnyStore::Mem(InMemoryStore::default()))
+        }
+        _ => Err(StoreError::Backend(
+            "worker database config requires MEMPHANT_WORKER_DATABASE_URL; DATABASE_URL is not accepted"
+                .to_string(),
+        )),
+    }
+}
+
+fn env_url(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
 }
 
 #[cfg(feature = "fastembed")]
 pub mod embeddings;
 
 pub mod api_embeddings;
+mod api_reranking;
+mod structured_state_openrouter;
 
 /// Single source of truth mapping an embedder selector id to a provider, shared
 /// by the runtime `MEMPHANT_EMBEDDINGS` env var (via [`build_embedder`]) AND
@@ -85,7 +139,7 @@ pub mod api_embeddings;
 /// Accepted ids:
 /// - `off` | `noop` → [`NoopEmbedding`] (vector channel honestly disabled)
 /// - `fastembed` → the legacy default local arm (bge-small-en-v1.5)
-/// - `small` | `base` | `modernbert` | `gemma` → the T1 fastembed arms
+/// - `small` | `base` | `bge-m3` | `modernbert` | `gemma` → the T1 fastembed arms
 /// - `qwen3` → the T1b Qwen3-Embedding-0.6B arm
 /// - `voyage-4` | `voyage-4-lite` | `voyage-4-large` | `voyage-code-3`
 ///   | `voyage-context-4` | `gemini-embedding-001`
@@ -97,7 +151,9 @@ pub fn embedder_from_id(id: &str) -> Result<Arc<dyn EmbeddingProvider>, String> 
     };
     match id {
         "off" | "noop" => Ok(Arc::new(NoopEmbedding)),
-        "fastembed" | "small" | "base" | "modernbert" | "gemma" => fastembed_arm(id),
+        "fastembed" | "small" | "base" | "bge-m3" | "fastembed:bge-m3" | "modernbert" | "gemma" => {
+            fastembed_arm(id)
+        }
         "qwen3" => qwen3_arm(),
         "voyage-4" => api(VoyageEmbedding::new(VoyageModel::Voyage4)),
         "voyage-4-lite" => api(VoyageEmbedding::new(VoyageModel::Voyage4Lite)),
@@ -108,7 +164,7 @@ pub fn embedder_from_id(id: &str) -> Result<Arc<dyn EmbeddingProvider>, String> 
         "openai-text-embedding-3-small" => api(OpenAiEmbedding::new()),
         other => Err(format!(
             "unknown embedder id: {other} (accepted: off, noop, fastembed, small, base, \
-             modernbert, gemma, qwen3, voyage-4, voyage-4-lite, voyage-4-large, voyage-code-3, \
+             bge-m3, fastembed:bge-m3, modernbert, gemma, qwen3, voyage-4, voyage-4-lite, voyage-4-large, voyage-code-3, \
              voyage-context-4, gemini-embedding-001, openai-text-embedding-3-small)"
         )),
     }
@@ -125,13 +181,14 @@ where
         .map_err(|error| error.to_string())
 }
 
-/// The fastembed local arms (`fastembed`/`small`/`base`/`modernbert`/`gemma`),
+/// The fastembed local arms (`fastembed`/`small`/`base`/`bge-m3`/`modernbert`/`gemma`),
 /// when the feature is compiled in.
 #[cfg(feature = "fastembed")]
 fn fastembed_arm(id: &str) -> Result<Arc<dyn EmbeddingProvider>, String> {
     let model = match id {
         "fastembed" | "small" => embeddings::FastEmbedModel::BgeSmallEnV15,
         "base" => embeddings::FastEmbedModel::BgeBaseEnV15,
+        "bge-m3" | "fastembed:bge-m3" => embeddings::FastEmbedModel::BgeM3,
         "modernbert" => embeddings::FastEmbedModel::ModernBertEmbedLarge,
         "gemma" => embeddings::FastEmbedModel::EmbeddingGemma300M,
         other => unreachable!("fastembed_arm dispatched a non-fastembed id: {other}"),
@@ -174,15 +231,36 @@ fn qwen3_arm() -> Result<Arc<dyn EmbeddingProvider>, String> {
 /// A clear build-instruction error when the `fastembed` feature is absent
 /// (the cross-encoder is a fastembed model), mirroring `fastembed_arm`/
 /// `qwen3_arm`.
-#[cfg(feature = "fastembed")]
 pub fn build_cross_reranker() -> Result<Arc<dyn CrossReranker>, String> {
-    embeddings::FastEmbedCrossReranker::new()
+    let candidate_limit = reranker_candidate_limit_from_value(
+        std::env::var("MEMPHANT_RERANK_CANDIDATE_LIMIT")
+            .ok()
+            .as_deref(),
+    )?;
+    match std::env::var("MEMPHANT_RERANKER")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        None | Some("fastembed") => build_fastembed_cross_reranker(),
+        Some("voyage-rerank-2.5") => api_reranking::VoyageReranker::new(candidate_limit)
+            .map(|reranker| Arc::new(reranker) as Arc<dyn CrossReranker>),
+        Some(value) => Err(format!(
+            "MEMPHANT_RERANKER expected fastembed or voyage-rerank-2.5, got {value:?}"
+        )),
+    }
+}
+
+#[cfg(feature = "fastembed")]
+fn build_fastembed_cross_reranker() -> Result<Arc<dyn CrossReranker>, String> {
+    embeddings::FastEmbedCrossReranker::with_config(reranker_config_from_env()?)
         .map(|reranker| Arc::new(reranker) as Arc<dyn CrossReranker>)
         .map_err(|error| format!("cross-reranker initialization failed: {error}"))
 }
 
 #[cfg(not(feature = "fastembed"))]
-pub fn build_cross_reranker() -> Result<Arc<dyn CrossReranker>, String> {
+fn build_fastembed_cross_reranker() -> Result<Arc<dyn CrossReranker>, String> {
     Err(
         "cross-reranker requires a binary built with --features fastembed \
          (the cross-encoder is a fastembed model)"
@@ -248,15 +326,16 @@ fn fastembed_or(
 /// `MEMPHANT_RECALL_POOL_DEPTH` (default `DEFAULT_RECALL_POOL_DEPTH`, 64) is
 /// threaded the same way, so the recall-pool-depth knob reaches both binaries
 /// from ONE env var. R1.5-T1's `MEMPHANT_CROSS_RERANK` (default OFF) is the
-/// same pattern again: only when truthy does this construct the W8
+/// same pattern again for recall-serving processes: only when truthy does this construct the W8
 /// cross-encoder reranker (via [`build_cross_reranker`], a real ~1.1 GB model
 /// load) and install it with `with_cross_reranker` — unset/off costs nothing,
-/// so server/worker/mcp (all three share this one function) never pay the
-/// load unless the flag is on.
+/// so server/MCP never pay the load unless the flag is on. The worker uses
+/// [`build_worker_service`] because it never recalls.
 pub fn build_service(store: AnyStore) -> MemoryService<AnyStore> {
-    let service = MemoryService::new(Arc::new(store), Arc::new(SystemClock), build_embedder())
-        .with_resource_chunks_write_enabled(resource_chunks_write_from_env())
-        .with_recall_pool_depth(recall_pool_depth_from_env());
+    let service = build_base_service(store).with_cross_rerank_candidate_selection(
+        cross_rerank_candidate_selection_from_env()
+            .unwrap_or_else(|error| panic!("MEMPHANT_CROSS_RERANK_CANDIDATES: {error}")),
+    );
     if cross_rerank_enabled_from_env() {
         let reranker = build_cross_reranker().unwrap_or_else(|error| {
             panic!("MEMPHANT_CROSS_RERANK=1: {error}");
@@ -265,6 +344,48 @@ pub fn build_service(store: AnyStore) -> MemoryService<AnyStore> {
     } else {
         service
     }
+}
+
+/// Workers only compile queued writes; they never recall, so loading a
+/// cross-encoder in the worker process wastes memory and startup time.
+pub fn build_worker_service(store: AnyStore) -> MemoryService<AnyStore> {
+    build_base_service(store)
+}
+
+fn build_base_service(store: AnyStore) -> MemoryService<AnyStore> {
+    let service = MemoryService::new(Arc::new(store), Arc::new(SystemClock), build_embedder())
+        .with_resource_chunks_write_enabled(resource_chunks_write_from_env())
+        .with_recall_pool_depth(recall_pool_depth_from_env())
+        .with_structured_state_prefetch_concurrency(
+            structured_state_prefetch_concurrency_from_value(
+                std::env::var("MEMPHANT_STRUCTURED_STATE_CONCURRENCY")
+                    .ok()
+                    .as_deref(),
+            )
+            .unwrap_or_else(|error| panic!("MEMPHANT_STRUCTURED_STATE_CONCURRENCY: {error}")),
+        );
+    match structured_state_openrouter::provider_from_env()
+        .unwrap_or_else(|error| panic!("MEMPHANT_STRUCTURED_STATE=on: {error}"))
+    {
+        Some(provider) => service.with_structured_state_provider(provider),
+        None => service,
+    }
+}
+
+fn structured_state_prefetch_concurrency_from_value(value: Option<&str>) -> Result<usize, String> {
+    let Some(value) = value else {
+        return Ok(DEFAULT_STRUCTURED_STATE_PREFETCH_CONCURRENCY);
+    };
+    value
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|value| (1..=MAX_STRUCTURED_STATE_PREFETCH_CONCURRENCY).contains(value))
+        .ok_or_else(|| {
+            format!(
+                "must be an integer from 1 through {MAX_STRUCTURED_STATE_PREFETCH_CONCURRENCY}, got {value:?}"
+            )
+        })
 }
 
 /// `MEMPHANT_RESOURCE_CHUNKS` → bool. Truthy (`1`/`true`/`on`, case-insensitive)
@@ -302,6 +423,82 @@ fn cross_rerank_enabled_from_env() -> bool {
     )
 }
 
+fn cross_rerank_candidate_selection_from_env() -> Result<CrossRerankCandidateSelection, String> {
+    cross_rerank_candidate_selection_from_value(
+        std::env::var("MEMPHANT_CROSS_RERANK_CANDIDATES")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn cross_rerank_candidate_selection_from_value(
+    value: Option<&str>,
+) -> Result<CrossRerankCandidateSelection, String> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None | Some("fused-head") => Ok(CrossRerankCandidateSelection::FusedHead),
+        Some("vector-lexical-balanced") => Ok(CrossRerankCandidateSelection::VectorLexicalBalanced),
+        Some(value) => Err(format!(
+            "expected fused-head or vector-lexical-balanced, got {value:?}"
+        )),
+    }
+}
+
+#[cfg(feature = "fastembed")]
+fn reranker_config_from_env() -> Result<CrossRerankerConfig, String> {
+    reranker_config_from_values(
+        std::env::var("MEMPHANT_RERANK_CANDIDATE_LIMIT")
+            .ok()
+            .as_deref(),
+        std::env::var("MEMPHANT_RERANK_MAX_LENGTH").ok().as_deref(),
+        std::env::var("MEMPHANT_RERANK_BATCH_SIZE").ok().as_deref(),
+    )
+}
+
+fn reranker_candidate_limit_from_value(value: Option<&str>) -> Result<usize, String> {
+    let Some(value) = value else {
+        return Ok(DEFAULT_RECALL_POOL_DEPTH);
+    };
+    value
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            format!("MEMPHANT_RERANK_CANDIDATE_LIMIT must be a positive integer, got {value:?}")
+        })
+}
+
+#[cfg(any(feature = "fastembed", test))]
+fn reranker_config_from_values(
+    candidate_limit: Option<&str>,
+    max_length: Option<&str>,
+    batch_size: Option<&str>,
+) -> Result<CrossRerankerConfig, String> {
+    fn positive(name: &str, value: Option<&str>, default: usize) -> Result<usize, String> {
+        let Some(value) = value else {
+            return Ok(default);
+        };
+        value
+            .trim()
+            .parse::<usize>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| format!("{name} must be a positive integer, got {value:?}"))
+    }
+
+    Ok(CrossRerankerConfig {
+        provider: "fastembed".to_string(),
+        model: "fastembed:bge-reranker-base".to_string(),
+        candidate_limit: positive(
+            "MEMPHANT_RERANK_CANDIDATE_LIMIT",
+            candidate_limit,
+            DEFAULT_RECALL_POOL_DEPTH,
+        )?,
+        max_length: positive("MEMPHANT_RERANK_MAX_LENGTH", max_length, 512)?,
+        batch_size: Some(positive("MEMPHANT_RERANK_BATCH_SIZE", batch_size, 256)?),
+    })
+}
+
 /// `MEMPHANT_RECALL_POOL_DEPTH` → `usize`. Unset, empty, or unparseable-as a
 /// positive integer falls back to [`DEFAULT_RECALL_POOL_DEPTH`] (64) — the
 /// shipped default, so no env means byte-identical-to-the-new-default
@@ -335,10 +532,10 @@ macro_rules! delegate {
 impl MemoryStore for AnyStore {
     type Txn = AnyTxn;
 
-    async fn begin(&self) -> Result<Self::Txn, StoreError> {
+    async fn begin(&self, context: &ResolvedMemoryContext) -> Result<Self::Txn, StoreError> {
         Ok(match self {
-            Self::Mem(store) => AnyTxn::Mem(store.begin().await?),
-            Self::Pg(store) => AnyTxn::Pg(store.begin().await?),
+            Self::Mem(store) => AnyTxn::Mem(store.begin(context).await?),
+            Self::Pg(store) => AnyTxn::Pg(store.begin(context).await?),
         })
     }
 
@@ -346,6 +543,14 @@ impl MemoryStore for AnyStore {
         match (self, tx) {
             (Self::Mem(store), AnyTxn::Mem(tx)) => store.commit(tx).await,
             (Self::Pg(store), AnyTxn::Pg(tx)) => store.commit(tx).await,
+            _ => txn_mismatch(),
+        }
+    }
+
+    async fn rollback(&self, tx: Self::Txn) -> Result<(), StoreError> {
+        match (self, tx) {
+            (Self::Mem(store), AnyTxn::Mem(tx)) => store.rollback(tx).await,
+            (Self::Pg(store), AnyTxn::Pg(tx)) => store.rollback(tx).await,
             _ => txn_mismatch(),
         }
     }
@@ -412,140 +617,162 @@ impl MemoryStore for AnyStore {
 
     async fn fetch_recall_candidates(
         &self,
-        tenant: TenantId,
-        scopes: &[ScopeId],
+        context: &ResolvedMemoryContext,
         kinds: &[MemoryKind],
         query_terms: &[String],
+        time: &RecallTime,
         limit: usize,
     ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
         delegate!(self, store => store
-            .fetch_recall_candidates(tenant, scopes, kinds, query_terms, limit)
+            .fetch_recall_candidates(context, kinds, query_terms, time, limit)
             .await)
     }
 
     async fn fetch_scope_open_units(
         &self,
-        tenant: TenantId,
-        scope: ScopeId,
+        context: &ResolvedMemoryContext,
     ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
-        delegate!(self, store => store.fetch_scope_open_units(tenant, scope).await)
+        delegate!(self, store => store.fetch_scope_open_units(context).await)
     }
 
     async fn fetch_vector_candidates(
         &self,
-        tenant: TenantId,
-        scopes: &[ScopeId],
-        kinds: &[MemoryKind],
+        context: &ResolvedMemoryContext,
         query_vec: &[f32],
         profile_id: Uuid,
+        time: &RecallTime,
         limit: usize,
     ) -> Result<Vec<(StoredMemoryUnit, f32)>, StoreError> {
         delegate!(self, store => store
-            .fetch_vector_candidates(tenant, scopes, kinds, query_vec, profile_id, limit)
+            .fetch_vector_candidates(context, query_vec, profile_id, time, limit)
             .await)
     }
 
     async fn fetch_units_by_ids(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         ids: &[UnitId],
     ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
-        delegate!(self, store => store.fetch_units_by_ids(tenant, ids).await)
+        delegate!(self, store => store.fetch_units_by_ids(context, ids).await)
     }
 
     async fn fetch_edges(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         unit_ids: &[UnitId],
+        time: &RecallTime,
     ) -> Result<Vec<StoredMemoryEdge>, StoreError> {
-        delegate!(self, store => store.fetch_edges(tenant, unit_ids).await)
+        delegate!(self, store => store.fetch_edges(context, unit_ids, time).await)
+    }
+
+    async fn fetch_record_material(
+        &self,
+        context: &ResolvedMemoryContext,
+        ids: &[UnitId],
+        time: &RecallTime,
+    ) -> Result<Vec<RecordMaterial>, StoreError> {
+        delegate!(self, store => store.fetch_record_material(context, ids, time).await)
     }
 
     async fn fetch_review_events(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         unit_ids: &[UnitId],
+        time: &RecallTime,
     ) -> Result<Vec<ReviewEventRow>, StoreError> {
-        delegate!(self, store => store.fetch_review_events(tenant, unit_ids).await)
+        delegate!(self, store => store.fetch_review_events(context, unit_ids, time).await)
     }
 
     async fn fetch_episodes_for_scope(
         &self,
-        tenant: TenantId,
-        scope: ScopeId,
+        context: &ResolvedMemoryContext,
         limit: usize,
     ) -> Result<Vec<StoredEpisode>, StoreError> {
-        delegate!(self, store => store.fetch_episodes_for_scope(tenant, scope, limit).await)
+        delegate!(self, store => store.fetch_episodes_for_scope(context, limit).await)
     }
 
     async fn pending_job_count(
         &self,
-        tenant: TenantId,
-        scope: ScopeId,
+        context: &ResolvedMemoryContext,
     ) -> Result<usize, StoreError> {
-        delegate!(self, store => store.pending_job_count(tenant, scope).await)
+        delegate!(self, store => store.pending_job_count(context).await)
     }
 
     async fn fetch_episode(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         id: EpisodeId,
     ) -> Result<Option<StoredEpisode>, StoreError> {
-        delegate!(self, store => store.fetch_episode(tenant, id).await)
+        delegate!(self, store => store.fetch_episode(context, id).await)
     }
 
     async fn fetch_resource(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         id: ResourceId,
     ) -> Result<Option<StoredResource>, StoreError> {
-        delegate!(self, store => store.fetch_resource(tenant, id).await)
+        delegate!(self, store => store.fetch_resource(context, id).await)
     }
 
-    async fn apply_correction(
+    async fn stage_correction(
         &self,
-        tenant: TenantId,
+        tx: &mut Self::Txn,
         correction: CorrectionWrite,
     ) -> Result<CorrectOutcome, StoreError> {
-        delegate!(self, store => store.apply_correction(tenant, correction).await)
+        match (self, tx) {
+            (Self::Mem(store), AnyTxn::Mem(tx)) => store.stage_correction(tx, correction).await,
+            (Self::Pg(store), AnyTxn::Pg(tx)) => store.stage_correction(tx, correction).await,
+            _ => txn_mismatch(),
+        }
     }
 
-    async fn apply_forget(
+    async fn stage_forget(
         &self,
-        tenant: TenantId,
+        tx: &mut Self::Txn,
         forget: ForgetWrite,
     ) -> Result<ForgetOutcome, StoreError> {
-        delegate!(self, store => store.apply_forget(tenant, forget).await)
+        match (self, tx) {
+            (Self::Mem(store), AnyTxn::Mem(tx)) => store.stage_forget(tx, forget).await,
+            (Self::Pg(store), AnyTxn::Pg(tx)) => store.stage_forget(tx, forget).await,
+            _ => txn_mismatch(),
+        }
     }
 
-    async fn record_review_events(
+    async fn stage_review_events(
         &self,
-        tenant: TenantId,
+        tx: &mut Self::Txn,
         events: Vec<ReviewEventRow>,
     ) -> Result<(), StoreError> {
-        delegate!(self, store => store.record_review_events(tenant, events).await)
+        match (self, tx) {
+            (Self::Mem(store), AnyTxn::Mem(tx)) => store.stage_review_events(tx, events).await,
+            (Self::Pg(store), AnyTxn::Pg(tx)) => store.stage_review_events(tx, events).await,
+            _ => txn_mismatch(),
+        }
     }
 
-    async fn store_trace(&self, tenant: TenantId, trace: RetrievalTrace) -> Result<(), StoreError> {
-        delegate!(self, store => store.store_trace(tenant, trace).await)
+    async fn store_trace(
+        &self,
+        context: &ResolvedMemoryContext,
+        trace: RetrievalTrace,
+    ) -> Result<(), StoreError> {
+        delegate!(self, store => store.store_trace(context, trace).await)
     }
 
     async fn trace_by_id(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         id: TraceId,
     ) -> Result<Option<RetrievalTrace>, StoreError> {
-        delegate!(self, store => store.trace_by_id(tenant, id).await)
+        delegate!(self, store => store.trace_by_id(context, id).await)
     }
 
     async fn scope_memory_page(
         &self,
-        tenant: TenantId,
-        scope: ScopeId,
+        context: &ResolvedMemoryContext,
         cursor: Option<UnitId>,
         limit: usize,
     ) -> Result<ScopePage, StoreError> {
-        delegate!(self, store => store.scope_memory_page(tenant, scope, cursor, limit).await)
+        delegate!(self, store => store.scope_memory_page(context, cursor, limit).await)
     }
 
     async fn claim_reflect_jobs(
@@ -556,33 +783,75 @@ impl MemoryStore for AnyStore {
         delegate!(self, store => store.claim_reflect_jobs(filter, limit).await)
     }
 
-    async fn complete_reflect_job(&self, tenant: TenantId, id: JobId) -> Result<(), StoreError> {
-        delegate!(self, store => store.complete_reflect_job(tenant, id).await)
+    async fn complete_reflect_job(
+        &self,
+        claim: &ReflectJobRow,
+    ) -> Result<memphant_core::ClaimMutationOutcome, StoreError> {
+        delegate!(self, store => store.complete_reflect_job(claim).await)
     }
 
-    async fn persist_compiled_units(
+    async fn fetch_prepared_structured_state(
         &self,
-        tenant: TenantId,
-        write: CompiledWrite,
+        claim: &ReflectJobRow,
+    ) -> Result<Option<Vec<memphant_core::ProjectedStructuredState>>, StoreError> {
+        delegate!(self, store => store.fetch_prepared_structured_state(claim).await)
+    }
+
+    async fn store_prepared_structured_state(
+        &self,
+        claim: &ReflectJobRow,
+        projections: Vec<memphant_core::ProjectedStructuredState>,
     ) -> Result<(), StoreError> {
-        delegate!(self, store => store.persist_compiled_units(tenant, write).await)
+        delegate!(self, store => store.store_prepared_structured_state(claim, projections).await)
+    }
+
+    async fn release_reflect_job(
+        &self,
+        claim: &ReflectJobRow,
+        retry_after_seconds: u64,
+        error: String,
+    ) -> Result<(), StoreError> {
+        delegate!(self, store => store.release_reflect_job(claim, retry_after_seconds, error).await)
+    }
+
+    async fn fail_reflect_job(
+        &self,
+        claim: &ReflectJobRow,
+        error: String,
+    ) -> Result<(), StoreError> {
+        delegate!(self, store => store.fail_reflect_job(claim, error).await)
+    }
+
+    async fn stage_compiled_units(
+        &self,
+        tx: &mut Self::Txn,
+        claim: Option<&ReflectJobRow>,
+        write: CompiledWrite,
+    ) -> Result<memphant_core::ClaimMutationOutcome, StoreError> {
+        match (self, tx) {
+            (Self::Mem(store), AnyTxn::Mem(tx)) => {
+                store.stage_compiled_units(tx, claim, write).await
+            }
+            (Self::Pg(store), AnyTxn::Pg(tx)) => store.stage_compiled_units(tx, claim, write).await,
+            _ => txn_mismatch(),
+        }
     }
 
     async fn fetch_reflect_trace(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         job_id: JobId,
         compiler_version: &str,
     ) -> Result<Option<ReflectTrace>, StoreError> {
-        delegate!(self, store => store.fetch_reflect_trace(tenant, job_id, compiler_version).await)
+        delegate!(self, store => store.fetch_reflect_trace(context, job_id, compiler_version).await)
     }
 
     async fn upsert_embeddings(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         rows: Vec<EmbeddingRow>,
     ) -> Result<(), StoreError> {
-        delegate!(self, store => store.upsert_embeddings(tenant, rows).await)
+        delegate!(self, store => store.upsert_embeddings(context, rows).await)
     }
 
     async fn upsert_embedding_profile(
@@ -595,14 +864,40 @@ impl MemoryStore for AnyStore {
 
     async fn fetch_embeddings(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         unit_ids: &[UnitId],
     ) -> Result<Vec<EmbeddingRow>, StoreError> {
-        delegate!(self, store => store.fetch_embeddings(tenant, unit_ids).await)
+        delegate!(self, store => store.fetch_embeddings(context, unit_ids).await)
     }
 
     async fn lookup_api_key(&self, key_hash: &str) -> Result<Option<ApiKeyRow>, StoreError> {
         delegate!(self, store => store.lookup_api_key(key_hash).await)
+    }
+
+    async fn resolve_context_binding(
+        &self,
+        tenant: TenantId,
+        client_ref: String,
+        request: ContextBindingRequest,
+    ) -> Result<ContextBindingResponse, StoreError> {
+        delegate!(self, store => store.resolve_context_binding(tenant, client_ref, request).await)
+    }
+
+    async fn resolve_memory_context(
+        &self,
+        tenant: TenantId,
+        subject_id: SubjectId,
+        actor_id: ActorId,
+        scope_id: ScopeId,
+        agent_node_id: AgentNodeId,
+    ) -> Result<ResolvedMemoryContext, StoreError> {
+        delegate!(self, store => store.resolve_memory_context(
+            tenant,
+            subject_id,
+            actor_id,
+            scope_id,
+            agent_node_id
+        ).await)
     }
 
     async fn ping(&self) -> Result<(), StoreError> {
@@ -614,10 +909,68 @@ impl MemoryStore for AnyStore {
     }
 }
 
+impl MutationLedgerStore for AnyStore {
+    async fn stage_mutation_claim(
+        &self,
+        tx: &mut Self::Txn,
+        claim: MutationClaim,
+    ) -> Result<MutationClaimOutcome, StoreError> {
+        match (self, tx) {
+            (Self::Mem(store), AnyTxn::Mem(tx)) => store.stage_mutation_claim(tx, claim).await,
+            (Self::Pg(store), AnyTxn::Pg(tx)) => store.stage_mutation_claim(tx, claim).await,
+            _ => txn_mismatch(),
+        }
+    }
+
+    async fn stage_mutation_response(
+        &self,
+        tx: &mut Self::Txn,
+        response: MutationResponse,
+    ) -> Result<(), StoreError> {
+        match (self, tx) {
+            (Self::Mem(store), AnyTxn::Mem(tx)) => {
+                store.stage_mutation_response(tx, response).await
+            }
+            (Self::Pg(store), AnyTxn::Pg(tx)) => store.stage_mutation_response(tx, response).await,
+            _ => txn_mismatch(),
+        }
+    }
+
+    async fn stage_subject_erasure(
+        &self,
+        tx: &mut Self::Txn,
+    ) -> Result<SubjectErasureReceipt, StoreError> {
+        match (self, tx) {
+            (Self::Mem(store), AnyTxn::Mem(tx)) => store.stage_subject_erasure(tx).await,
+            (Self::Pg(store), AnyTxn::Pg(tx)) => store.stage_subject_erasure(tx).await,
+            _ => txn_mismatch(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::embedder_from_id;
+    use super::{embedder_from_id, structured_state_prefetch_concurrency_from_value};
     use memphant_core::{EmbedError, EmbeddingProvider, embedding_profile_for};
+
+    #[test]
+    fn structured_state_concurrency_is_bounded() {
+        assert_eq!(
+            structured_state_prefetch_concurrency_from_value(None),
+            Ok(4)
+        );
+        assert_eq!(
+            structured_state_prefetch_concurrency_from_value(Some("1")),
+            Ok(1)
+        );
+        assert_eq!(
+            structured_state_prefetch_concurrency_from_value(Some("16")),
+            Ok(16)
+        );
+        assert!(structured_state_prefetch_concurrency_from_value(Some("0")).is_err());
+        assert!(structured_state_prefetch_concurrency_from_value(Some("17")).is_err());
+        assert!(structured_state_prefetch_concurrency_from_value(Some("fast")).is_err());
+    }
 
     #[test]
     fn off_and_noop_construct_the_disabled_noop_provider() {
@@ -677,7 +1030,16 @@ mod tests {
     #[cfg(not(feature = "fastembed"))]
     #[test]
     fn local_arm_ids_recognized_without_the_feature() {
-        for id in ["fastembed", "small", "base", "modernbert", "gemma", "qwen3"] {
+        for id in [
+            "fastembed",
+            "small",
+            "base",
+            "bge-m3",
+            "fastembed:bge-m3",
+            "modernbert",
+            "gemma",
+            "qwen3",
+        ] {
             let error = expect_grammar_err(id);
             assert!(
                 !error.contains("unknown embedder id"),
@@ -749,6 +1111,7 @@ mod tests {
             // arms never collide with the fastembed/qwen3 arms or Noop.
             IdDims("fastembed:bge-small-en-v1.5", 384),
             IdDims("fastembed:bge-base-en-v1.5", 768),
+            IdDims("fastembed:bge-m3", 1024),
             IdDims("fastembed:modernbert-embed-large", 1024),
             IdDims("fastembed:embeddinggemma-300m", 768),
             IdDims("fastembed:qwen3-embedding-0.6b", 1024),
@@ -886,6 +1249,76 @@ mod tests {
                 None => std::env::remove_var(VAR),
             }
         }
+    }
+
+    #[test]
+    fn cross_rerank_candidate_selection_is_explicit_and_fail_closed() {
+        use super::cross_rerank_candidate_selection_from_value;
+        use memphant_core::CrossRerankCandidateSelection::{FusedHead, VectorLexicalBalanced};
+
+        assert_eq!(
+            cross_rerank_candidate_selection_from_value(None),
+            Ok(FusedHead)
+        );
+        assert_eq!(
+            cross_rerank_candidate_selection_from_value(Some("fused-head")),
+            Ok(FusedHead)
+        );
+        assert_eq!(
+            cross_rerank_candidate_selection_from_value(Some("vector-lexical-balanced")),
+            Ok(VectorLexicalBalanced)
+        );
+        assert!(
+            cross_rerank_candidate_selection_from_value(Some("vector-lexical-quota32")).is_err()
+        );
+        assert!(cross_rerank_candidate_selection_from_value(Some("quota")).is_err());
+    }
+
+    #[test]
+    fn reranker_runtime_config_uses_safe_defaults_and_positive_integer_overrides() {
+        use super::reranker_config_from_values;
+
+        let defaults = reranker_config_from_values(None, None, None).expect("defaults");
+        assert_eq!(defaults.candidate_limit, 64);
+        assert_eq!(defaults.max_length, 512);
+        assert_eq!(defaults.batch_size, Some(256));
+
+        let configured = reranker_config_from_values(Some("32"), Some("1024"), Some("8"))
+            .expect("valid overrides");
+        assert_eq!(configured.candidate_limit, 32);
+        assert_eq!(configured.max_length, 1024);
+        assert_eq!(configured.batch_size, Some(8));
+
+        for (candidate, max_length, batch, expected_name) in [
+            (Some("0"), None, None, "MEMPHANT_RERANK_CANDIDATE_LIMIT"),
+            (None, Some("nope"), None, "MEMPHANT_RERANK_MAX_LENGTH"),
+            (None, None, Some("0"), "MEMPHANT_RERANK_BATCH_SIZE"),
+        ] {
+            let error = reranker_config_from_values(candidate, max_length, batch)
+                .expect_err("explicit invalid override must fail");
+            assert!(error.contains(expected_name), "{error}");
+        }
+    }
+
+    #[cfg(feature = "fastembed")]
+    #[test]
+    fn build_cross_reranker_rejects_invalid_env_before_model_load() {
+        const VAR: &str = "MEMPHANT_RERANK_BATCH_SIZE";
+        let saved = std::env::var(VAR).ok();
+        unsafe {
+            std::env::set_var(VAR, "0");
+        }
+        let error = match super::build_cross_reranker() {
+            Err(error) => error,
+            Ok(_) => panic!("invalid config must fail before model construction"),
+        };
+        unsafe {
+            match saved {
+                Some(value) => std::env::set_var(VAR, value),
+                None => std::env::remove_var(VAR),
+            }
+        }
+        assert!(error.contains(VAR), "{error}");
     }
 
     /// R1.5-T1 feature-off error path: without the `fastembed` feature,

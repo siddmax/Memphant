@@ -141,7 +141,7 @@ fn main() -> ExitCode {
         }
         _ => {
             eprintln!(
-                "usage: memphant lock --out <path|-> | memphant verify --lock <path> [--export <dir>] | memphant compile --scope <scope> --out <dir> --source <json> | memphant db lint --provider <plain-postgres|supabase|neon> | memphant db bootstrap-check --provider <plain-postgres|supabase|neon> [--profile <env-file>] | memphant admin create-tenant --name <name> --database-url <url> | memphant admin create-key --tenant <uuid> [--max-trust <tier>] --database-url <url> | memphant admin revoke-key --id <uuid> --database-url <url> | memphant retain --tenant <uuid> --scope <uuid> --body <text> [--subject S --predicate P] | memphant retain --tenant <uuid> --scope <uuid> --resource --uri <uri> [--revision R] [--body-file F] | memphant recall --tenant <uuid> --scope <uuid> --query <text> | memphant reflect --tenant <uuid> --scope <uuid> | memphant correct --tenant <uuid> --scope <uuid> --unit <uuid> --value V --reason R | memphant forget --tenant <uuid> --scope <uuid> (--unit|--episode|--resource <uuid>) --reason R | memphant mark --tenant <uuid> --trace <uuid> --outcome <success|failure|corrected|ignored> [--used a,b] | memphant trace <uuid>   (env: MEMPHANT_URL, MEMPHANT_API_KEY)"
+                "usage: memphant <retain|recall|reflect|correct|forget|mark|trace> --subject-id <uuid> --scope <uuid> --actor <uuid> --agent-node <uuid> --subject-generation <n> [verb options]; mutations require --idempotency-key <key> (env: MEMPHANT_URL, MEMPHANT_API_KEY)"
             );
             ExitCode::from(2)
         }
@@ -179,7 +179,15 @@ mod http_verbs {
                 .cloned()
                 .or_else(|| flags.get("id").cloned())
                 .ok_or("usage: memphant trace <trace-id>")?;
-            return request("GET", &format!("/v1/traces/{id}"), None);
+            let (subject, scope, actor, agent_node, generation) = ids(&flags)?;
+            return request(
+                "GET",
+                &format!(
+                    "/v1/traces/{id}?subject_id={subject}&scope_id={scope}&actor_id={actor}&agent_node_id={agent_node}&subject_generation={generation}"
+                ),
+                None,
+                None,
+            );
         }
         if !positional.is_empty() {
             return Err(format!("unexpected positional arguments: {positional:?}"));
@@ -194,7 +202,10 @@ mod http_verbs {
             "mark" => "/v1/mark",
             other => return Err(format!("unknown verb: {other}")),
         };
-        request("POST", path, Some(body))
+        let idempotency_key = matches!(verb, "retain" | "reflect" | "correct" | "forget" | "mark")
+            .then(|| required(&flags, "idempotency-key").map(str::to_string))
+            .transpose()?;
+        request("POST", path, Some(body), idempotency_key.as_deref())
     }
 
     /// `--flag value` pairs plus bare `--resource` style booleans.
@@ -231,30 +242,25 @@ mod http_verbs {
             .ok_or_else(|| format!("missing required flag --{name}"))
     }
 
-    fn ids(flags: &HashMap<String, String>) -> Result<(String, String, String), String> {
-        let tenant = required(flags, "tenant")?.to_string();
-        let scope = required(flags, "scope")?.to_string();
-        let actor = flags
-            .get("actor")
-            .cloned()
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        Ok((tenant, scope, actor))
+    fn ids(
+        flags: &HashMap<String, String>,
+    ) -> Result<(String, String, String, String, u64), String> {
+        Ok((
+            required(flags, "subject-id")?.to_string(),
+            required(flags, "scope")?.to_string(),
+            required(flags, "actor")?.to_string(),
+            required(flags, "agent-node")?.to_string(),
+            required(flags, "subject-generation")?
+                .parse()
+                .map_err(|error| format!("--subject-generation: {error}"))?,
+        ))
     }
 
     fn build_body(verb: &str, flags: &HashMap<String, String>) -> Result<Value, String> {
         match verb {
             "retain" => {
-                let (tenant, scope, actor) = ids(flags)?;
-                let mut body = json!({
-                    "tenant_id": tenant,
-                    "scope_id": scope,
-                    "actor_id": actor,
-                    "source_kind": flags.get("source-kind").cloned().unwrap_or_else(|| "user".to_string()),
-                    "source_trust": flags.get("trust").cloned().unwrap_or_else(|| "trusted_user".to_string()),
-                    "subject_hint": flags.get("subject-hint"),
-                    "compiler_version": null,
-                });
-                if flags.contains_key("resource") {
+                let (subject_id, scope, actor, agent_node_id, subject_generation) = ids(flags)?;
+                let payload = if flags.contains_key("resource") {
                     let resource_body = match flags.get("body-file") {
                         Some(path) => Some(
                             std::fs::read_to_string(path)
@@ -262,75 +268,97 @@ mod http_verbs {
                         ),
                         None => flags.get("body").cloned(),
                     };
-                    body["resource"] = json!({
+                    json!({ "resource": {
                         "uri": required(flags, "uri")?,
                         "mime_type": flags.get("mime-type").cloned().unwrap_or_else(|| "text/plain".to_string()),
-                        "content_hash": flags.get("content-hash").cloned().unwrap_or_default(),
+                        "content_hash": required(flags, "content-hash")?,
                         "kind": flags.get("kind"),
                         "revision": flags.get("revision"),
                         "body": resource_body,
-                    });
+                    }})
                 } else if flags.contains_key("unit") {
-                    body["unit"] = json!({
+                    json!({ "unit": {
                         "kind": flags.get("kind").cloned().unwrap_or_else(|| "semantic".to_string()),
-                        "subject": required(flags, "subject")?,
+                        "fact_key": required(flags, "fact-key")?,
                         "predicate": required(flags, "predicate")?,
                         "body": required(flags, "body")?,
-                        "churn_class": flags.get("churn-class"),
-                    });
+                        "confidence": required(flags, "confidence")?.parse::<f32>()
+                            .map_err(|error| format!("--confidence: {error}"))?,
+                        "valid_from": flags.get("valid-from"),
+                        "valid_to": flags.get("valid-to"),
+                    }})
                 } else {
-                    body["body"] = json!(required(flags, "body")?);
-                    if let Some(subject) = flags.get("subject") {
-                        body["subject"] = json!(subject);
-                        body["predicate"] = json!(required(flags, "predicate")?);
-                    }
-                }
-                Ok(body)
-            }
-            "recall" => {
-                let (tenant, scope, actor) = ids(flags)?;
+                    json!({ "episode": {
+                        "source_kind": flags.get("source-kind").cloned().unwrap_or_else(|| "user".to_string()),
+                        "body": required(flags, "body")?,
+                    }})
+                };
                 Ok(json!({
-                    "tenant_id": tenant,
+                    "subject_id": subject_id,
                     "scope_id": scope,
                     "actor_id": actor,
+                    "agent_node_id": agent_node_id,
+                    "subject_generation": subject_generation,
+                    "source_ref": required(flags, "source-ref")?,
+                    "observed_at": required(flags, "observed-at")?,
+                    "payload": payload,
+                }))
+            }
+            "recall" => {
+                let (subject_id, scope, actor, agent_node_id, subject_generation) = ids(flags)?;
+                Ok(json!({
+                    "subject_id": subject_id,
+                    "scope_id": scope,
+                    "actor_id": actor,
+                    "agent_node_id": agent_node_id,
+                    "subject_generation": subject_generation,
                     "query": required(flags, "query")?,
                     "limit": flags.get("limit").map(|value| value.parse::<usize>()
                         .map_err(|error| format!("--limit: {error}"))).transpose()?,
                     "budget_tokens": flags.get("budget-tokens").map(|value| value.parse::<usize>()
                         .map_err(|error| format!("--budget-tokens: {error}"))).transpose()?,
                     "mode": flags.get("mode"),
+                    "transaction_as_of": flags.get("transaction-as-of"),
+                    "valid_at": flags.get("valid-at"),
                 }))
             }
             "reflect" => {
-                let (tenant, scope, actor) = ids(flags)?;
+                let (subject_id, scope, actor, agent_node_id, subject_generation) = ids(flags)?;
                 Ok(json!({
-                    "tenant_id": tenant,
+                    "subject_id": subject_id,
                     "scope_id": scope,
                     "actor_id": actor,
-                    "compiler_version": flags.get("compiler-version"),
+                    "agent_node_id": agent_node_id,
+                    "subject_generation": subject_generation,
                 }))
             }
             "correct" => {
-                let (tenant, scope, actor) = ids(flags)?;
+                let (subject_id, scope, actor, agent_node_id, subject_generation) = ids(flags)?;
                 Ok(json!({
-                    "tenant_id": tenant,
+                    "subject_id": subject_id,
                     "scope_id": scope,
                     "actor_id": actor,
+                    "agent_node_id": agent_node_id,
+                    "subject_generation": subject_generation,
                     "selector": { "memory_unit_id": required(flags, "unit")? },
                     "correction": {
                         "value": required(flags, "value")?,
                         "reason": required(flags, "reason")?,
+                        "source_ref": required(flags, "source-ref")?,
+                        "observed_at": required(flags, "observed-at")?,
                         "valid_from": flags.get("valid-from"),
                         "valid_to": flags.get("valid-to"),
                     },
                 }))
             }
             "forget" => {
-                let (tenant, scope, actor) = ids(flags)?;
+                let (subject_id, scope, actor, agent_node_id, subject_generation) = ids(flags)?;
                 Ok(json!({
-                    "tenant_id": tenant,
+                    "subject_id": subject_id,
                     "scope_id": scope,
                     "actor_id": actor,
+                    "agent_node_id": agent_node_id,
+                    "subject_generation": subject_generation,
                     "selector": {
                         "memory_unit_id": flags.get("unit"),
                         "episode_id": flags.get("episode"),
@@ -340,21 +368,33 @@ mod http_verbs {
                     "reason": required(flags, "reason")?,
                 }))
             }
-            "mark" => Ok(json!({
-                "tenant_id": required(flags, "tenant")?,
-                "trace_id": required(flags, "trace")?,
-                "caller_id": flags.get("caller").cloned().unwrap_or_else(|| "memphant-cli".to_string()),
-                "used_ids": flags
-                    .get("used")
-                    .map(|used| used.split(',').map(str::trim).filter(|id| !id.is_empty()).collect::<Vec<_>>())
-                    .unwrap_or_default(),
-                "outcome": required(flags, "outcome")?,
-            })),
+            "mark" => {
+                let (subject_id, scope, actor, agent_node_id, subject_generation) = ids(flags)?;
+                Ok(json!({
+                    "subject_id": subject_id,
+                    "scope_id": scope,
+                    "actor_id": actor,
+                    "agent_node_id": agent_node_id,
+                    "subject_generation": subject_generation,
+                    "trace_id": required(flags, "trace")?,
+                    "caller_id": flags.get("caller").cloned().unwrap_or_else(|| "memphant-cli".to_string()),
+                    "used_ids": flags
+                        .get("used")
+                        .map(|used| used.split(',').map(str::trim).filter(|id| !id.is_empty()).collect::<Vec<_>>())
+                        .unwrap_or_default(),
+                    "outcome": required(flags, "outcome")?,
+                }))
+            }
             other => Err(format!("unknown verb: {other}")),
         }
     }
 
-    fn request(method: &str, path: &str, body: Option<Value>) -> Result<ExitCode, String> {
+    fn request(
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+        idempotency_key: Option<&str>,
+    ) -> Result<ExitCode, String> {
         let base = std::env::var("MEMPHANT_URL")
             .ok()
             .filter(|url| !url.trim().is_empty())
@@ -371,6 +411,9 @@ mod http_verbs {
                 if let Some(key) = &api_key {
                     request = request.header("authorization", format!("Bearer {key}"));
                 }
+                if let Some(key) = idempotency_key {
+                    request = request.header("idempotency-key", key);
+                }
                 request
                     .send_json(&body)
                     .map_err(|error| format!("{method} {url}: {error}"))?
@@ -379,6 +422,9 @@ mod http_verbs {
                 let mut request = agent.get(&url);
                 if let Some(key) = &api_key {
                     request = request.header("authorization", format!("Bearer {key}"));
+                }
+                if let Some(key) = idempotency_key {
+                    request = request.header("idempotency-key", key);
                 }
                 request
                     .call()
@@ -412,7 +458,8 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
 }
 
 fn connect_pg(url: &str) -> Result<memphant_store_postgres::PgStore, String> {
-    block_on(memphant_store_postgres::PgStore::connect(url)).map_err(|error| error.to_string())
+    block_on(memphant_store_postgres::PgStore::connect_provisioner(url))
+        .map_err(|error| error.to_string())
 }
 
 fn admin_create_tenant(name: &str, url: &str) -> ExitCode {
@@ -462,7 +509,7 @@ fn admin_create_key(tenant: &str, max_trust: &str, url: &str) -> ExitCode {
     let key_hash = sha256_hex(&plaintext);
 
     match connect_pg(url).and_then(|store| {
-        block_on(store.create_api_key(tenant_id, &key_hash, "cli", trust))
+        block_on(store.create_api_key(tenant_id, &key_hash, "cli", trust, None))
             .map_err(|error| error.to_string())
     }) {
         Ok(id) => {
@@ -794,6 +841,15 @@ fn validate_database_url(provider: Provider, database_url: &str, findings: &mut 
     }
     if provider == Provider::Neon && !database_url.contains("sslmode=require") {
         findings.push("neon:database_url_missing_sslmode_require".to_string());
+    }
+    if provider == Provider::Supabase
+        && database_url
+            .split_once("://")
+            .and_then(|(_, tail)| tail.split('/').next())
+            .and_then(|authority| authority.rsplit_once(':'))
+            .is_some_and(|(_, port)| port == "6543")
+    {
+        findings.push("supabase:database_url_transaction_pooler_forbidden".to_string());
     }
     if database_url.contains("public.") || database_url.contains("syndai.") {
         findings.push("database_url:forbidden_schema_reference".to_string());

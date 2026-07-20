@@ -8,6 +8,7 @@ server process — these run under plain ``pytest tests/``.
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -112,3 +113,91 @@ def test_assert_gold_coverage_raises_when_missing(clr):
     goldens = [_golden("a2")]
     with pytest.raises(RuntimeError, match="a2"):
         clr.assert_gold_coverage(ingested, goldens)
+
+
+def test_verify_input_contract_rejects_corpus_drift(clr, tmp_path):
+    corpus = tmp_path / "corpus.jsonl"
+    golden = tmp_path / "golden.jsonl"
+    corpus.write_text(json.dumps(_row("a1")) + "\n")
+    golden.write_text(json.dumps(_golden("a1")) + "\n")
+    import hashlib
+
+    lock = {
+        "sha256": hashlib.sha256(golden.read_bytes()).hexdigest(),
+        "bytes": golden.stat().st_size,
+        "count": 1,
+        "extraction": {
+            "corpus_sha256": "0" * 64,
+            "corpus_bytes": corpus.stat().st_size,
+            "sampled_attempts": 1,
+        },
+    }
+
+    with pytest.raises(RuntimeError, match="corpus sha256 mismatch"):
+        clr.verify_input_contract(corpus, golden, lock)
+
+
+def test_verify_input_contract_requires_exact_counts_and_pairing(clr, tmp_path):
+    import hashlib
+
+    corpus = tmp_path / "corpus.jsonl"
+    golden = tmp_path / "golden.jsonl"
+    corpus_row = _row("a1")
+    corpus_row["events"] = [
+        {"sequence": 7, "event_id": "event-7", "role": "assistant", "text": "exact span"}
+    ]
+    golden_row = _golden("a1")
+    golden_row["provenance"][0].update(
+        {"event_sequence": 7, "event_id": "event-7", "char_start": 0, "char_end": 10}
+    )
+    golden_row["provenance"][0]["span"] = "exact span"
+    corpus.write_text(json.dumps(corpus_row) + "\n")
+    golden.write_text(json.dumps(golden_row) + "\n")
+    lock = {
+        "sha256": hashlib.sha256(golden.read_bytes()).hexdigest(),
+        "bytes": golden.stat().st_size,
+        "count": 1,
+        "extraction": {
+            "corpus_sha256": hashlib.sha256(corpus.read_bytes()).hexdigest(),
+            "corpus_bytes": corpus.stat().st_size,
+            "sampled_attempts": 1,
+        },
+    }
+
+    corpus_rows, goldens = clr.verify_input_contract(corpus, golden, lock)
+
+    assert corpus_rows == [corpus_row]
+    assert goldens == [golden_row]
+
+
+def test_outcome_marked_arm_fails_closed_without_explicit_typed_labels(clr):
+    readiness = clr.control_readiness(
+        [{"attempt_id": "a1", "run_id": "r1", "started_at": "2026-01-01", "events": []}],
+        [_golden("a1")],
+    )
+
+    assert readiness["verbatim_memphant"] is True
+    assert readiness["outcome_marked_memphant"] is False
+    assert readiness["validator_backed_held_out"] is False
+    assert "explicit_outcome" in readiness["missing_fields"]
+    with pytest.raises(RuntimeError, match="outcome-marked MemPhant is not paired"):
+        clr.require_outcome_mark_ready(readiness)
+
+
+def test_deterministic_file_search_ranks_raw_matching_event_first():
+    search = _load("code_lane_run_deterministic", "scripts/code_lane_run_deterministic.py")
+    documents = search.event_documents(
+        [
+            {
+                "attempt_id": "a1",
+                "events": [
+                    {"sequence": 0, "text": "generic build output"},
+                    {"sequence": 1, "text": "compiler error E0425 missing value"},
+                ],
+            }
+        ]
+    )
+
+    assert search.bm25_search(documents, "Which compiler error E0425 occurred?", 1) == [
+        "compiler error E0425 missing value"
+    ]

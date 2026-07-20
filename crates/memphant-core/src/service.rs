@@ -3,26 +3,39 @@
 //! claiming/compilation, degraded read-your-own-writes recall) lives here —
 //! transport handlers stay thin.
 
+use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use futures::{StreamExt, stream};
+#[cfg(test)]
+use memphant_types::TenantId;
 use memphant_types::{
-    COMPILER_VERSION, ContextualChunk, CorrectRequest, CorrectResult, ENGINE_VERSION, EpisodeId,
-    ForgetRequest, ForgetResult, MarkRequest, MarkResult, MemoryKind, RecallContextItem,
-    RecallHttpRequest, RecallMode, RecallRequest, RecallResponse, ReflectCandidate, ReflectInput,
-    ReflectJobKind, ReflectResult, ResourceId, ResourceKind, RetainEpisodeHttpRequest,
-    RetainEpisodeHttpResponse, RetainRequest, RetainResourceRequest, RetrievalTrace, ScopeId,
-    StoredEpisode, TenantId, TraceId, TrustLevel, UnitId,
+    COMPILER_VERSION, ContextualChunk, CorrectRequest, DegradedRecallTraceItem, ENGINE_VERSION,
+    EpisodeId, ForgetRequest, ForgetResult, MarkRequest, MarkResult, MemoryKind, NewEpisode,
+    NewResource, RecallContextItem, RecallDegradationDiagnostic, RecallDegradationReason,
+    RecallHttpRequest, RecallMode, RecallRequest, RecallResponse, ReflectAccepted,
+    ReflectCandidate, ReflectInput, ReflectJob, ReflectJobKind, ReflectRequest,
+    ResolvedMemoryContext, ResourceId, ResourceKind, RetainEpisodeHttpRequest,
+    RetainEpisodeHttpResponse, RetrievalTrace, ReviewEvent, StoredEpisode, TraceId, TrustLevel,
+    UnitId,
 };
 
 use crate::{
-    Clock, CoreError, CrossReranker, DEFAULT_RECALL_POOL_DEPTH, EmbeddingProvider, JobFilter,
-    MemoryStore, PackLevers, ReflectJobRow, ScopePage, StoreError, VectorQuery, correct_memory,
-    embedding_profile_for, forget_memory, normalize_component, parse_content_date,
-    recall_with_pool, record_mark, reflect_recorded, retain_episode, retain_resource, tokenize,
+    ClaimMutationOutcome, Clock, CoreError, CorrectionWrite, CrossRerankCandidateSelection,
+    CrossReranker, DEFAULT_RECALL_POOL_DEPTH, EmbeddingProvider, ForgetWrite, JobFilter,
+    MemoryStore, MutationClaim, MutationClaimOutcome, MutationLedgerStore, MutationResponse,
+    MutationVerb, PackLevers, PreparedCompiledWrite, ReflectJobRow, ScopePage, StoreError,
+    StructuredStateProvider, StructuredStateRequest, VectorQuery, canonical_mutation_request_hash,
+    derive_episode_dedup_key, embedding_profile_for, normalize_component, parse_content_date,
+    prepare_compiled_write, project_structured_state, recall_with_pool_and_selection,
+    reflect_recorded_claimed, structured_compiler_identity, tokenize, validate_valid_interval,
 };
+
+pub const DEFAULT_STRUCTURED_STATE_PREFETCH_CONCURRENCY: usize = 4;
+pub const MAX_STRUCTURED_STATE_PREFETCH_CONCURRENCY: usize = 16;
 
 /// Errors surfaced by the application layer. Transport layers map these onto
 /// their envelope (REST status codes / MCP tool errors).
@@ -34,9 +47,712 @@ pub enum ServiceError {
     Invalid(String),
 }
 
+fn canonical_utc_timestamp(value: &str, field: &str) -> Result<String, ServiceError> {
+    if !(value.ends_with('Z') || value.ends_with("+00:00")) {
+        return Err(ServiceError::Invalid(format!(
+            "{field} must use a UTC offset"
+        )));
+    }
+    value
+        .parse::<jiff::Timestamp>()
+        .map(crate::fmt_rfc3339)
+        .map_err(|_| ServiceError::Invalid(format!("{field} must be RFC3339")))
+}
+
+#[cfg(test)]
+mod structured_provider_retry_tests {
+    use std::collections::{BTreeMap, VecDeque};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use super::*;
+    use crate::{
+        FixedClock, InMemoryStore, NoopEmbedding, StructuredStateOp, StructuredStateOperation,
+        StructuredStateProviderError, StructuredStateProviderIdentity,
+    };
+    use serde_json::json;
+
+    async fn bind_test_context(
+        store: &InMemoryStore,
+        tenant: TenantId,
+        suffix: &str,
+    ) -> ResolvedMemoryContext {
+        use memphant_types::{
+            ContextBindingAgentRef, ContextBindingEntityRef, ContextBindingRequest,
+            ContextBindingScopeRef,
+        };
+        let binding = store
+            .resolve_context_binding(
+                tenant,
+                format!("test:{suffix}"),
+                ContextBindingRequest {
+                    subject: ContextBindingEntityRef {
+                        external_ref: format!("subject:{suffix}"),
+                        kind: "user".to_string(),
+                    },
+                    actor: ContextBindingEntityRef {
+                        external_ref: format!("actor:{suffix}"),
+                        kind: "user".to_string(),
+                    },
+                    scope: ContextBindingScopeRef {
+                        external_ref: format!("scope:{suffix}"),
+                        kind: "memory".to_string(),
+                        parent_external_ref: None,
+                    },
+                    agent_node: ContextBindingAgentRef {
+                        external_ref: format!("agent:{suffix}"),
+                        parent_external_ref: None,
+                    },
+                    access_policies: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .resolve_memory_context(
+                tenant,
+                binding.subject_id,
+                binding.actor_id,
+                binding.scope_id,
+                binding.agent_node_id,
+            )
+            .await
+            .unwrap()
+    }
+
+    fn episode_request(
+        context: &ResolvedMemoryContext,
+        source_ref: impl Into<String>,
+        body: impl Into<String>,
+    ) -> RetainEpisodeHttpRequest {
+        RetainEpisodeHttpRequest {
+            subject_id: context.data_subject_id,
+            scope_id: context.scope_id,
+            actor_id: context.actor_id,
+            agent_node_id: context.agent_node_id,
+            subject_generation: context.subject_generation,
+            source_ref: source_ref.into(),
+            observed_at: "2026-07-13T00:00:00Z".to_string(),
+            payload: memphant_types::RetainPayload::Episode(memphant_types::RetainEpisodePayload {
+                source_kind: "user".to_string(),
+                body: body.into(),
+            }),
+        }
+    }
+
+    struct RetryProvider {
+        identity: StructuredStateProviderIdentity,
+        responses: Mutex<VecDeque<Result<Vec<StructuredStateOp>, StructuredStateProviderError>>>,
+    }
+
+    struct DelayedProvider {
+        identity: StructuredStateProviderIdentity,
+        calls: Arc<AtomicUsize>,
+        in_flight: Arc<AtomicUsize>,
+        max_in_flight: Arc<AtomicUsize>,
+        active_item_counts: Arc<Mutex<Vec<(String, usize)>>>,
+    }
+
+    impl StructuredStateProvider for DelayedProvider {
+        fn identity(&self) -> &StructuredStateProviderIdentity {
+            &self.identity
+        }
+
+        fn extract<'a>(
+            &'a self,
+            request: &'a StructuredStateRequest,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<Vec<StructuredStateOp>, StructuredStateProviderError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let current = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_in_flight.fetch_max(current, Ordering::SeqCst);
+            let in_flight = Arc::clone(&self.in_flight);
+            let body = request.episode_body.clone();
+            let target = request.active_items.first().cloned();
+            self.active_item_counts
+                .lock()
+                .unwrap()
+                .push((body.clone(), request.active_items.len()));
+            Box::pin(async move {
+                let delay = if body.contains("Oslo") {
+                    40
+                } else if body.contains("Lima") {
+                    20
+                } else {
+                    1
+                };
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+                let quote = body.strip_prefix("user: ").unwrap();
+                Ok(vec![StructuredStateOp {
+                    operation: if target.is_some() {
+                        StructuredStateOperation::Replace
+                    } else {
+                        StructuredStateOperation::Create
+                    },
+                    namespace: target
+                        .as_ref()
+                        .map_or_else(|| "profile".to_string(), |item| item.namespace.clone()),
+                    item_key: target
+                        .as_ref()
+                        .map_or_else(|| "home_city".to_string(), |item| item.item_key.clone()),
+                    target_unit_ids: target.iter().map(|item| item.unit_id).collect(),
+                    fields: BTreeMap::from([(
+                        "value".to_string(),
+                        json!(quote.trim_end_matches('.').rsplit(' ').next().unwrap()),
+                    )]),
+                    evidence_quote: quote.to_string(),
+                    source_span: format!("6-{}", body.len()),
+                    valid_from: None,
+                    valid_to: None,
+                }])
+            })
+        }
+    }
+
+    impl StructuredStateProvider for RetryProvider {
+        fn identity(&self) -> &StructuredStateProviderIdentity {
+            &self.identity
+        }
+
+        fn extract<'a>(
+            &'a self,
+            _: &'a StructuredStateRequest,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<Vec<StructuredStateOp>, StructuredStateProviderError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            let response = self.responses.lock().unwrap().pop_front().unwrap();
+            Box::pin(async move { response })
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_failure_writes_nothing_and_same_job_redelivery_succeeds() {
+        let body = "user: My home city is Oslo.";
+        let quote = "My home city is Oslo.";
+        let start = body.find(quote).unwrap();
+        let operation = StructuredStateOp {
+            operation: StructuredStateOperation::Create,
+            namespace: "profile".to_string(),
+            item_key: "home_city".to_string(),
+            target_unit_ids: Vec::new(),
+            fields: BTreeMap::from([("value".to_string(), json!("Oslo"))]),
+            evidence_quote: quote.to_string(),
+            source_span: format!("{start}-{}", start + quote.len()),
+            valid_from: None,
+            valid_to: None,
+        };
+        let provider = RetryProvider {
+            identity: StructuredStateProviderIdentity {
+                model: "test/model".to_string(),
+                prompt_hash: "prompt".to_string(),
+                schema_hash: "schema".to_string(),
+            },
+            responses: Mutex::new(VecDeque::from([
+                Err(StructuredStateProviderError::Unavailable(
+                    "temporary outage".to_string(),
+                )),
+                Ok(vec![operation]),
+            ])),
+        };
+        let store = InMemoryStore::default();
+        let tenant = TenantId::new();
+        let context = bind_test_context(&store, tenant, "redelivery").await;
+        let scope = context.scope_id;
+        let service = MemoryService::new(
+            Arc::new(store.clone()),
+            Arc::new(FixedClock("2026-07-13T00:00:00Z")),
+            Arc::new(NoopEmbedding),
+        )
+        .with_structured_state_provider(Arc::new(provider));
+        service
+            .retain(
+                &context,
+                "structured:redelivery",
+                TrustLevel::TrustedUser,
+                episode_request(&context, "structured:redelivery", body),
+            )
+            .await
+            .unwrap();
+        let queued_compiler = store.reflect_jobs(tenant)[0].compiler_version.clone();
+        assert!(queued_compiler.contains("+structured-"));
+        let job = store
+            .claim_reflect_jobs(
+                JobFilter {
+                    tenant: Some(tenant),
+                    scope: Some(scope),
+                },
+                1,
+            )
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let context = service.resolve_job_context(&job).await.unwrap();
+
+        assert!(matches!(
+            service
+                .compile_job(&job, &context, Some("different-compiler".to_string()), None)
+                .await,
+            Err(ServiceError::Invalid(_))
+        ));
+        assert!(store.memory_units(tenant).is_empty());
+        assert!(store.reflect_traces(tenant).is_empty());
+
+        assert!(matches!(
+            service.compile_job(&job, &context, None, None).await,
+            Err(ServiceError::Core(CoreError::ProviderUnavailable(_)))
+        ));
+        assert!(store.memory_units(tenant).is_empty());
+        assert!(store.reflect_traces(tenant).is_empty());
+
+        service
+            .compile_job(&job, &context, None, None)
+            .await
+            .unwrap();
+        store.complete_reflect_job(&job).await.unwrap();
+        assert_eq!(store.memory_units(tenant).len(), 2);
+        let traces = store.reflect_traces(tenant);
+        assert_eq!(traces.len(), 1);
+        assert_eq!(traces[0].compiler_version, queued_compiler);
+    }
+
+    #[tokio::test]
+    async fn worker_terminally_fails_provider_errors_after_provider_owned_attempts() {
+        for failure in [
+            StructuredStateProviderError::Unavailable("attempts exhausted".to_string()),
+            StructuredStateProviderError::InvalidOutput("schema mismatch".to_string()),
+        ] {
+            let provider = Arc::new(RetryProvider {
+                identity: StructuredStateProviderIdentity {
+                    model: "test/model".to_string(),
+                    prompt_hash: "prompt".to_string(),
+                    schema_hash: "schema".to_string(),
+                },
+                responses: Mutex::new(VecDeque::from([Err(failure), Ok(Vec::new())])),
+            });
+            let store = InMemoryStore::default();
+            let tenant = TenantId::new();
+            let context = bind_test_context(&store, tenant, "terminal-provider").await;
+            let service = MemoryService::new(
+                Arc::new(store.clone()),
+                Arc::new(FixedClock("2026-07-13T00:00:00Z")),
+                Arc::new(NoopEmbedding),
+            )
+            .with_structured_state_provider(provider.clone());
+            service
+                .retain(
+                    &context,
+                    "structured:terminal-provider",
+                    TrustLevel::TrustedUser,
+                    episode_request(
+                        &context,
+                        "structured:terminal-provider",
+                        "user: My home city is Oslo.",
+                    ),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(service.run_worker_tick(1).await.unwrap(), 0);
+            assert_eq!(store.dead_letter_count().await.unwrap(), 1);
+            assert_eq!(service.run_worker_tick(1).await.unwrap(), 0);
+            assert_eq!(
+                provider.responses.lock().unwrap().len(),
+                1,
+                "the job layer must not multiply provider-owned attempts"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn worker_prepares_and_compiles_same_lane_sequentially() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_in_flight = Arc::new(AtomicUsize::new(0));
+        let active_item_counts = Arc::new(Mutex::new(Vec::new()));
+        let provider = DelayedProvider {
+            identity: StructuredStateProviderIdentity {
+                model: "test/model".to_string(),
+                prompt_hash: "prompt".to_string(),
+                schema_hash: "schema".to_string(),
+            },
+            calls: Arc::clone(&calls),
+            in_flight,
+            max_in_flight: Arc::clone(&max_in_flight),
+            active_item_counts: Arc::clone(&active_item_counts),
+        };
+        let store = InMemoryStore::default();
+        let tenant = TenantId::new();
+        let context = bind_test_context(&store, tenant, "same-lane").await;
+        let service = MemoryService::new(
+            Arc::new(store.clone()),
+            Arc::new(FixedClock("2026-07-13T00:00:00Z")),
+            Arc::new(NoopEmbedding),
+        )
+        .with_structured_state_provider(Arc::new(provider))
+        .with_structured_state_prefetch_concurrency(2);
+        for city in ["Oslo", "Lima"] {
+            let key = format!("structured:same-lane:{city}");
+            service
+                .retain(
+                    &context,
+                    &key,
+                    TrustLevel::TrustedUser,
+                    episode_request(
+                        &context,
+                        format!("structured:same-lane:{city}"),
+                        format!("user: My home city is {city}."),
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(service.run_worker_tick(16).await.unwrap(), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(max_in_flight.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *active_item_counts.lock().unwrap(),
+            vec![
+                ("user: My home city is Oslo.".to_string(), 0),
+                ("user: My home city is Lima.".to_string(), 1),
+            ]
+        );
+        let active = store
+            .memory_units(tenant)
+            .into_iter()
+            .filter(|unit| {
+                unit.state == memphant_types::UnitState::Active
+                    && unit
+                        .fact_key
+                        .as_deref()
+                        .is_some_and(|key| key.ends_with(":profile:home_city"))
+            })
+            .map(|unit| unit.body)
+            .collect::<Vec<_>>();
+        assert!(
+            active.iter().any(|body| body.contains("Lima")),
+            "{active:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn worker_prepares_distinct_lanes_concurrently() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_in_flight = Arc::new(AtomicUsize::new(0));
+        let provider = DelayedProvider {
+            identity: StructuredStateProviderIdentity {
+                model: "test/model".to_string(),
+                prompt_hash: "prompt".to_string(),
+                schema_hash: "schema".to_string(),
+            },
+            calls: Arc::clone(&calls),
+            in_flight,
+            max_in_flight: Arc::clone(&max_in_flight),
+            active_item_counts: Arc::new(Mutex::new(Vec::new())),
+        };
+        let store = InMemoryStore::default();
+        let tenant = TenantId::new();
+        let service = MemoryService::new(
+            Arc::new(store.clone()),
+            Arc::new(FixedClock("2026-07-13T00:00:00Z")),
+            Arc::new(NoopEmbedding),
+        )
+        .with_structured_state_provider(Arc::new(provider))
+        .with_structured_state_prefetch_concurrency(2);
+        for (suffix, city) in [("oslo-lane", "Oslo"), ("lima-lane", "Lima")] {
+            let context = bind_test_context(&store, tenant, suffix).await;
+            let key = format!("structured:parallel-lane:{suffix}");
+            service
+                .retain(
+                    &context,
+                    &key,
+                    TrustLevel::TrustedUser,
+                    episode_request(
+                        &context,
+                        format!("structured:parallel-lane:{suffix}"),
+                        format!("user: My home city is {city}."),
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(service.run_worker_tick(16).await.unwrap(), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(max_in_flight.load(Ordering::SeqCst) >= 2);
+    }
+
+    #[tokio::test]
+    async fn terminal_predecessor_releases_unprepared_tail_for_redelivery() {
+        let first = "user: My home city is Oslo.";
+        let quote = first.strip_prefix("user: ").unwrap();
+        let operation = StructuredStateOp {
+            operation: StructuredStateOperation::Create,
+            namespace: "profile".to_string(),
+            item_key: "home_city".to_string(),
+            target_unit_ids: Vec::new(),
+            fields: BTreeMap::from([("value".to_string(), json!("Oslo"))]),
+            evidence_quote: quote.to_string(),
+            source_span: format!("6-{}", first.len()),
+            valid_from: None,
+            valid_to: None,
+        };
+        let provider = Arc::new(RetryProvider {
+            identity: StructuredStateProviderIdentity {
+                model: "test/model".to_string(),
+                prompt_hash: "prompt".to_string(),
+                schema_hash: "schema".to_string(),
+            },
+            responses: Mutex::new(VecDeque::from([
+                Err(StructuredStateProviderError::Unavailable(
+                    "temporary outage".to_string(),
+                )),
+                Ok(Vec::new()),
+                Ok(Vec::new()),
+                Ok(vec![operation]),
+            ])),
+        });
+        let store = InMemoryStore::default();
+        let tenant = TenantId::new();
+        let context = bind_test_context(&store, tenant, "tail-redelivery").await;
+        let service = MemoryService::new(
+            Arc::new(store.clone()),
+            Arc::new(FixedClock("2026-07-13T00:00:00Z")),
+            Arc::new(NoopEmbedding),
+        )
+        .with_structured_state_provider(provider.clone());
+        for (index, body) in [first, "user: Tail two.", "user: Tail three."]
+            .into_iter()
+            .enumerate()
+        {
+            let key = format!("structured:tail:{index}");
+            service
+                .retain(
+                    &context,
+                    &key,
+                    TrustLevel::TrustedUser,
+                    episode_request(&context, format!("structured:tail:{index}"), body),
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(service.run_worker_tick(16).await.unwrap(), 0);
+        assert_eq!(provider.responses.lock().unwrap().len(), 3);
+        assert_eq!(service.run_worker_tick(16).await.unwrap(), 2);
+        assert_eq!(provider.responses.lock().unwrap().len(), 1);
+        assert_eq!(store.dead_letter_count().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn persisted_completion_closes_crash_window_without_another_provider_call() {
+        let body = "user: My home city is Oslo.";
+        let quote = body.strip_prefix("user: ").unwrap();
+        let operation = StructuredStateOp {
+            operation: StructuredStateOperation::Create,
+            namespace: "profile".to_string(),
+            item_key: "home_city".to_string(),
+            target_unit_ids: Vec::new(),
+            fields: BTreeMap::from([("value".to_string(), json!("Oslo"))]),
+            evidence_quote: quote.to_string(),
+            source_span: format!("6-{}", body.len()),
+            valid_from: None,
+            valid_to: None,
+        };
+        let identity = || StructuredStateProviderIdentity {
+            model: "test/model".to_string(),
+            prompt_hash: "prompt".to_string(),
+            schema_hash: "schema".to_string(),
+        };
+        let first_provider = Arc::new(RetryProvider {
+            identity: identity(),
+            responses: Mutex::new(VecDeque::from([Ok(vec![operation])])),
+        });
+        let store = InMemoryStore::default();
+        let tenant = TenantId::new();
+        let context = bind_test_context(&store, tenant, "crash-window").await;
+        let scope = context.scope_id;
+        let first = MemoryService::new(
+            Arc::new(store.clone()),
+            Arc::new(FixedClock("2026-07-13T00:00:00Z")),
+            Arc::new(NoopEmbedding),
+        )
+        .with_structured_state_provider(first_provider);
+        first
+            .retain(
+                &context,
+                "structured:crash-window",
+                TrustLevel::TrustedUser,
+                episode_request(&context, "structured:crash-window", body),
+            )
+            .await
+            .unwrap();
+        let job = store
+            .claim_reflect_jobs(
+                JobFilter {
+                    tenant: Some(tenant),
+                    scope: Some(scope),
+                },
+                1,
+            )
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let context = first.resolve_job_context(&job).await.unwrap();
+        let prepared = first
+            .prepare_structured_state(&job, &context)
+            .await
+            .unwrap();
+        first
+            .compile_job(&job, &context, None, Some(&prepared))
+            .await
+            .unwrap();
+        // Simulate a process crash before the legacy separate complete call.
+        let second_provider = Arc::new(RetryProvider {
+            identity: identity(),
+            responses: Mutex::new(VecDeque::from([Err(
+                StructuredStateProviderError::Unavailable("must not run".to_string()),
+            )])),
+        });
+        let second = MemoryService::new(
+            Arc::new(store),
+            Arc::new(FixedClock("2026-07-13T00:01:00Z")),
+            Arc::new(NoopEmbedding),
+        )
+        .with_structured_state_provider(second_provider.clone());
+        assert_eq!(second.run_worker_tick(16).await.unwrap(), 0);
+        assert_eq!(
+            second_provider.responses.lock().unwrap().len(),
+            1,
+            "completed persistence must make the job unclaimable"
+        );
+    }
+}
+
 impl From<StoreError> for ServiceError {
     fn from(error: StoreError) -> Self {
         Self::Core(CoreError::Store(error))
+    }
+}
+
+fn serialized_mutation_response(
+    status: u16,
+    value: &impl serde::Serialize,
+) -> Result<MutationResponse, ServiceError> {
+    let body = serde_json::to_vec(value).map_err(|error| {
+        CoreError::Store(StoreError::Backend(format!(
+            "mutation response serialization failed: {error}"
+        )))
+    })?;
+    Ok(MutationResponse::success(status, body)?)
+}
+
+#[cfg(test)]
+mod retain_atomicity_tests {
+    use super::*;
+    use crate::{FixedClock, InMemoryStore, NoopEmbedding};
+    use memphant_types::{
+        ContextBindingAgentRef, ContextBindingEntityRef, ContextBindingRequest,
+        ContextBindingScopeRef, RetainEpisodePayload, RetainPayload,
+    };
+
+    #[tokio::test]
+    async fn retain_rolls_back_source_and_job_when_receipt_staging_fails() {
+        let store = InMemoryStore::default();
+        let tenant = TenantId::new();
+        let binding = store
+            .resolve_context_binding(
+                tenant,
+                "retain-atomicity".to_string(),
+                ContextBindingRequest {
+                    subject: ContextBindingEntityRef {
+                        external_ref: "subject:atomicity".to_string(),
+                        kind: "user".to_string(),
+                    },
+                    actor: ContextBindingEntityRef {
+                        external_ref: "actor:atomicity".to_string(),
+                        kind: "user".to_string(),
+                    },
+                    scope: ContextBindingScopeRef {
+                        external_ref: "scope:atomicity".to_string(),
+                        kind: "memory".to_string(),
+                        parent_external_ref: None,
+                    },
+                    agent_node: ContextBindingAgentRef {
+                        external_ref: "agent:atomicity".to_string(),
+                        parent_external_ref: None,
+                    },
+                    access_policies: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        let context = store
+            .resolve_memory_context(
+                tenant,
+                binding.subject_id,
+                binding.actor_id,
+                binding.scope_id,
+                binding.agent_node_id,
+            )
+            .await
+            .unwrap();
+        let service = MemoryService::new(
+            Arc::new(store.clone()),
+            Arc::new(FixedClock("2026-07-15T00:00:00Z")),
+            Arc::new(NoopEmbedding),
+        );
+        let request = RetainEpisodeHttpRequest {
+            subject_id: context.data_subject_id,
+            scope_id: context.scope_id,
+            actor_id: context.actor_id,
+            agent_node_id: context.agent_node_id,
+            subject_generation: context.subject_generation,
+            source_ref: "test:atomicity".to_string(),
+            observed_at: "2026-07-15T00:00:00Z".to_string(),
+            payload: RetainPayload::Episode(RetainEpisodePayload {
+                source_kind: "user".to_string(),
+                body: "an atomic retained episode".to_string(),
+            }),
+        };
+
+        store.fail_next_mutation_response();
+        service
+            .retain(
+                &context,
+                "retain-atomicity",
+                TrustLevel::TrustedUser,
+                request.clone(),
+            )
+            .await
+            .unwrap_err();
+        assert!(store.episodes(tenant).is_empty());
+        assert!(store.reflect_jobs(tenant).is_empty());
+
+        service
+            .retain(
+                &context,
+                "retain-atomicity",
+                TrustLevel::TrustedUser,
+                request,
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.episodes(tenant).len(), 1);
+        assert_eq!(store.reflect_jobs(tenant).len(), 1);
     }
 }
 
@@ -128,6 +844,9 @@ pub struct MemoryService<S: MemoryStore> {
     /// retired heuristic rerank stage. Set via `with_cross_reranker`; the bench
     /// lane's `--cross-rerank` threads the real fastembed reranker here.
     cross_reranker: Option<Arc<dyn CrossReranker>>,
+    cross_rerank_candidate_selection: CrossRerankCandidateSelection,
+    structured_state_provider: Option<Arc<dyn StructuredStateProvider>>,
+    structured_state_prefetch_concurrency: usize,
 }
 
 impl<S: MemoryStore> Clone for MemoryService<S> {
@@ -143,6 +862,9 @@ impl<S: MemoryStore> Clone for MemoryService<S> {
             temporal_grounding_enabled: self.temporal_grounding_enabled,
             fact_extraction_enabled: self.fact_extraction_enabled,
             cross_reranker: self.cross_reranker.clone(),
+            cross_rerank_candidate_selection: self.cross_rerank_candidate_selection,
+            structured_state_provider: self.structured_state_provider.clone(),
+            structured_state_prefetch_concurrency: self.structured_state_prefetch_concurrency,
         }
     }
 }
@@ -160,6 +882,9 @@ impl<S: MemoryStore> MemoryService<S> {
             temporal_grounding_enabled: false,
             fact_extraction_enabled: false,
             cross_reranker: None,
+            cross_rerank_candidate_selection: CrossRerankCandidateSelection::FusedHead,
+            structured_state_provider: None,
+            structured_state_prefetch_concurrency: DEFAULT_STRUCTURED_STATE_PREFETCH_CONCURRENCY,
         }
     }
 
@@ -250,6 +975,31 @@ impl<S: MemoryStore> MemoryService<S> {
         self
     }
 
+    pub fn with_cross_rerank_candidate_selection(
+        mut self,
+        selection: CrossRerankCandidateSelection,
+    ) -> Self {
+        self.cross_rerank_candidate_selection = selection;
+        self
+    }
+
+    /// Installs structured-state extraction at episode reflection. Provider
+    /// output is validated against exact USER evidence before it reaches the
+    /// existing admission and bitemporal storage path.
+    pub fn with_structured_state_provider(
+        mut self,
+        provider: Arc<dyn StructuredStateProvider>,
+    ) -> Self {
+        self.structured_state_provider = Some(provider);
+        self
+    }
+
+    pub fn with_structured_state_prefetch_concurrency(mut self, concurrency: usize) -> Self {
+        self.structured_state_prefetch_concurrency =
+            concurrency.clamp(1, MAX_STRUCTURED_STATE_PREFETCH_CONCURRENCY);
+        self
+    }
+
     pub fn store(&self) -> &S {
         &self.store
     }
@@ -258,132 +1008,313 @@ impl<S: MemoryStore> MemoryService<S> {
         self.embedder.as_ref()
     }
 
-    /// The retain verb: payload-dispatched between `episode` (default),
-    /// `resource` and direct `unit` shapes (spec 08 §209). `tenant` comes from
-    /// the authenticated key, never the body; `source_trust` must already be
-    /// clamped at the edge.
+    /// The retain verb. Identity comes from the resolved context and source
+    /// trust is assigned by the authenticated edge.
     pub async fn retain(
         &self,
-        tenant: TenantId,
-        request: RetainEpisodeHttpRequest,
-    ) -> Result<RetainEpisodeHttpResponse, ServiceError> {
-        let compiler_version = request
-            .compiler_version
-            .clone()
-            .unwrap_or_else(|| COMPILER_VERSION.to_string());
-        match (&request.resource, &request.unit) {
-            (Some(_), Some(_)) => Err(ServiceError::Invalid(
-                "retain accepts exactly one payload shape: episode body, resource, or unit"
-                    .to_string(),
-            )),
-            (Some(resource), None) => {
-                let outcome = retain_resource(
-                    self.store.as_ref(),
-                    RetainResourceRequest {
-                        tenant_id: tenant,
-                        scope_id: request.scope_id,
-                        actor_id: request.actor_id,
-                        uri: resource.uri.clone(),
-                        kind: resource.kind,
-                        content_hash: resource.content_hash.clone(),
-                        mime_type: resource.mime_type.clone(),
-                        revision: resource.revision.clone(),
-                        body: resource.body.clone(),
-                        source_trust: request.source_trust,
-                        compiler_version,
-                    },
-                )
-                .await?;
-                Ok(RetainEpisodeHttpResponse {
-                    episode_id: None,
-                    resource_id: Some(outcome.resource_id),
-                    unit_ids: Vec::new(),
-                    dedup: None,
-                    assigned_trust: Some(request.source_trust),
-                    enqueued: vec!["reflect_resource".to_string()],
-                    trace_ref: None,
-                })
-            }
-            (None, Some(unit)) => {
-                if unit.subject.trim().is_empty() || unit.predicate.trim().is_empty() {
+        context: &ResolvedMemoryContext,
+        idempotency_key: &str,
+        assigned_trust: TrustLevel,
+        mut request: RetainEpisodeHttpRequest,
+    ) -> Result<MutationResponse, ServiceError>
+    where
+        S: MutationLedgerStore,
+    {
+        if (
+            request.subject_id,
+            request.scope_id,
+            request.actor_id,
+            request.agent_node_id,
+            request.subject_generation,
+        ) != (
+            context.data_subject_id,
+            context.scope_id,
+            context.actor_id,
+            context.agent_node_id,
+            context.subject_generation,
+        ) {
+            return Err(ServiceError::Invalid(
+                "retain request identity must match the resolved context".to_string(),
+            ));
+        }
+        if request.source_ref.trim().is_empty() {
+            return Err(ServiceError::Invalid(
+                "source_ref must not be blank".to_string(),
+            ));
+        }
+        request.observed_at = canonical_utc_timestamp(&request.observed_at, "observed_at")?;
+        let compiler_version = COMPILER_VERSION.to_string();
+        match &request.payload {
+            memphant_types::RetainPayload::Episode(episode) => {
+                if !matches!(
+                    episode.source_kind.as_str(),
+                    "user" | "agent" | "tool" | "web" | "resource" | "system"
+                ) {
                     return Err(ServiceError::Invalid(
-                        "unit retain requires an explicit subject and predicate".to_string(),
+                        "episode source_kind must be one of user, agent, tool, web, resource, system"
+                            .to_string(),
                     ));
                 }
-                // A direct unit write is a synchronous reflect of one
-                // caller-asserted candidate: the admission trust policy
-                // applies unchanged (untrusted keys mint candidate tier).
+                if episode.body.trim().is_empty() {
+                    return Err(CoreError::EmptyBody.into());
+                }
+            }
+            memphant_types::RetainPayload::Unit(unit) => {
+                if unit.fact_key.trim().is_empty() || unit.predicate.trim().is_empty() {
+                    return Err(ServiceError::Invalid(
+                        "unit retain requires an explicit fact_key and predicate".to_string(),
+                    ));
+                }
+                if !unit.confidence.is_finite() || !(0.0..=1.0).contains(&unit.confidence) {
+                    return Err(ServiceError::Invalid(
+                        "unit confidence must be finite and between 0 and 1".to_string(),
+                    ));
+                }
+                validate_valid_interval(unit.valid_from.as_deref(), unit.valid_to.as_deref())?;
+            }
+            memphant_types::RetainPayload::Resource(_) => {}
+        }
+        let claim = MutationClaim::new(
+            context,
+            MutationVerb::Retain,
+            idempotency_key,
+            canonical_mutation_request_hash(MutationVerb::Retain, &request)?,
+        )?;
+        let source_ref = request.source_ref;
+        let observed_at = request.observed_at;
+        match request.payload {
+            memphant_types::RetainPayload::Resource(resource) => {
+                let mut tx = self.store.begin(context).await?;
+                match self.store.stage_mutation_claim(&mut tx, claim).await? {
+                    MutationClaimOutcome::Replay(response) => {
+                        self.store.commit(tx).await?;
+                        return Ok(response);
+                    }
+                    MutationClaimOutcome::Execute => {}
+                }
+                let resource_id = self
+                    .store
+                    .stage_resource(
+                        &mut tx,
+                        NewResource {
+                            tenant_id: context.tenant_id,
+                            data_subject_id: context.data_subject_id,
+                            scope_id: context.scope_id,
+                            actor_id: context.actor_id,
+                            agent_node_id: context.agent_node_id,
+                            subject_generation: context.subject_generation,
+                            uri: resource.uri,
+                            source_ref: source_ref.clone(),
+                            observed_at,
+                            kind: resource.kind.unwrap_or_default(),
+                            content_hash: resource.content_hash,
+                            mime_type: resource.mime_type,
+                            revision: resource.revision,
+                            body: resource.body,
+                            source_trust: assigned_trust,
+                        },
+                    )
+                    .await?;
+                self.store
+                    .enqueue_reflect(
+                        &mut tx,
+                        ReflectJob {
+                            tenant_id: context.tenant_id,
+                            data_subject_id: context.data_subject_id,
+                            scope_id: context.scope_id,
+                            actor_id: context.actor_id,
+                            agent_node_id: context.agent_node_id,
+                            subject_generation: context.subject_generation,
+                            episode_id: None,
+                            resource_id: Some(resource_id),
+                            kind: ReflectJobKind::ReflectResource,
+                            compiler_version,
+                            subject: None,
+                            predicate: None,
+                        },
+                    )
+                    .await?;
+                let result = RetainEpisodeHttpResponse {
+                    episode_id: None,
+                    resource_id: Some(resource_id),
+                    unit_ids: Vec::new(),
+                    dedup: None,
+                    assigned_trust: Some(assigned_trust),
+                    enqueued: vec!["reflect_resource".to_string()],
+                    trace_ref: None,
+                };
+                let response = serialized_mutation_response(200, &result)?;
+                self.store
+                    .stage_mutation_response(&mut tx, response.clone())
+                    .await?;
+                self.store.commit(tx).await?;
+                Ok(response)
+            }
+            memphant_types::RetainPayload::Unit(unit) => {
+                let mut probe = self.store.begin(context).await?;
+                match self
+                    .store
+                    .stage_mutation_claim(&mut probe, claim.clone())
+                    .await?
+                {
+                    MutationClaimOutcome::Replay(response) => {
+                        self.store.commit(probe).await?;
+                        return Ok(response);
+                    }
+                    MutationClaimOutcome::Execute => self.store.rollback(probe).await?,
+                }
                 let job_id = memphant_types::JobId::new();
-                let (trace, unit_ids) = reflect_recorded(
+                let prepared = prepare_compiled_write(
                     self.store.as_ref(),
                     ReflectInput {
-                        tenant_id: tenant,
-                        scope_id: request.scope_id,
-                        actor_id: request.actor_id,
+                        tenant_id: context.tenant_id,
+                        data_subject_id: context.data_subject_id,
+                        scope_id: context.scope_id,
+                        agent_node_id: context.agent_node_id,
+                        subject_generation: context.subject_generation,
+                        actor_id: context.actor_id,
+                        source_ref: source_ref.clone(),
+                        observed_at,
+                        source_body: Some(unit.body.clone()),
                         episode_id: None,
                         resource_id: None,
                         job_id,
                         compiler_version,
                         candidates: vec![ReflectCandidate {
                             source_kind: "direct".to_string(),
-                            trust_level: request.source_trust,
-                            actor_id: request.actor_id,
-                            subject: Some(unit.subject.clone()),
+                            trust_level: assigned_trust,
+                            actor_id: context.actor_id,
+                            subject: None,
                             predicate: Some(unit.predicate.clone()),
+                            fact_key: Some(unit.fact_key.clone()),
                             kind: Some(unit.kind),
-                            body: unit.body.clone(),
-                            churn_class: unit.churn_class.clone(),
+                            body: unit.body,
+                            confidence: Some(unit.confidence),
+                            churn_class: None,
                             admission_hint: None,
+                            target_unit_ids: None,
                             contextual_chunks: Vec::new(),
-                            valid_from: None,
-                            valid_to: None,
+                            valid_from: unit.valid_from.clone(),
+                            valid_to: unit.valid_to.clone(),
                         }],
                     },
                     self.embedder.as_ref(),
                     self.clock.as_ref(),
+                    Some(context),
                 )
                 .await?;
-                Ok(RetainEpisodeHttpResponse {
+                let PreparedCompiledWrite::Write {
+                    trace,
+                    created_unit_ids: unit_ids,
+                    write,
+                    ..
+                } = prepared
+                else {
+                    return Err(CoreError::Store(StoreError::Conflict(
+                        "new direct retain unexpectedly matched an existing reflect trace"
+                            .to_string(),
+                    ))
+                    .into());
+                };
+                let mut tx = self.store.begin(context).await?;
+                match self.store.stage_mutation_claim(&mut tx, claim).await? {
+                    MutationClaimOutcome::Replay(response) => {
+                        self.store.commit(tx).await?;
+                        return Ok(response);
+                    }
+                    MutationClaimOutcome::Execute => {}
+                }
+                self.store
+                    .stage_compiled_units(&mut tx, None, write)
+                    .await?;
+                let result = RetainEpisodeHttpResponse {
                     episode_id: None,
                     resource_id: None,
                     unit_ids,
                     dedup: None,
-                    assigned_trust: Some(request.source_trust),
+                    assigned_trust: Some(assigned_trust),
                     enqueued: Vec::new(),
                     trace_ref: Some(format!("memphant://trace/{}", trace.job_id.as_uuid())),
-                })
+                };
+                let response = serialized_mutation_response(200, &result)?;
+                self.store
+                    .stage_mutation_response(&mut tx, response.clone())
+                    .await?;
+                self.store.commit(tx).await?;
+                Ok(response)
             }
-            (None, None) => {
-                let body = request
-                    .body
-                    .clone()
-                    .filter(|body| !body.trim().is_empty())
-                    .ok_or(CoreError::EmptyBody)?;
-                let outcome = retain_episode(
-                    self.store.as_ref(),
-                    RetainRequest {
-                        tenant_id: tenant,
-                        scope_id: request.scope_id,
-                        actor_id: request.actor_id,
-                        source_kind: request.source_kind.clone(),
-                        source_trust: request.source_trust,
-                        subject_hint: request.subject_hint.clone(),
-                        subject: request.subject.clone(),
-                        predicate: request.predicate.clone(),
-                        body,
-                        compiler_version,
-                    },
-                )
-                .await?;
-                Ok(RetainEpisodeHttpResponse {
+            memphant_types::RetainPayload::Episode(episode) => {
+                let compiler_version = self
+                    .structured_state_provider
+                    .as_ref()
+                    .map(|provider| {
+                        structured_compiler_identity(&compiler_version, provider.identity())
+                    })
+                    .unwrap_or(compiler_version);
+                let mut tx = self.store.begin(context).await?;
+                match self.store.stage_mutation_claim(&mut tx, claim).await? {
+                    MutationClaimOutcome::Replay(response) => {
+                        self.store.commit(tx).await?;
+                        return Ok(response);
+                    }
+                    MutationClaimOutcome::Execute => {}
+                }
+                let dedup_key =
+                    derive_episode_dedup_key(&episode.source_kind, &source_ref, &episode.body);
+                let outcome = self
+                    .store
+                    .stage_episode(
+                        &mut tx,
+                        NewEpisode {
+                            tenant_id: context.tenant_id,
+                            data_subject_id: context.data_subject_id,
+                            scope_id: context.scope_id,
+                            actor_id: context.actor_id,
+                            agent_node_id: context.agent_node_id,
+                            subject_generation: context.subject_generation,
+                            source_kind: episode.source_kind,
+                            source_ref,
+                            observed_at,
+                            source_trust: assigned_trust,
+                            dedup_key,
+                            body: episode.body,
+                        },
+                    )
+                    .await?;
+                self.store
+                    .enqueue_reflect(
+                        &mut tx,
+                        ReflectJob {
+                            tenant_id: context.tenant_id,
+                            data_subject_id: context.data_subject_id,
+                            scope_id: context.scope_id,
+                            actor_id: context.actor_id,
+                            agent_node_id: context.agent_node_id,
+                            subject_generation: context.subject_generation,
+                            episode_id: Some(outcome.episode_id),
+                            resource_id: None,
+                            kind: ReflectJobKind::ReflectEpisode,
+                            compiler_version,
+                            subject: None,
+                            predicate: None,
+                        },
+                    )
+                    .await?;
+                let result = RetainEpisodeHttpResponse {
                     episode_id: Some(outcome.episode_id),
                     resource_id: None,
                     unit_ids: Vec::new(),
                     dedup: Some(outcome.dedup),
-                    assigned_trust: Some(request.source_trust),
+                    assigned_trust: Some(assigned_trust),
                     enqueued: vec!["reflect_episode".to_string()],
                     trace_ref: None,
-                })
+                };
+                let response = serialized_mutation_response(200, &result)?;
+                self.store
+                    .stage_mutation_response(&mut tx, response.clone())
+                    .await?;
+                self.store.commit(tx).await?;
+                Ok(response)
             }
         }
     }
@@ -393,17 +1324,52 @@ impl<S: MemoryStore> MemoryService<S> {
     /// bodies are matched and returned with `degraded: true` (spec 08 §4).
     pub async fn recall(
         &self,
-        tenant: TenantId,
+        context: ResolvedMemoryContext,
         request: RecallHttpRequest,
     ) -> Result<RecallResponse, ServiceError> {
-        let scope_id = request.scope_id;
-        let query = request.query.clone();
         // Defensive ceilings on caller-supplied sizing, for symmetry with the
         // scope endpoint's clamp. No allocation is driven by these (output is
         // bounded by the candidate pool), so they only reject absurd values.
         const MAX_RECALL_LIMIT: usize = 1_000;
         const MAX_RECALL_BUDGET_TOKENS: usize = 1_000_000;
         let k = request.limit.unwrap_or(8).clamp(1, MAX_RECALL_LIMIT);
+        self.recall_internal(RecallRequest {
+            context,
+            query: request.query,
+            k,
+            budget_tokens: request
+                .budget_tokens
+                .unwrap_or(512)
+                .clamp(1, MAX_RECALL_BUDGET_TOKENS),
+            mode: request.mode.unwrap_or(RecallMode::Fast),
+            include_beliefs: request.include_beliefs.unwrap_or(false),
+            edge_expansion_enabled: false,
+            context_packing_abstention_enabled: true,
+            // Real-evidence default (rung 8 disable-when, real-retrieval-20260710):
+            // the deterministic reranker cost -0.143 Recall@5 on LongMemEval-S
+            // (CI excludes zero), so it is opt-in until a variant earns its keep.
+            rerank_enabled: false,
+            learned_rerank_profile: None,
+            query_decomposition_enabled: true,
+            procedure_recall_enabled: true,
+            decay_enabled: true,
+            engine_version: ENGINE_VERSION.to_string(),
+            transaction_as_of: request.transaction_as_of,
+            valid_at: request.valid_at,
+            aggregation_window: request.aggregation_window,
+        })
+        .await
+    }
+
+    /// Internal recall contract for benchmarks and controlled evaluations.
+    /// Public callers always enter through [`Self::recall`].
+    pub async fn recall_internal(
+        &self,
+        request: RecallRequest,
+    ) -> Result<RecallResponse, ServiceError> {
+        let context = request.context.clone();
+        let query = request.query.clone();
+        let k = request.k;
         // Real embedding provider → embed the query and run the vector
         // channel; the Noop provider keeps the channel honestly disabled.
         let query_vec = if self.embedder.dimensions() > 0 {
@@ -426,215 +1392,541 @@ impl<S: MemoryStore> MemoryService<S> {
             vec,
             profile_id: embedding_profile_for(self.embedder()).id,
         });
-        let response = recall_with_pool(
+        let response = recall_with_pool_and_selection(
             self.store.as_ref(),
-            RecallRequest {
-                tenant_id: tenant,
-                scope_id,
-                actor_id: request.actor_id,
-                allowed_scope_ids: request
-                    .allowed_scope_ids
-                    .clone()
-                    .unwrap_or_else(|| vec![scope_id]),
-                query: query.clone(),
-                k,
-                budget_tokens: request
-                    .budget_tokens
-                    .unwrap_or(512)
-                    .clamp(1, MAX_RECALL_BUDGET_TOKENS),
-                mode: request.mode.unwrap_or(RecallMode::Fast),
-                include_beliefs: request.include_beliefs.unwrap_or(false),
-                edge_expansion_enabled: request.edge_expansion_enabled.unwrap_or(true),
-                context_packing_abstention_enabled: request
-                    .context_packing_abstention_enabled
-                    .unwrap_or(true),
-                // Real-evidence default (rung 8 disable-when, real-retrieval-20260710):
-                // the deterministic reranker cost -0.143 Recall@5 on LongMemEval-S
-                // (CI excludes zero), so it is opt-in until a variant earns its keep.
-                rerank_enabled: request.rerank_enabled.unwrap_or(false),
-                learned_rerank_profile: None,
-                query_decomposition_enabled: request.query_decomposition_enabled.unwrap_or(true),
-                procedure_recall_enabled: request.procedure_recall_enabled.unwrap_or(true),
-                decay_enabled: request.decay_enabled.unwrap_or(true),
-                engine_version: ENGINE_VERSION.to_string(),
-            },
+            request.clone(),
             vector_query,
             self.clock.as_ref(),
             self.recall_pool_depth,
             self.pack_levers,
             self.temporal_grounding_enabled,
             self.cross_reranker.as_deref(),
+            self.cross_rerank_candidate_selection,
         )
         .await?;
 
-        if !response.items.is_empty() {
+        if !response.items.is_empty()
+            || request.transaction_as_of.is_some()
+            || request.valid_at.is_some()
+        {
             return Ok(response);
         }
-        let pending = self.store.pending_job_count(tenant, scope_id).await?;
+        let pending = self.store.pending_job_count(&context).await?;
         if pending == 0 {
             return Ok(response);
         }
-        let episodes = self
-            .store
-            .fetch_episodes_for_scope(tenant, scope_id, 256)
-            .await?;
+        let episodes = self.store.fetch_episodes_for_scope(&context, 256).await?;
         let items = degraded_episode_items(&episodes, &query, k.max(1));
         if items.is_empty() {
             return Ok(response);
         }
-        Ok(RecallResponse {
-            degraded: true,
-            consolidation_lag_ms: 1,
-            abstention: false,
-            candidate_whitelist: items.iter().map(|item| item.unit_id).collect(),
-            citations: items
+        let consolidation_lag_ms = 1;
+        let mut trace = self
+            .store
+            .trace_by_id(&context, response.trace_id)
+            .await?
+            .ok_or(StoreError::NotFound("retrieval trace"))?;
+        trace.consolidation_lag_ms = consolidation_lag_ms;
+        trace.degradation = Some(RecallDegradationDiagnostic {
+            reason: RecallDegradationReason::PendingReflectionReadYourOwnWrites,
+            consolidation_lag_ms,
+            items: items
                 .iter()
-                .filter_map(|item| {
-                    item.citation_episode_id
-                        .map(|episode_id| memphant_types::RecallCitation {
-                            unit_id: item.unit_id,
-                            episode_id: Some(episode_id),
-                            resource_id: None,
-                        })
+                .map(|item| DegradedRecallTraceItem {
+                    body: item.body.clone(),
+                    kind: item.kind,
                 })
                 .collect(),
+        });
+        self.store.store_trace(&context, trace).await?;
+        Ok(RecallResponse {
+            degraded: true,
+            consolidation_lag_ms,
+            abstention: false,
+            candidate_whitelist: Vec::new(),
+            citations: Vec::new(),
             items,
             ..response
         })
     }
 
-    /// The reflect verb: claims THIS scope's pending jobs through the same
-    /// claim/complete path the worker uses (never double-compiles) and
-    /// compiles them synchronously.
+    /// Accepts asynchronous reflection for an already-bound context. Retain
+    /// owns durable job enqueueing; only the worker may claim or compile jobs.
     pub async fn reflect(
         &self,
-        tenant: TenantId,
-        scope: ScopeId,
-        compiler_version: Option<String>,
-    ) -> Result<ReflectResult, ServiceError> {
-        let jobs = self
-            .store
-            .claim_reflect_jobs(
-                JobFilter {
-                    tenant: Some(tenant),
-                    scope: Some(scope),
-                },
-                usize::MAX,
-            )
-            .await?;
-        let mut consumed = 0;
-        let mut created = 0;
-        let mut trace_ref = None;
-        for job in jobs {
-            let outcome = self.compile_job(&job, compiler_version.clone()).await?;
-            consumed += outcome.consumed;
-            created += outcome.created;
-            if outcome.consumed > 0 {
-                trace_ref = Some(format!("memphant://trace/{}", job.job.id.as_uuid()));
-            }
-            self.store
-                .complete_reflect_job(job.job.tenant_id, job.job.id)
-                .await?;
+        context: &ResolvedMemoryContext,
+        idempotency_key: &str,
+        request: ReflectRequest,
+    ) -> Result<MutationResponse, ServiceError>
+    where
+        S: MutationLedgerStore,
+    {
+        if (
+            request.subject_id,
+            request.scope_id,
+            request.actor_id,
+            request.agent_node_id,
+            request.subject_generation,
+        ) != (
+            context.data_subject_id,
+            context.scope_id,
+            context.actor_id,
+            context.agent_node_id,
+            context.subject_generation,
+        ) {
+            return Err(ServiceError::Invalid(
+                "reflect request identity must match the resolved context".to_string(),
+            ));
         }
-        Ok(ReflectResult {
-            reflect_id: format!("rfl_{}", scope.as_uuid()),
-            episodes_consumed: consumed,
-            candidates_created: created,
-            trace_ref,
-        })
+        let claim = MutationClaim::new(
+            context,
+            MutationVerb::Reflect,
+            idempotency_key,
+            canonical_mutation_request_hash(MutationVerb::Reflect, &request)?,
+        )?;
+        let mut tx = self.store.begin(context).await?;
+        match self.store.stage_mutation_claim(&mut tx, claim).await? {
+            MutationClaimOutcome::Replay(response) => {
+                self.store.commit(tx).await?;
+                Ok(response)
+            }
+            MutationClaimOutcome::Execute => {
+                let job_id = self
+                    .store
+                    .enqueue_reflect(
+                        &mut tx,
+                        ReflectJob {
+                            tenant_id: context.tenant_id,
+                            data_subject_id: context.data_subject_id,
+                            scope_id: context.scope_id,
+                            actor_id: context.actor_id,
+                            agent_node_id: context.agent_node_id,
+                            subject_generation: context.subject_generation,
+                            episode_id: None,
+                            resource_id: None,
+                            kind: ReflectJobKind::ReflectScope,
+                            compiler_version: COMPILER_VERSION.to_string(),
+                            subject: None,
+                            predicate: None,
+                        },
+                    )
+                    .await?;
+                let response = serialized_mutation_response(202, &ReflectAccepted { job_id })?;
+                self.store
+                    .stage_mutation_response(&mut tx, response.clone())
+                    .await?;
+                self.store.commit(tx).await?;
+                Ok(response)
+            }
+        }
     }
 
     pub async fn correct(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
+        idempotency_key: &str,
         mut request: CorrectRequest,
-    ) -> Result<CorrectResult, ServiceError> {
-        request.tenant_id = tenant;
-        Ok(correct_memory(
-            self.store.as_ref(),
-            request,
-            self.embedder.as_ref(),
-            self.clock.as_ref(),
-        )
-        .await?)
+    ) -> Result<MutationResponse, ServiceError>
+    where
+        S: MutationLedgerStore,
+    {
+        if request.correction.value.trim().is_empty() {
+            return Err(CoreError::Invalid("correction value cannot be empty".to_string()).into());
+        }
+        if request.correction.source_ref.trim().is_empty() {
+            return Err(ServiceError::Invalid(
+                "correction source_ref must not be blank".to_string(),
+            ));
+        }
+        request.correction.observed_at =
+            canonical_utc_timestamp(&request.correction.observed_at, "correction observed_at")?;
+        validate_valid_interval(
+            request.correction.valid_from.as_deref(),
+            request.correction.valid_to.as_deref(),
+        )?;
+        let claim = MutationClaim::new(
+            context,
+            MutationVerb::Correct,
+            idempotency_key,
+            canonical_mutation_request_hash(MutationVerb::Correct, &request)?,
+        )?;
+        let mut tx = self.store.begin(context).await?;
+        match self.store.stage_mutation_claim(&mut tx, claim).await? {
+            MutationClaimOutcome::Replay(response) => {
+                self.store.commit(tx).await?;
+                Ok(response)
+            }
+            MutationClaimOutcome::Execute => {
+                let embedding = if self.embedder.dimensions() > 0 {
+                    self.embedder
+                        .embed(std::slice::from_ref(&request.correction.value))
+                        .map_err(|error| {
+                            CoreError::Store(StoreError::Backend(format!(
+                                "embedding failed: {error}"
+                            )))
+                        })?
+                        .into_iter()
+                        .next()
+                        .filter(|vector| !vector.is_empty())
+                        .map(|vector| (embedding_profile_for(self.embedder.as_ref()), vector))
+                } else {
+                    None
+                };
+                let result = self
+                    .store
+                    .stage_correction(
+                        &mut tx,
+                        CorrectionWrite {
+                            selector: request.selector,
+                            source_ref: request.correction.source_ref.clone(),
+                            observed_at: request.correction.observed_at.clone(),
+                            correction: request.correction,
+                            now: self.clock.now_rfc3339(),
+                            embedding,
+                        },
+                    )
+                    .await
+                    .map_err(|error| match error {
+                        StoreError::NotFound(entity) => CoreError::NotFound(entity.to_string()),
+                        other => CoreError::Store(other),
+                    })?;
+                let response = serialized_mutation_response(200, &result)?;
+                self.store
+                    .stage_mutation_response(&mut tx, response.clone())
+                    .await?;
+                self.store.commit(tx).await?;
+                Ok(response)
+            }
+        }
     }
 
     pub async fn forget(
         &self,
-        tenant: TenantId,
-        mut request: ForgetRequest,
-    ) -> Result<ForgetResult, ServiceError> {
-        request.tenant_id = tenant;
-        Ok(forget_memory(self.store.as_ref(), request, self.clock.as_ref()).await?)
+        context: &ResolvedMemoryContext,
+        idempotency_key: &str,
+        request: ForgetRequest,
+    ) -> Result<MutationResponse, ServiceError>
+    where
+        S: MutationLedgerStore,
+    {
+        let target = request
+            .selector
+            .exactly_one_target()
+            .map_err(CoreError::Invalid)?;
+        let claim = MutationClaim::new(
+            context,
+            MutationVerb::Forget,
+            idempotency_key,
+            canonical_mutation_request_hash(MutationVerb::Forget, &request)?,
+        )?;
+        let mut tx = self.store.begin(context).await?;
+        match self.store.stage_mutation_claim(&mut tx, claim).await? {
+            MutationClaimOutcome::Replay(response) => {
+                self.store.commit(tx).await?;
+                Ok(response)
+            }
+            MutationClaimOutcome::Execute => {
+                let outcome = self
+                    .store
+                    .stage_forget(
+                        &mut tx,
+                        ForgetWrite {
+                            target,
+                            now: self.clock.now_rfc3339(),
+                        },
+                    )
+                    .await?;
+                let result = ForgetResult {
+                    deletion_generation: outcome.deletion_generation,
+                    policy: "hard_delete".to_string(),
+                    invalidated_units: outcome.invalidated_units,
+                    verification: "authorized_transaction_committed".to_string(),
+                    trace_ref: None,
+                };
+                let response = serialized_mutation_response(200, &result)?;
+                self.store
+                    .stage_mutation_response(&mut tx, response.clone())
+                    .await?;
+                self.store.commit(tx).await?;
+                Ok(response)
+            }
+        }
     }
 
     pub async fn mark(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
+        idempotency_key: &str,
         mut request: MarkRequest,
-    ) -> Result<MarkResult, ServiceError> {
-        request.tenant_id = tenant;
-        Ok(record_mark(self.store.as_ref(), request).await?)
+    ) -> Result<MutationResponse, ServiceError>
+    where
+        S: MutationLedgerStore,
+    {
+        if request.caller_id.trim().is_empty() {
+            return Err(CoreError::Invalid("caller_id cannot be empty".to_string()).into());
+        }
+        let claim = MutationClaim::new(
+            context,
+            MutationVerb::Mark,
+            idempotency_key,
+            canonical_mutation_request_hash(MutationVerb::Mark, &request)?,
+        )?;
+        request.used_ids.sort_unstable_by_key(|id| id.as_uuid());
+        request.used_ids.dedup();
+        let mut tx = self.store.begin(context).await?;
+        match self.store.stage_mutation_claim(&mut tx, claim).await? {
+            MutationClaimOutcome::Replay(response) => {
+                self.store.commit(tx).await?;
+                Ok(response)
+            }
+            MutationClaimOutcome::Execute => {
+                let trace = self
+                    .store
+                    .trace_by_id(context, request.trace_id)
+                    .await?
+                    .ok_or_else(|| CoreError::NotFound("retrieval trace".to_string()))?;
+                let canonical_ids: HashSet<UnitId> = trace
+                    .context_items
+                    .iter()
+                    .map(|item| item.unit_id)
+                    .collect();
+                if request
+                    .used_ids
+                    .iter()
+                    .any(|unit_id| !canonical_ids.contains(unit_id))
+                {
+                    return Err(CoreError::Invalid(
+                        "marked units must belong to the trace canonical inclusion whitelist"
+                            .to_string(),
+                    )
+                    .into());
+                }
+                let result = MarkResult {
+                    accepted: true,
+                    trace_id: request.trace_id,
+                };
+                self.store
+                    .stage_review_events(
+                        &mut tx,
+                        vec![ReviewEvent {
+                            tenant_id: context.tenant_id,
+                            trace_id: request.trace_id,
+                            caller_id: request.caller_id,
+                            used_ids: request.used_ids,
+                            outcome: request.outcome,
+                            recorded_at: self.clock.now_rfc3339(),
+                        }],
+                    )
+                    .await?;
+                let response = serialized_mutation_response(200, &result)?;
+                self.store
+                    .stage_mutation_response(&mut tx, response.clone())
+                    .await?;
+                self.store.commit(tx).await?;
+                Ok(response)
+            }
+        }
     }
 
     /// Tenant-bound trace fetch: a trace owned by another tenant is `None`.
     pub async fn trace(
         &self,
-        tenant: TenantId,
+        context: &ResolvedMemoryContext,
         id: TraceId,
     ) -> Result<Option<RetrievalTrace>, ServiceError> {
-        Ok(self.store.trace_by_id(tenant, id).await?)
+        Ok(self.store.trace_by_id(context, id).await?)
     }
 
     pub async fn scope_memory_page(
         &self,
-        tenant: TenantId,
-        scope: ScopeId,
+        context: &ResolvedMemoryContext,
         cursor: Option<UnitId>,
         limit: usize,
     ) -> Result<ScopePage, ServiceError> {
-        Ok(self
-            .store
-            .scope_memory_page(tenant, scope, cursor, limit)
-            .await?)
+        Ok(self.store.scope_memory_page(context, cursor, limit).await?)
     }
 
     /// One worker tick: claims up to `batch` reflect jobs (unfiltered across
-    /// tenants) and compiles them. Panics are caught per job — a poisoned job
-    /// stays claimed and is retried after the reclaim window until it
-    /// dead-letters. Returns the number of jobs completed.
+    /// tenants) and compiles them. Infrastructure failures are requeued with bounded backoff;
+    /// provider-invalid output and provider-unavailable-after-retries are terminally failed;
+    /// later jobs in a failed scope lane are released for ordered redelivery.
+    /// Returns the number of jobs completed.
     pub async fn run_worker_tick(&self, batch: usize) -> Result<usize, ServiceError> {
+        self.run_worker_tick_scoped(JobFilter::default(), batch)
+            .await
+    }
+
+    /// A worker tick restricted to `filter`'s tenant/scope lanes. The unscoped
+    /// tick claims across every tenant, which is right for a fleet worker but
+    /// wrong for callers that must not drain lanes they do not own (per-tenant
+    /// workers, shared-database test harnesses).
+    pub async fn run_worker_tick_scoped(
+        &self,
+        filter: JobFilter,
+        batch: usize,
+    ) -> Result<usize, ServiceError> {
         let jobs = self
             .store
-            .claim_reflect_jobs(JobFilter::default(), batch)
+            .claim_reflect_jobs(
+                filter,
+                batch.min(self.structured_state_prefetch_concurrency),
+            )
             .await?;
-        let mut completed = 0;
+        let mut lanes: Vec<Vec<ReflectJobRow>> = Vec::new();
         for job in jobs {
-            let result = CatchUnwind::new(self.compile_job(&job, None)).await;
-            match result {
-                Ok(Ok(_)) => {
-                    self.store
-                        .complete_reflect_job(job.job.tenant_id, job.job.id)
-                        .await?;
-                    completed += 1;
-                }
-                Ok(Err(error)) => {
-                    eprintln!(
-                        "memphant-worker: job {} failed (attempt {}): {error}",
-                        job.job.id.as_uuid(),
-                        job.attempts
-                    );
-                }
-                Err(()) => {
-                    eprintln!(
-                        "memphant-worker: job {} panicked (attempt {})",
-                        job.job.id.as_uuid(),
-                        job.attempts
-                    );
-                }
+            let lane = (
+                job.job.tenant_id,
+                job.job.data_subject_id,
+                job.job.subject_generation,
+                job.job.scope_id,
+                job.job.agent_node_id,
+            );
+            match lanes.iter_mut().find(|jobs| {
+                jobs.first().is_some_and(|first| {
+                    (
+                        first.job.tenant_id,
+                        first.job.data_subject_id,
+                        first.job.subject_generation,
+                        first.job.scope_id,
+                        first.job.agent_node_id,
+                    ) == lane
+                })
+            }) {
+                Some(jobs) => jobs.push(job),
+                None => lanes.push(vec![job]),
             }
         }
-        Ok(completed)
+        let outcomes = stream::iter(lanes.into_iter().map(|jobs| {
+            let service = self.clone();
+            async move {
+                let mut completed = 0;
+                let mut blocked = false;
+                for job in jobs {
+                    if blocked {
+                        service
+                            .store
+                            .release_reflect_job(
+                                &job,
+                                0,
+                                "blocked by an earlier scope-lane job".to_string(),
+                            )
+                            .await?;
+                        continue;
+                    }
+                    let prepared = async {
+                        let context = service.resolve_job_context(&job).await?;
+                        let projections = service.prepare_structured_state(&job, &context).await?;
+                        Ok::<_, ServiceError>((context, projections))
+                    };
+                    let (context, projections) = match CatchUnwind::new(prepared).await {
+                        Ok(Ok(prepared)) => prepared,
+                        Ok(Err(error)) => {
+                            blocked = true;
+                            if is_terminal_provider_error(&error) {
+                                service
+                                    .store
+                                    .fail_reflect_job(&job, error.to_string())
+                                    .await?;
+                            } else {
+                                service
+                                    .store
+                                    .release_reflect_job(
+                                        &job,
+                                        retry_backoff_seconds(job.attempts),
+                                        error.to_string(),
+                                    )
+                                    .await?;
+                            }
+                            eprintln!(
+                                "memphant-worker: job {} preparation failed (attempt {}): {error}",
+                                job.job.id.as_uuid(),
+                                job.attempts
+                            );
+                            continue;
+                        }
+                        Err(()) => {
+                            blocked = true;
+                            service
+                                .store
+                                .release_reflect_job(
+                                    &job,
+                                    retry_backoff_seconds(job.attempts),
+                                    "structured-state preparation panicked".to_string(),
+                                )
+                                .await?;
+                            eprintln!(
+                                "memphant-worker: job {} preparation panicked (attempt {})",
+                                job.job.id.as_uuid(),
+                                job.attempts
+                            );
+                            continue;
+                        }
+                    };
+                    match CatchUnwind::new(service.compile_job(
+                        &job,
+                        &context,
+                        None,
+                        Some(&projections),
+                    ))
+                    .await
+                    {
+                        Ok(Ok(_)) => {
+                            if service.store.complete_reflect_job(&job).await?
+                                == ClaimMutationOutcome::Applied
+                            {
+                                completed += 1;
+                            }
+                        }
+                        Ok(Err(error)) => {
+                            blocked = true;
+                            if is_terminal_provider_error(&error) {
+                                service
+                                    .store
+                                    .fail_reflect_job(&job, error.to_string())
+                                    .await?;
+                            } else {
+                                service
+                                    .store
+                                    .release_reflect_job(
+                                        &job,
+                                        retry_backoff_seconds(job.attempts),
+                                        error.to_string(),
+                                    )
+                                    .await?;
+                            }
+                            eprintln!(
+                                "memphant-worker: job {} failed (attempt {}): {error}",
+                                job.job.id.as_uuid(),
+                                job.attempts
+                            );
+                        }
+                        Err(()) => {
+                            blocked = true;
+                            service
+                                .store
+                                .release_reflect_job(
+                                    &job,
+                                    retry_backoff_seconds(job.attempts),
+                                    "reflect compilation panicked".to_string(),
+                                )
+                                .await?;
+                            eprintln!(
+                                "memphant-worker: job {} panicked (attempt {})",
+                                job.job.id.as_uuid(),
+                                job.attempts
+                            );
+                        }
+                    }
+                }
+                Ok::<usize, ServiceError>(completed)
+            }
+        }))
+        .buffer_unordered(self.structured_state_prefetch_concurrency)
+        .collect::<Vec<_>>()
+        .await;
+        outcomes
+            .into_iter()
+            .try_fold(0, |total, outcome| outcome.map(|count| total + count))
     }
 
     /// Compiles one claimed reflect job through `reflect_recorded` — the ONE
@@ -642,143 +1934,210 @@ impl<S: MemoryStore> MemoryService<S> {
     async fn compile_job(
         &self,
         job: &ReflectJobRow,
+        context: &ResolvedMemoryContext,
         compiler_override: Option<String>,
-    ) -> Result<CompileOutcome, ServiceError> {
-        let compiler_version =
-            compiler_override.unwrap_or_else(|| job.job.compiler_version.clone());
-        let (episode_id, resource_id, candidates): (_, _, Vec<ReflectCandidate>) =
-            match job.job.kind {
-                ReflectJobKind::ReflectEpisode => {
-                    let Some(episode_id) = job.job.episode_id else {
-                        return Ok(CompileOutcome::default());
+        prepared_structured_state: Option<&[crate::ProjectedStructuredState]>,
+    ) -> Result<(), ServiceError> {
+        if compiler_override
+            .as_ref()
+            .is_some_and(|version| version != &job.job.compiler_version)
+        {
+            return Err(ServiceError::Invalid(
+                "reflect compiler override must match the queued compiler version".to_string(),
+            ));
+        }
+        let compiler_version = job.job.compiler_version.clone();
+        let (episode_id, resource_id, source_ref, observed_at, source_body, candidates): (
+            _,
+            _,
+            String,
+            String,
+            Option<String>,
+            Vec<ReflectCandidate>,
+        ) = match job.job.kind {
+            ReflectJobKind::ReflectEpisode => {
+                let Some(episode_id) = job.job.episode_id else {
+                    return Ok(());
+                };
+                let Some(episode) = self.store.fetch_episode(context, episode_id).await? else {
+                    // Episode gone (e.g. forgotten before compile): nothing to do.
+                    return Ok(());
+                };
+                // W5 temporal grounding: extract the episode's primary content
+                // date (deterministic, clock-free) once. Valid time falls back
+                // to the episode's first observation when the body has no date.
+                // Gated: off ⇒ no date at all.
+                let content_date = if self.temporal_grounding_enabled {
+                    parse_content_date(&episode.body)
+                } else {
+                    None
+                };
+                // `YYYY-MM-DD` for the chunk header slot; midnight-UTC RFC 3339
+                // for the grounded `valid_from`. Both derive from the SAME parsed
+                // date so the header and the window agree.
+                let content_date_header = content_date.map(|date| date.to_string());
+                let valid_from = self.temporal_grounding_enabled.then(|| {
+                    content_date.map_or_else(
+                        || episode.first_observed_at.clone(),
+                        |date| format!("{date}T00:00:00Z"),
+                    )
+                });
+                // Rung 4: mint contextual chunks tied to this raw episode when
+                // the write path is enabled (default on since 2026-07-10).
+                // Every other candidate construction (resource jobs,
+                // direct-unit retains) stays chunk-free — episodes only.
+                let contextual_chunks = if self.contextual_chunks_write_enabled {
+                    episode_contextual_chunks(
+                        episode.id,
+                        &episode.source_kind,
+                        &episode.body,
+                        content_date_header.as_deref(),
+                    )
+                } else {
+                    Vec::new()
+                };
+                // The raw episode candidate is explicitly episodic; derived
+                // candidates keep the compiler's semantic default. Then — only
+                // when W6 fact extraction is on — add mined facts. The
+                // `[date ...]` body prefix couples to temporal grounding only:
+                // `content_date_header` is already `None` unless that flag is on.
+                let mut candidates = vec![ReflectCandidate {
+                    source_kind: episode.source_kind.clone(),
+                    trust_level: episode.source_trust,
+                    actor_id: episode.actor_id,
+                    subject: job.job.subject.clone(),
+                    predicate: job.job.predicate.clone(),
+                    fact_key: None,
+                    kind: Some(MemoryKind::Episodic),
+                    body: episode.body.clone(),
+                    confidence: None,
+                    churn_class: None,
+                    admission_hint: None,
+                    target_unit_ids: None,
+                    contextual_chunks,
+                    valid_from,
+                    valid_to: None,
+                }];
+                if self.fact_extraction_enabled {
+                    candidates.extend(extract_fact_candidates(
+                        &episode,
+                        content_date_header.as_deref(),
+                    ));
+                }
+                if self.structured_state_provider.is_some() {
+                    let projections = match prepared_structured_state {
+                        Some(projections) => projections.to_vec(),
+                        None => self.prepare_structured_state(job, context).await?,
                     };
-                    let Some(episode) = self
-                        .store
-                        .fetch_episode(job.job.tenant_id, episode_id)
-                        .await?
-                    else {
-                        // Episode gone (e.g. forgotten before compile): nothing to do.
-                        return Ok(CompileOutcome::default());
-                    };
-                    // W5 temporal grounding: extract the episode's primary content
-                    // date (deterministic, clock-free) once. Fallback order is
-                    // parsed content date → episode first_observed_at → none; the
-                    // store carries no first_observed_at column today, so the middle
-                    // rung is NOT-YET-WIRED and we go straight to `None` when parsing
-                    // fails (the bench corpus always carries the `[date ...]` prefix,
-                    // so measurement is unaffected). Gated: off ⇒ no date at all.
-                    let content_date = if self.temporal_grounding_enabled {
-                        parse_content_date(&episode.body)
-                    } else {
-                        None
-                    };
-                    // `YYYY-MM-DD` for the chunk header slot; midnight-UTC RFC 3339
-                    // for the grounded `valid_from`. Both derive from the SAME parsed
-                    // date so the header and the window agree.
-                    let content_date_header = content_date.map(|date| date.to_string());
-                    let valid_from = content_date.map(|date| format!("{date}T00:00:00Z"));
-                    // Rung 4: mint contextual chunks tied to this raw episode when
-                    // the write path is enabled (default on since 2026-07-10).
-                    // Every other candidate construction (resource jobs,
-                    // direct-unit retains) stays chunk-free — episodes only.
-                    let contextual_chunks = if self.contextual_chunks_write_enabled {
-                        episode_contextual_chunks(
-                            episode.id,
-                            &episode.source_kind,
-                            &episode.body,
-                            content_date_header.as_deref(),
-                        )
-                    } else {
-                        Vec::new()
-                    };
-                    // The raw episode candidate (unchanged), then — only when W6 fact
-                    // extraction is on — the mined preference/attribute facts. The
-                    // `[date ...]` body prefix couples to temporal grounding only:
-                    // `content_date_header` is already `None` unless that flag is on.
-                    let mut candidates = vec![ReflectCandidate {
+                    candidates.extend(projections.into_iter().map(|projection| ReflectCandidate {
                         source_kind: episode.source_kind.clone(),
                         trust_level: episode.source_trust,
                         actor_id: episode.actor_id,
-                        subject: job.job.subject.clone(),
-                        predicate: job.job.predicate.clone(),
+                        subject: Some(projection.subject),
+                        predicate: Some(projection.predicate),
+                        fact_key: None,
                         kind: None,
-                        body: episode.body.clone(),
+                        body: projection.body,
+                        confidence: None,
+                        churn_class: None,
+                        admission_hint: projection.admission_hint,
+                        target_unit_ids: projection.target_unit_ids,
+                        contextual_chunks: projection.contextual_chunks,
+                        valid_from: projection.valid_from,
+                        valid_to: projection.valid_to,
+                    }));
+                }
+                (
+                    Some(episode.id),
+                    None,
+                    episode.source_ref.clone(),
+                    episode.last_observed_at.clone(),
+                    Some(episode.body.clone()),
+                    candidates,
+                )
+            }
+            ReflectJobKind::ReflectResource => {
+                let Some(resource_id) = job.job.resource_id else {
+                    return Ok(());
+                };
+                let Some(resource) = self.store.fetch_resource(context, resource_id).await? else {
+                    return Ok(());
+                };
+                let Some(body) = resource.body.clone().filter(|body| !body.trim().is_empty())
+                else {
+                    // Pointer-only resource: nothing durable to compile yet.
+                    return Ok(());
+                };
+                // R1: rung-4 machinery extended to the docs domain. Mint
+                // per-resource contextual chunks for DOCUMENT resources when
+                // the (default-off) resource-chunk write path is enabled;
+                // non-document kinds and the disabled path stay chunk-free —
+                // byte-identical to today. Episodes get theirs in the
+                // ReflectEpisode arm above; this is the resource twin.
+                let contextual_chunks = if self.resource_chunks_write_enabled
+                    && resource.kind == ResourceKind::Document
+                {
+                    resource_contextual_chunks(resource.id, &resource.uri, &body)
+                } else {
+                    Vec::new()
+                };
+                (
+                    None,
+                    Some(resource.id),
+                    resource.source_ref,
+                    resource.observed_at,
+                    Some(body.clone()),
+                    vec![ReflectCandidate {
+                        source_kind: "resource".to_string(),
+                        trust_level: resource.source_trust,
+                        actor_id: resource.actor_id,
+                        subject: None,
+                        predicate: None,
+                        fact_key: None,
+                        kind: Some(MemoryKind::Resource),
+                        body,
+                        confidence: None,
                         churn_class: None,
                         admission_hint: None,
+                        target_unit_ids: None,
                         contextual_chunks,
-                        valid_from,
+                        valid_from: None,
                         valid_to: None,
-                    }];
-                    if self.fact_extraction_enabled {
-                        candidates.extend(extract_fact_candidates(
-                            &episode,
-                            content_date_header.as_deref(),
-                        ));
-                    }
-                    (Some(episode.id), None, candidates)
-                }
-                ReflectJobKind::ReflectResource => {
-                    let Some(resource_id) = job.job.resource_id else {
-                        return Ok(CompileOutcome::default());
-                    };
-                    let Some(resource) = self
-                        .store
-                        .fetch_resource(job.job.tenant_id, resource_id)
-                        .await?
-                    else {
-                        return Ok(CompileOutcome::default());
-                    };
-                    let Some(body) = resource.body.clone().filter(|body| !body.trim().is_empty())
-                    else {
-                        // Pointer-only resource: nothing durable to compile yet.
-                        return Ok(CompileOutcome::default());
-                    };
-                    // R1: rung-4 machinery extended to the docs domain. Mint
-                    // per-resource contextual chunks for DOCUMENT resources when
-                    // the (default-off) resource-chunk write path is enabled;
-                    // non-document kinds and the disabled path stay chunk-free —
-                    // byte-identical to today. Episodes get theirs in the
-                    // ReflectEpisode arm above; this is the resource twin.
-                    let contextual_chunks = if self.resource_chunks_write_enabled
-                        && resource.kind == ResourceKind::Document
-                    {
-                        resource_contextual_chunks(resource.id, &resource.uri, &body)
-                    } else {
-                        Vec::new()
-                    };
-                    (
-                        None,
-                        Some(resource.id),
-                        vec![ReflectCandidate {
-                            source_kind: "resource".to_string(),
-                            trust_level: resource.source_trust,
-                            actor_id: resource.actor_id,
-                            subject: None,
-                            predicate: None,
-                            kind: Some(MemoryKind::Resource),
-                            body,
-                            churn_class: None,
-                            admission_hint: None,
-                            contextual_chunks,
-                            valid_from: None,
-                            valid_to: None,
-                        }],
-                    )
-                }
-            };
+                    }],
+                )
+            }
+            ReflectJobKind::ReflectScope => (
+                None,
+                None,
+                format!("memphant:reflect_scope:{}", job.job.id.as_uuid()),
+                self.clock.now_rfc3339(),
+                None,
+                Vec::new(),
+            ),
+        };
 
         // Every candidate in a job shares the episode/resource actor; the raw
         // candidate is always first, so its actor drives the ReflectInput.
-        let Some(actor_id) = candidates.first().map(|candidate| candidate.actor_id) else {
-            return Ok(CompileOutcome::default());
+        let actor_id = match job.job.kind {
+            ReflectJobKind::ReflectScope => job.job.actor_id,
+            _ => match candidates.first() {
+                Some(candidate) => candidate.actor_id,
+                None => return Ok(()),
+            },
         };
 
-        let (trace, _) = reflect_recorded(
+        reflect_recorded_claimed(
             self.store.as_ref(),
             ReflectInput {
                 tenant_id: job.job.tenant_id,
+                data_subject_id: job.job.data_subject_id,
                 scope_id: job.job.scope_id,
+                agent_node_id: job.job.agent_node_id,
+                subject_generation: job.job.subject_generation,
                 actor_id,
+                source_ref,
+                observed_at,
+                source_body,
                 episode_id,
                 resource_id,
                 job_id: job.job.id,
@@ -787,32 +2146,96 @@ impl<S: MemoryStore> MemoryService<S> {
             },
             self.embedder.as_ref(),
             self.clock.as_ref(),
+            context,
+            job,
         )
         .await?;
-        let created = trace
-            .actions
+        Ok(())
+    }
+
+    async fn prepare_structured_state(
+        &self,
+        job: &ReflectJobRow,
+        context: &ResolvedMemoryContext,
+    ) -> Result<Vec<crate::ProjectedStructuredState>, ServiceError> {
+        let Some(provider) = &self.structured_state_provider else {
+            return Ok(Vec::new());
+        };
+        if job.job.kind != ReflectJobKind::ReflectEpisode {
+            return Ok(Vec::new());
+        }
+        if let Some(prepared) = self.store.fetch_prepared_structured_state(job).await? {
+            return Ok(prepared);
+        }
+        let Some(episode_id) = job.job.episode_id else {
+            return Ok(Vec::new());
+        };
+        let Some(episode) = self.store.fetch_episode(context, episode_id).await? else {
+            return Ok(Vec::new());
+        };
+        let active_items = self
+            .store
+            .fetch_scope_open_units(context)
+            .await?
             .iter()
-            .filter(|action| {
-                matches!(
-                    action,
-                    memphant_types::AdmissionAction::Append
-                        | memphant_types::AdmissionAction::Supersede
-                        | memphant_types::AdmissionAction::Quarantine
-                        | memphant_types::AdmissionAction::Invalidate
-                )
-            })
-            .count();
-        Ok(CompileOutcome {
-            consumed: 1,
-            created,
-        })
+            .filter_map(crate::active_structured_state)
+            .collect::<Vec<_>>();
+        let active_items =
+            crate::structured_state::select_relevant_active_state(active_items, &episode.body);
+        let request = StructuredStateRequest {
+            episode_id,
+            episode_body: episode.body.clone(),
+            active_items,
+        };
+        let operations = provider
+            .extract(&request)
+            .await
+            .map_err(|error| match error {
+                crate::StructuredStateProviderError::Unavailable(message) => {
+                    ServiceError::Core(CoreError::ProviderUnavailable(message))
+                }
+                crate::StructuredStateProviderError::InvalidOutput(message) => {
+                    ServiceError::Core(CoreError::ProviderInvalid(message))
+                }
+            })?;
+        let projections = project_structured_state(episode_id, &episode.body, &operations)
+            .map_err(|error| ServiceError::Core(CoreError::ProviderInvalid(error.to_string())))?;
+        self.store
+            .store_prepared_structured_state(job, projections.clone())
+            .await?;
+        Ok(projections)
+    }
+
+    async fn resolve_job_context(
+        &self,
+        job: &ReflectJobRow,
+    ) -> Result<ResolvedMemoryContext, ServiceError> {
+        let context = self
+            .store
+            .resolve_memory_context(
+                job.job.tenant_id,
+                job.job.data_subject_id,
+                job.job.actor_id,
+                job.job.scope_id,
+                job.job.agent_node_id,
+            )
+            .await?;
+        if context.subject_generation != job.job.subject_generation {
+            return Err(StoreError::Conflict("subject generation is stale".to_string()).into());
+        }
+        Ok(context)
     }
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-struct CompileOutcome {
-    consumed: usize,
-    created: usize,
+fn is_terminal_provider_error(error: &ServiceError) -> bool {
+    matches!(
+        error,
+        ServiceError::Core(CoreError::ProviderUnavailable(_) | CoreError::ProviderInvalid(_))
+    )
+}
+
+fn retry_backoff_seconds(attempts: u32) -> u64 {
+    1_u64 << attempts.saturating_sub(1).min(6)
 }
 
 /// Turns (or fallback segments) per contextual-chunk window. This is the
@@ -1177,7 +2600,7 @@ const MIN_FACT_SENTENCE_WORDS: usize = 4;
 
 /// A deterministic preference/attribute fact mined from one episode body. The
 /// `family`/`subject_phrase` pair becomes the honest subject key
-/// (`{scope}:{family}:{subject_phrase}`, via `derive_subject_key`) so the SAME
+/// (`{scope}:{family}:{subject_phrase}`, via `derive_fact_key`) so the SAME
 /// subject in a later episode supersedes; `body` is the verbatim source sentence
 /// (optionally `[date ...]`-prefixed).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1678,10 +3101,13 @@ fn extract_fact_candidates(
             actor_id: episode.actor_id,
             subject: Some(fact.family.to_string()),
             predicate: Some(fact.subject_phrase),
+            fact_key: None,
             kind: None,
             body: fact.body,
+            confidence: None,
             churn_class: None,
             admission_hint: None,
+            target_unit_ids: None,
             contextual_chunks: Vec::new(),
             valid_from: None,
             valid_to: None,
@@ -1690,7 +3116,8 @@ fn extract_fact_candidates(
 }
 
 /// Degraded read-your-own-writes items: raw episode bodies lexically matched
-/// against the query, cited back to their episode.
+/// against the query. They are deliberately uncited and excluded from the
+/// candidate whitelist because the canonical trace did not admit them.
 fn degraded_episode_items(
     episodes: &[StoredEpisode],
     query: &str,
@@ -1723,8 +3150,9 @@ fn degraded_episode_items(
             kind: MemoryKind::Episodic,
             derived_by: "raw_episode".to_string(),
             inclusion_reason: "degraded_read_your_own_writes".to_string(),
-            citation_episode_id: Some(episode.id),
+            citation_episode_id: None,
             citation_resource_id: None,
+            derived_from_unit_ids: Vec::new(),
             suppression_labels: Vec::new(),
         })
         .collect()

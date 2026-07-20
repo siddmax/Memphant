@@ -10,11 +10,19 @@ use memphant_core::{
     StubEmbedding, VECTOR_CANDIDATE_LIMIT, cosine_similarity, embedding_profile_for,
 };
 use memphant_types::{
-    ActorId, CorrectRequest, CorrectSelector, CorrectionPayload, RecallChannel, RecallHttpRequest,
-    RetainEpisodeHttpRequest, ScopeId, TenantId, TrustLevel,
+    CorrectRequest, CorrectSelector, CorrectionPayload, RecallChannel, RecallHttpRequest,
+    RecallTime, ResolvedMemoryContext, RetainEpisodeHttpRequest, TenantId, TrustLevel,
 };
 
 const CLOCK: FixedClock = FixedClock("2026-07-09T00:00:00Z");
+
+fn test_recall_time() -> RecallTime {
+    RecallTime {
+        evaluated_at: CLOCK.0.to_string(),
+        transaction_as_of: CLOCK.0.to_string(),
+        valid_at: CLOCK.0.to_string(),
+    }
+}
 
 /// A provider whose `embed_query` deliberately diverges from `embed` (it
 /// nudges every component by a small constant, then renormalizes), so the
@@ -80,50 +88,37 @@ fn noop_service(store: InMemoryStore) -> MemoryService<InMemoryStore> {
     MemoryService::new(Arc::new(store), Arc::new(CLOCK), Arc::new(NoopEmbedding))
 }
 
-fn retain_request(
-    tenant_id: TenantId,
-    scope_id: ScopeId,
-    actor_id: ActorId,
-    body: &str,
-) -> RetainEpisodeHttpRequest {
+fn retain_request(context: &ResolvedMemoryContext, body: &str) -> RetainEpisodeHttpRequest {
     RetainEpisodeHttpRequest {
-        tenant_id,
-        scope_id,
-        actor_id,
-        source_kind: "user".to_string(),
-        source_trust: TrustLevel::TrustedUser,
-        subject_hint: None,
-        subject: None,
-        predicate: None,
-        body: Some(body.to_string()),
-        resource: None,
-        unit: None,
-        compiler_version: None,
+        subject_id: context.data_subject_id,
+        scope_id: context.scope_id,
+        actor_id: context.actor_id,
+        agent_node_id: context.agent_node_id,
+        subject_generation: context.subject_generation,
+        source_ref: "test:fixture".to_string(),
+        observed_at: "2026-07-09T00:00:00Z".to_string(),
+        payload: memphant_types::RetainPayload::Episode(memphant_types::RetainEpisodePayload {
+            source_kind: "user".to_string(),
+            body: body.to_string(),
+        }),
     }
 }
 
-fn recall_request(
-    tenant_id: TenantId,
-    scope_id: ScopeId,
-    actor_id: ActorId,
-    query: &str,
-) -> RecallHttpRequest {
+fn recall_request(context: &ResolvedMemoryContext, query: &str) -> RecallHttpRequest {
     RecallHttpRequest {
-        tenant_id,
-        scope_id,
-        actor_id,
-        allowed_scope_ids: None,
+        subject_id: context.data_subject_id,
+        scope_id: context.scope_id,
+        agent_node_id: context.agent_node_id,
+        subject_generation: context.subject_generation,
+        actor_id: context.actor_id,
         query: query.to_string(),
         limit: None,
         budget_tokens: None,
         mode: None,
         include_beliefs: None,
-        edge_expansion_enabled: None,
-        context_packing_abstention_enabled: None,
-        rerank_enabled: None,
-        query_decomposition_enabled: None,
-        procedure_recall_enabled: None,
-        decay_enabled: None,
+        transaction_as_of: None,
+        valid_at: None,
+        aggregation_window: None,
     }
 }
 
@@ -132,26 +127,27 @@ async fn compile_persists_embeddings_under_seeded_profile() {
     let store = InMemoryStore::default();
     let service = stub_service(store.clone());
     let tenant = TenantId::new();
-    let scope = ScopeId::new();
-    let actor = ActorId::new();
+    let context = memphant_store_testkit::bind_context(&store, tenant).await;
 
     service
         .retain(
-            tenant,
-            retain_request(tenant, scope, actor, "Release region is Taipei."),
+            &context,
+            concat!("test:", line!()),
+            TrustLevel::TrustedUser,
+            retain_request(&context, "Release region is Taipei."),
         )
         .await
         .expect("retain");
-    service.reflect(tenant, scope, None).await.expect("reflect");
+    service.run_worker_tick(usize::MAX).await.expect("reflect");
 
     let page = store
-        .scope_memory_page(tenant, scope, None, 100)
+        .scope_memory_page(&context, None, 100)
         .await
         .expect("page");
     assert!(!page.items.is_empty(), "reflect compiled at least one unit");
     let unit_ids: Vec<_> = page.items.iter().map(|unit| unit.id).collect();
     let rows = store
-        .fetch_embeddings(tenant, &unit_ids)
+        .fetch_embeddings(&context, &unit_ids)
         .await
         .expect("embeddings");
     assert!(
@@ -183,29 +179,30 @@ async fn vector_channel_scores_candidates_with_real_provider() {
     let store = InMemoryStore::default();
     let service = stub_service(store.clone());
     let tenant = TenantId::new();
-    let scope = ScopeId::new();
-    let actor = ActorId::new();
+    let context = memphant_store_testkit::bind_context(&store, tenant).await;
 
     service
         .retain(
-            tenant,
-            retain_request(tenant, scope, actor, "Release region is Taipei."),
+            &context,
+            concat!("test:", line!()),
+            TrustLevel::TrustedUser,
+            retain_request(&context, "Release region is Taipei."),
         )
         .await
         .expect("retain");
-    service.reflect(tenant, scope, None).await.expect("reflect");
+    service.run_worker_tick(usize::MAX).await.expect("reflect");
 
     let response = service
         .recall(
-            tenant,
-            recall_request(tenant, scope, actor, "Release region is Taipei."),
+            context.clone(),
+            recall_request(&context, "Release region is Taipei."),
         )
         .await
         .expect("recall");
     assert!(!response.items.is_empty(), "recall returns the unit");
 
     let trace = service
-        .trace(tenant, response.trace_id)
+        .trace(&context, response.trace_id)
         .await
         .expect("trace fetch")
         .expect("trace stored");
@@ -244,17 +241,18 @@ async fn in_memory_vector_candidates_return_cosine_distance() {
     let store = InMemoryStore::default();
     let service = stub_service(store.clone());
     let tenant = TenantId::new();
-    let scope = ScopeId::new();
-    let actor = ActorId::new();
+    let context = memphant_store_testkit::bind_context(&store, tenant).await;
 
     service
         .retain(
-            tenant,
-            retain_request(tenant, scope, actor, "Release region is Taipei."),
+            &context,
+            concat!("test:", line!()),
+            TrustLevel::TrustedUser,
+            retain_request(&context, "Release region is Taipei."),
         )
         .await
         .expect("retain");
-    service.reflect(tenant, scope, None).await.expect("reflect");
+    service.run_worker_tick(usize::MAX).await.expect("reflect");
 
     let stub = StubEmbedding::default();
     let profile = embedding_profile_for(&stub);
@@ -265,11 +263,10 @@ async fn in_memory_vector_candidates_return_cosine_distance() {
 
     let pairs = store
         .fetch_vector_candidates(
-            tenant,
-            &[scope],
-            &[],
+            &context,
             &query_vec,
             profile.id,
+            &test_recall_time(),
             VECTOR_CANDIDATE_LIMIT,
         )
         .await
@@ -278,7 +275,7 @@ async fn in_memory_vector_candidates_return_cosine_distance() {
     let (unit, distance) = &pairs[0];
 
     let rows = store
-        .fetch_embeddings(tenant, &[unit.id])
+        .fetch_embeddings(&context, &[unit.id])
         .await
         .expect("embeddings");
     let stored = rows
@@ -302,18 +299,19 @@ async fn vector_channel_score_is_one_minus_store_distance() {
     let store = InMemoryStore::default();
     let service = stub_service(store.clone());
     let tenant = TenantId::new();
-    let scope = ScopeId::new();
-    let actor = ActorId::new();
+    let context = memphant_store_testkit::bind_context(&store, tenant).await;
     let query = "Release region Osaka.";
 
     service
         .retain(
-            tenant,
-            retain_request(tenant, scope, actor, "Release region is Taipei."),
+            &context,
+            concat!("test:", line!()),
+            TrustLevel::TrustedUser,
+            retain_request(&context, "Release region is Taipei."),
         )
         .await
         .expect("retain");
-    service.reflect(tenant, scope, None).await.expect("reflect");
+    service.run_worker_tick(usize::MAX).await.expect("reflect");
 
     let stub = StubEmbedding::default();
     let profile = embedding_profile_for(&stub);
@@ -323,11 +321,10 @@ async fn vector_channel_score_is_one_minus_store_distance() {
         .remove(0);
     let pairs = store
         .fetch_vector_candidates(
-            tenant,
-            &[scope],
-            &[],
+            &context,
             &query_vec,
             profile.id,
+            &test_recall_time(),
             VECTOR_CANDIDATE_LIMIT,
         )
         .await
@@ -336,11 +333,11 @@ async fn vector_channel_score_is_one_minus_store_distance() {
     let distance = pairs[0].1;
 
     let response = service
-        .recall(tenant, recall_request(tenant, scope, actor, query))
+        .recall(context.clone(), recall_request(&context, query))
         .await
         .expect("recall");
     let trace = service
-        .trace(tenant, response.trace_id)
+        .trace(&context, response.trace_id)
         .await
         .expect("trace fetch")
         .expect("trace stored");
@@ -364,38 +361,39 @@ async fn noop_provider_keeps_vector_channel_disabled() {
     let store = InMemoryStore::default();
     let service = noop_service(store.clone());
     let tenant = TenantId::new();
-    let scope = ScopeId::new();
-    let actor = ActorId::new();
+    let context = memphant_store_testkit::bind_context(&store, tenant).await;
 
     service
         .retain(
-            tenant,
-            retain_request(tenant, scope, actor, "Release region is Taipei."),
+            &context,
+            concat!("test:", line!()),
+            TrustLevel::TrustedUser,
+            retain_request(&context, "Release region is Taipei."),
         )
         .await
         .expect("retain");
-    service.reflect(tenant, scope, None).await.expect("reflect");
+    service.run_worker_tick(usize::MAX).await.expect("reflect");
 
     let page = store
-        .scope_memory_page(tenant, scope, None, 100)
+        .scope_memory_page(&context, None, 100)
         .await
         .expect("page");
     let unit_ids: Vec<_> = page.items.iter().map(|unit| unit.id).collect();
     let rows = store
-        .fetch_embeddings(tenant, &unit_ids)
+        .fetch_embeddings(&context, &unit_ids)
         .await
         .expect("embeddings");
     assert!(rows.is_empty(), "Noop provider persists no embeddings");
 
     let response = service
         .recall(
-            tenant,
-            recall_request(tenant, scope, actor, "Release region is Taipei."),
+            context.clone(),
+            recall_request(&context, "Release region is Taipei."),
         )
         .await
         .expect("recall");
     let trace = service
-        .trace(tenant, response.trace_id)
+        .trace(&context, response.trace_id)
         .await
         .expect("trace fetch")
         .expect("trace stored");
@@ -425,26 +423,30 @@ async fn recall_embeds_query_via_embed_query_index_time_via_embed() {
     let store = InMemoryStore::default();
     let service = asymmetric_service(store.clone());
     let tenant = TenantId::new();
-    let scope = ScopeId::new();
-    let actor = ActorId::new();
+    let context = memphant_store_testkit::bind_context(&store, tenant).await;
     let body = "Release region is Taipei.";
     let provider = AsymmetricEmbedding::default();
 
     service
-        .retain(tenant, retain_request(tenant, scope, actor, body))
+        .retain(
+            &context,
+            concat!("test:", line!()),
+            TrustLevel::TrustedUser,
+            retain_request(&context, body),
+        )
         .await
         .expect("retain");
-    service.reflect(tenant, scope, None).await.expect("reflect");
+    service.run_worker_tick(usize::MAX).await.expect("reflect");
 
     // Index-time (reflect): the persisted vector matches `embed(body)`, NOT
     // `embed_query(body)` — documents are never query-prefixed/transformed.
     let page = store
-        .scope_memory_page(tenant, scope, None, 100)
+        .scope_memory_page(&context, None, 100)
         .await
         .expect("page");
     let unit_id = page.items[0].id;
     let rows = store
-        .fetch_embeddings(tenant, &[unit_id])
+        .fetch_embeddings(&context, &[unit_id])
         .await
         .expect("embeddings");
     let stored = &rows
@@ -465,11 +467,11 @@ async fn recall_embeds_query_via_embed_query_index_time_via_embed() {
     // `1 - cosine_distance(embed_query(query), stored)`, computed
     // independently here — proving recall used `embed_query`, not `embed`.
     let response = service
-        .recall(tenant, recall_request(tenant, scope, actor, body))
+        .recall(context.clone(), recall_request(&context, body))
         .await
         .expect("recall");
     let trace = service
-        .trace(tenant, response.trace_id)
+        .trace(&context, response.trace_id)
         .await
         .expect("trace fetch")
         .expect("trace stored");
@@ -538,26 +540,24 @@ async fn failed_embedding_commits_nothing_from_reflect() {
         Arc::new(FailingEmbedding),
     );
     let tenant = TenantId::new();
-    let scope = ScopeId::new();
-    let actor = ActorId::new();
+    let context = memphant_store_testkit::bind_context(&store, tenant).await;
 
     service
         .retain(
-            tenant,
-            retain_request(tenant, scope, actor, "Release region is Taipei."),
+            &context,
+            concat!("test:", line!()),
+            TrustLevel::TrustedUser,
+            retain_request(&context, "Release region is Taipei."),
         )
         .await
         .expect("retain");
-    let result = service.reflect(tenant, scope, None).await;
-    assert!(
-        result.is_err(),
-        "reflect surfaces the embedder failure instead of silently dropping the vector"
-    );
+    assert_eq!(service.run_worker_tick(usize::MAX).await.unwrap(), 0);
+    assert_eq!(store.pending_job_count(&context).await.unwrap(), 1);
 
     // Nothing from the compile committed: no units, hence no embeddings and no
     // reflect trace for a retry to short-circuit on.
     let page = store
-        .scope_memory_page(tenant, scope, None, 100)
+        .scope_memory_page(&context, None, 100)
         .await
         .expect("page");
     assert!(
@@ -575,36 +575,42 @@ async fn correction_embeds_the_replacement_unit() {
     let store = InMemoryStore::default();
     let service = stub_service(store.clone());
     let tenant = TenantId::new();
-    let scope = ScopeId::new();
-    let actor = ActorId::new();
+    let context = memphant_store_testkit::bind_context(&store, tenant).await;
 
     service
         .retain(
-            tenant,
-            retain_request(tenant, scope, actor, "Release region is Taipei."),
+            &context,
+            concat!("test:", line!()),
+            TrustLevel::TrustedUser,
+            retain_request(&context, "Release region is Taipei."),
         )
         .await
         .expect("retain");
-    service.reflect(tenant, scope, None).await.expect("reflect");
+    service.run_worker_tick(usize::MAX).await.expect("reflect");
     let page = store
-        .scope_memory_page(tenant, scope, None, 100)
+        .scope_memory_page(&context, None, 100)
         .await
         .expect("page");
     let old_id = page.items[0].id;
 
     let corrected = service
         .correct(
-            tenant,
+            &context,
+            "embedding-correction-test",
             CorrectRequest {
-                tenant_id: tenant,
-                scope_id: scope,
-                actor_id: actor,
+                subject_id: context.data_subject_id,
+                scope_id: context.scope_id,
+                agent_node_id: context.agent_node_id,
+                subject_generation: context.subject_generation,
+                actor_id: context.actor_id,
                 selector: CorrectSelector {
                     memory_unit_id: old_id,
                 },
                 correction: CorrectionPayload {
                     value: "Release region is Osaka.".to_string(),
                     reason: "corrected_fact".to_string(),
+                    source_ref: "test:correction".to_string(),
+                    observed_at: "2026-07-09T00:00:00Z".to_string(),
                     valid_from: None,
                     valid_to: None,
                 },
@@ -612,11 +618,13 @@ async fn correction_embeds_the_replacement_unit() {
         )
         .await
         .expect("correct");
+    let corrected: memphant_types::CorrectResult =
+        serde_json::from_slice(corrected.body()).expect("correct response");
     let new_id = corrected.created[0];
 
     // The replacement carries a persisted embedding under the active profile.
     let rows = store
-        .fetch_embeddings(tenant, &[new_id])
+        .fetch_embeddings(&context, &[new_id])
         .await
         .expect("embeddings");
     assert!(
@@ -633,11 +641,10 @@ async fn correction_embeds_the_replacement_unit() {
         .remove(0);
     let pairs = store
         .fetch_vector_candidates(
-            tenant,
-            &[scope],
-            &[],
+            &context,
             &query_vec,
             profile.id,
+            &test_recall_time(),
             VECTOR_CANDIDATE_LIMIT,
         )
         .await

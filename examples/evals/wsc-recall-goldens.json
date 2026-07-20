@@ -198,9 +198,7 @@
         "mem_refund_90_tombstoned"
       ],
       "dropped": [
-        { "unit": "mem_refund_30_deleted", "reason": "deleted" },
-        { "unit": "mem_refund_60_invalidated", "reason": "invalidated" },
-        { "unit": "mem_refund_90_tombstoned", "reason": "deleted" }
+        { "unit": "mem_refund_60_invalidated", "reason": "invalidated" }
       ]
     }
   },

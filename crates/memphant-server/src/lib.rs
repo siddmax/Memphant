@@ -1,22 +1,28 @@
 use std::sync::Arc;
 
-use axum::extract::{FromRequestParts, Path, Query, State};
-use axum::http::StatusCode;
+use axum::body::Body;
+use axum::extract::{FromRequest, FromRequestParts, Path, Query, Request, State};
 use axum::http::request::Parts;
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use memphant_core::service::{MemoryService, ServiceError, clamp_trust};
-use memphant_core::{CoreError, InMemoryStore, MemoryStore, NoopEmbedding, SystemClock};
+use memphant_core::{
+    CoreError, InMemoryStore, MemoryStore, MutationLedgerStore, MutationResponse, NoopEmbedding,
+    StoreError, SystemClock, validate_idempotency_key,
+};
 use memphant_types::{
-    CorrectRequest, ENGINE_VERSION, ErrorBody, ErrorEnvelope, HealthResponse, MarkRequest,
-    RecallHttpRequest, ReflectRequest, ReflectResult, RetainEpisodeHttpRequest,
-    RetainEpisodeHttpResponse, RetrievalTrace, SCHEMA_COMPAT_REVISION, ScopeMemoryResponse,
+    ActorId, AgentNodeId, ContextBindingRequest, ContextBindingResponse, CorrectRequest,
+    ENGINE_VERSION, ErrorBody, ErrorEnvelope, HealthResponse, MarkRequest, RecallHttpRequest,
+    ReflectAccepted, ReflectRequest, RetainEpisodeHttpRequest, RetainEpisodeHttpResponse,
+    RetrievalTrace, SCHEMA_COMPAT_REVISION, ScopeId, ScopeMemoryResponse, SubjectId,
     TRACE_SCHEMA_VERSION, TenantId, TrustLevel,
 };
 use schemars::JsonSchema;
 use schemars::generate::{SchemaGenerator, SchemaSettings};
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -31,6 +37,7 @@ const FORGET_PATH: &str = "/v1/forget";
 const MARK_PATH: &str = "/v1/mark";
 const TRACE_PATH: &str = "/v1/traces/{id}";
 const SCOPE_MEMORY_PATH: &str = "/v1/scopes/{id}/memory";
+const CONTEXT_BINDING_PATH: &str = "/v1/context-bindings/{client_ref}";
 
 const DOCUMENTED_OPENAPI_PATHS: &[&str] = &[
     EPISODES_PATH,
@@ -41,6 +48,7 @@ const DOCUMENTED_OPENAPI_PATHS: &[&str] = &[
     MARK_PATH,
     TRACE_PATH,
     SCOPE_MEMORY_PATH,
+    CONTEXT_BINDING_PATH,
     HEALTH_PATH,
 ];
 
@@ -124,16 +132,81 @@ impl<S: MemoryStore> AppState<S> {
 pub struct AuthedTenant {
     pub tenant: TenantId,
     pub max_trust: TrustLevel,
+    actor_id: Option<memphant_types::ActorId>,
+    scope_id: Option<memphant_types::ScopeId>,
     dev_mode: bool,
 }
 
+struct StrictJson<T>(T);
+
+struct IdempotencyKey(String);
+
+impl<S: Send + Sync> FromRequestParts<S> for IdempotencyKey {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let mut values = parts.headers.get_all("idempotency-key").iter();
+        let value = values
+            .next()
+            .ok_or_else(|| ApiError::bad_request("Idempotency-Key header is required"))?;
+        if values.next().is_some() {
+            return Err(ApiError::bad_request(
+                "exactly one Idempotency-Key header is required",
+            ));
+        }
+        let key = value
+            .to_str()
+            .map_err(|_| ApiError::bad_request("Idempotency-Key must be valid UTF-8"))?;
+        validate_idempotency_key(key)
+            .map_err(|_| ApiError::bad_request("Idempotency-Key must contain 1 to 255 bytes"))?;
+        Ok(Self(key.to_string()))
+    }
+}
+
+impl<S, T> FromRequest<S> for StrictJson<T>
+where
+    S: Send + Sync,
+    T: DeserializeOwned,
+{
+    type Rejection = ApiError;
+
+    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        Json::<T>::from_request(request, state)
+            .await
+            .map(|Json(value)| Self(value))
+            .map_err(|error| ApiError::invalid(error.body_text()))
+    }
+}
+
 impl AuthedTenant {
-    /// The tenant every request body must carry (unless dev mode ignores it).
-    fn check_body_tenant(&self, body_tenant: TenantId) -> Result<(), ApiError> {
-        if self.dev_mode || body_tenant == self.tenant {
+    fn check_principal(
+        &self,
+        actor_id: memphant_types::ActorId,
+        scope_id: memphant_types::ScopeId,
+    ) -> Result<(), ApiError> {
+        if self.dev_mode
+            || (self.actor_id.is_none() && self.scope_id.is_none())
+            || (self.actor_id == Some(actor_id) && self.scope_id == Some(scope_id))
+        {
             Ok(())
         } else {
-            Err(ApiError::tenant_mismatch())
+            Err(ApiError::scope_denied())
+        }
+    }
+
+    fn check_scope(&self, scope_id: memphant_types::ScopeId) -> Result<(), ApiError> {
+        if self.dev_mode || self.scope_id.is_none() || self.scope_id == Some(scope_id) {
+            Ok(())
+        } else {
+            Err(ApiError::scope_denied())
+        }
+    }
+
+    fn require_tenant_service_key(&self) -> Result<(), ApiError> {
+        if self.dev_mode || (self.actor_id.is_none() && self.scope_id.is_none()) {
+            Ok(())
+        } else {
+            Err(ApiError::scope_denied())
         }
     }
 }
@@ -149,6 +222,8 @@ impl<S: MemoryStore + 'static> FromRequestParts<AppState<S>> for AuthedTenant {
             return Ok(Self {
                 tenant,
                 max_trust: TrustLevel::TrustedSystem,
+                actor_id: None,
+                scope_id: None,
                 dev_mode: true,
             });
         }
@@ -174,12 +249,14 @@ impl<S: MemoryStore + 'static> FromRequestParts<AppState<S>> for AuthedTenant {
         Ok(Self {
             tenant: row.tenant_id,
             max_trust: row.max_trust,
+            actor_id: row.actor_id,
+            scope_id: row.scope_id,
             dev_mode: false,
         })
     }
 }
 
-pub fn app<S: MemoryStore + 'static>(state: AppState<S>) -> Router {
+pub fn app<S: MutationLedgerStore + 'static>(state: AppState<S>) -> Router {
     Router::new()
         .route(HEALTH_PATH, get(health::<S>))
         .route(OPENAPI_PATH, get(openapi))
@@ -191,7 +268,68 @@ pub fn app<S: MemoryStore + 'static>(state: AppState<S>) -> Router {
         .route(MARK_PATH, post(mark_handler::<S>))
         .route(TRACE_PATH, get(trace_handler::<S>))
         .route(SCOPE_MEMORY_PATH, get(scope_memory_handler::<S>))
+        .route(CONTEXT_BINDING_PATH, put(context_binding_handler::<S>))
         .with_state(state)
+}
+
+async fn context_binding_handler<S: MemoryStore + 'static>(
+    State(state): State<AppState<S>>,
+    authed: AuthedTenant,
+    Path(client_ref): Path<String>,
+    StrictJson(request): StrictJson<ContextBindingRequest>,
+) -> Result<Json<ContextBindingResponse>, ApiError> {
+    authed.require_tenant_service_key()?;
+    validate_context_binding(&client_ref, &request)?;
+    let response = state
+        .store()
+        .resolve_context_binding(authed.tenant, client_ref, request)
+        .await
+        .map_err(ApiError::from)?;
+    Ok(Json(response))
+}
+
+fn validate_context_binding(
+    client_ref: &str,
+    request: &ContextBindingRequest,
+) -> Result<(), ApiError> {
+    if [
+        client_ref,
+        request.subject.external_ref.as_str(),
+        request.actor.external_ref.as_str(),
+        request.scope.external_ref.as_str(),
+        request.agent_node.external_ref.as_str(),
+    ]
+    .iter()
+    .any(|value| value.trim().is_empty())
+    {
+        return Err(ApiError::invalid(
+            "context binding references cannot be empty",
+        ));
+    }
+    if !matches!(
+        request.actor.kind.as_str(),
+        "user" | "agent" | "tool" | "web" | "system"
+    ) {
+        return Err(ApiError::invalid("unsupported actor kind"));
+    }
+    for (index, policy) in request.access_policies.iter().enumerate() {
+        if policy.source_scope_external_ref().trim().is_empty()
+            || policy.source_agent_node_external_ref().trim().is_empty()
+        {
+            return Err(ApiError::invalid(
+                "access policy source references cannot be empty",
+            ));
+        }
+        if request.access_policies[..index].iter().any(|existing| {
+            existing.source_scope_external_ref() == policy.source_scope_external_ref()
+                && existing.source_agent_node_external_ref()
+                    == policy.source_agent_node_external_ref()
+                && existing.kind() == policy.kind()
+        }) {
+            return Err(ApiError::invalid("duplicate access policy"));
+        }
+    }
+    Ok(())
 }
 
 async fn health<S: MemoryStore + 'static>(
@@ -213,84 +351,278 @@ async fn openapi() -> Json<Value> {
     Json(openapi_document())
 }
 
-async fn retain_handler<S: MemoryStore + 'static>(
+async fn retain_handler<S: MutationLedgerStore + 'static>(
     State(state): State<AppState<S>>,
     authed: AuthedTenant,
-    Json(mut request): Json<RetainEpisodeHttpRequest>,
-) -> Result<Json<RetainEpisodeHttpResponse>, ApiError> {
-    authed.check_body_tenant(request.tenant_id)?;
-    // Caller-declared trust is a hint, capped at the key's ceiling.
-    request.source_trust = clamp_trust(request.source_trust, authed.max_trust);
-    Ok(Json(state.service.retain(authed.tenant, request).await?))
-}
-
-async fn reflect_handler<S: MemoryStore + 'static>(
-    State(state): State<AppState<S>>,
-    authed: AuthedTenant,
-    Json(request): Json<ReflectRequest>,
-) -> Result<Json<ReflectResult>, ApiError> {
-    authed.check_body_tenant(request.tenant_id)?;
-    Ok(Json(
+    IdempotencyKey(idempotency_key): IdempotencyKey,
+    StrictJson(request): StrictJson<RetainEpisodeHttpRequest>,
+) -> Result<Response, ApiError> {
+    authed.check_principal(request.actor_id, request.scope_id)?;
+    let context = state
+        .store()
+        .resolve_memory_context(
+            authed.tenant,
+            request.subject_id,
+            request.actor_id,
+            request.scope_id,
+            request.agent_node_id,
+        )
+        .await
+        .map_err(|error| match error {
+            StoreError::NotFound(_) => ApiError::scope_denied(),
+            other => ApiError::from(other),
+        })?;
+    if request.subject_generation != context.subject_generation {
+        return Err(ApiError::context_binding_conflict(
+            "subject generation is stale".to_string(),
+        ));
+    }
+    mutation_http_response(
         state
             .service
-            .reflect(authed.tenant, request.scope_id, request.compiler_version)
+            .retain(
+                &context,
+                &idempotency_key,
+                clamp_trust(context.actor_trust, authed.max_trust),
+                request,
+            )
             .await?,
-    ))
+    )
+}
+
+async fn reflect_handler<S: MutationLedgerStore + 'static>(
+    State(state): State<AppState<S>>,
+    authed: AuthedTenant,
+    IdempotencyKey(idempotency_key): IdempotencyKey,
+    StrictJson(request): StrictJson<ReflectRequest>,
+) -> Result<Response, ApiError> {
+    authed.check_principal(request.actor_id, request.scope_id)?;
+    let context = state
+        .store()
+        .resolve_memory_context(
+            authed.tenant,
+            request.subject_id,
+            request.actor_id,
+            request.scope_id,
+            request.agent_node_id,
+        )
+        .await
+        .map_err(|error| match error {
+            StoreError::NotFound(_) => ApiError::scope_denied(),
+            other => ApiError::from(other),
+        })?;
+    if request.subject_generation != context.subject_generation {
+        return Err(ApiError::context_binding_conflict(
+            "subject generation is stale".to_string(),
+        ));
+    }
+    mutation_http_response(
+        state
+            .service
+            .reflect(&context, &idempotency_key, request)
+            .await?,
+    )
 }
 
 async fn recall_handler<S: MemoryStore + 'static>(
     State(state): State<AppState<S>>,
     authed: AuthedTenant,
-    Json(request): Json<RecallHttpRequest>,
+    StrictJson(request): StrictJson<RecallHttpRequest>,
 ) -> Result<Json<memphant_types::RecallResponse>, ApiError> {
-    authed.check_body_tenant(request.tenant_id)?;
-    Ok(Json(state.service.recall(authed.tenant, request).await?))
+    authed.check_principal(request.actor_id, request.scope_id)?;
+    let context = state
+        .store()
+        .resolve_memory_context(
+            authed.tenant,
+            request.subject_id,
+            request.actor_id,
+            request.scope_id,
+            request.agent_node_id,
+        )
+        .await
+        .map_err(|error| match error {
+            StoreError::NotFound(_) => ApiError::scope_denied(),
+            other => ApiError::from(other),
+        })?;
+    if request.subject_generation != context.subject_generation {
+        return Err(ApiError::context_binding_conflict(
+            "subject generation is stale".to_string(),
+        ));
+    }
+    Ok(Json(state.service.recall(context, request).await?))
 }
 
-async fn correct_handler<S: MemoryStore + 'static>(
+async fn correct_handler<S: MutationLedgerStore + 'static>(
     State(state): State<AppState<S>>,
     authed: AuthedTenant,
-    Json(request): Json<CorrectRequest>,
-) -> Result<Json<memphant_types::CorrectResult>, ApiError> {
-    authed.check_body_tenant(request.tenant_id)?;
-    Ok(Json(state.service.correct(authed.tenant, request).await?))
+    IdempotencyKey(idempotency_key): IdempotencyKey,
+    StrictJson(request): StrictJson<CorrectRequest>,
+) -> Result<Response, ApiError> {
+    authed.check_principal(request.actor_id, request.scope_id)?;
+    let context = state
+        .store()
+        .resolve_memory_context(
+            authed.tenant,
+            request.subject_id,
+            request.actor_id,
+            request.scope_id,
+            request.agent_node_id,
+        )
+        .await
+        .map_err(|error| match error {
+            StoreError::NotFound(_) => ApiError::scope_denied(),
+            other => ApiError::from(other),
+        })?;
+    if request.subject_generation != context.subject_generation {
+        return Err(ApiError::context_binding_conflict(
+            "subject generation is stale".to_string(),
+        ));
+    }
+    mutation_http_response(
+        state
+            .service
+            .correct(&context, &idempotency_key, request)
+            .await?,
+    )
 }
 
-async fn forget_handler<S: MemoryStore + 'static>(
+async fn forget_handler<S: MutationLedgerStore + 'static>(
     State(state): State<AppState<S>>,
     authed: AuthedTenant,
-    Json(request): Json<memphant_types::ForgetRequest>,
-) -> Result<Json<memphant_types::ForgetResult>, ApiError> {
-    authed.check_body_tenant(request.tenant_id)?;
-    Ok(Json(state.service.forget(authed.tenant, request).await?))
+    IdempotencyKey(idempotency_key): IdempotencyKey,
+    StrictJson(request): StrictJson<memphant_types::ForgetRequest>,
+) -> Result<Response, ApiError> {
+    if request.scope_id != request.selector.scope_id {
+        return Err(ApiError::context_binding_conflict(
+            "forget scope does not match selector scope".to_string(),
+        ));
+    }
+    authed.check_principal(request.actor_id, request.selector.scope_id)?;
+    let context = state
+        .store()
+        .resolve_memory_context(
+            authed.tenant,
+            request.subject_id,
+            request.actor_id,
+            request.scope_id,
+            request.agent_node_id,
+        )
+        .await
+        .map_err(|error| match error {
+            StoreError::NotFound(_) => ApiError::scope_denied(),
+            other => ApiError::from(other),
+        })?;
+    if request.subject_generation != context.subject_generation {
+        return Err(ApiError::context_binding_conflict(
+            "subject generation is stale".to_string(),
+        ));
+    }
+    mutation_http_response(
+        state
+            .service
+            .forget(&context, &idempotency_key, request)
+            .await?,
+    )
 }
 
-async fn mark_handler<S: MemoryStore + 'static>(
+async fn mark_handler<S: MutationLedgerStore + 'static>(
     State(state): State<AppState<S>>,
     authed: AuthedTenant,
-    Json(request): Json<MarkRequest>,
-) -> Result<Json<memphant_types::MarkResult>, ApiError> {
-    authed.check_body_tenant(request.tenant_id)?;
-    Ok(Json(state.service.mark(authed.tenant, request).await?))
+    IdempotencyKey(idempotency_key): IdempotencyKey,
+    StrictJson(request): StrictJson<MarkRequest>,
+) -> Result<Response, ApiError> {
+    authed.check_principal(request.actor_id, request.scope_id)?;
+    let context = state
+        .store()
+        .resolve_memory_context(
+            authed.tenant,
+            request.subject_id,
+            request.actor_id,
+            request.scope_id,
+            request.agent_node_id,
+        )
+        .await
+        .map_err(|error| match error {
+            StoreError::NotFound(_) => ApiError::scope_denied(),
+            other => ApiError::from(other),
+        })?;
+    if request.subject_generation != context.subject_generation {
+        return Err(ApiError::context_binding_conflict(
+            "subject generation is stale".to_string(),
+        ));
+    }
+    mutation_http_response(
+        state
+            .service
+            .mark(&context, &idempotency_key, request)
+            .await?,
+    )
+}
+
+fn mutation_http_response(response: MutationResponse) -> Result<Response, ApiError> {
+    let status =
+        StatusCode::from_u16(response.status()).map_err(|_| ApiError::backend_unavailable())?;
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(response.body().to_vec()))
+        .map_err(|_| ApiError::backend_unavailable())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TraceContextQuery {
+    subject_id: SubjectId,
+    scope_id: ScopeId,
+    actor_id: ActorId,
+    agent_node_id: AgentNodeId,
+    subject_generation: u64,
 }
 
 async fn trace_handler<S: MemoryStore + 'static>(
     State(state): State<AppState<S>>,
     authed: AuthedTenant,
     Path(id): Path<String>,
+    Query(query): Query<TraceContextQuery>,
 ) -> Result<Json<RetrievalTrace>, ApiError> {
     let uuid = Uuid::parse_str(&id).map_err(|_| ApiError::invalid("invalid trace id"))?;
     let trace_id = memphant_types::TraceId::from_u128(uuid.as_u128());
-    state
+    authed.check_principal(query.actor_id, query.scope_id)?;
+    let context = state
+        .store()
+        .resolve_memory_context(
+            authed.tenant,
+            query.subject_id,
+            query.actor_id,
+            query.scope_id,
+            query.agent_node_id,
+        )
+        .await
+        .map_err(|error| match error {
+            StoreError::NotFound(_) => ApiError::scope_denied(),
+            other => ApiError::from(other),
+        })?;
+    if query.subject_generation != context.subject_generation {
+        return Err(ApiError::context_binding_conflict(
+            "subject generation is stale".to_string(),
+        ));
+    }
+    let trace = state
         .service
-        .trace(authed.tenant, trace_id)
+        .trace(&context, trace_id)
         .await?
-        .map(Json)
-        .ok_or_else(|| ApiError::not_found("trace"))
+        .ok_or_else(|| ApiError::not_found("trace"))?;
+    authed.check_principal(trace.actor_id, trace.scope_id)?;
+    Ok(Json(trace))
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ScopeMemoryQuery {
+    subject_id: SubjectId,
+    actor_id: ActorId,
+    agent_node_id: AgentNodeId,
+    subject_generation: u64,
     #[serde(default)]
     cursor: Option<Uuid>,
     #[serde(default)]
@@ -305,13 +637,34 @@ async fn scope_memory_handler<S: MemoryStore + 'static>(
 ) -> Result<Json<ScopeMemoryResponse>, ApiError> {
     let uuid = Uuid::parse_str(&id).map_err(|_| ApiError::invalid("invalid scope id"))?;
     let scope_id = memphant_types::ScopeId::from_u128(uuid.as_u128());
+    authed.check_scope(scope_id)?;
+    authed.check_principal(query.actor_id, scope_id)?;
+    let context = state
+        .store()
+        .resolve_memory_context(
+            authed.tenant,
+            query.subject_id,
+            query.actor_id,
+            scope_id,
+            query.agent_node_id,
+        )
+        .await
+        .map_err(|error| match error {
+            StoreError::NotFound(_) => ApiError::scope_denied(),
+            other => ApiError::from(other),
+        })?;
+    if query.subject_generation != context.subject_generation {
+        return Err(ApiError::context_binding_conflict(
+            "subject generation is stale".to_string(),
+        ));
+    }
     let cursor = query
         .cursor
         .map(|cursor| memphant_types::UnitId::from_u128(cursor.as_u128()));
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
     let page = state
         .service
-        .scope_memory_page(authed.tenant, scope_id, cursor, limit)
+        .scope_memory_page(&context, cursor, limit)
         .await?;
     Ok(Json(ScopeMemoryResponse {
         tenant_id: authed.tenant,
@@ -337,7 +690,7 @@ pub fn openapi_document() -> Value {
                     "type": "http",
                     "scheme": "bearer",
                     "bearerFormat": "mk_<key>",
-                    "description": "MemPhant API key; the key binds the tenant and caps source_trust at its max_trust tier."
+                    "description": "MemPhant API key; the key binds the tenant and caps the bound actor trust at its max_trust tier."
                 }
             },
             "schemas": component_schemas()
@@ -349,10 +702,10 @@ fn openapi_paths() -> serde_json::Map<String, Value> {
     let mut paths = serde_json::Map::new();
     paths.insert(
         EPISODES_PATH.to_string(),
-        path_item(
-            "post",
+        mutation_path_item_with_success_status(
             "RetainEpisodeHttpRequest",
             "RetainEpisodeHttpResponse",
+            "200",
         ),
     );
     paths.insert(
@@ -361,19 +714,19 @@ fn openapi_paths() -> serde_json::Map<String, Value> {
     );
     paths.insert(
         REFLECT_PATH.to_string(),
-        path_item("post", "ReflectRequest", "ReflectResult"),
+        mutation_path_item_with_success_status("ReflectRequest", "ReflectAccepted", "202"),
     );
     paths.insert(
         CORRECT_PATH.to_string(),
-        path_item("post", "CorrectRequest", "CorrectResult"),
+        mutation_path_item("CorrectRequest", "CorrectResult"),
     );
     paths.insert(
         FORGET_PATH.to_string(),
-        path_item("post", "ForgetRequest", "ForgetResult"),
+        mutation_path_item("ForgetRequest", "ForgetResult"),
     );
     paths.insert(
         MARK_PATH.to_string(),
-        path_item("post", "MarkRequest", "MarkResult"),
+        mutation_path_item("MarkRequest", "MarkResult"),
     );
     paths.insert(
         TRACE_PATH.to_string(),
@@ -385,6 +738,10 @@ fn openapi_paths() -> serde_json::Map<String, Value> {
             "ScopeMemoryResponse",
             vec![
                 path_param("id"),
+                required_query_param("subject_id", "uuid"),
+                required_query_param("actor_id", "uuid"),
+                required_query_param("agent_node_id", "uuid"),
+                required_query_param("subject_generation", "integer"),
                 optional_query_param("cursor", "uuid"),
                 optional_query_param("limit", "integer"),
             ],
@@ -393,6 +750,15 @@ fn openapi_paths() -> serde_json::Map<String, Value> {
     paths.insert(
         HEALTH_PATH.to_string(),
         get_path_item("HealthResponse", Vec::new()),
+    );
+    paths.insert(
+        CONTEXT_BINDING_PATH.to_string(),
+        path_item_with_params(
+            "put",
+            "ContextBindingRequest",
+            "ContextBindingResponse",
+            vec![string_path_param("client_ref")],
+        ),
     );
     paths
 }
@@ -404,7 +770,7 @@ fn component_schemas() -> serde_json::Map<String, Value> {
     seed_component::<RecallHttpRequest>(&mut generator);
     seed_component::<memphant_types::RecallResponse>(&mut generator);
     seed_component::<ReflectRequest>(&mut generator);
-    seed_component::<ReflectResult>(&mut generator);
+    seed_component::<ReflectAccepted>(&mut generator);
     seed_component::<CorrectRequest>(&mut generator);
     seed_component::<memphant_types::CorrectResult>(&mut generator);
     seed_component::<memphant_types::ForgetRequest>(&mut generator);
@@ -414,6 +780,8 @@ fn component_schemas() -> serde_json::Map<String, Value> {
     seed_component::<RetrievalTrace>(&mut generator);
     seed_component::<ScopeMemoryResponse>(&mut generator);
     seed_component::<HealthResponse>(&mut generator);
+    seed_component::<ContextBindingRequest>(&mut generator);
+    seed_component::<ContextBindingResponse>(&mut generator);
     seed_component::<ErrorEnvelope>(&mut generator);
     generator.take_definitions(true)
 }
@@ -432,6 +800,15 @@ fn seed_component<T: JsonSchema>(generator: &mut SchemaGenerator) {
 }
 
 fn path_item(method: &str, input_schema: &str, output_schema: &str) -> Value {
+    path_item_with_success_status(method, input_schema, output_schema, "200")
+}
+
+fn path_item_with_success_status(
+    method: &str,
+    input_schema: &str,
+    output_schema: &str,
+    success_status: &str,
+) -> Value {
     json!({
         method: {
             "requestBody": {
@@ -442,7 +819,7 @@ fn path_item(method: &str, input_schema: &str, output_schema: &str) -> Value {
                 }
             },
             "responses": {
-                "200": {
+                success_status: {
                     "content": {
                         "application/json": {
                             "schema": { "$ref": format!("#/components/schemas/{output_schema}") }
@@ -459,6 +836,37 @@ fn path_item(method: &str, input_schema: &str, output_schema: &str) -> Value {
             }
         }
     })
+}
+
+fn mutation_path_item(input_schema: &str, output_schema: &str) -> Value {
+    mutation_path_item_with_success_status(input_schema, output_schema, "200")
+}
+
+fn mutation_path_item_with_success_status(
+    input_schema: &str,
+    output_schema: &str,
+    success_status: &str,
+) -> Value {
+    let mut item =
+        path_item_with_success_status("post", input_schema, output_schema, success_status);
+    item["post"]["parameters"] = json!([{
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": true,
+        "schema": { "type": "string", "minLength": 1, "maxLength": 255 }
+    }]);
+    item
+}
+
+fn path_item_with_params(
+    method: &str,
+    input_schema: &str,
+    output_schema: &str,
+    parameters: Vec<Value>,
+) -> Value {
+    let mut item = path_item(method, input_schema, output_schema);
+    item[method]["parameters"] = Value::Array(parameters);
+    item
 }
 
 fn get_path_item(output_schema: &str, parameters: Vec<Value>) -> Value {
@@ -494,6 +902,15 @@ fn path_param(name: &str) -> Value {
     })
 }
 
+fn string_path_param(name: &str) -> Value {
+    json!({
+        "name": name,
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string" }
+    })
+}
+
 fn optional_query_param(name: &str, format: &str) -> Value {
     let schema = if format == "integer" {
         json!({ "type": "integer" })
@@ -508,6 +925,12 @@ fn optional_query_param(name: &str, format: &str) -> Value {
     })
 }
 
+fn required_query_param(name: &str, format: &str) -> Value {
+    let mut parameter = optional_query_param(name, format);
+    parameter["required"] = Value::Bool(true);
+    parameter
+}
+
 pub struct ApiError {
     status: StatusCode,
     code: &'static str,
@@ -515,6 +938,14 @@ pub struct ApiError {
 }
 
 impl ApiError {
+    fn bad_request(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_request",
+            message: message.into(),
+        }
+    }
+
     fn invalid(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::UNPROCESSABLE_ENTITY,
@@ -539,11 +970,11 @@ impl ApiError {
         }
     }
 
-    fn tenant_mismatch() -> Self {
+    fn scope_denied() -> Self {
         Self {
             status: StatusCode::FORBIDDEN,
-            code: "tenant_mismatch",
-            message: "body tenant_id does not match the API key's tenant".to_string(),
+            code: "scope_denied",
+            message: "actor_id or scope_id is outside the API key principal binding".to_string(),
         }
     }
 
@@ -552,6 +983,51 @@ impl ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "backend_unavailable",
             message: "backend unavailable".to_string(),
+        }
+    }
+
+    fn context_binding_conflict(message: String) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "context_binding_conflict",
+            message,
+        }
+    }
+
+    fn conflict(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+impl From<StoreError> for ApiError {
+    fn from(error: StoreError) -> Self {
+        match error {
+            StoreError::Conflict(message) => Self::context_binding_conflict(message),
+            StoreError::PolicyDenied(message) => Self {
+                status: StatusCode::FORBIDDEN,
+                code: "scope_denied",
+                message,
+            },
+            StoreError::IdempotencyConflict => Self::conflict(
+                "idempotency_conflict",
+                "idempotency key was already used for a different mutation",
+            ),
+            StoreError::StaleSubjectGeneration => {
+                Self::conflict("stale_subject_generation", "subject generation is stale")
+            }
+            StoreError::SubjectErased => Self {
+                status: StatusCode::GONE,
+                code: "subject_erased",
+                message: "subject has been erased".to_string(),
+            },
+            StoreError::NotFound(entity) => Self::not_found(entity),
+            StoreError::TransactionAlreadyCommitted
+            | StoreError::Poisoned
+            | StoreError::Backend(_) => Self::backend_unavailable(),
         }
     }
 }
@@ -574,7 +1050,10 @@ impl From<CoreError> for ApiError {
                 code: "scope_denied",
                 message: error.to_string(),
             },
-            CoreError::Store(_) => Self::backend_unavailable(),
+            CoreError::Store(store) => store.into(),
+            CoreError::ProviderUnavailable(_) | CoreError::ProviderInvalid(_) => {
+                Self::backend_unavailable()
+            }
         }
     }
 }
@@ -599,5 +1078,46 @@ impl IntoResponse for ApiError {
             },
         };
         (self.status, Json(body)).into_response()
+    }
+}
+
+#[cfg(test)]
+mod error_mapping_tests {
+    use super::{ApiError, CoreError, StatusCode, StoreError};
+
+    #[test]
+    fn subject_safety_errors_have_stable_public_status_and_code() {
+        let cases = [
+            (
+                StoreError::IdempotencyConflict,
+                StatusCode::CONFLICT,
+                "idempotency_conflict",
+            ),
+            (
+                StoreError::StaleSubjectGeneration,
+                StatusCode::CONFLICT,
+                "stale_subject_generation",
+            ),
+            (
+                StoreError::SubjectErased,
+                StatusCode::GONE,
+                "subject_erased",
+            ),
+            (
+                StoreError::PolicyDenied("denied".to_string()),
+                StatusCode::FORBIDDEN,
+                "scope_denied",
+            ),
+        ];
+
+        for (source, expected_status, expected_code) in cases {
+            let error = ApiError::from(source);
+            assert_eq!(error.status, expected_status);
+            assert_eq!(error.code, expected_code);
+        }
+
+        let wrapped = ApiError::from(CoreError::Store(StoreError::SubjectErased));
+        assert_eq!(wrapped.status, StatusCode::GONE);
+        assert_eq!(wrapped.code, "subject_erased");
     }
 }

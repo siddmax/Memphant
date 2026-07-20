@@ -8,10 +8,11 @@ use memphant_core::{FixedClock, InMemoryStore, MemoryStore, forget_memory, recal
 /// Deterministic clock for eval fixtures (pinned to the WS-A methodology date).
 const EVAL_CLOCK: FixedClock = FixedClock("2026-07-03T00:00:00Z");
 use memphant_types::{
-    ActorId, ContextualChunk, ENGINE_VERSION, ForgetRequest, ForgetSelector, LearnedRerankProfile,
-    MarkOutcome, MarkRequest, MemoryEdgeKind, MemoryKind, NewEpisode, NewMemoryEdge, NewMemoryUnit,
-    RecallDropReason, RecallMode, RecallRequest, ScopeId, TRACE_SCHEMA_VERSION, TenantId, TraceId,
-    TrustLevel, UnitId, UnitState,
+    ActorId, AgentNodeId, ContextualChunk, ENGINE_VERSION, ForgetRequest, ForgetSelector,
+    LearnedRerankProfile, MarkOutcome, MarkRequest, MemoryEdgeKind, MemoryKind, NewEpisode,
+    NewMemoryEdge, NewMemoryUnit, RecallContextItem, RecallDropReason, RecallMode, RecallRequest,
+    RecallTime, ResolvedMemoryContext, RetrievalTrace, ScopeId, SubjectId, TRACE_SCHEMA_VERSION,
+    TenantId, TraceId, TrustLevel, UnitId, UnitState,
 };
 use schemars::schema_for;
 use serde::{Deserialize, Serialize};
@@ -334,7 +335,12 @@ struct GoldenUnit {
     episode_body: String,
     kind: MemoryKind,
     state: UnitState,
-    subject_key: Option<String>,
+    // The golden fixtures spell this `subject_key` (its historical name before
+    // the canonical cutover renamed the unit column to `fact_key`). Keep the
+    // fixture-facing name so the value still populates the unit's fact key —
+    // recall's subject dedup keys off it.
+    #[serde(alias = "subject_key")]
+    fact_key: Option<String>,
     body: String,
     trust_level: TrustLevel,
     #[serde(default)]
@@ -503,6 +509,42 @@ struct SeedContext {
     scope_id: ScopeId,
     actor_id: ActorId,
     named_units: HashMap<String, UnitId>,
+}
+
+impl SeedContext {
+    fn resolved(&self) -> ResolvedMemoryContext {
+        resolved_context(self.tenant_id, self.scope_id, self.actor_id)
+    }
+}
+
+fn resolved_context(
+    tenant_id: TenantId,
+    scope_id: ScopeId,
+    actor_id: ActorId,
+) -> ResolvedMemoryContext {
+    ResolvedMemoryContext {
+        tenant_id,
+        data_subject_id: SubjectId::from_u128(tenant_id.as_uuid().as_u128()),
+        actor_id,
+        actor_trust: memphant_types::TrustLevel::TrustedUser,
+        scope_id,
+        agent_node_id: AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+        agent_level: 0,
+        subject_generation: 0,
+        policy_revision: "eval-policy".to_string(),
+        sources_by_kind: MemoryKind::ALL
+            .into_iter()
+            .map(|kind| {
+                (
+                    kind,
+                    vec![memphant_types::ResolvedMemorySource {
+                        scope_id,
+                        agent_node_id: AgentNodeId::from_u128(scope_id.as_uuid().as_u128()),
+                    }],
+                )
+            })
+            .collect(),
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1729,7 +1771,7 @@ async fn run_syndai_trace_compare(
                 episode_body: format!("{}: {}", file.path, file.content),
                 kind: MemoryKind::Resource,
                 state: UnitState::Active,
-                subject_key: Some(file.path.clone()),
+                fact_key: Some(file.path.clone()),
                 body: file.content.clone(),
                 trust_level: TrustLevel::TrustedSystem,
                 deletion_generation: None,
@@ -1746,10 +1788,7 @@ async fn run_syndai_trace_compare(
     let response = recall(
         &context.store,
         RecallRequest {
-            tenant_id: context.tenant_id,
-            scope_id: context.scope_id,
-            actor_id: context.actor_id,
-            allowed_scope_ids: vec![context.scope_id],
+            context: context.resolved(),
             query: fixture.query.clone(),
             k: 8,
             budget_tokens: fixture.token_budget,
@@ -1763,6 +1802,9 @@ async fn run_syndai_trace_compare(
             procedure_recall_enabled: true,
             decay_enabled: true,
             engine_version: ENGINE_VERSION.to_string(),
+            transaction_as_of: None,
+            valid_at: None,
+            aggregation_window: None,
         },
         None,
         &EVAL_CLOCK,
@@ -1859,10 +1901,7 @@ async fn run_golden_case_inner(
     let response = recall(
         &context.store,
         RecallRequest {
-            tenant_id: context.tenant_id,
-            scope_id: context.scope_id,
-            actor_id: context.actor_id,
-            allowed_scope_ids: vec![context.scope_id],
+            context: context.resolved(),
             query: case.query.clone(),
             k: case.k.unwrap_or(8),
             budget_tokens: case.budget_tokens.unwrap_or(256),
@@ -1879,6 +1918,9 @@ async fn run_golden_case_inner(
             procedure_recall_enabled: controls.procedure_recall_enabled,
             decay_enabled: controls.decay_enabled,
             engine_version: ENGINE_VERSION.to_string(),
+            transaction_as_of: None,
+            valid_at: None,
+            aggregation_window: None,
         },
         None,
         &EVAL_CLOCK,
@@ -2177,10 +2219,7 @@ async fn run_high_risk_lane(lane: &SecurityLane) -> EvalResult<String> {
     let response = recall(
         &context.store,
         RecallRequest {
-            tenant_id: context.tenant_id,
-            scope_id: context.scope_id,
-            actor_id: context.actor_id,
-            allowed_scope_ids: vec![context.scope_id],
+            context: context.resolved(),
             query: lane.query.clone(),
             k: 8,
             budget_tokens: 256,
@@ -2194,6 +2233,9 @@ async fn run_high_risk_lane(lane: &SecurityLane) -> EvalResult<String> {
             procedure_recall_enabled: true,
             decay_enabled: true,
             engine_version: ENGINE_VERSION.to_string(),
+            transaction_as_of: None,
+            valid_at: None,
+            aggregation_window: None,
         },
         None,
         &EVAL_CLOCK,
@@ -2247,9 +2289,14 @@ async fn run_deletion_lane(lane: &SecurityLane) -> EvalResult<String> {
         .ok_or_else(|| EvalError::Failed(format!("unknown forget unit {}", forget.unit)))?;
     let result = forget_memory(
         &context.store,
+        &context.resolved(),
         ForgetRequest {
-            tenant_id: context.tenant_id,
+            subject_id: memphant_types::SubjectId::from_u128(context.tenant_id.as_uuid().as_u128()),
             scope_id: context.scope_id,
+            agent_node_id: memphant_types::AgentNodeId::from_u128(
+                context.scope_id.as_uuid().as_u128(),
+            ),
+            subject_generation: 0,
             actor_id: context.actor_id,
             selector: ForgetSelector {
                 memory_unit_id: Some(unit_id),
@@ -2291,10 +2338,7 @@ async fn run_deletion_lane(lane: &SecurityLane) -> EvalResult<String> {
     let response = recall(
         &context.store,
         RecallRequest {
-            tenant_id: context.tenant_id,
-            scope_id: context.scope_id,
-            actor_id: context.actor_id,
-            allowed_scope_ids: vec![context.scope_id],
+            context: context.resolved(),
             query: case.query,
             k: 8,
             budget_tokens: 256,
@@ -2308,6 +2352,9 @@ async fn run_deletion_lane(lane: &SecurityLane) -> EvalResult<String> {
             procedure_recall_enabled: true,
             decay_enabled: true,
             engine_version: ENGINE_VERSION.to_string(),
+            transaction_as_of: None,
+            valid_at: None,
+            aggregation_window: None,
         },
         None,
         &EVAL_CLOCK,
@@ -2421,6 +2468,78 @@ fn run_reindex_sla_check(check: &OpsCheck) -> EvalResult<String> {
     }
 }
 
+/// A minimal but real retrieval trace whose canonical inclusion whitelist is
+/// exactly the reviewed unit, so seeded review events satisfy `record_mark`'s
+/// trace-existence and whitelist checks. Deterministic: the caller supplies the
+/// trace id from the fixture seed.
+fn seeded_review_trace(
+    context: &ResolvedMemoryContext,
+    trace_id: TraceId,
+    unit_id: UnitId,
+    unit_name: &str,
+) -> RetrievalTrace {
+    RetrievalTrace {
+        id: trace_id,
+        tenant_id: context.tenant_id,
+        data_subject_id: context.data_subject_id,
+        scope_id: context.scope_id,
+        actor_id: context.actor_id,
+        agent_node_id: context.agent_node_id,
+        subject_generation: context.subject_generation,
+        policy_revision: context.policy_revision.clone(),
+        query_hash: format!("fixture-review:{unit_name}"),
+        engine_version: ENGINE_VERSION.to_string(),
+        feature_flags: Vec::new(),
+        channel_runs: Vec::new(),
+        candidates: Vec::new(),
+        policy_filters: Vec::new(),
+        context_items: vec![RecallContextItem {
+            unit_id,
+            body: unit_name.to_string(),
+            kind: MemoryKind::Semantic,
+            derived_by: "fixture".to_string(),
+            inclusion_reason: "fixture-review".to_string(),
+            citation_episode_id: None,
+            citation_resource_id: None,
+            derived_from_unit_ids: Vec::new(),
+            suppression_labels: Vec::new(),
+        }],
+        dropped_items: Vec::new(),
+        citations: Vec::new(),
+        filter_selectivity: None,
+        iterative_scan_depth: None,
+        recall_pool_depth: 1,
+        cross_rerank_ms: 0,
+        cross_rerank: None,
+        consolidation_lag_ms: 0,
+        degradation: None,
+        weight_vector_id: "none".to_string(),
+        mode_requested: RecallMode::Fast,
+        mode_executed: RecallMode::Fast,
+        escalation_reason: "none".to_string(),
+        reranker_id: "none".to_string(),
+        rerank_input_count: 0,
+        rerank_overfetch_ratio: 0.0,
+        learned_rerank_training_set_id: None,
+        subquery_ids: Vec::new(),
+        decomposition_reason: "none".to_string(),
+        procedure_ids: Vec::new(),
+        procedure_validation_states: Vec::new(),
+        abstention_signal: false,
+        latency_ms: 0,
+        token_estimate: 0,
+        cost_micros: 0,
+        decay_model_id: "none".to_string(),
+        l4_sandbox_id: None,
+        l4_gathered_evidence_ids: Vec::new(),
+        recall_time: RecallTime {
+            evaluated_at: EVAL_CLOCK.0.to_string(),
+            transaction_as_of: EVAL_CLOCK.0.to_string(),
+            valid_at: EVAL_CLOCK.0.to_string(),
+        },
+    }
+}
+
 async fn seed_store(
     seed: &GoldenSeed,
     masked_units: &BTreeSet<String>,
@@ -2434,11 +2553,20 @@ async fn seed_store(
     let scope_id = ScopeId::from_u128(90_010);
     let denied_scope_id = ScopeId::from_u128(90_011);
     let actor_id = ActorId::from_u128(90_020);
+    // Canonical cutover: the store rejects any hand-built context without a
+    // registered binding. Seed a binding for every (tenant, scope) combination
+    // this fixture writes to or reads from — the primary lane plus the negative
+    // "other tenant" and "denied scope" lanes used by tenant/scope-isolation
+    // cases.
+    for (binding_tenant, binding_scope) in [
+        (tenant_id, scope_id),
+        (other_tenant_id, scope_id),
+        (tenant_id, denied_scope_id),
+        (other_tenant_id, denied_scope_id),
+    ] {
+        store.seed_context_binding(&resolved_context(binding_tenant, binding_scope, actor_id));
+    }
     let mut named_units = HashMap::new();
-    let mut tx = store
-        .begin()
-        .await
-        .map_err(|error| EvalError::Core(error.to_string()))?;
     for unit in &seed.units {
         if masked_units.contains(&unit.name) {
             continue;
@@ -2453,14 +2581,29 @@ async fn seed_store(
         } else {
             scope_id
         };
+        // Canonical cutover: every staged row is checked against its
+        // transaction's context, so cross-tenant / cross-scope fixture units
+        // (the negative "other"/"denied" lanes) cannot share one primary
+        // transaction. Open a transaction bound to THIS unit's context.
+        let unit_context = resolved_context(unit_tenant_id, unit_scope_id, actor_id);
+        let mut tx = store.begin_at(&unit_context, &EVAL_CLOCK);
         let episode = store
             .stage_episode(
                 &mut tx,
                 NewEpisode {
                     tenant_id: unit_tenant_id,
+                    data_subject_id: memphant_types::SubjectId::from_u128(
+                        unit_tenant_id.as_uuid().as_u128(),
+                    ),
                     scope_id: unit_scope_id,
+                    agent_node_id: memphant_types::AgentNodeId::from_u128(
+                        unit_scope_id.as_uuid().as_u128(),
+                    ),
+                    subject_generation: 0,
                     actor_id,
                     source_kind: unit.source_kind.clone(),
+                    source_ref: format!("eval:{}", unit.name),
+                    observed_at: "2026-07-03T00:00:00Z".to_string(),
                     source_trust: unit.trust_level,
                     dedup_key: format!("{}:{}", unit.name, unit.episode_body),
                     body: unit.episode_body.clone(),
@@ -2473,17 +2616,28 @@ async fn seed_store(
                 &mut tx,
                 NewMemoryUnit {
                     tenant_id: unit_tenant_id,
+                    data_subject_id: memphant_types::SubjectId::from_u128(
+                        unit_tenant_id.as_uuid().as_u128(),
+                    ),
                     scope_id: unit_scope_id,
+                    agent_node_id: memphant_types::AgentNodeId::from_u128(
+                        unit_scope_id.as_uuid().as_u128(),
+                    ),
+                    subject_generation: 0,
                     kind: unit.kind,
                     state: unit.state,
-                    subject_key: unit.subject_key.clone(),
+                    fact_key: unit.fact_key.clone(),
+                    predicate: None,
                     body: unit.body.clone(),
+                    confidence: None,
                     trust_level: unit.trust_level,
                     churn_class: unit.churn_class.clone(),
                     freshness_due_at: (unit.churn_class.as_deref() == Some("volatile"))
                         .then(|| "2026-07-03T00:00:00Z".to_string()),
                     actor_id: Some(actor_id),
                     source_kind: Some(unit.source_kind.clone()),
+                    source_ref: format!("eval:{}", unit.name),
+                    observed_at: "2026-07-03T00:00:00Z".to_string(),
                     source_episode_id: Some(episode.episode_id),
                     source_resource_id: None,
                     deletion_generation: unit.deletion_generation,
@@ -2504,36 +2658,49 @@ async fn seed_store(
             )
             .await
             .map_err(|error| EvalError::Core(error.to_string()))?;
+        store
+            .commit(tx)
+            .await
+            .map_err(|error| EvalError::Core(error.to_string()))?;
         named_units.insert(unit.name.clone(), unit_id);
     }
-    for edge in seed.edges.iter().filter(|_| seed_edges_enabled) {
-        if masked_units.contains(&edge.src) || masked_units.contains(&edge.dst) {
-            continue;
+    // Edges only ever connect primary-scope units, so they stage under the
+    // primary context.
+    let edges: Vec<_> = seed
+        .edges
+        .iter()
+        .filter(|_| seed_edges_enabled)
+        .filter(|edge| !masked_units.contains(&edge.src) && !masked_units.contains(&edge.dst))
+        .collect();
+    if !edges.is_empty() {
+        let seed_context = resolved_context(tenant_id, scope_id, actor_id);
+        let mut tx = store.begin_at(&seed_context, &EVAL_CLOCK);
+        for edge in edges {
+            let src_id = *named_units
+                .get(&edge.src)
+                .ok_or_else(|| EvalError::Failed(format!("unknown edge src {}", edge.src)))?;
+            let dst_id = *named_units
+                .get(&edge.dst)
+                .ok_or_else(|| EvalError::Failed(format!("unknown edge dst {}", edge.dst)))?;
+            store
+                .stage_memory_edge(
+                    &mut tx,
+                    NewMemoryEdge {
+                        tenant_id,
+                        scope_id,
+                        src_id,
+                        dst_id,
+                        kind: edge.kind,
+                    },
+                )
+                .await
+                .map_err(|error| EvalError::Core(error.to_string()))?;
         }
-        let src_id = *named_units
-            .get(&edge.src)
-            .ok_or_else(|| EvalError::Failed(format!("unknown edge src {}", edge.src)))?;
-        let dst_id = *named_units
-            .get(&edge.dst)
-            .ok_or_else(|| EvalError::Failed(format!("unknown edge dst {}", edge.dst)))?;
         store
-            .stage_memory_edge(
-                &mut tx,
-                NewMemoryEdge {
-                    tenant_id,
-                    scope_id,
-                    src_id,
-                    dst_id,
-                    kind: edge.kind,
-                },
-            )
+            .commit(tx)
             .await
             .map_err(|error| EvalError::Core(error.to_string()))?;
     }
-    store
-        .commit(tx)
-        .await
-        .map_err(|error| EvalError::Core(error.to_string()))?;
 
     let mut review_trace_seed = 600_000_u128;
     for unit in seed
@@ -2551,15 +2718,40 @@ async fn seed_store(
         };
         for (index, review) in unit.review_events.iter().enumerate() {
             review_trace_seed = review_trace_seed.saturating_add(1);
+            let mut review_context = resolved_context(tenant_id, scope_id, actor_id);
+            review_context.tenant_id = unit_tenant_id;
+            review_context.data_subject_id =
+                SubjectId::from_u128(unit_tenant_id.as_uuid().as_u128());
+            // `record_mark` fails closed unless the referenced retrieval trace
+            // exists and whitelists the marked unit, so seed a minimal real
+            // trace per review event instead of a fabricated id.
+            store
+                .store_trace(
+                    &review_context,
+                    seeded_review_trace(
+                        &review_context,
+                        TraceId::from_u128(review_trace_seed),
+                        unit_id,
+                        &unit.name,
+                    ),
+                )
+                .await
+                .map_err(|error| EvalError::Core(error.to_string()))?;
             record_mark(
                 &store,
+                &review_context,
                 MarkRequest {
-                    tenant_id: unit_tenant_id,
+                    subject_id: review_context.data_subject_id,
+                    scope_id: review_context.scope_id,
+                    actor_id: review_context.actor_id,
+                    agent_node_id: review_context.agent_node_id,
+                    subject_generation: review_context.subject_generation,
                     trace_id: TraceId::from_u128(review_trace_seed),
                     caller_id: format!("fixture-review:{}:{index}", unit.name),
                     used_ids: vec![unit_id],
                     outcome: review.outcome,
                 },
+                &EVAL_CLOCK,
             )
             .await
             .map_err(|error| EvalError::Core(error.to_string()))?;

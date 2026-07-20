@@ -1,13 +1,13 @@
 //! Real embedding + reranking providers behind the `fastembed` cargo feature.
 //!
-//! Embeddings: local models via fastembed/onnxruntime. Four measured arms (W8,
+//! Embeddings: local models via fastembed/onnxruntime. Five measured arms (W8,
 //! R0-T1) coexist because the store keys every embedding by profile id =
 //! hash(embedder id + dims), so they never mix: `bge-small-en-v1.5` (384d, the
-//! default, unchanged), `bge-base-en-v1.5` (768d), `modernbert-embed-large`
-//! (1024d), and `embeddinggemma-300m` (768d). The default build stays Noop —
+//! default, unchanged), `bge-base-en-v1.5` (768d), `bge-m3` (1024d),
+//! `modernbert-embed-large` (1024d), and `embeddinggemma-300m` (768d). The default build stays Noop —
 //! no model download in CI or tests.
 //!
-//! A fifth arm, Qwen3-Embedding-0.6B ([`Qwen3Provider`], R0-T1b), lives
+//! A sixth arm, Qwen3-Embedding-0.6B ([`Qwen3Provider`], R0-T1b), lives
 //! behind the SEPARATE `qwen3` cargo feature: fastembed's candle backend
 //! (safetensors download, not the ort/ONNX path the four arms above use).
 //! `fastembed::Qwen3TextEmbedding` is its own public type, not a
@@ -17,7 +17,7 @@
 //!
 //! Query/document prefixes (R0-T1): some models are trained with distinct
 //! textual prefixes for queries vs documents. [`prefix_text`] is the pure,
-//! unit-testable seam for the four `FastEmbedModel` arms; [`FastEmbedProvider`]
+//! unit-testable seam for the five `FastEmbedModel` arms; [`FastEmbedProvider`]
 //! applies it inside `embed`/`embed_query` so call sites never have to know
 //! about it. Verified against fastembed 5.17.2's source
 //! (`~/.cargo/registry/.../fastembed-5.17.2/src/`): it does NOT apply any of
@@ -42,9 +42,10 @@ use candle_core::{DType, Device};
 #[cfg(feature = "qwen3")]
 use fastembed::Qwen3TextEmbedding;
 use fastembed::{
-    EmbeddingModel, InitOptions, RerankInitOptions, RerankerModel, TextEmbedding, TextRerank,
+    EmbeddingModel, InitOptions, RerankInitOptions, RerankResult, RerankerModel, TextEmbedding,
+    TextRerank,
 };
-use memphant_core::{CrossReranker, EmbedError, EmbeddingProvider};
+use memphant_core::{CrossReranker, CrossRerankerConfig, EmbedError, EmbeddingProvider};
 
 /// Legacy aliases for the default (small) embedder identity, kept so existing
 /// call sites and reports stay byte-identical.
@@ -65,6 +66,8 @@ pub enum FastEmbedModel {
     BgeSmallEnV15,
     /// `bge-base-en-v1.5` (768d) — the W8 measured upgrade arm.
     BgeBaseEnV15,
+    /// `BAAI/bge-m3` (1024d) — the multilingual MemSyco retrieval arm.
+    BgeM3,
     /// `lightonai/modernbert-embed-large` (1024d) — nomic-style
     /// `search_query:`/`search_document:` prefixing (R0-T1).
     ModernBertEmbedLarge,
@@ -78,6 +81,8 @@ impl FastEmbedModel {
     const SMALL_DIMENSIONS: usize = 384;
     const BASE_ID: &'static str = "fastembed:bge-base-en-v1.5";
     const BASE_DIMENSIONS: usize = 768;
+    const BGE_M3_ID: &'static str = "fastembed:bge-m3";
+    const BGE_M3_DIMENSIONS: usize = 1024;
     const MODERNBERT_ID: &'static str = "fastembed:modernbert-embed-large";
     const MODERNBERT_DIMENSIONS: usize = 1024;
     const GEMMA_ID: &'static str = "fastembed:embeddinggemma-300m";
@@ -88,6 +93,7 @@ impl FastEmbedModel {
         match self {
             Self::BgeSmallEnV15 => Self::SMALL_ID,
             Self::BgeBaseEnV15 => Self::BASE_ID,
+            Self::BgeM3 => Self::BGE_M3_ID,
             Self::ModernBertEmbedLarge => Self::MODERNBERT_ID,
             Self::EmbeddingGemma300M => Self::GEMMA_ID,
         }
@@ -98,6 +104,7 @@ impl FastEmbedModel {
         match self {
             Self::BgeSmallEnV15 => Self::SMALL_DIMENSIONS,
             Self::BgeBaseEnV15 => Self::BASE_DIMENSIONS,
+            Self::BgeM3 => Self::BGE_M3_DIMENSIONS,
             Self::ModernBertEmbedLarge => Self::MODERNBERT_DIMENSIONS,
             Self::EmbeddingGemma300M => Self::GEMMA_DIMENSIONS,
         }
@@ -108,17 +115,19 @@ impl FastEmbedModel {
         match self {
             Self::BgeSmallEnV15 => EmbeddingModel::BGESmallENV15,
             Self::BgeBaseEnV15 => EmbeddingModel::BGEBaseENV15,
+            Self::BgeM3 => EmbeddingModel::BGEM3,
             Self::ModernBertEmbedLarge => EmbeddingModel::ModernBertEmbedLarge,
             Self::EmbeddingGemma300M => EmbeddingModel::EmbeddingGemma300M,
         }
     }
 
     /// Parses the bench `--embed-model` selector
-    /// (`small` | `base` | `modernbert` | `gemma`).
+    /// (`small` | `base` | `bge-m3` | `modernbert` | `gemma`).
     pub fn parse(selector: &str) -> Option<Self> {
         match selector {
             "small" => Some(Self::BgeSmallEnV15),
             "base" => Some(Self::BgeBaseEnV15),
+            "bge-m3" => Some(Self::BgeM3),
             "modernbert" => Some(Self::ModernBertEmbedLarge),
             "gemma" => Some(Self::EmbeddingGemma300M),
             _ => None,
@@ -153,7 +162,9 @@ pub enum TextKind {
 /// against its source — see the module docs), so this never double-prefixes.
 pub fn prefix_text(model: FastEmbedModel, kind: TextKind, text: &str) -> String {
     match model {
-        FastEmbedModel::BgeSmallEnV15 | FastEmbedModel::BgeBaseEnV15 => text.to_string(),
+        FastEmbedModel::BgeSmallEnV15 | FastEmbedModel::BgeBaseEnV15 | FastEmbedModel::BgeM3 => {
+            text.to_string()
+        }
         FastEmbedModel::ModernBertEmbedLarge => {
             let prefix = match kind {
                 TextKind::Query => "search_query: ",
@@ -357,54 +368,92 @@ impl EmbeddingProvider for Qwen3Provider {
 /// a mutex serializes reranking calls exactly like the embedder.
 pub struct FastEmbedCrossReranker {
     model: Mutex<TextRerank>,
+    config: CrossRerankerConfig,
 }
 
 impl FastEmbedCrossReranker {
     /// Initializes `BAAI/bge-reranker-base` (downloads ~1.1 GB into the local
     /// fastembed cache on first use; never in the default/CI build).
     pub fn new() -> Result<Self, EmbedError> {
-        let model = TextRerank::try_new(RerankInitOptions::new(RerankerModel::BGERerankerBase))
+        Self::with_config(CrossRerankerConfig {
+            provider: "fastembed".to_string(),
+            model: FASTEMBED_RERANKER_ID.to_string(),
+            candidate_limit: memphant_core::DEFAULT_RECALL_POOL_DEPTH,
+            max_length: 512,
+            batch_size: Some(256),
+        })
+    }
+
+    pub fn with_config(config: CrossRerankerConfig) -> Result<Self, EmbedError> {
+        let options = RerankInitOptions::new(RerankerModel::BGERerankerBase)
+            .with_max_length(config.max_length);
+        let model = TextRerank::try_new(options)
             .map_err(|error| EmbedError::Unavailable(error.to_string()))?;
         Ok(Self {
             model: Mutex::new(model),
+            config,
         })
     }
 }
 
 impl CrossReranker for FastEmbedCrossReranker {
-    fn rerank(&self, query: &str, docs: &[&str]) -> Vec<f32> {
+    fn config(&self) -> CrossRerankerConfig {
+        self.config.clone()
+    }
+
+    fn rerank(&self, query: &str, docs: &[&str]) -> Result<Vec<f32>, String> {
         if docs.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let mut model = match self.model.lock() {
             Ok(model) => model,
             Err(_) => {
-                eprintln!("memphant: cross-reranker mutex poisoned — skipping rerank");
-                return Vec::new();
+                return Err("cross-reranker mutex poisoned".to_string());
             }
         };
         // fastembed returns results sorted by score DESC, each carrying its
         // input `index`. The core seam expects one score per doc IN INPUT
         // ORDER, so re-scatter by index. `return_documents = false` (we only
-        // need the scores); default batch size.
-        match model.rerank(query, docs, false, None) {
-            Ok(results) => {
-                let mut scores = vec![0.0_f32; docs.len()];
-                for result in results {
-                    if let Some(slot) = scores.get_mut(result.index) {
-                        *slot = result.score;
-                    }
-                }
-                scores
-            }
-            Err(error) => {
-                // A length != docs.len() (here 0) signals "no-op" to the core
-                // stage, which then leaves the fused order unchanged.
-                eprintln!("memphant: cross-reranker inference failed: {error}");
-                Vec::new()
-            }
+        // need the scores); configured batch size or fastembed's default.
+        match model.rerank(query, docs, false, self.config.batch_size) {
+            Ok(results) => scatter_rerank_results(results, docs.len()),
+            Err(error) => Err(error.to_string()),
         }
     }
+}
+
+fn scatter_rerank_results(
+    results: Vec<RerankResult>,
+    input_count: usize,
+) -> Result<Vec<f32>, String> {
+    if results.len() != input_count {
+        return Err(format!(
+            "reranker returned {} results for {input_count} inputs",
+            results.len()
+        ));
+    }
+    let mut scores = vec![0.0; input_count];
+    let mut seen = vec![false; input_count];
+    for result in results {
+        let Some(slot) = scores.get_mut(result.index) else {
+            return Err(format!(
+                "reranker returned out-of-range index {}",
+                result.index
+            ));
+        };
+        if seen[result.index] {
+            return Err(format!(
+                "reranker returned duplicate index {}",
+                result.index
+            ));
+        }
+        seen[result.index] = true;
+        *slot = result.score;
+    }
+    if seen.iter().any(|seen| !seen) {
+        return Err("reranker omitted an input index".to_string());
+    }
+    Ok(scores)
 }
 
 #[cfg(test)]
@@ -427,13 +476,46 @@ mod tests {
         }
     }
 
-    /// All four arms, for tests that need to iterate every variant.
-    const ALL_ARMS: [FastEmbedModel; 4] = [
+    /// All five arms, for tests that need to iterate every variant.
+    const ALL_ARMS: [FastEmbedModel; 5] = [
         FastEmbedModel::BgeSmallEnV15,
         FastEmbedModel::BgeBaseEnV15,
+        FastEmbedModel::BgeM3,
         FastEmbedModel::ModernBertEmbedLarge,
         FastEmbedModel::EmbeddingGemma300M,
     ];
+
+    fn rerank_result(index: usize, score: f32) -> fastembed::RerankResult {
+        fastembed::RerankResult {
+            document: None,
+            score,
+            index,
+        }
+    }
+
+    #[test]
+    fn rerank_result_scatter_requires_one_unique_in_range_result_per_input() {
+        assert_eq!(
+            scatter_rerank_results(
+                vec![
+                    rerank_result(2, 0.3),
+                    rerank_result(0, 0.9),
+                    rerank_result(1, 0.5)
+                ],
+                3,
+            )
+            .expect("valid scatter"),
+            vec![0.9, 0.5, 0.3]
+        );
+
+        assert!(scatter_rerank_results(vec![rerank_result(0, 1.0)], 2).is_err());
+        assert!(
+            scatter_rerank_results(vec![rerank_result(0, 1.0), rerank_result(2, 0.5)], 2).is_err()
+        );
+        assert!(
+            scatter_rerank_results(vec![rerank_result(0, 1.0), rerank_result(0, 0.5)], 2).is_err()
+        );
+    }
 
     #[test]
     fn arm_identity_mapping() {
@@ -444,6 +526,8 @@ mod tests {
             "fastembed:bge-base-en-v1.5"
         );
         assert_eq!(FastEmbedModel::BgeBaseEnV15.dimensions(), 768);
+        assert_eq!(FastEmbedModel::BgeM3.id(), "fastembed:bge-m3");
+        assert_eq!(FastEmbedModel::BgeM3.dimensions(), 1024);
         assert_eq!(
             FastEmbedModel::ModernBertEmbedLarge.id(),
             "fastembed:modernbert-embed-large"
@@ -466,6 +550,7 @@ mod tests {
             FastEmbedModel::parse("base"),
             Some(FastEmbedModel::BgeBaseEnV15)
         );
+        assert_eq!(FastEmbedModel::parse("bge-m3"), Some(FastEmbedModel::BgeM3));
         assert_eq!(
             FastEmbedModel::parse("modernbert"),
             Some(FastEmbedModel::ModernBertEmbedLarge)
@@ -505,7 +590,8 @@ mod tests {
         assert_eq!(profiles[0].dimensions, 384);
         assert_eq!(profiles[1].dimensions, 768);
         assert_eq!(profiles[2].dimensions, 1024);
-        assert_eq!(profiles[3].dimensions, 768);
+        assert_eq!(profiles[3].dimensions, 1024);
+        assert_eq!(profiles[4].dimensions, 768);
     }
 
     /// Binding contract: our declared `dimensions()` for every arm must match
@@ -532,7 +618,11 @@ mod tests {
     fn bge_arms_are_never_prefixed() {
         // Binding baseline-integrity guarantee: bge-small/base text is
         // byte-identical to the input, for either kind.
-        for &arm in &[FastEmbedModel::BgeSmallEnV15, FastEmbedModel::BgeBaseEnV15] {
+        for &arm in &[
+            FastEmbedModel::BgeSmallEnV15,
+            FastEmbedModel::BgeBaseEnV15,
+            FastEmbedModel::BgeM3,
+        ] {
             assert_eq!(prefix_text(arm, TextKind::Query, "hello"), "hello");
             assert_eq!(prefix_text(arm, TextKind::Document, "hello"), "hello");
         }
@@ -741,7 +831,7 @@ mod tests {
             "France is a country in Western Europe.",
         ];
         let started = std::time::Instant::now();
-        let scores = reranker.rerank(query, &docs);
+        let scores = reranker.rerank(query, &docs).expect("rerank");
         let elapsed = started.elapsed();
         eprintln!(
             "rerank smoke: {} docs in {} ms",
@@ -750,13 +840,30 @@ mod tests {
         );
         assert_eq!(scores.len(), docs.len(), "one score per doc in input order");
         // Determinism: a second call yields byte-identical scores.
-        let again = reranker.rerank(query, &docs);
+        let again = reranker.rerank(query, &docs).expect("rerank again");
         assert_eq!(scores, again, "fastembed inference is deterministic");
         // The on-topic Paris doc must outscore the cell-biology distractor.
         assert!(
             scores[0] > scores[1],
             "the relevant doc scores above the irrelevant one: {scores:?}"
         );
+    }
+
+    fn representative_rerank_docs(candidate_count: usize) -> Vec<String> {
+        let sentence = "This representative long memory passage carries enough surrounding context to exercise tokenizer truncation and realistic reranker inference rather than a one-line synthetic document. ";
+        let mut body = String::new();
+        while body.len() < 1_500 {
+            body.push_str(sentence);
+        }
+        (0..candidate_count)
+            .map(|index| {
+                if index == 0 {
+                    format!("Paris is the capital and most populous city of France. {body}")
+                } else {
+                    format!("Unrelated distractor document {index}. {body}")
+                }
+            })
+            .collect()
     }
 
     /// R1.5-T1 live smoke: a SINGLE `rerank` call over
@@ -776,21 +883,10 @@ mod tests {
         let reranker = FastEmbedCrossReranker::new().expect("load bge-reranker-base");
         let query = "What is the capital of France?";
         let pool_depth = memphant_core::DEFAULT_RECALL_POOL_DEPTH;
-        let docs: Vec<String> = (0..pool_depth)
-            .map(|index| {
-                if index == 0 {
-                    "Paris is the capital and most populous city of France.".to_string()
-                } else {
-                    format!(
-                        "Distractor document number {index} discusses an unrelated topic \
-                         at some length to approximate a real candidate body."
-                    )
-                }
-            })
-            .collect();
+        let docs = representative_rerank_docs(pool_depth);
         let doc_refs: Vec<&str> = docs.iter().map(String::as_str).collect();
         let started = std::time::Instant::now();
-        let scores = reranker.rerank(query, &doc_refs);
+        let scores = reranker.rerank(query, &doc_refs).expect("rerank");
         let elapsed = started.elapsed();
         eprintln!(
             "rerank smoke (pool_depth={pool_depth}): {} docs in {} ms",
@@ -806,5 +902,36 @@ mod tests {
             scores[0] > scores[1],
             "the relevant doc scores above a distractor: {scores:?}"
         );
+    }
+
+    #[test]
+    #[ignore = "downloads bge-reranker-base (~1.1 GB); run with MEMPHANT_RERANK_SMOKE=1"]
+    fn rerank_real_model_latency_matrix() {
+        if std::env::var("MEMPHANT_RERANK_SMOKE").as_deref() != Ok("1") {
+            eprintln!("rerank matrix skipped (set MEMPHANT_RERANK_SMOKE=1 to run)");
+            return;
+        }
+        let query = "What is the capital of France?";
+        for (candidate_count, max_length) in [(64, 512), (32, 512), (32, 256), (32, 128)] {
+            let batch_size = 256;
+            let reranker = FastEmbedCrossReranker::with_config(CrossRerankerConfig {
+                provider: "fastembed".to_string(),
+                model: FASTEMBED_RERANKER_ID.to_string(),
+                candidate_limit: candidate_count,
+                max_length,
+                batch_size: Some(batch_size),
+            })
+            .expect("load bge-reranker-base");
+            let docs = representative_rerank_docs(candidate_count);
+            let doc_refs = docs.iter().map(String::as_str).collect::<Vec<_>>();
+            let started = std::time::Instant::now();
+            let scores = reranker.rerank(query, &doc_refs).expect("rerank arm");
+            let elapsed_ms = started.elapsed().as_millis();
+            eprintln!(
+                "{{\"event\":\"memphant_rerank_latency\",\"candidate_count\":{candidate_count},\"max_length\":{max_length},\"batch_size\":{batch_size},\"elapsed_ms\":{elapsed_ms}}}"
+            );
+            assert_eq!(scores.len(), candidate_count);
+            assert!(scores.iter().all(|score| score.is_finite()));
+        }
     }
 }

@@ -28,18 +28,16 @@ Engines (``--engine``):
 reader; both model ids and the engine are recorded in the report header.
 
 Honesty contract:
-- engine, reader model and judge method are recorded in the output header;
-- containment judging runs first (gold answer normalized-contained in the
-  reply); only non-matches spend one LLM judge call;
-- abstention questions (``_abs`` in the question id) score correct only when
-  the reader replies "I don't know" (normalized containment);
-- a hard call budget aborts with partial results recorded (n is explicit);
+- the reader returns one strict JSON object; only its answer field is judged;
+- non-abstention answers use the canonical task-specific LongMemEval judge;
+- abstention scores correct only for ``abstain=true`` plus ``answer=null``;
+- parse, reader, and judge failures score incorrect with distinct reasons;
+- a hard call budget aborts with partial results recorded and promotion blocked;
 - every reply is cached by sha256(engine + model + kind + prompt) so reruns
-  and identical evidence packs across runs never re-spend budget (legacy
-  pre-engine cache entries stay readable for the claude engine).
+  and identical evidence packs across runs never re-spend budget. Schema and
+  decoding identity are part of the key, so pre-schema replies are never reused.
 
-This script never fabricates: any CLI failure is recorded per question as
-``reader_error`` and that question is excluded from accuracy (n_scored drops).
+This script never fabricates: every failure is recorded and counted incorrect.
 """
 
 from __future__ import annotations
@@ -58,39 +56,46 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from provider_attempts import openrouter_generation_lookup, provider_response_evidence
+
 DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 ENGINES = ("claude", "codex", "openrouter")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_TIMEOUT = 180
 OPENROUTER_RETRY_DELAYS = (2, 8, 30)  # 4 tries total: 3 backoff sleeps between them
+FLASH_MODEL = "google/gemini-3.5-flash"
+FLASH_PROVIDER = "google-ai-studio"
+LUNA_MODEL = "openai/gpt-5.6-luna-pro"
 # The codex engine has no separate system-prompt channel; the system prompt is
 # prepended to the user prompt with this no-tool-use guard.
 CODEX_NO_TOOLS_GUARD = (
     "Do not run any commands or use any tools; answer directly from this "
     "prompt in your final message."
 )
-# Prompt components, shared across v1/v2/v3 (--prompt-version) so the reader
-# prompts are composed rather than triplicated. v1 and v2 below are each a
-# join of these fragments (byte-identical to their pre-W7 literals — pinned
-# by test_prompt_v1_and_v2_unchanged_after_v3_factoring); v3's two routes
-# (further down) reuse the same fragments.
+# Prompt components shared across v1/v2/v3 (--prompt-version), so the reader
+# prompts are composed rather than triplicated.
 READER_BASE_INSTRUCTION = (
     "You answer questions using ONLY the evidence provided in the prompt."
 )
 READER_TERSE_INSTRUCTION = (
-    "Be terse: reply with the answer itself, a short phrase, no preamble."
+    "Be terse: put only the concise answer, a short phrase with no preamble, "
+    "in the answer field."
 )
 # v1's plain abstention line. Used by v1 only; v2 and v3 use the calibrated
 # abstention instruction below instead.
 READER_V1_ABSTENTION = (
-    "If the evidence is insufficient to answer, reply exactly: I don't know."
+    "If the evidence is insufficient to answer, set abstain=true and answer=null."
 )
 # v2's enumerate-then-compute chain-of-thought instruction.
 READER_COT_INSTRUCTION = (
     "First, identify every evidence item that bears on the question, even "
     "partially. Then reason step by step over those items: for questions "
     "that require combining values, doing arithmetic, or counting "
-    "occurrences, work the calculation through explicitly before answering."
+    "occurrences, work the calculation through explicitly in notes before answering."
 )
 # v2's calibrated-abstention instruction: fixes over-abstention (replying
 # "I don't know" when the pack did contain the answer). A pure win, 6/6, on
@@ -98,45 +103,58 @@ READER_COT_INSTRUCTION = (
 READER_CALIBRATED_ABSTENTION = (
     "Abstain only if NO evidence item bears on the question at all; if at "
     "least one item is partially relevant, give your best-supported answer "
-    "instead of abstaining, and never use the phrase \"I don't know\" "
-    "anywhere in your reply except as the abstention reply itself."
+    "instead of abstaining."
 )
 # v2's instruction to isolate the final answer from its CoT reasoning.
 READER_FINAL_LINE_INSTRUCTION = (
-    "Finish with a final line, on its own, containing ONLY the concise "
-    "answer — a short phrase, no preamble, no restated reasoning — or, if "
-    "truly abstaining, reply with exactly: I don't know."
+    "Put only the concise answer in the answer field; put reasoning only in notes."
+)
+READER_OUTPUT_CONTRACT = (
+    'Return exactly one JSON object with this schema and no other text: '
+    '{"notes": string, "answer": string|null, "abstain": boolean}. '
+    'Use notes for reasoning. For an answer, set abstain=false and answer to a '
+    'nonempty string. To abstain, set abstain=true and answer=null.'
 )
 
 READER_SYSTEM_PROMPT = " ".join(
-    [READER_BASE_INSTRUCTION, READER_TERSE_INSTRUCTION, READER_V1_ABSTENTION]
+    [
+        READER_BASE_INSTRUCTION,
+        READER_TERSE_INSTRUCTION,
+        READER_V1_ABSTENTION,
+        READER_OUTPUT_CONTRACT,
+    ]
 )
 # v2 (--prompt-version 2): enumerate-then-compute reasoning with calibrated
 # abstention. Fixes three n=100-campaign failure modes: multi-item arithmetic
 # answered wrong despite both operands being present, enumerable ("how many
 # ...") questions answered from partial recall instead of counting the
 # packed items, and over-abstention (replying "I don't know" when the pack
-# did contain the answer). Still containment-friendly: judge_row's
-# containment check scans the whole reply, but any non-abstention reply
-# that happens to contain the literal phrase "I don't know" in its reasoning
-# is short-circuited to incorrect by judge_row before contains_gold ever
-# runs — so the prompt bans that phrase outside real abstention and
-# requires a clean final line with the bare answer.
+# did contain the answer). The strict output contract keeps reasoning in notes
+# and the concise answer in its own field.
 READER_SYSTEM_PROMPT_V2 = " ".join(
     [
         READER_BASE_INSTRUCTION,
         READER_COT_INSTRUCTION,
         READER_CALIBRATED_ABSTENTION,
         READER_FINAL_LINE_INSTRUCTION,
+        READER_OUTPUT_CONTRACT,
     ]
 )
 # v3 (--prompt-version 3) terse route: v1-style terse phrasing, but v2's
 # calibrated-abstention instruction (W7 requirement 1) instead of v1's plain
 # one. Used for every question NOT routed to the v2 CoT prompt.
 READER_SYSTEM_PROMPT_V3_TERSE = " ".join(
-    [READER_BASE_INSTRUCTION, READER_TERSE_INSTRUCTION, READER_CALIBRATED_ABSTENTION]
+    [
+        READER_BASE_INSTRUCTION,
+        READER_TERSE_INSTRUCTION,
+        READER_CALIBRATED_ABSTENTION,
+        READER_OUTPUT_CONTRACT,
+    ]
 )
-READER_SYSTEM_PROMPTS = {1: READER_SYSTEM_PROMPT, 2: READER_SYSTEM_PROMPT_V2}
+READER_SYSTEM_PROMPTS = {
+    1: READER_SYSTEM_PROMPT,
+    2: READER_SYSTEM_PROMPT_V2,
+}
 
 # v3 (--prompt-version 3): stratum-routed prompt. Evidence: v2's CoT +
 # calibrated abstention moved temporal-reasoning 0.52->0.78 but regressed
@@ -169,9 +187,62 @@ def route_v3(question_type: str, question: str) -> tuple[str, str]:
     return "terse", READER_SYSTEM_PROMPT_V3_TERSE
 
 
-JUDGE_SYSTEM_PROMPT = (
-    "You are a strict grader. Reply with exactly one word: yes or no."
+JUDGE_SYSTEM_PROMPT = "Grade the response. Return only the required yes/no verdict."
+READER_OUTPUT_KEYS = {"notes", "answer", "abstain"}
+READER_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "notes": {"type": "string"},
+        "answer": {"type": ["string", "null"]},
+        "abstain": {"type": "boolean"},
+    },
+    "required": ["notes", "answer", "abstain"],
+    "additionalProperties": False,
+}
+JUDGE_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {"verdict": {"type": "string", "enum": ["yes", "no"]}},
+    "required": ["verdict"],
+    "additionalProperties": False,
+}
+RAG_SUPPORTED_JUDGE_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "answer_correct": {"type": "boolean"},
+        "fully_supported": {"type": "boolean"},
+        "supporting_evidence_ranks": {
+            "type": "array",
+            "items": {"type": "integer", "minimum": 1},
+        },
+    },
+    "required": [
+        "answer_correct",
+        "fully_supported",
+        "supporting_evidence_ranks",
+    ],
+    "additionalProperties": False,
+}
+PAIRED_RAG_JUDGE_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdict": {
+            "type": "string",
+            "enum": ["a", "b", "both", "neither"],
+        }
+    },
+    "required": ["verdict"],
+    "additionalProperties": False,
+}
+RAG_SUPPORTED_SCHEMA_ID = "rag-supported-v1"
+RAG_SUPPORTED_JUDGE_SYSTEM_PROMPT = (
+    "Grade whether the answer is correct and fully supported by its retrieved "
+    "evidence. Return only the required JSON object."
 )
+PAIRED_RAG_JUDGE_SYSTEM_PROMPT = (
+    "Compare two answer-and-evidence bundles without favoring their position. "
+    "Return only the required JSON object."
+)
+OPENROUTER_DECODING = {"temperature": 0, "max_tokens": 8192}
 BOOTSTRAP_RESAMPLES = 1000
 
 
@@ -180,6 +251,35 @@ def normalize(text: str) -> str:
     text = text.lower()
     text = re.sub(r"[^\w\s]", " ", text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def atomic_write_json(path: Path, value: dict) -> None:
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, delete=False
+        ) as handle:
+            json.dump(value, handle)
+            handle.write("\n")
+            temporary = Path(handle.name)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def reader_report_fingerprint(report: dict) -> str:
+    return sha256_text(
+        json.dumps(
+            {key: value for key, value in report.items() if key != "reader_report_sha256"},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
 
 
 def contains_gold(reply: str, gold: str) -> bool:
@@ -192,23 +292,141 @@ def contains_gold(reply: str, gold: str) -> bool:
     return re.search(pattern, normalize(reply)) is not None
 
 
-def is_abstention_reply(reply: str) -> bool:
-    return "i don t know" in normalize(reply)
-
-
-def is_final_line_abstention(reply: str) -> bool:
-    """Like is_abstention_reply, but scoped to the reply's final non-empty
-    line. Used for non-abstention rows so a v2 chain-of-thought reply that
-    hedges mid-reasoning (e.g. "I don't know the exact format... 50") isn't
-    short-circuited to WRONG when its final line states the answer."""
-    lines = [line.strip() for line in reply.splitlines()]
-    non_empty = [line for line in lines if line]
-    final_line = non_empty[-1] if non_empty else ""
-    return is_abstention_reply(final_line)
-
-
 class CallBudgetExceeded(Exception):
     pass
+
+
+class JudgeFailure(RuntimeError):
+    pass
+
+
+def parse_reader_output(reply: str) -> dict:
+    output = json.loads(reply)
+    if not isinstance(output, dict) or set(output) != READER_OUTPUT_KEYS:
+        raise ValueError("reader output must be an object with the exact output keys")
+    if not isinstance(output["notes"], str):
+        raise ValueError("reader notes must be a string")
+    if not isinstance(output["abstain"], bool):
+        raise ValueError("reader abstain must be a boolean")
+    answer = output["answer"]
+    if output["abstain"]:
+        if answer is not None:
+            raise ValueError("abstention requires answer=null")
+    elif not isinstance(answer, str) or not answer.strip():
+        raise ValueError("non-abstention requires a nonempty string answer")
+    return output
+
+
+def parse_judge_output(reply: str, engine: str) -> str:
+    if engine == "openrouter":
+        try:
+            output = json.loads(reply)
+        except (json.JSONDecodeError, TypeError) as error:
+            raise JudgeFailure("judge output must be a strict JSON object") from error
+        if (
+            not isinstance(output, dict)
+            or set(output) != {"verdict"}
+            or output["verdict"] not in ("yes", "no")
+        ):
+            raise JudgeFailure("judge output must match the strict verdict schema")
+        return output["verdict"]
+    normalized = normalize(reply)
+    if normalized not in ("yes", "no"):
+        raise JudgeFailure(f"judge verdict must be exactly yes or no: {reply!r}")
+    return normalized
+
+
+def parse_rag_supported_judge_output(
+    reply: str, evidence_ranks: set[int]
+) -> dict:
+    try:
+        output = json.loads(reply)
+    except (json.JSONDecodeError, TypeError) as error:
+        raise JudgeFailure("RAG judge output must be a strict JSON object") from error
+    expected = {
+        "answer_correct",
+        "fully_supported",
+        "supporting_evidence_ranks",
+    }
+    if not isinstance(output, dict) or set(output) != expected:
+        raise JudgeFailure("RAG judge output must match the strict schema")
+    if type(output["answer_correct"]) is not bool or type(output["fully_supported"]) is not bool:
+        raise JudgeFailure("RAG judge booleans must be exact")
+    ranks = output["supporting_evidence_ranks"]
+    if (
+        not isinstance(ranks, list)
+        or any(type(rank) is not int for rank in ranks)
+        or len(ranks) != len(set(ranks))
+        or any(rank not in evidence_ranks for rank in ranks)
+        or (output["fully_supported"] and not ranks)
+    ):
+        raise JudgeFailure("RAG judge evidence ranks are invalid")
+    return output
+
+
+def parse_paired_rag_judge_output(reply: str) -> str:
+    try:
+        output = json.loads(reply)
+    except (json.JSONDecodeError, TypeError) as error:
+        raise JudgeFailure("paired RAG judge output must be strict JSON") from error
+    if (
+        not isinstance(output, dict)
+        or set(output) != {"verdict"}
+        or output["verdict"] not in ("a", "b", "both", "neither")
+    ):
+        raise JudgeFailure("paired RAG judge output must match the strict schema")
+    return output["verdict"]
+
+
+def openrouter_decoding(model: str | None = None) -> dict:
+    decoding = dict(OPENROUTER_DECODING)
+    if model == LUNA_MODEL:
+        decoding.pop("temperature")
+    return decoding
+
+
+def response_contract(engine: str, kind: str, model: str | None = None) -> dict:
+    schemas = {
+        "reader": READER_JSON_SCHEMA,
+        "judge": JUDGE_JSON_SCHEMA,
+        "rag_judge": RAG_SUPPORTED_JUDGE_JSON_SCHEMA,
+        "pair_judge": PAIRED_RAG_JUDGE_JSON_SCHEMA,
+    }
+    try:
+        schema = schemas[kind]
+    except KeyError as error:
+        raise ValueError(f"unknown response kind: {kind}") from error
+    if engine == "openrouter":
+        return {
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": f"{kind}_output",
+                    "strict": True,
+                    "schema": schema,
+                },
+            },
+            "decoding": openrouter_decoding(model),
+        }
+    return {
+        "response_format": (
+            "prompt_enforced_enum" if kind == "judge" else "prompt_enforced_json"
+        ),
+        "parser": (
+            "normalized_exact_yes_no_v1" if kind == "judge" else "strict_json_v1"
+        ),
+        "decoding": {"provider_defaults": True},
+    }
+
+
+def openrouter_provider_preferences(model: str) -> dict:
+    preferences = {"require_parameters": True}
+    if model == FLASH_MODEL:
+        preferences |= {
+            "only": [FLASH_PROVIDER],
+            "allow_fallbacks": True,
+        }
+    return preferences
 
 
 class ReaderCli:
@@ -236,7 +454,14 @@ class ReaderCli:
         self.max_calls = max_calls
         self.fresh_calls = 0
         self.cached_calls = 0
+        self.provider_attempts = 0
+        self.provider_attempt_log: list[dict] = []
+        self.provider_attempt_limit: int | None = None
+        self.provider_attempt_hook = None
+        self._active_cache_key: str | None = None
+        self.last_call_metadata: dict | None = None
         self._openrouter_api_key = None
+        self._openrouter_generation_lookup = None
         if engine == "openrouter":
             api_key = os.environ.get("OPENROUTER_API_KEY")
             if not api_key:
@@ -247,10 +472,11 @@ class ReaderCli:
                     "openrouter ..."
                 )
             self._openrouter_api_key = api_key
+            self._openrouter_generation_lookup = openrouter_generation_lookup(api_key)
         cache_dir.mkdir(parents=True, exist_ok=True)
 
     def model_for(self, kind: str) -> str:
-        return self.judge_model if kind == "judge" else self.model
+        return self.model if kind == "reader" else self.judge_model
 
     def cache_model_for(self, kind: str) -> str:
         """Cache identity of the model: reasoning effort changes replies, so
@@ -261,24 +487,25 @@ class ReaderCli:
         return model
 
     def _cache_path(self, kind: str, system_prompt: str, prompt: str) -> Path:
+        contract_identity = {
+            "response": response_contract(self.engine, kind, self.model_for(kind)),
+            "provenance_schema": 2,
+        }
+        if self.engine == "openrouter":
+            contract_identity["provider"] = openrouter_provider_preferences(
+                self.model_for(kind)
+            )
+        contract = json.dumps(contract_identity, sort_keys=True, separators=(",", ":"))
         key = hashlib.sha256(
             "\x1e".join(
                 [
                     self.engine,
                     self.cache_model_for(kind),
                     kind,
+                    contract,
                     system_prompt,
                     prompt,
                 ]
-            ).encode()
-        ).hexdigest()
-        return self.cache_dir / f"{key}.json"
-
-    def _legacy_cache_path(self, kind: str, system_prompt: str, prompt: str) -> Path:
-        """Pre-engine cache key (claude engine only): sha256(model+kind+prompts)."""
-        key = hashlib.sha256(
-            "\x1e".join(
-                [self.model_for(kind), kind, system_prompt, prompt]
             ).encode()
         ).hexdigest()
         return self.cache_dir / f"{key}.json"
@@ -287,27 +514,50 @@ class ReaderCli:
         cache_path = self._cache_path(kind, system_prompt, prompt)
         if cache_path.exists():
             self.cached_calls += 1
-            return json.loads(cache_path.read_text())["reply"]
-        if self.engine == "claude":
-            legacy = self._legacy_cache_path(kind, system_prompt, prompt)
-            if legacy.exists():
-                self.cached_calls += 1
-                return json.loads(legacy.read_text())["reply"]
+            cached = json.loads(cache_path.read_text())
+            self.last_call_metadata = cached.get("metadata")
+            return cached["reply"]
         if self.fresh_calls >= self.max_calls:
             raise CallBudgetExceeded(
                 f"{self.engine} CLI call budget exhausted ({self.max_calls})"
             )
         self.fresh_calls += 1
-        if self.engine == "claude":
-            reply = self._call_claude(kind, system_prompt, prompt)
-        elif self.engine == "codex":
-            reply = self._call_codex(kind, system_prompt, prompt)
-        else:
-            reply = self._call_openrouter(kind, system_prompt, prompt)
-        cache_path.write_text(
-            json.dumps({"kind": kind, "prompt": prompt, "reply": reply}) + "\n"
+        self._active_cache_key = cache_path.name
+        try:
+            if self.engine == "claude":
+                reply = self._call_claude(kind, system_prompt, prompt)
+            elif self.engine == "codex":
+                reply = self._call_codex(kind, system_prompt, prompt)
+            else:
+                reply = self._call_openrouter(kind, system_prompt, prompt)
+        finally:
+            self._active_cache_key = None
+        atomic_write_json(
+            cache_path,
+            {
+                "kind": kind,
+                "prompt": prompt,
+                "reply": reply,
+                "metadata": self.last_call_metadata,
+            },
         )
         return reply
+
+    def set_provider_attempt_limit(self, limit: int | None) -> None:
+        if limit is not None and limit < self.provider_attempts:
+            raise ValueError("provider attempt limit is below attempts already used")
+        self.provider_attempt_limit = limit
+
+    def set_provider_attempt_hook(self, hook) -> None:
+        self.provider_attempt_hook = hook
+
+    def _provider_attempt_event(self, event: str, payload: dict | None = None) -> None:
+        if self.provider_attempt_hook is not None:
+            self.provider_attempt_hook(
+                event,
+                self._active_cache_key or "direct-openrouter-call",
+                payload,
+            )
 
     def _call_claude(self, kind: str, system_prompt: str, prompt: str) -> str:
         result = subprocess.run(
@@ -380,14 +630,17 @@ class ReaderCli:
         return reply
 
     def _call_openrouter(self, kind: str, system_prompt: str, prompt: str) -> str:
+        self.last_call_metadata = None
+        model = self.model_for(kind)
         payload = {
-            "model": self.model_for(kind),
+            "model": model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt},
             ],
-            "temperature": 0,
-            "max_tokens": 1024,
+            **openrouter_decoding(model),
+            "response_format": response_contract("openrouter", kind)["response_format"],
+            "provider": openrouter_provider_preferences(self.model_for(kind)),
         }
         if self.reasoning_effort is not None:
             payload["reasoning"] = {"effort": self.reasoning_effort}
@@ -400,18 +653,87 @@ class ReaderCli:
                 "Authorization": f"Bearer {self._openrouter_api_key}",
                 "Content-Type": "application/json",
                 "HTTP-Referer": "https://github.com/memphant",
+                "X-OpenRouter-Metadata": "enabled",
                 "X-Title": "memphant-bench-reader",
             },
         )
         last_error: Exception | None = None
         for attempt, delay in enumerate((0, *OPENROUTER_RETRY_DELAYS)):
+            if (
+                self.provider_attempt_limit is not None
+                and self.provider_attempts >= self.provider_attempt_limit
+            ):
+                raise CallBudgetExceeded(
+                    f"openrouter provider attempt budget exhausted "
+                    f"({self.provider_attempt_limit})"
+                )
             if delay:
                 time.sleep(delay)
+            self._provider_attempt_event(
+                "start",
+                {
+                    "retry_index": attempt,
+                    "requested_model": model,
+                    "request_sha256": hashlib.sha256(body).hexdigest(),
+                },
+            )
+            self.provider_attempts += 1
+            attempt_started = time.monotonic()
             try:
                 with urllib.request.urlopen(
                     request, timeout=OPENROUTER_TIMEOUT
                 ) as response:
                     data = json.loads(response.read())
+                available = (
+                    (data.get("openrouter_metadata") or {})
+                    .get("endpoints", {})
+                    .get("available", [])
+                )
+                selected = [
+                    endpoint
+                    for endpoint in available
+                    if isinstance(endpoint, dict) and endpoint.get("selected") is True
+                ]
+                provider = data.get("provider")
+                if provider is None and len(selected) == 1:
+                    provider = selected[0].get("provider")
+                response_id = data.get("id")
+                request_sha256 = hashlib.sha256(body).hexdigest()
+                metadata = provider_response_evidence(
+                    data,
+                    model,
+                    time.monotonic() - attempt_started,
+                    request_sha256,
+                    retry_index=attempt,
+                    provider=provider,
+                )
+                stats = {}
+                if response_id:
+                    try:
+                        stats = self._openrouter_generation_lookup(response_id)
+                    except Exception as error:
+                        metadata["parse_status"] = "generation_stats_lookup_failed"
+                        error_payload = {
+                            "type": type(error).__name__,
+                            "message": str(error),
+                            "elapsed_seconds": time.monotonic() - attempt_started,
+                            "retry_index": attempt,
+                            "response": metadata,
+                        }
+                        self.provider_attempt_log.append(error_payload)
+                        self._provider_attempt_event("error", error_payload)
+                        raise RuntimeError(
+                            "OpenRouter generation statistics lookup failed"
+                        ) from error
+                usage = data.get("usage")
+                if isinstance(usage, dict):
+                    usage = dict(usage)
+                    cost = usage.get("cost")
+                    if not isinstance(cost, (int, float)) or cost <= 0:
+                        usage["cost"] = stats.get("total_cost")
+                metadata["served_model"] = stats.get("model") or metadata["served_model"]
+                metadata["provider"] = stats.get("provider_name") or metadata["provider"]
+                metadata["usage"] = usage
                 content = (
                     (data.get("choices") or [{}])[0].get("message", {}).get("content")
                 )
@@ -420,7 +742,17 @@ class ReaderCli:
                         f"openrouter returned empty content (attempt "
                         f"{attempt + 1}/4): {json.dumps(data)[:500]}"
                     )
+                    error_payload = {
+                        "error": "empty_content",
+                        "elapsed_seconds": time.monotonic() - attempt_started,
+                        "retry_index": attempt,
+                    }
+                    self.provider_attempt_log.append(error_payload)
+                    self._provider_attempt_event("error", error_payload)
                     continue
+                self.provider_attempt_log.append({"response": metadata})
+                self._provider_attempt_event("result", {"response": metadata})
+                self.last_call_metadata = metadata
                 return content.strip()
             except urllib.error.HTTPError as error:
                 body_text = error.read().decode(errors="replace")[:500]
@@ -428,6 +760,13 @@ class ReaderCli:
                     f"openrouter request failed (HTTP {error.code}, attempt "
                     f"{attempt + 1}/4): {body_text}"
                 )
+                error_payload = {
+                    "error": f"http_{error.code}",
+                    "elapsed_seconds": time.monotonic() - attempt_started,
+                    "retry_index": attempt,
+                }
+                self.provider_attempt_log.append(error_payload)
+                self._provider_attempt_event("error", error_payload)
                 if error.code != 429 and error.code < 500:
                     raise last_error from error
             except (urllib.error.URLError, TimeoutError, OSError, ValueError) as error:
@@ -438,6 +777,13 @@ class ReaderCli:
                 last_error = RuntimeError(
                     f"openrouter request failed (attempt {attempt + 1}/4): {error}"
                 )
+                error_payload = {
+                    "error": type(error).__name__,
+                    "elapsed_seconds": time.monotonic() - attempt_started,
+                    "retry_index": attempt,
+                }
+                self.provider_attempt_log.append(error_payload)
+                self._provider_attempt_event("error", error_payload)
         assert last_error is not None
         raise last_error
 
@@ -457,31 +803,250 @@ def build_reader_prompt(row: dict) -> str:
     return "\n".join(lines)
 
 
-def build_judge_prompt(question: str, gold: str, reply: str) -> str:
+def build_judge_prompt(question_type: str, question: str, gold: str, answer: str) -> str:
+    if question_type in (
+        "single-session-user",
+        "single-session-assistant",
+        "multi-session",
+    ):
+        instruction = (
+            "Answer yes if the model response contains or is equivalent to the "
+            "correct answer, including all required information; answer no if it "
+            "contains only a subset."
+        )
+        gold_label = "Correct Answer"
+    elif question_type == "temporal-reasoning":
+        instruction = (
+            "Answer yes if the model response contains or is equivalent to the "
+            "correct answer, including all required information. Do not penalize "
+            "off-by-one errors in durations measured in days, weeks, or months."
+        )
+        gold_label = "Correct Answer"
+    elif question_type == "knowledge-update":
+        instruction = (
+            "Answer yes if the model response gives the updated correct answer. "
+            "Previous information may also appear only when the required updated "
+            "answer is still clear."
+        )
+        gold_label = "Correct Answer"
+    elif question_type == "single-session-preference":
+        instruction = (
+            "Answer yes if the model response satisfies the personalized-response "
+            "rubric by correctly recalling and using the user's information; it "
+            "need not reflect every rubric point."
+        )
+        gold_label = "Rubric"
+    else:
+        raise ValueError(f"unknown LongMemEval question type: {question_type}")
     return (
-        f"Question: {question}\n"
-        f"Gold answer: {gold}\n"
-        f"Model answer: {reply}\n\n"
-        "Does the model answer convey the gold answer? "
-        "Reply with exactly one word: yes or no."
+        f"{instruction}\n\nQuestion: {question}\n\n{gold_label}: {gold}\n\n"
+        f"Model Response: {answer}\n\nIs the model response correct? Answer yes or no only."
     )
 
 
-def judge_row(cli: ReaderCli, row: dict, reply: str) -> tuple[bool, str]:
+def _render_ranked_evidence(evidence: list[dict]) -> str:
+    if not evidence:
+        return "(no evidence was retrieved)"
+    return "\n\n".join(
+        f"--- evidence item {item['rank']} ---\n{item['body'].strip()}"
+        for item in evidence
+    )
+
+
+def build_rag_supported_judge_prompt(row: dict, answer: str) -> str:
+    return (
+        "Judge the candidate answer on two independent requirements. "
+        "answer_correct is true only when it is semantically correct relative "
+        "to the reference answer and answers the question. fully_supported is "
+        "true only when every material factual claim in the candidate answer "
+        "is entailed by the retrieved evidence below. The reference answer is "
+        "not evidence. Cite every evidence rank used.\n\n"
+        f"Question: {row['question']}\n\n"
+        f"Reference answer: {row['gold_answer']}\n\n"
+        f"Candidate answer: {answer}\n\n"
+        "Retrieved evidence:\n"
+        f"{_render_ranked_evidence(row['evidence'])}\n\n"
+        "Return exactly one JSON object with answer_correct, fully_supported, "
+        "and supporting_evidence_ranks."
+    )
+
+
+def _rag_audit_defaults() -> dict:
+    return {
+        "answer_correct": None,
+        "fully_supported": None,
+        "supporting_evidence_ranks": [],
+        "judge_raw_response": None,
+        "judge_parse_status": "not_called",
+        "judge_schema_id": RAG_SUPPORTED_SCHEMA_ID,
+        "judge_fallback_used": False,
+        "judge_error": None,
+    }
+
+
+def judge_rag_row(cli: ReaderCli, row: dict, output: dict) -> dict:
+    audit = _rag_audit_defaults()
+    if row["is_abstention"]:
+        audit.update(
+            {
+                "correct": output["abstain"] and output["answer"] is None,
+                "judge_method": "abstention_exact",
+            }
+        )
+        return audit
+    if output["abstain"]:
+        audit.update({"correct": False, "judge_method": "abstention_exact"})
+        return audit
+    try:
+        reply = cli.call(
+            "rag_judge",
+            RAG_SUPPORTED_JUDGE_SYSTEM_PROMPT,
+            build_rag_supported_judge_prompt(row, output["answer"]),
+        )
+    except (RuntimeError, subprocess.TimeoutExpired) as error:
+        audit.update(
+            {
+                "correct": False,
+                "judge_method": "rag_supported_llm_judge",
+                "judge_error": str(error),
+            }
+        )
+        return audit
+    audit["judge_raw_response"] = reply
+    try:
+        parsed = parse_rag_supported_judge_output(
+            reply, {item["rank"] for item in row["evidence"]}
+        )
+    except JudgeFailure as error:
+        audit.update(
+            {
+                "correct": False,
+                "judge_method": "rag_supported_llm_judge",
+                "judge_parse_status": "invalid",
+                "judge_error": str(error),
+            }
+        )
+        return audit
+    audit.update(parsed)
+    audit.update(
+        {
+            "correct": parsed["answer_correct"] and parsed["fully_supported"],
+            "judge_method": "rag_supported_llm_judge",
+            "judge_parse_status": "strict_valid",
+        }
+    )
+    return audit
+
+
+def build_paired_rag_prompt(common: dict, bundle_a: dict, bundle_b: dict) -> str:
+    def render(label: str, bundle: dict) -> str:
+        return (
+            f"Answer {label}: {bundle['answer']}\n"
+            f"Evidence {label}:\n{_render_ranked_evidence(bundle['evidence'])}"
+        )
+
+    return (
+        "Choose which answer is both correct relative to the reference answer "
+        "and fully supported by its own evidence bundle. The reference answer "
+        "is not evidence. Return a for A only, b for B only, both when both "
+        "pass, or neither when neither passes.\n\n"
+        f"Question: {common['question']}\n\n"
+        f"Reference answer: {common['gold_answer']}\n\n"
+        f"{render('A', bundle_a)}\n\n{render('B', bundle_b)}\n\n"
+        "Return exactly one JSON object with verdict."
+    )
+
+
+def _bundle_sha256(bundle: dict) -> str:
+    return sha256_text(json.dumps(bundle, sort_keys=True, separators=(",", ":")))
+
+
+def _canonical_pair_verdict(verdict: str, a_label: str, b_label: str) -> str:
+    if verdict == "a":
+        return a_label
+    if verdict == "b":
+        return b_label
+    return verdict
+
+
+def adjudicate_supported_flip(
+    cli: ReaderCli,
+    common: dict,
+    current: dict,
+    baseline: dict,
+    *,
+    seed: int,
+) -> dict:
+    first_current = int(
+        sha256_text(f"{seed}\x1e{common['question_id']}")[-1], 16
+    ) % 2 == 0
+    orders = [
+        [("current", current), ("baseline", baseline)],
+        [("baseline", baseline), ("current", current)],
+    ]
+    if not first_current:
+        orders.reverse()
+    raw_responses = []
+    parsed_verdicts = []
+    canonical_verdicts = []
+    order_labels = []
+    error = None
+    for order in orders:
+        (a_label, bundle_a), (b_label, bundle_b) = order
+        order_labels.append({"a": a_label, "b": b_label})
+        try:
+            reply = cli.call(
+                "pair_judge",
+                PAIRED_RAG_JUDGE_SYSTEM_PROMPT,
+                build_paired_rag_prompt(common, bundle_a, bundle_b),
+            )
+            raw_responses.append(reply)
+            verdict = parse_paired_rag_judge_output(reply)
+            parsed_verdicts.append(verdict)
+            canonical_verdicts.append(
+                _canonical_pair_verdict(verdict, a_label, b_label)
+            )
+        except (CallBudgetExceeded, JudgeFailure, RuntimeError, subprocess.TimeoutExpired) as caught:
+            error = str(caught)
+            break
+    expected = "current" if current["correct"] else "baseline"
+    if error is not None or len(canonical_verdicts) != 2:
+        status = "error"
+    elif canonical_verdicts[0] != canonical_verdicts[1]:
+        status = "position_disagreement"
+    elif canonical_verdicts[0] != expected:
+        status = "absolute_disagreement"
+    else:
+        status = "resolved"
+    return {
+        "question_id": common["question_id"],
+        "status": status,
+        "expected_winner": expected,
+        "orders": order_labels,
+        "raw_responses": raw_responses,
+        "parsed_verdicts": parsed_verdicts,
+        "canonical_verdicts": canonical_verdicts,
+        "current_bundle_sha256": _bundle_sha256(current),
+        "baseline_bundle_sha256": _bundle_sha256(baseline),
+        "judge_fallback_used": False,
+        "error": error,
+    }
+
+
+def judge_row(cli: ReaderCli, row: dict, output: dict) -> tuple[bool, str]:
     """Returns (correct, judge_method)."""
     gold = str(row["gold_answer"])
     if row["is_abstention"]:
-        return is_abstention_reply(reply), "abstention_exact"
-    if is_final_line_abstention(reply):
-        return False, "containment"
-    if contains_gold(reply, gold):
-        return True, "containment"
+        return output["abstain"] and output["answer"] is None, "abstention_exact"
+    if output["abstain"]:
+        return False, "abstention_exact"
+    answer = output["answer"]
     verdict = cli.call(
         "judge",
         JUDGE_SYSTEM_PROMPT,
-        build_judge_prompt(row["question"], gold, reply),
+        build_judge_prompt(row["question_type"], row["question"], gold, answer),
     )
-    return normalize(verdict).startswith("yes"), "llm_judge"
+    return parse_judge_output(verdict, cli.engine) == "yes", "llm_judge"
 
 
 def bootstrap_ci(deltas: list[float], resamples: int, seed: int) -> dict:
@@ -519,6 +1084,164 @@ def accuracy(rows: list[dict]) -> dict:
     }
 
 
+def _indexed_rows(report: dict, kind: str) -> dict[str, dict]:
+    rows = report.get("per_question")
+    if not isinstance(rows, list):
+        raise ValueError(f"{kind} report is missing per_question rows")
+    indexed: dict[str, dict] = {}
+    for row in rows:
+        qid = row.get("question_id") if isinstance(row, dict) else None
+        if not isinstance(qid, str) or not qid or qid in indexed:
+            raise ValueError(f"{kind} report has missing or duplicate question IDs")
+        indexed[qid] = row
+    if not indexed:
+        raise ValueError(f"{kind} report has no question IDs")
+    return indexed
+
+
+def validate_and_pair_reports(
+    left: dict, right: dict, kind: str
+) -> list[tuple[str, dict, dict]]:
+    """Fail-closed validation and exact question-ID pairing for promotion gates."""
+    if kind not in ("reader", "provenance"):
+        raise ValueError(f"unknown report kind: {kind}")
+    indexed = [_indexed_rows(report, kind) for report in (left, right)]
+    if set(indexed[0]) != set(indexed[1]):
+        raise ValueError(f"{kind} reports have unequal question IDs")
+    if kind == "reader":
+        for report, rows in zip((left, right), indexed):
+            if report.get("smoke_only") is not False:
+                raise ValueError("reader smoke report is not promotion eligible")
+            errors = report.get("errors")
+            if (
+                report.get("promotion_ineligible") is True
+                or report.get("complete") is not True
+                or report.get("aborted") is not None
+                or report.get("expected_n") != len(rows)
+                or report.get("evaluated_expected_n") != len(rows)
+                or report.get("source_expected_n") != len(rows)
+                or not isinstance(report.get("source_evidence_sha256"), str)
+                or not report["source_evidence_sha256"]
+                or report.get("evaluated_evidence_sha256")
+                != report.get("source_evidence_sha256")
+                or not isinstance(errors, dict)
+                or set(errors) != {"reader", "parse", "judge"}
+                or any(not isinstance(value, int) or value != 0 for value in errors.values())
+                or any(type(row.get("correct")) is not bool for row in rows.values())
+            ):
+                raise ValueError("reader report is incomplete, aborted, or erroring")
+        question_set_sha = left.get("question_set_sha256")
+        if (
+            not isinstance(question_set_sha, str)
+            or not question_set_sha
+            or question_set_sha != right.get("question_set_sha256")
+        ):
+            raise ValueError("reader question-set fingerprints differ")
+        for report in (left, right):
+            fingerprint = report.get("evaluator_fingerprint")
+            if not isinstance(fingerprint, dict) or not fingerprint.get("sha256"):
+                raise ValueError("reader evaluator fingerprint is missing")
+            payload = {key: value for key, value in fingerprint.items() if key != "sha256"}
+            expected_sha256 = sha256_text(
+                json.dumps(payload, sort_keys=True, separators=(",", ":"))
+            )
+            if fingerprint["sha256"] != expected_sha256:
+                raise ValueError("reader evaluator fingerprint hash is invalid")
+            for field in (
+                "engine",
+                "reader_model_id",
+                "judge_model_id",
+                "reasoning_effort",
+                "source_evidence_sha256",
+                "retrieval_report_sha256",
+            ):
+                if fingerprint.get(field) != report.get(field):
+                    raise ValueError(f"reader evaluator {field} does not match report")
+            if not re.fullmatch(
+                r"[0-9a-f]{64}", str(fingerprint.get("evaluator_source_sha256", ""))
+            ):
+                raise ValueError("reader evaluator source hash is invalid")
+        input_binding_fields = {
+            "sha256",
+            "source_evidence_sha256",
+            "retrieval_report_sha256",
+        }
+        if {
+            key: value
+            for key, value in left["evaluator_fingerprint"].items()
+            if key not in input_binding_fields
+        } != {
+            key: value
+            for key, value in right["evaluator_fingerprint"].items()
+            if key not in input_binding_fields
+        }:
+            raise ValueError("reader evaluator fingerprints differ")
+        for qid in indexed[0]:
+            left_row, right_row = indexed[0][qid], indexed[1][qid]
+            for row in (left_row, right_row):
+                if (
+                    not isinstance(row.get("question"), str)
+                    or not isinstance(row.get("question_type"), str)
+                    or not row["question_type"]
+                    or type(row.get("is_abstention")) is not bool
+                    or "question_date" not in row
+                    or "gold_answer" not in row
+                ):
+                    raise ValueError(f"reader immutable evaluation inputs missing for {qid}")
+            for field in (
+                "question",
+                "question_date",
+                "question_type",
+                "is_abstention",
+                "gold_answer",
+            ):
+                if left_row.get(field) != right_row.get(field):
+                    raise ValueError(f"reader {field} differs for {qid}")
+            gold_list_fields = {
+                key
+                for row in (left_row, right_row)
+                for key, value in row.items()
+                if "gold" in key and isinstance(value, list)
+            }
+            for field in gold_list_fields:
+                if left_row.get(field) != right_row.get(field):
+                    raise ValueError(f"reader {field} differs for {qid}")
+        for report in (left, right):
+            if report.get("reader_report_sha256") != reader_report_fingerprint(report):
+                raise ValueError("reader report fingerprint is invalid")
+    else:
+        scripts_dir = str(Path(__file__).resolve().parent)
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        import gate_common
+
+        strict_rows = [gate_common.validate_provenance_report(report) for report in (left, right)]
+        if any(rows != strict for rows, strict in zip(indexed, strict_rows)):
+            raise ValueError("provenance strict validation changed question rows")
+        for field in ("golden_revision", "corpus_revision"):
+            if not left.get(field) or left.get(field) != right.get(field):
+                raise ValueError(f"provenance {field} differs")
+    return [(qid, indexed[0][qid], indexed[1][qid]) for qid in sorted(indexed[0])]
+
+
+def load_bound_evidence_rows(report: dict) -> dict[str, dict]:
+    path_value = report.get("evidence_path")
+    expected_sha = report.get("source_evidence_sha256")
+    if not isinstance(path_value, str) or not path_value:
+        raise ValueError("reader report evidence_path is missing")
+    raw = Path(path_value).read_bytes()
+    if hashlib.sha256(raw).hexdigest() != expected_sha:
+        raise ValueError("reader report evidence bytes do not match source hash")
+    rows = [json.loads(line) for line in raw.split(b"\n") if line.strip()]
+    indexed = {}
+    for row in rows:
+        qid = row.get("question_id") if isinstance(row, dict) else None
+        if not isinstance(qid, str) or not qid or qid in indexed:
+            raise ValueError("reader evidence has missing or duplicate question IDs")
+        indexed[qid] = row
+    return indexed
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence", required=True, help="bench-lme --emit-qa JSONL")
@@ -545,15 +1268,20 @@ def main() -> int:
             "v2 CoT prompt for temporal-reasoning questions and counting "
             "questions in any stratum, the terse route elsewhere, "
             "calibrated abstention kept in both routes); part of the "
-            "reader cache key since the system prompt differs per row "
-            "under v3, and recorded in the report as prompt_version plus "
-            "a routing breakdown"
+            "reader cache key and recorded in the report as prompt_version; "
+            "v3 also records its per-row routing breakdown"
         ),
     )
     parser.add_argument(
         "--judge-model",
         default=None,
         help="judge model id (defaults to --model; lets a stronger model judge)",
+    )
+    parser.add_argument(
+        "--judge-profile",
+        choices=("longmemeval", RAG_SUPPORTED_SCHEMA_ID),
+        default="longmemeval",
+        help="judge contract; rag-supported-v1 requires correctness and evidence support",
     )
     parser.add_argument(
         "--reasoning-effort",
@@ -569,16 +1297,28 @@ def main() -> int:
     parser.add_argument("--limit", type=int, help="only process the first N evidence rows (smoke)")
     parser.add_argument("--seed", type=int, default=20260710, help="bootstrap seed")
     args = parser.parse_args()
+    if args.limit is not None and args.limit < 1:
+        parser.error("--limit must be at least 1")
 
     # Split on '\n' only: chat bodies can embed U+2028/U+2029, which
     # str.splitlines() would treat as line breaks mid-JSON-record.
-    rows = [
-        json.loads(line)
-        for line in Path(args.evidence).read_text().split("\n")
+    evidence_path = Path(args.evidence)
+    evidence_bytes = evidence_path.read_bytes()
+    retrieval_report_sha256 = (
+        hashlib.sha256(Path(args.retrieval_report).read_bytes()).hexdigest()
+        if args.retrieval_report
+        else None
+    )
+    raw_lines = evidence_bytes.split(b"\n")
+    source_lines = [
+        line + (b"\n" if index < len(raw_lines) - 1 else b"")
+        for index, line in enumerate(raw_lines)
         if line.strip()
     ]
-    if args.limit:
-        rows = rows[: args.limit]
+    source_rows = [json.loads(line.decode()) for line in source_lines]
+    smoke_only = args.limit is not None
+    rows = source_rows[: args.limit] if smoke_only else source_rows
+    evaluated_evidence_bytes = b"".join(source_lines[: args.limit]) if smoke_only else evidence_bytes
 
     judge_model = args.judge_model or args.model
     cli = ReaderCli(
@@ -598,12 +1338,20 @@ def main() -> int:
             "question_id": row["question_id"],
             "question_type": row["question_type"],
             "is_abstention": row["is_abstention"],
+            "question": row["question"],
+            "question_date": row.get("question_date"),
             "gold_answer": row["gold_answer"],
-            "reply": None,
+            "notes": None,
+            "answer": None,
+            "abstain": None,
             "judge_method": None,
-            "correct": None,
+            "correct": False,
             "reader_error": None,
+            "parse_error": None,
+            "judge_error": None,
         }
+        if args.judge_profile == RAG_SUPPORTED_SCHEMA_ID:
+            record.update(_rag_audit_defaults())
         if args.prompt_version == 3:
             route, system_prompt = route_v3(row["question_type"], row["question"])
             routing_counts[route] += 1
@@ -611,10 +1359,24 @@ def main() -> int:
             system_prompt = reader_system_prompt
         try:
             reply = cli.call("reader", system_prompt, build_reader_prompt(row))
-            record["reply"] = reply
-            correct, method = judge_row(cli, row, reply)
-            record["correct"] = correct
-            record["judge_method"] = method
+            try:
+                output = parse_reader_output(reply)
+            except (json.JSONDecodeError, ValueError, TypeError) as error:
+                record["parse_error"] = str(error)
+                per_question.append(record)
+                continue
+            record.update(output)
+            if args.judge_profile == RAG_SUPPORTED_SCHEMA_ID:
+                record.update(judge_rag_row(cli, row, output))
+            else:
+                try:
+                    correct, method = judge_row(cli, row, output)
+                except (JudgeFailure, RuntimeError, subprocess.TimeoutExpired, ValueError) as error:
+                    record["judge_error"] = str(error)
+                    per_question.append(record)
+                    continue
+                record["correct"] = correct
+                record["judge_method"] = method
         except CallBudgetExceeded as error:
             aborted_reason = str(error)
             per_question.append(record)
@@ -635,17 +1397,114 @@ def main() -> int:
         "codex": "codex exec headless (read-only sandbox, final message only)",
         "openrouter": "openrouter chat/completions API",
     }[args.engine]
+    errors = {
+        name: sum(bool(row[f"{name}_error"]) for row in per_question)
+        for name in ("reader", "parse", "judge")
+    }
+    question_ids = sorted(row["question_id"] for row in rows)
+    prompt_hashes = {
+        "v1": sha256_text(READER_SYSTEM_PROMPT),
+        "v2": sha256_text(READER_SYSTEM_PROMPT_V2),
+        "v3_terse": sha256_text(READER_SYSTEM_PROMPT_V3_TERSE),
+    }
+    if args.judge_profile == RAG_SUPPORTED_SCHEMA_ID:
+        judge_hashes = {
+            RAG_SUPPORTED_SCHEMA_ID: sha256_text(
+                build_rag_supported_judge_prompt(
+                    {
+                        "question": "{question}",
+                        "gold_answer": "{gold}",
+                        "evidence": [{"rank": 1, "body": "{evidence}"}],
+                    },
+                    "{answer}",
+                )
+            )
+        }
+        judge_system_prompt = RAG_SUPPORTED_JUDGE_SYSTEM_PROMPT
+        response_contracts = {
+            kind: response_contract(
+                args.engine, kind, args.model if kind == "reader" else judge_model
+            )
+            for kind in ("reader", "rag_judge", "pair_judge")
+        }
+    else:
+        judge_hashes = {
+            question_type: sha256_text(
+                build_judge_prompt(question_type, "{question}", "{gold}", "{answer}")
+            )
+            for question_type in (
+                "single-session-user",
+                "single-session-assistant",
+                "multi-session",
+                "temporal-reasoning",
+                "knowledge-update",
+                "single-session-preference",
+            )
+        }
+        judge_system_prompt = JUDGE_SYSTEM_PROMPT
+        response_contracts = {
+            kind: response_contract(
+                args.engine, kind, args.model if kind == "reader" else judge_model
+            )
+            for kind in ("reader", "judge")
+        }
+    evaluator = {
+        "engine": args.engine,
+        "reader_model_id": args.model,
+        "judge_model_id": judge_model,
+        "judge_profile": args.judge_profile,
+        "fallback_policy": "none_fail_closed",
+        "reasoning_effort": args.reasoning_effort,
+        "evaluator_source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "source_evidence_sha256": hashlib.sha256(evidence_bytes).hexdigest(),
+        "retrieval_report_sha256": retrieval_report_sha256,
+        "prompt_version": args.prompt_version,
+        "active_reader_prompt_sha256": (
+            {
+                "cot": sha256_text(READER_SYSTEM_PROMPT_V2),
+                "terse": sha256_text(READER_SYSTEM_PROMPT_V3_TERSE),
+            }
+            if args.prompt_version == 3
+            else sha256_text(reader_system_prompt)
+        ),
+        "judge_system_prompt_sha256": sha256_text(judge_system_prompt),
+        "prompt_sha256": prompt_hashes,
+        "response_contract": response_contracts,
+        "judge_prompt_sha256": judge_hashes,
+    }
+    if args.judge_profile == RAG_SUPPORTED_SCHEMA_ID:
+        evaluator["rag_supported_judge_schema_sha256"] = sha256_text(
+            json.dumps(
+                RAG_SUPPORTED_JUDGE_JSON_SCHEMA,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        evaluator["paired_rag_judge_schema_sha256"] = sha256_text(
+            json.dumps(
+                PAIRED_RAG_JUDGE_JSON_SCHEMA,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+    evaluator["sha256"] = sha256_text(
+        json.dumps(evaluator, sort_keys=True, separators=(",", ":"))
+    )
+    complete = len(per_question) == len(rows) and aborted_reason is None
     report = {
         "benchmark": "longmemeval_reader_qa",
         "engine": args.engine,
         "reader": f"{args.model} ({engine_desc})",
         "judge": (
-            f"containment+{judge_model} (normalized containment first; one LLM "
-            "judge call on non-match; abstention = exact 'I don't know' "
-            "containment)"
+            f"{judge_model} (rag-supported-v1; correctness plus retrieved-evidence "
+            "support; no fallback)"
+            if args.judge_profile == RAG_SUPPORTED_SCHEMA_ID
+            else f"{judge_model} (canonical task-specific LongMemEval prompt; "
+            "answer field only; abstention = abstain true plus answer null)"
         ),
         "reader_model_id": args.model,
         "judge_model_id": judge_model,
+        "judge_profile": args.judge_profile,
         "prompt_version": args.prompt_version,
         "routing": routing_counts,
         "reasoning_effort": args.reasoning_effort,
@@ -653,8 +1512,23 @@ def main() -> int:
         "label": args.label,
         "evidence_path": args.evidence,
         "retrieval_report": args.retrieval_report,
+        "retrieval_report_sha256": retrieval_report_sha256,
         "command": " ".join(sys.argv),
         "generated_at_unix": int(time.time()),
+        "expected_n": len(rows),
+        "source_expected_n": len(source_rows),
+        "evaluated_expected_n": len(rows),
+        "smoke_only": smoke_only,
+        "complete": complete,
+        "promotion_ineligible": smoke_only or not complete or any(errors.values()),
+        "errors": errors,
+        "evidence_sha256": hashlib.sha256(evaluated_evidence_bytes).hexdigest(),
+        "source_evidence_sha256": hashlib.sha256(evidence_bytes).hexdigest(),
+        "evaluated_evidence_sha256": hashlib.sha256(evaluated_evidence_bytes).hexdigest(),
+        "question_set_sha256": sha256_text(
+            json.dumps(question_ids, separators=(",", ":"))
+        ),
+        "evaluator_fingerprint": evaluator,
         "aborted": aborted_reason,
         "fresh_calls": cli.fresh_calls,
         "cached_calls": cli.cached_calls,
@@ -667,29 +1541,75 @@ def main() -> int:
         },
         "per_question": per_question,
         "paired_vs_baseline": None,
+        "baseline_validation_error": None,
+        "paired_adjudication_invalid": False,
     }
 
+    report["reader_report_sha256"] = reader_report_fingerprint(report)
     if args.baseline:
-        baseline = json.loads(Path(args.baseline).read_text())
-        base_rows = {
-            r["question_id"]: r
-            for r in baseline["per_question"]
-            if r.get("correct") is not None
-        }
-        deltas = [
-            float(r["correct"]) - float(base_rows[r["question_id"]]["correct"])
-            for r in per_question
-            if r.get("correct") is not None and r["question_id"] in base_rows
-        ]
-        report["paired_vs_baseline"] = {
-            "baseline_path": args.baseline,
-            "baseline_label": baseline.get("label"),
-            "n_paired": len(deltas),
-            "delta_qa_accuracy": bootstrap_ci(deltas, BOOTSTRAP_RESAMPLES, args.seed),
-            "bootstrap_resamples": BOOTSTRAP_RESAMPLES,
-            "bootstrap_seed": args.seed,
-        }
+        try:
+            baseline = json.loads(Path(args.baseline).read_text())
+            paired = validate_and_pair_reports(report, baseline, "reader")
+            deltas = [
+                float(current["correct"]) - float(base["correct"])
+                for _, current, base in paired
+            ]
+            report["paired_vs_baseline"] = {
+                "baseline_path": args.baseline,
+                "baseline_label": baseline.get("label"),
+                "n_paired": len(deltas),
+                "delta_qa_accuracy": bootstrap_ci(deltas, BOOTSTRAP_RESAMPLES, args.seed),
+                "bootstrap_resamples": BOOTSTRAP_RESAMPLES,
+                "bootstrap_seed": args.seed,
+            }
+            if args.judge_profile == RAG_SUPPORTED_SCHEMA_ID:
+                current_evidence = {
+                    row["question_id"]: row for row in source_rows
+                }
+                baseline_evidence = load_bound_evidence_rows(baseline)
+                if set(current_evidence) != set(baseline_evidence):
+                    raise ValueError("paired RAG evidence question IDs differ")
+                adjudications = []
+                for qid, current, base in paired:
+                    if current["correct"] == base["correct"]:
+                        continue
+                    common = {
+                        "question_id": qid,
+                        "question": current["question"],
+                        "gold_answer": current["gold_answer"],
+                    }
+                    current_bundle = {
+                        "answer": current["answer"],
+                        "evidence": current_evidence[qid]["evidence"],
+                        "correct": current["correct"],
+                    }
+                    baseline_bundle = {
+                        "answer": base["answer"],
+                        "evidence": baseline_evidence[qid]["evidence"],
+                        "correct": base["correct"],
+                    }
+                    adjudications.append(
+                        adjudicate_supported_flip(
+                            cli,
+                            common,
+                            current_bundle,
+                            baseline_bundle,
+                            seed=args.seed,
+                        )
+                    )
+                report["paired_vs_baseline"]["supported_flip_adjudication"] = adjudications
+                if any(item["status"] != "resolved" for item in adjudications):
+                    report["paired_adjudication_invalid"] = True
+                    report["promotion_ineligible"] = True
+        except (OSError, json.JSONDecodeError, ValueError) as error:
+            report["baseline_validation_error"] = str(error)
+            report["paired_vs_baseline"] = {
+                "baseline_path": args.baseline,
+                "decision": f"HOLD/INVALID: {error}",
+            }
+            report["promotion_ineligible"] = True
 
+    report["reader_report_sha256"] = reader_report_fingerprint(report)
     Path(args.out).write_text(json.dumps(report, indent=2) + "\n")
     overall = report["overall"]
     print(
@@ -698,7 +1618,11 @@ def main() -> int:
         f"fresh_calls={cli.fresh_calls} cached_calls={cli.cached_calls} "
         f"aborted={aborted_reason} out={args.out}"
     )
-    return 1 if aborted_reason else 0
+    return 1 if (
+        aborted_reason
+        or report["baseline_validation_error"]
+        or report["paired_adjudication_invalid"]
+    ) else 0
 
 
 if __name__ == "__main__":

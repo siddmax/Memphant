@@ -11,6 +11,7 @@ MIGRATIONS = ROOT / "memphant_migrations" / "versions"
 REQUIRED_TABLES = {
     "tenant",
     "subject",
+    "subject_tombstone",
     "actor",
     "agent_node",
     "scope",
@@ -29,7 +30,11 @@ REQUIRED_TABLES = {
     "blob_ledger",
     "belief_observation",
     "review_event",
+    "review_event_unit",
     "scope_block",
+    "api_key",
+    "forgotten_source",
+    "mutation_ledger",
     "schema_migrations",
 }
 
@@ -71,6 +76,8 @@ def main() -> int:
             findings.append(f"{table}:missing_tenant_id")
         if f"alter table memphant.{table} enable row level security" not in sql:
             findings.append(f"{table}:missing_rls")
+        if f"alter table memphant.{table} force row level security" not in sql:
+            findings.append(f"{table}:missing_force_rls")
         if table != "tenant" and f"create index if not exists memphant_{table}_tenant" not in sql:
             findings.append(f"{table}:missing_tenant_index")
         policy_marker = f"create policy memphant_{table}_tenant_isolation"
@@ -83,10 +90,43 @@ def main() -> int:
         if re.search(rf"grant\s+(select|insert|update|delete|all).*?\s+to\s+{role}\b", sql, re.S):
             findings.append(f"{role}:browser_role_grant")
 
-    for function in ("current_tenant_id", "set_updated_at"):
+    for function in (
+        "current_tenant_id",
+        "bind_tenant",
+        "set_updated_at",
+        "authenticate_api_key",
+        "claim_reflect_jobs",
+        "dead_letter_count",
+        "provision_tenant",
+        "provision_api_key",
+        "revoke_api_key",
+    ):
         block = sql[sql.find(f"function memphant.{function}"):]
         if not block or "set search_path = memphant, pg_catalog" not in block[:500]:
             findings.append(f"{function}:missing_search_path")
+
+    for role in (
+        "memphant_owner",
+        "memphant_app",
+        "memphant_worker",
+        "memphant_authn",
+        "memphant_readonly",
+        "memphant_provisioner",
+    ):
+        if f"create role {role} nologin" not in sql:
+            findings.append(f"{role}:missing_capability_role")
+
+    for function in (
+        "authenticate_api_key",
+        "claim_reflect_jobs",
+        "dead_letter_count",
+        "provision_tenant",
+        "provision_api_key",
+        "revoke_api_key",
+    ):
+        block = sql[sql.find(f"function memphant.{function}"):]
+        if not block or "security definer" not in block[:900]:
+            findings.append(f"{function}:missing_security_definer")
 
     if findings:
         print("migration_contract=dirty")

@@ -33,10 +33,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use memphant_core::service::MemoryService;
-use memphant_core::{EmbeddingProvider, NoopEmbedding, SystemClock};
+use memphant_core::{EmbeddingProvider, MemoryStore, NoopEmbedding, SystemClock};
 use memphant_store_postgres::PgStore;
 use memphant_types::{
-    ActorId, RecallHttpRequest, RecallMode, RetainEpisodeHttpRequest, ScopeId, TenantId, TrustLevel,
+    ContextBindingAgentRef, ContextBindingEntityRef, ContextBindingRequest, ContextBindingScopeRef,
+    RecallMode, RecallRequest, RetainEpisodeHttpRequest, RetainEpisodeHttpResponse,
+    RetainEpisodePayload, RetainPayload, TenantId, TrustLevel,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -806,8 +808,44 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
             .await
             .map_err(|error| format!("create_tenant: {error}"))?;
         let tenant = TenantId::from_u128(tenant_uuid.as_u128());
-        let scope = ScopeId::new();
-        let actor = ActorId::new();
+        let binding = store
+            .resolve_context_binding(
+                tenant,
+                format!("lme:{}", question.question_id),
+                ContextBindingRequest {
+                    subject: ContextBindingEntityRef {
+                        external_ref: format!("subject:{}", question.question_id),
+                        kind: "user".to_string(),
+                    },
+                    actor: ContextBindingEntityRef {
+                        external_ref: "actor:lme".to_string(),
+                        kind: "system".to_string(),
+                    },
+                    scope: ContextBindingScopeRef {
+                        external_ref: "scope:lme".to_string(),
+                        kind: "user_root".to_string(),
+                        parent_external_ref: None,
+                    },
+                    agent_node: ContextBindingAgentRef {
+                        external_ref: "agent:lme".to_string(),
+                        parent_external_ref: None,
+                    },
+                    access_policies: vec![],
+                },
+            )
+            .await
+            .map_err(|error| format!("bind context: {error}"))?;
+        let context = store
+            .resolve_memory_context(
+                tenant,
+                binding.subject_id,
+                binding.actor_id,
+                binding.scope_id,
+                binding.agent_node_id,
+            )
+            .await
+            .map_err(|error| format!("resolve context: {error}"))?;
+        let scope = context.scope_id;
 
         // Chronological ingestion: one episode per haystack session.
         let mut order: Vec<usize> = (0..question.haystack_sessions.len()).collect();
@@ -826,28 +864,35 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
                 &question.haystack_dates[session_index],
                 &question.haystack_sessions[session_index],
             );
-            for body in bodies {
+            for (turn_index, body) in bodies.into_iter().enumerate() {
                 let response = ingest_service
                     .retain(
-                        tenant,
+                        &context,
+                        &format!("lme:{session_id}:{turn_index}"),
+                        TrustLevel::TrustedUser,
                         RetainEpisodeHttpRequest {
-                            tenant_id: tenant,
+                            subject_id: context.data_subject_id,
                             scope_id: scope,
-                            actor_id: actor,
-                            source_kind: "user".to_string(),
-                            source_trust: TrustLevel::TrustedUser,
-                            subject_hint: Some(format!("session {session_id}")),
-                            subject: None,
-                            predicate: None,
-                            body: Some(body),
-                            resource: None,
-                            unit: None,
-                            compiler_version: None,
+                            actor_id: context.actor_id,
+                            agent_node_id: context.agent_node_id,
+                            subject_generation: context.subject_generation,
+                            source_ref: format!("longmemeval:session:{session_id}"),
+                            observed_at: format!(
+                                "{}T00:00:00Z",
+                                question.haystack_dates[session_index]
+                            ),
+                            payload: RetainPayload::Episode(RetainEpisodePayload {
+                                source_kind: "user".to_string(),
+                                body,
+                            }),
                         },
                     )
                     .await
                     .map_err(|error| format!("retain {session_id}: {error}"))?;
-                if let Some(episode_id) = response.episode_id {
+                let retained: RetainEpisodeHttpResponse =
+                    serde_json::from_slice(response.body())
+                        .map_err(|error| format!("retain {session_id}: {error}"))?;
+                if let Some(episode_id) = retained.episode_id {
                     episode_sessions
                         .entry(episode_id)
                         .or_insert_with(|| session_id.clone());
@@ -855,33 +900,35 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
             }
         }
 
-        // Reflect through the same claim/complete path the worker uses.
-        ingest_service
-            .reflect(tenant, scope, None)
+        // Each question has a fresh tenant above; drain only this scratch
+        // workload through the production worker surface.
+        while ingest_service
+            .run_worker_tick(usize::MAX)
             .await
-            .map_err(|error| format!("reflect: {error}"))?;
+            .map_err(|error| format!("reflect: {error}"))?
+            > 0
+        {}
 
         let response = recall_service
-            .recall(
-                tenant,
-                RecallHttpRequest {
-                    tenant_id: tenant,
-                    scope_id: scope,
-                    actor_id: actor,
-                    allowed_scope_ids: None,
-                    query: question.question.clone(),
-                    limit: Some(options.k),
-                    budget_tokens: Some(options.budget_tokens),
-                    mode: Some(options.mode),
-                    include_beliefs: Some(false),
-                    edge_expansion_enabled: Some(disable != Some("edge_expansion")),
-                    context_packing_abstention_enabled: Some(disable != Some("packing")),
-                    rerank_enabled: Some(disable != Some("rerank")),
-                    query_decomposition_enabled: Some(disable != Some("query_decomposition")),
-                    procedure_recall_enabled: Some(disable != Some("procedure_recall")),
-                    decay_enabled: Some(disable != Some("decay")),
-                },
-            )
+            .recall_internal(RecallRequest {
+                context: context.clone(),
+                query: question.question.clone(),
+                k: options.k,
+                budget_tokens: options.budget_tokens,
+                mode: options.mode,
+                include_beliefs: false,
+                edge_expansion_enabled: disable != Some("edge_expansion"),
+                context_packing_abstention_enabled: disable != Some("packing"),
+                rerank_enabled: disable != Some("rerank"),
+                learned_rerank_profile: None,
+                query_decomposition_enabled: disable != Some("query_decomposition"),
+                procedure_recall_enabled: disable != Some("procedure_recall"),
+                decay_enabled: disable != Some("decay"),
+                engine_version: "bench-lme".to_string(),
+                transaction_as_of: None,
+                valid_at: None,
+                aggregation_window: None,
+            })
             .await
             .map_err(|error| format!("recall: {error}"))?;
 

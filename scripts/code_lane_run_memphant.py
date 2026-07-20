@@ -113,6 +113,129 @@ def assert_gold_coverage(ingested_rows: list[dict], goldens: list[dict]) -> None
         raise RuntimeError(f"gold attempt_id(s) not in ingest set: {missing}")
 
 
+def verify_input_contract(
+    corpus_path: Path, golden_path: Path, lock: dict
+) -> tuple[list[dict], list[dict]]:
+    """Verify both private inputs and every golden-to-event provenance edge.
+
+    The old runner checked only the golden hash. That allowed a same-path
+    corpus replacement to change the retrieval mechanism while preserving the
+    claimed golden identity. The extraction block in the golden lock is the
+    canonical corpus lock, so both sides are checked before any scratch DB or
+    server process is created.
+    """
+    corpus_bytes = corpus_path.read_bytes()
+    golden_bytes = golden_path.read_bytes()
+    extraction = lock.get("extraction")
+    if not isinstance(extraction, dict):
+        raise RuntimeError("golden lock missing extraction corpus contract")
+    corpus_sha = gc.sha256_hex(corpus_bytes)
+    if corpus_sha != extraction.get("corpus_sha256"):
+        raise RuntimeError("corpus sha256 mismatch")
+    if len(corpus_bytes) != extraction.get("corpus_bytes"):
+        raise RuntimeError("corpus byte count mismatch")
+    golden_sha = gc.sha256_hex(golden_bytes)
+    if golden_sha != lock.get("sha256"):
+        raise RuntimeError("golden sha256 mismatch")
+    if len(golden_bytes) != lock.get("bytes"):
+        raise RuntimeError("golden byte count mismatch")
+
+    corpus_rows = gc.load_goldens(corpus_path)
+    goldens = gc.load_goldens(golden_path)
+    if len(corpus_rows) != extraction.get("sampled_attempts"):
+        raise RuntimeError("corpus attempt count mismatch")
+    if len(goldens) != lock.get("count"):
+        raise RuntimeError("golden count mismatch")
+    attempt_ids = [row.get("attempt_id") for row in corpus_rows]
+    if any(not isinstance(value, str) or not value for value in attempt_ids):
+        raise RuntimeError("corpus attempt_id is missing")
+    if len(attempt_ids) != len(set(attempt_ids)):
+        raise RuntimeError("duplicate corpus attempt_id")
+
+    events: dict[tuple[str, int], dict] = {}
+    for row in corpus_rows:
+        sequences: list[int] = []
+        for event in row.get("events", []):
+            sequence = event.get("sequence")
+            if not isinstance(sequence, int):
+                raise RuntimeError(f"invalid event sequence for {row['attempt_id']}")
+            key = (row["attempt_id"], sequence)
+            if key in events:
+                raise RuntimeError(f"duplicate corpus event: {key}")
+            events[key] = event
+            sequences.append(sequence)
+        if sequences != sorted(sequences):
+            raise RuntimeError(f"corpus event order drift: {row['attempt_id']}")
+
+    for golden in goldens:
+        provenance = golden.get("provenance")
+        if not isinstance(provenance, list) or not provenance:
+            raise RuntimeError(f"golden provenance missing: {golden.get('question_id')}")
+        for entry in provenance:
+            key = (entry.get("attempt_id"), entry.get("event_sequence"))
+            event = events.get(key)
+            if event is None:
+                raise RuntimeError(f"golden source event missing: {key}")
+            if event.get("event_id") != entry.get("event_id"):
+                raise RuntimeError(f"golden event_id pairing mismatch: {key}")
+            start = entry.get("char_start")
+            end = entry.get("char_end")
+            span = entry.get("span")
+            if not isinstance(start, int) or not isinstance(end, int) or not isinstance(span, str):
+                raise RuntimeError(f"golden span coordinates invalid: {key}")
+            if event.get("text", "")[start:end] != span:
+                raise RuntimeError(f"golden span pairing mismatch: {key}")
+    return corpus_rows, goldens
+
+
+def control_readiness(corpus_rows: list[dict], goldens: list[dict]) -> dict:
+    """Report which Task-5 mechanisms the pinned rows can truthfully support.
+
+    Outcome labels are intentionally never inferred from exit codes, run
+    phases, or partial validator counts. A mark arm needs an explicit typed
+    post-action label and its validator evidence on every training attempt.
+    Likewise, retrieval QA is not a validator-backed held-out coding task.
+    """
+    required_attempt_fields = {
+        "repository",
+        "base_commit",
+        "explicit_outcome",
+        "outcome_evidence",
+    }
+    required_task_fields = {
+        "held_out_task_id",
+        "validator_command",
+        "validator_expected",
+    }
+    missing = {
+        field
+        for field in required_attempt_fields
+        if any(field not in row for row in corpus_rows)
+    }
+    missing.update(
+        field for field in required_task_fields if any(field not in row for row in goldens)
+    )
+    typed = {"success", "failure", "corrected", "ignored"}
+    labels_valid = all(row.get("explicit_outcome") in typed for row in corpus_rows)
+    return {
+        "deterministic_file_search": bool(corpus_rows and goldens),
+        "verbatim_memphant": bool(corpus_rows and goldens),
+        "outcome_marked_memphant": not missing.intersection(required_attempt_fields)
+        and labels_valid,
+        "validator_backed_held_out": not missing.intersection(required_task_fields),
+        "missing_fields": sorted(missing),
+    }
+
+
+def require_outcome_mark_ready(readiness: dict) -> None:
+    if not readiness.get("outcome_marked_memphant"):
+        raise RuntimeError(
+            "outcome-marked MemPhant is not paired: explicit typed post-action "
+            "labels and validator evidence are required; missing "
+            + ", ".join(readiness.get("missing_fields", []))
+        )
+
+
 # --- ingest ------------------------------------------------------------------
 
 
@@ -158,35 +281,39 @@ def main() -> int:
         "--limit-attempts", type=int, default=0,
         help="0 = full corpus; otherwise a smoke cap that always keeps every gold-referenced attempt",
     )
+    parser.add_argument(
+        "--outcome-marked",
+        action="store_true",
+        help="require the explicit typed outcome+validator contract; current 40Q corpus fails closed",
+    )
     parser.add_argument("--server-bin", default=str(gc.MEMPHANT_ROOT / "target/release/memphant-server"))
     parser.add_argument("--worker-bin", default=str(gc.MEMPHANT_ROOT / "target/release/memphant-worker"))
     parser.add_argument("--cli-bin", default=str(gc.MEMPHANT_ROOT / "target/release/memphant-cli"))
     args = parser.parse_args()
 
-    # Re-exec through with_scratch_db.sh (unless already inside one): mints a
-    # fresh migrated DB, drops it on exit. args.database_url then points at that
-    # scratch DB for every downstream call (provision/server/worker/report).
+    golden_path = Path(args.golden)
+    lock = json.loads(golden_lock_path(golden_path).read_text())
+    corpus_path = Path(args.corpus)
+    corpus_rows, goldens = verify_input_contract(corpus_path, golden_path, lock)
+    readiness = control_readiness(corpus_rows, goldens)
+    if args.outcome_marked:
+        require_outcome_mark_ready(readiness)
+
+    # Re-exec only after immutable input + mechanism readiness checks. Invalid
+    # inputs must not mint a scratch DB or start any packaged process.
     gr.reexec_through_scratch_db(args.database_url)
     args.database_url = os.environ["DATABASE_URL"]
 
     gr.check_embed_model_key(args.embed_model)
     label_prefix = f"[{args.label}] " if args.label else ""
 
-    golden_path = Path(args.golden)
-    goldens = gc.load_goldens(golden_path)
-    lock = json.loads(golden_lock_path(golden_path).read_text())
-    golden_sha = gc.sha256_hex(golden_path.read_bytes())
-    if golden_sha != lock["sha256"]:
-        raise RuntimeError(
-            f"golden sha256 mismatch: file={golden_sha[:12]} lock={lock['sha256'][:12]}"
-        )
+    golden_sha = lock["sha256"]
     print(
         f"{label_prefix}goldens={len(goldens)} path={golden_path.name} "
         f"sha256={golden_sha[:12]} (lock verified)",
         file=sys.stderr,
     )
 
-    corpus_rows = gc.load_goldens(Path(args.corpus))
     ingest_rows = select_ingest_attempts(corpus_rows, goldens, args.limit_attempts)
     assert_gold_coverage(ingest_rows, goldens)
     print(
@@ -263,6 +390,7 @@ def main() -> int:
             "limit_attempts": args.limit_attempts,
             "golden_sha256": golden_sha,
             "golden_count": n,
+            "control_readiness": readiness,
             "recall_at_5": r5,
             "recall_at_10": r10,
             "per_question": provenance_rows,

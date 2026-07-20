@@ -240,9 +240,25 @@ def test_build_provenance_report_records_breadcrumb_false(gr):
         budget_tokens=8192,
         haystack_len=42,
         golden_sha="deadbeef",
+        corpus_revision_id="sha256:test-corpus",
+        expected_n=2,
         provenance_rows=[
-            {"hit_at_5": True, "hit_at_10": True},
-            {"hit_at_5": False, "hit_at_10": True},
+            {
+                "hit_at_5": True,
+                "hit_at_10": True,
+                "degraded": False,
+                "fallback": False,
+                "skipped": False,
+                "recall_e2e_ms": 100,
+            },
+            {
+                "hit_at_5": False,
+                "hit_at_10": True,
+                "degraded": False,
+                "fallback": False,
+                "skipped": False,
+                "recall_e2e_ms": 200,
+            },
         ],
     )
     assert report["breadcrumb"] is False

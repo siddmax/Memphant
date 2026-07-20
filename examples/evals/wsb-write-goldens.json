@@ -64,12 +64,15 @@
       }
     ],
     "expected_actions": ["append", "supersede"],
-    "expected_unit_count": 2,
-    "expected_semantic_bodies": ["Callback token version is v2."],
+    "expected_unit_count": 3,
+    "expected_semantic_bodies": [
+      "Callback token version is v1.",
+      "Callback token version is v2."
+    ],
     "expected_belief_bodies": [],
     "expected_quarantined_bodies": [],
     "expected_freshness_due_bodies": [],
-    "expected_edge_kinds": ["contradicts", "supersedes"]
+    "expected_edge_kinds": ["supersedes", "contradicts", "supersedes"]
   },
   {
     "id": "invalidate_action",
@@ -200,11 +203,17 @@
       }
     ],
     "expected_actions": ["append", "supersede"],
-    "expected_unit_count": 2,
-    "expected_semantic_bodies": ["Current project is Borealis."],
+    "expected_unit_count": 3,
+    "expected_semantic_bodies": [
+      "Current project is Apollo.",
+      "Current project is Borealis."
+    ],
     "expected_belief_bodies": [],
     "expected_quarantined_bodies": [],
-    "expected_freshness_due_bodies": ["Current project is Borealis."],
-    "expected_edge_kinds": ["contradicts", "supersedes"]
+    "expected_freshness_due_bodies": [
+      "Current project is Apollo.",
+      "Current project is Borealis."
+    ],
+    "expected_edge_kinds": ["supersedes", "contradicts", "supersedes"]
   }
 ]

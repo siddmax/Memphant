@@ -1,0 +1,109 @@
+# Canonical evidence allowlist for the ignored campaign artifact roots
+# (docs/build-log/artifacts/unified-sota-20260713/, unified-sota-20260714/,
+# pmu-full300-sequential-20260717/ — see .gitignore).
+#
+# These are the small, canonical evidence files (scorecards, gate/retirement
+# records, candidate freezes, research-escalation cards, qualification proofs,
+# SHA256SUMS manifests, etc.) referenced by docs/handoff/2026-07-16-*.md,
+# docs/handoff/2026-07-18-*.md, docs/handoff/NEXT-SESSION-PROMPT.md,
+# docs/superpowers/specs/memphant/STATUS.md, and
+# docs/build-log/2026-07-1[3-5]-*.md, force-added out of an otherwise
+# ignore-only tree. Everything else under those roots (raw evidence dumps,
+# reader caches, corpora, and any file over 1MB) stays on disk but out of
+# Git.
+#
+# pmu-full300-sequential-20260717/ contributes zero entries: it holds an
+# upstream/official checkout of the PMU benchmark repo (dataset/scripts/
+# baselines), not campaign evidence, and no path under it is referenced by
+# name in the handoff/build-log set above.
+#
+# Future evidence adds under these ignored roots require `git add -f`.
+#
+docs/build-log/artifacts/unified-sota-20260713/development-memphant-query-rewrite-retrieval.json
+docs/build-log/artifacts/unified-sota-20260713/development-memphant-retrieval.json
+docs/build-log/artifacts/unified-sota-20260713/development-memphant-sibling-gather-retrieval.json
+docs/build-log/artifacts/unified-sota-20260713/development-memphant-temporal-retrieval.json
+docs/build-log/artifacts/unified-sota-20260713/development-profile-projection-retrieval.json
+docs/build-log/artifacts/unified-sota-20260713/query-rewrites-solpro-v1.json
+docs/build-log/artifacts/unified-sota-20260713/reader-model-screen-flash.json
+docs/build-log/artifacts/unified-sota-20260713/reader-model-screen-glm52.json
+docs/build-log/artifacts/unified-sota-20260713/reader-model-screen-luna.json
+docs/build-log/artifacts/unified-sota-20260713/reader-model-screen-solpro.json
+docs/build-log/artifacts/unified-sota-20260713/reader-model-screen-sonnet5.json
+docs/build-log/artifacts/unified-sota-20260713/reader-solpro-memphant-current-evaluator.json
+docs/build-log/artifacts/unified-sota-20260713/reader-solpro-memphant-sibling-gather.json
+docs/build-log/artifacts/unified-sota-20260713/reader-solpro-memphant-temporal.json
+docs/build-log/artifacts/unified-sota-20260713/reader-solpro-memphant-v4-notes.json
+docs/build-log/artifacts/unified-sota-20260713/reader-solpro-memphant-validity-v1.json
+docs/build-log/artifacts/unified-sota-20260713/reader-solpro-memphant.json
+docs/build-log/artifacts/unified-sota-20260713/task2-error-decomposition.json
+docs/build-log/artifacts/unified-sota-20260713/task4-memora/weekly-software-engineer.answers.json
+docs/build-log/artifacts/unified-sota-20260713/task4-memora/weekly-software-engineer.attempts.json
+docs/build-log/artifacts/unified-sota-20260713/task4-memora/weekly-software-engineer.checkpoint.json
+docs/build-log/artifacts/unified-sota-20260713/task4-memora/weekly-software-engineer.proof.json
+docs/build-log/artifacts/unified-sota-20260713/validity-transform-v1.json
+docs/build-log/artifacts/unified-sota-20260714/memora-causal-split-20260715T072809Z/current-schema-rebuild-20260715T080000Z/SHA256SUMS
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/CANDIDATE-FREEZE.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/FINAL-CANDIDATE-FREEZE.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/objective/CANDIDATE-FREEZE.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/objective/OFFICIAL-GATE.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/objective/OFFICIAL-RETIREMENT.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/CANDIDATE-FREEZE-v11-confirmation-v12.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/confirmation-v10/research/20260718T173348Z/RESEARCH-ESCALATION.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/confirmation-v10/research/20260718T173954Z/RESEARCH-ESCALATION.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/confirmation-v12/CONFIRMATION-OPEN.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/confirmation-v12/CONFIRMATION-QUALIFICATION-v12.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/confirmation-v12/MEMPHANT-OPEN.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/confirmation-v12/PAUSED.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/confirmation-v12/RAW-DIALOGUE-GATE.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/confirmation-v12/memphant-recovery-1-rowwise/RECOVERY.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/confirmation-v12/memphant-recovery-2-rowwise/RECOVERY.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/confirmation-v12/memphant-recovery-3-rowwise/RECOVERY.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/confirmation-v12/memphant-recovery-4-rowwise/RECOVERY.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/confirmation-v12/memphant-recovery-5-rowwise/RECOVERY.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/confirmation-v9/research/20260718T161845Z/RESEARCH-ESCALATION.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/development-v17/QUALIFICATION.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/diagnostic-postfix-offset220-v7/QUALIFICATION.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/research/20260717T154402Z/RESEARCH-ESCALATION.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/research/20260717T161413Z/RESEARCH-ESCALATION.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/research/20260717T185101Z/RESEARCH-ESCALATION.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/research/20260717T191823Z/RESEARCH-ESCALATION.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/run-pmu-qualification-rowwise.sh
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/shadow-v1/CANDIDATE-865525-SEQUENTIAL-RETIRED.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/shadow-v1/CANDIDATE-9d3aad-SEQUENTIAL-RETIRED.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/shadow-v1/CANDIDATE-v7-FULL300-RETIREMENT.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/shadow-v1/MEMPHANT-CANDIDATE-68A947-RETIREMENT.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/shadow-v1/research/20260717T210523Z/RESEARCH-ESCALATION.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/shadow-v1/research/20260718T024654Z/RESEARCH-ESCALATION.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/shadow-v1/research/20260718T094323Z/RESEARCH-ESCALATION.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/shadow-v1/research/20260718T150532Z/MICRO-EVAL-SUMMARY.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/shadow-v1/research/20260718T150532Z/RESEARCH-ESCALATION.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/shadow-v1/research/20260719T033000Z/answer-set-coverage-proof/RESEARCH-ESCALATION.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/shadow-v1/runs/candidate-13dfa478d18d7e98/memphant-rowwise-sequential-v1/CANDIDATE-RETIREMENT-offset-165.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/shadow-v1/runs/candidate-d3c4475f-v12-aggregate/FULL300-SCORECARD.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/shadow-v1/runs/candidate-d3c4475f-v12-aggregate/INFRASTRUCTURE-AMENDMENT-v2.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/shadow-v1/runs/candidate-d3c4475f-v12-aggregate/LATENCY-AUDIT.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/personalized-use/future-v2/shadow-v1/runs/candidate-d3c4475f-v12-aggregate/POSTFLIGHT-VERIFICATION.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/scope/CANDIDATE-FREEZE.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/scope/OFFICIAL-GATE.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/scope/OFFICIAL-RETIREMENT.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/valid-selection/CANDIDATE-FREEZE.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/valid-selection/development/memphant-v6/extractor-attempts.jsonl
+docs/build-log/artifacts/unified-sota-20260714/memsyco-evidence-sota-20260715T172416Z/valid-selection/development/memphant-v6/memory/ABORTED.json
+docs/build-log/artifacts/unified-sota-20260714/memsyco-smoke-20260715T063309Z/SHA256SUMS
+docs/build-log/artifacts/unified-sota-20260714/stale-wiring-smoke-20260715T034300Z/stale-prefix/SHA256SUMS
+docs/build-log/artifacts/unified-sota-20260714/stale-wiring-smoke-20260715T054021Z/stale-prefix/SHA256SUMS
+docs/build-log/artifacts/unified-sota-20260714/task4-memora-luna/full.answers.json
+docs/build-log/artifacts/unified-sota-20260714/task4-memora-luna/full.fama.json
+docs/build-log/artifacts/unified-sota-20260714/task4-memora-luna/reasoning-v2.answers.json
+docs/build-log/artifacts/unified-sota-20260714/task4-memora-luna/reasoning-v2.fama.json
+docs/build-log/artifacts/unified-sota-20260714/task4-reasoning-oracle-luna-v4/report.json
+docs/build-log/artifacts/unified-sota-20260714/task4-state-mutation/artifact-reconstruction-runtime.json
+docs/build-log/artifacts/unified-sota-20260714/task4-state-mutation/book-current-bge16-post-preference.json
+docs/build-log/artifacts/unified-sota-20260714/task4-state-mutation/book-current-luna-reader-post-preference.json
+docs/build-log/artifacts/unified-sota-20260714/task4-state-mutation/prefix-screen-proof.json
+docs/build-log/artifacts/unified-sota-20260714/task4-state-mutation/prefix-screen/genetic-preference-v2.jsonl
+docs/build-log/artifacts/unified-sota-20260714/task4-state-mutation/project-current-luna-reader.json
+docs/build-log/artifacts/unified-sota-20260714/task4-state-mutation/targeted-state-proof.json
+docs/build-log/artifacts/unified-sota-20260714/task4-state-mutation/todo-current-causal-retrieval.json
+docs/build-log/artifacts/unified-sota-20260714/task4-state-mutation/todo-current-luna-reader.json

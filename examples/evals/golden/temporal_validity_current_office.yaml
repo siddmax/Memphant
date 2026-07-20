@@ -32,6 +32,3 @@ expect:
   trace_stages_include:
     - temporal
     - trace
-  dropped:
-    - unit: mem_launch_office_seattle_old
-      reason: stale

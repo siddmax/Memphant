@@ -364,8 +364,11 @@ expect:
 trace_assertions:
   - supersession_chain_length_min: 4   # N-1 supersedes edges — no A→C shortcut skipping a generation
   - resolution_reason: newer_valid_from
-# sibling case: historical query "where did the user live in March 2026?" with as_of →
-# the g2 (SF) generation (exercises the §1.3 historical validity gate + `08` §3.1 time_basis)
+# sibling case: historical query "where did the user live in mid-March 2026?" with
+# valid_at=2026-03-15 (after the g2 SF move on ep_2, before the g3 Austin move) and
+# transaction_as_of=2026-08-01 (after all five episodes are ingested) → the full-
+# bitemporal "both fields" case (`08` §3.1) resolving to the g2 (SF) generation, NOT
+# g1 (Seattle, whose window closes when g2 opens) (exercises both axes of the §1.3 historical validity gate)
 ```
 
 "Active-truth accuracy" (given N updates, does recall return the CURRENT truth?) is the per-ability rollup of this family + the stale-fact and derived-contradiction families — a fixture family, not a new metric.
