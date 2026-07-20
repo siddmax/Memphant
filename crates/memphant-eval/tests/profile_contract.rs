@@ -619,6 +619,54 @@ fn rung12_profile_archives_l4_exhaustive_promotion() {
 }
 
 #[test]
+fn current_rung12_profile_accepts_deep_names() {
+    let source =
+        fs::read_to_string(repo_root().join("examples/evals/rung12-l4-exhaustive-profile.yaml"))
+            .expect("read legacy fixture");
+    let current = source
+        .replace(
+            "benchmark_version: l4-exhaustive-raw-episode-2026-07-03",
+            "benchmark_version: agentic-deep-raw-source-2026-07-20",
+        )
+        .replace("item: L4 exhaustive recall", "item: L4 Deep recall");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("current-rung12-profile.yaml");
+    fs::write(&path, current).expect("write fixture");
+
+    let report = run_profile_file(&path, "rungs-0-11-baseline", None)
+        .expect("current Deep profile should pass");
+
+    assert_eq!(report.rung_decisions[0].item, "L4 Deep recall");
+    assert!(
+        report
+            .activated_levers
+            .iter()
+            .any(|item| item == "L4 Deep recall behavior")
+    );
+}
+
+#[test]
+fn current_rung12_profile_rejects_retired_public_names() {
+    let source =
+        fs::read_to_string(repo_root().join("examples/evals/rung12-l4-exhaustive-profile.yaml"))
+            .expect("read legacy fixture");
+    let current = source.replace(
+        "benchmark_version: l4-exhaustive-raw-episode-2026-07-03",
+        "benchmark_version: agentic-deep-raw-source-2026-07-20",
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("retired-rung12-profile.yaml");
+    fs::write(&path, current).expect("write fixture");
+
+    let error = run_profile_file(&path, "rungs-0-11-baseline", None)
+        .expect_err("current profiles must use Deep names");
+    let text = error.to_string();
+
+    assert!(text.contains("activation_decision:missing:L4 Deep recall behavior"));
+    assert!(text.contains("rung_decision:12:invalid_item:L4 exhaustive recall"));
+}
+
+#[test]
 fn rung12_promotion_requires_l4_sample_and_no_l4_control() {
     let source =
         fs::read_to_string(repo_root().join("examples/evals/rung12-l4-exhaustive-profile.yaml"))

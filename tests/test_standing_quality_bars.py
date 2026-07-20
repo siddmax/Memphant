@@ -64,6 +64,14 @@ def test_status_carries_promotion_provenance_rule_and_reopened_gates() -> None:
     assert "- [x] **Public launch gate**" not in status
 
 
+def test_agentic_deep_recall_stays_open_and_dormant_until_proven() -> None:
+    status = status_text()
+
+    assert "- [ ] 12 L4 Deep" in status
+    assert "| L4 Deep recall behavior | DORMANT" in status
+    assert "| L4 Deep recall behavior | BUILT" not in status
+
+
 def test_standing_quality_bars_all_pass() -> None:
     scorecard = load_scorecard()
 

@@ -140,7 +140,7 @@
 
 | Item | Status |
 |---|---|
-| L4 Deep recall behavior | BUILT (`rung12_l4_exhaustive_profile_001`: the then-public `mode=exhaustive` raw-episode scan recovered buried answer-bearing evidence; no-L4 control missed) |
+| L4 Deep recall behavior | DORMANT (public `mode=deep` contract exists, but bounded agentic source search is not built; legacy synthetic `rung12_l4_exhaustive_profile_001` evidence remains historical and does not prove Deep) |
 | Learned reranker | BUILT (`rung13_learned_rerank_profile_001`: archived memory-tuned linear profile recovered a protected-top-k rank-sensitive miss; no-learned-rerank control missed) |
 | Inferred-belief composition | BUILT (`rung15_inferred_belief_composition_profile_001`: guardrailed preference composition emits `derived_by=composition` belief-tier abstractions; no-composition control missed; OP-Bench-style restraint axis did not regress) |
 | Learned DSR/FSRS fitter | DORMANT (`rung13_learned_rerank_profile_001`: learned rerank proof is not the many-card MemPhant-native review-history floor required for FSRS parameter fitting) |

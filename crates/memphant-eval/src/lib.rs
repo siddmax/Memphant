@@ -33,7 +33,7 @@ const REQUIRED_PROFILE_AXES: &[&str] = &[
     "internal_syndai",
 ];
 const REQUIRED_ACTIVATION_DECISIONS: &[&str] = &[
-    "L4 exhaustive recall behavior",
+    "L4 Deep recall behavior",
     "Learned reranker",
     "Learned DSR/FSRS fitter",
     "DSR decay fold",
@@ -923,6 +923,9 @@ pub fn run_profile_file(
 
 fn validate_profile_suite(suite: &SotaProfileSuite) -> Vec<String> {
     let mut findings = Vec::new();
+    // The checked-in 2026-07-03 profiles are historical evidence and retain
+    // their then-public wording. Every current profile must use Deep.
+    let legacy_exhaustive_names_allowed = suite.benchmark_version.ends_with("-2026-07-03");
     for axis in REQUIRED_PROFILE_AXES {
         match suite.axes.get(*axis) {
             Some(result) => validate_axis(axis, result, &mut findings),
@@ -936,7 +939,10 @@ fn validate_profile_suite(suite: &SotaProfileSuite) -> Vec<String> {
         .map(|decision| decision.item.as_str())
         .collect();
     for item in REQUIRED_ACTIVATION_DECISIONS {
-        if !decisions.contains(item) {
+        let legacy_l4_match = *item == "L4 Deep recall behavior"
+            && legacy_exhaustive_names_allowed
+            && decisions.contains("L4 exhaustive recall behavior");
+        if !decisions.contains(item) && !legacy_l4_match {
             findings.push(format!("activation_decision:missing:{item}"));
         }
     }
@@ -944,7 +950,12 @@ fn validate_profile_suite(suite: &SotaProfileSuite) -> Vec<String> {
         validate_activation_decision(decision, &mut findings);
     }
     for decision in &suite.rung_decisions {
-        validate_rung_decision(decision, &suite.axes, &mut findings);
+        validate_rung_decision(
+            decision,
+            &suite.axes,
+            legacy_exhaustive_names_allowed,
+            &mut findings,
+        );
     }
 
     findings
@@ -1056,6 +1067,7 @@ fn validate_activation_decision(decision: &ActivationDecision, findings: &mut Ve
 fn validate_rung_decision(
     decision: &RungDecision,
     axes: &BTreeMap<String, SotaAxisResult>,
+    legacy_exhaustive_names_allowed: bool,
     findings: &mut Vec<String>,
 ) {
     let prefix = format!("rung_decision:{}", decision.rung);
@@ -1153,7 +1165,13 @@ fn validate_rung_decision(
         validate_rung11_dsr_decay_promotion(decision, axes, &prefix, findings);
     }
     if decision.rung == 12 && decision.status == "promoted" {
-        validate_rung12_l4_exhaustive_promotion(decision, axes, &prefix, findings);
+        validate_rung12_deep_promotion(
+            decision,
+            axes,
+            legacy_exhaustive_names_allowed,
+            &prefix,
+            findings,
+        );
     }
     if decision.rung == 13 && decision.status == "promoted" {
         validate_rung13_learned_rerank_promotion(decision, axes, &prefix, findings);
@@ -1509,13 +1527,15 @@ fn validate_rung11_dsr_decay_promotion(
     }
 }
 
-fn validate_rung12_l4_exhaustive_promotion(
+fn validate_rung12_deep_promotion(
     decision: &RungDecision,
     axes: &BTreeMap<String, SotaAxisResult>,
+    legacy_exhaustive_names_allowed: bool,
     prefix: &str,
     findings: &mut Vec<String>,
 ) {
-    if decision.item != "L4 exhaustive recall" {
+    let legacy_item = legacy_exhaustive_names_allowed && decision.item == "L4 exhaustive recall";
+    if decision.item != "L4 Deep recall" && !legacy_item {
         findings.push(format!("{prefix}:invalid_item:{}", decision.item));
     }
     for required_axis in ["long_horizon", "scale", "interactive"] {
