@@ -531,7 +531,16 @@ async fn every_cap_returns_a_machine_readable_partial_result() {
         assert_eq!(summary.stop_reason, stop_reason);
         assert_eq!(summary.usage, usage);
         let trace = store.trace_by_id_any_tenant(response.trace_id).unwrap();
-        assert_eq!(trace.deep.unwrap(), summary);
+        assert_eq!(trace.deep.as_ref().unwrap(), &summary);
+        assert!(
+            trace
+                .channel_runs
+                .iter()
+                .find(|stage| stage.stage == "l4_exhaustive")
+                .unwrap()
+                .detail
+                .starts_with("capped_")
+        );
         assert_eq!(trace.cost_micros, usage.spend_micros);
     }
 }
@@ -574,7 +583,51 @@ async fn paid_invalid_output_returns_checkpoint_and_truthful_outstanding_usage()
     assert_eq!(summary.usage, usage);
     let trace = store.trace_by_id_any_tenant(response.trace_id).unwrap();
     assert_eq!(trace.cost_micros, 200);
-    assert_eq!(trace.deep.unwrap(), summary);
+    assert_eq!(trace.deep.as_ref().unwrap(), &summary);
+    assert_eq!(
+        trace
+            .channel_runs
+            .iter()
+            .find(|stage| stage.stage == "l4_exhaustive")
+            .unwrap()
+            .detail,
+        "partial_invalid_output"
+    );
+}
+
+#[tokio::test]
+async fn provider_error_trace_stage_is_partial_not_capped() {
+    let (store, context, _, _) = seeded_service().await;
+    let provider = Arc::new(RecordingProvider::with_result(DeepRecallProviderResult {
+        status: DeepRecallStatus::Partial,
+        stop_reason: DeepRecallStopReason::ProviderError,
+        source_ids: Vec::new(),
+        usage: DeepRecallUsage::default(),
+        generation_ids: vec!["gen-provider-error".to_string()],
+        observed_provider: None,
+        observed_model: None,
+    }));
+    let service = MemoryService::new(
+        Arc::new(store.clone()),
+        Arc::new(CLOCK),
+        Arc::new(NoopEmbedding),
+    )
+    .with_deep_recall_provider(provider);
+
+    let response = service
+        .recall_internal(request(context, RecallMode::Deep))
+        .await
+        .unwrap();
+    let trace = store.trace_by_id_any_tenant(response.trace_id).unwrap();
+    assert_eq!(
+        trace
+            .channel_runs
+            .iter()
+            .find(|stage| stage.stage == "l4_exhaustive")
+            .unwrap()
+            .detail,
+        "partial_provider_error"
+    );
 }
 
 #[tokio::test]

@@ -196,6 +196,9 @@ impl ReqwestTransport {
     fn new(config: &DeepConfig) -> Result<Self, String> {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_millis(config.connect_timeout_ms))
+            .retry(reqwest::retry::never())
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
             .user_agent("memphant/0.1 deep-recall")
             .build()
             .map_err(|error| format!("failed to build Deep HTTP client: {error}"))?;
@@ -321,6 +324,9 @@ impl OpenRouterDeepRecall {
                 "settlement_reserve_ms": config.settlement_reserve_ms,
                 "max_retries": config.max_retries,
                 "retry_base_ms": config.retry_base_ms,
+                "implicit_protocol_retries": "disabled",
+                "redirects": "disabled",
+                "ambient_proxies": "disabled",
                 "tool_limits": {
                     "list_results": MAX_LIST_RESULTS,
                     "query_chars": MAX_QUERY_CHARS,
@@ -385,16 +391,18 @@ impl OpenRouterDeepRecall {
         let mut result = match outcome {
             Ok(Ok(result)) => result,
             Ok(Err(error)) => return Err(error),
-            Err(_) => {
-                self.settle_outstanding(&mut state, deadline).await;
-                state.result(
-                    DeepRecallStatus::Capped,
-                    DeepRecallStopReason::WallTime,
-                    None,
-                )
-            }
+            Err(_) => state.result(
+                DeepRecallStatus::Capped,
+                DeepRecallStopReason::WallTime,
+                None,
+            ),
         };
-        if state.outstanding.is_some() && !state.generation_ids.is_empty() {
+        if state
+            .outstanding
+            .as_ref()
+            .and_then(|outstanding| outstanding.generation_id.as_ref())
+            .is_some()
+        {
             self.settle_outstanding(&mut state, deadline).await;
             result = state.result(result.status, result.stop_reason, Some(result.source_ids));
         }
@@ -450,7 +458,7 @@ impl OpenRouterDeepRecall {
             let mut attempts = 0usize;
             let response = loop {
                 attempts += 1;
-                state.outstanding = Some(reservation);
+                state.begin_dispatch(reservation);
                 let response =
                     match tokio::time::timeout_at(deadline, self.transport.post(&body)).await {
                         Ok(Ok(response)) => response,
@@ -473,7 +481,7 @@ impl OpenRouterDeepRecall {
                     && response.generation_id.is_none()
                     && attempts <= usize::from(self.config.max_retries)
                 {
-                    state.outstanding = None;
+                    state.clear_current_dispatch();
                     let delay = response
                         .retry_after
                         .unwrap_or(Duration::from_millis(self.config.retry_base_ms));
@@ -494,11 +502,19 @@ impl OpenRouterDeepRecall {
 
             if !(200..300).contains(&response.status) {
                 if response.generation_id.is_none() {
-                    state.outstanding = None;
+                    let has_prior_work = state.has_prior_work();
+                    state.clear_current_dispatch();
+                    if has_prior_work {
+                        return Ok(state.result(
+                            DeepRecallStatus::Partial,
+                            DeepRecallStopReason::ProviderError,
+                            None,
+                        ));
+                    }
                     return Err(DeepRecallProviderError::Unavailable);
                 }
                 if state
-                    .push_generation(response.generation_id.as_deref())
+                    .attach_generation(response.generation_id.as_deref().unwrap())
                     .is_err()
                 {
                     return Ok(state.result(
@@ -525,7 +541,7 @@ impl OpenRouterDeepRecall {
                 ));
             }
             if state
-                .push_generation(response.generation_id.as_deref())
+                .attach_generation(response.generation_id.as_deref().unwrap())
                 .is_err()
             {
                 return Ok(state.result(
@@ -614,7 +630,11 @@ impl OpenRouterDeepRecall {
     }
 
     async fn settle_outstanding(&self, state: &mut LoopState, deadline: tokio::time::Instant) {
-        let Some(id) = state.generation_ids.last().cloned() else {
+        let Some(id) = state
+            .outstanding
+            .as_ref()
+            .and_then(|outstanding| outstanding.generation_id.clone())
+        else {
             return;
         };
         let settlement_deadline = deadline.min(
@@ -680,11 +700,16 @@ struct Reservation {
     spend_micros: u64,
 }
 
+struct OutstandingRequest {
+    reservation: Reservation,
+    generation_id: Option<String>,
+}
+
 struct LoopState {
     messages: Vec<Value>,
     tools: WorkspaceTools,
     usage: DeepRecallUsage,
-    outstanding: Option<Reservation>,
+    outstanding: Option<OutstandingRequest>,
     generation_ids: Vec<String>,
     observed_provider: Option<String>,
     observed_model: Option<String>,
@@ -714,15 +739,37 @@ impl LoopState {
         })
     }
 
-    fn push_generation(&mut self, id: Option<&str>) -> Result<(), DeepRecallProviderError> {
-        let Some(id) = id.filter(|id| !id.trim().is_empty()) else {
-            return Ok(());
-        };
+    fn begin_dispatch(&mut self, reservation: Reservation) {
+        self.outstanding = Some(OutstandingRequest {
+            reservation,
+            generation_id: None,
+        });
+    }
+
+    fn clear_current_dispatch(&mut self) {
+        self.outstanding = None;
+    }
+
+    fn attach_generation(&mut self, id: &str) -> Result<(), DeepRecallProviderError> {
+        if id.trim().is_empty() || self.outstanding.is_none() {
+            return Err(DeepRecallProviderError::InvalidOutput);
+        }
         if self.generation_ids.iter().any(|existing| existing == id) {
             return Err(DeepRecallProviderError::InvalidOutput);
         }
+        self.outstanding
+            .as_mut()
+            .expect("checked current dispatch")
+            .generation_id = Some(id.to_string());
         self.generation_ids.push(id.to_string());
         Ok(())
+    }
+
+    fn has_prior_work(&self) -> bool {
+        !self.generation_ids.is_empty()
+            || self.usage.context_tokens != 0
+            || self.usage.spend_micros != 0
+            || !self.tools.checkpoint.is_empty()
     }
 
     fn observe_route(
@@ -757,6 +804,14 @@ impl LoopState {
         prompt_tokens: u64,
         cost_micros: u64,
     ) -> Result<(), DeepRecallProviderError> {
+        if self
+            .outstanding
+            .as_ref()
+            .and_then(|outstanding| outstanding.generation_id.as_ref())
+            .is_none()
+        {
+            return Err(DeepRecallProviderError::InvalidOutput);
+        }
         let context_tokens = self
             .usage
             .context_tokens
@@ -791,10 +846,13 @@ impl LoopState {
         stop_reason: DeepRecallStopReason,
         source_ids: Option<Vec<Uuid>>,
     ) -> DeepRecallProviderResult {
-        let outstanding = self.outstanding.unwrap_or(Reservation {
-            context_tokens: 0,
-            spend_micros: 0,
-        });
+        let outstanding = self.outstanding.as_ref().map_or(
+            Reservation {
+                context_tokens: 0,
+                spend_micros: 0,
+            },
+            |outstanding| outstanding.reservation,
+        );
         let mut usage = self.usage;
         usage.unsettled_context_tokens_upper_bound = outstanding.context_tokens;
         usage.unsettled_spend_micros_upper_bound = outstanding.spend_micros;
@@ -1360,13 +1418,83 @@ mod tests {
     use memphant_types::{DeepWorkspace, DeepWorkspaceFile};
     use serde_json::json;
     use std::collections::VecDeque;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::task::{Context, Poll};
+    use std::time::Instant;
     use uuid::Uuid;
 
     struct PanicTransport;
+
+    static PROXY_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct ScopedEnv {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl ScopedEnv {
+        fn set(variables: &[(&'static str, String)]) -> Self {
+            let saved = variables
+                .iter()
+                .map(|(name, _)| (*name, std::env::var(name).ok()))
+                .collect::<Vec<_>>();
+            unsafe {
+                for (name, value) in variables {
+                    std::env::set_var(name, value);
+                }
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            unsafe {
+                for (name, value) in self.saved.drain(..) {
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+    }
+
+    fn bounded_http_server(
+        listener: TcpListener,
+        response: Option<String>,
+    ) -> (Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
+        listener.set_nonblocking(true).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_millis(750);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut socket, _)) => {
+                        observed.fetch_add(1, Ordering::SeqCst);
+                        socket.set_nonblocking(false).unwrap();
+                        socket
+                            .set_read_timeout(Some(Duration::from_millis(200)))
+                            .unwrap();
+                        let mut buffer = [0u8; 8192];
+                        let _ = socket.read(&mut buffer);
+                        if let Some(response) = &response {
+                            let _ = socket.write_all(response.as_bytes());
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("test server accept failed: {error}"),
+                }
+            }
+        });
+        (calls, server)
+    }
 
     impl Transport for PanicTransport {
         fn post<'a>(
@@ -1387,15 +1515,25 @@ mod tests {
     }
 
     struct ScriptTransport {
-        responses: Mutex<VecDeque<TransportResponse>>,
+        responses: Mutex<VecDeque<Result<TransportResponse, TransportError>>>,
         requests: Mutex<Vec<Value>>,
+        generation_requests: Mutex<Vec<String>>,
     }
 
     impl ScriptTransport {
         fn new(responses: Vec<TransportResponse>) -> Self {
             Self {
+                responses: Mutex::new(responses.into_iter().map(Ok).collect()),
+                requests: Mutex::new(Vec::new()),
+                generation_requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn with_results(responses: Vec<Result<TransportResponse, TransportError>>) -> Self {
+            Self {
                 responses: Mutex::new(responses.into()),
                 requests: Mutex::new(Vec::new()),
+                generation_requests: Mutex::new(Vec::new()),
             }
         }
     }
@@ -1408,14 +1546,18 @@ mod tests {
         {
             self.requests.lock().unwrap().push(body.clone());
             let response = self.responses.lock().unwrap().pop_front().unwrap();
-            Box::pin(async move { Ok(response) })
+            Box::pin(async move { response })
         }
 
         fn generation<'a>(
             &'a self,
-            _: &'a str,
+            id: &'a str,
         ) -> Pin<Box<dyn Future<Output = Result<GenerationUsage, TransportError>> + Send + 'a>>
         {
+            self.generation_requests
+                .lock()
+                .unwrap()
+                .push(id.to_string());
             Box::pin(async { Err(TransportError) })
         }
     }
@@ -1434,6 +1576,27 @@ mod tests {
             retry_after: None,
             content_type: Some("text/event-stream; charset=utf-8".into()),
             body: Box::pin(futures::stream::iter(chunks.into_iter().map(Ok))),
+        }
+    }
+
+    fn evidence_response(id: &str, call_id: &str, source_id: Uuid) -> TransportResponse {
+        sse_response(
+            id,
+            vec![json!({
+                "model":"anthropic/claude-sonnet-5","provider":"Azure",
+                "choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":call_id,"function":{"name":"record_evidence","arguments":format!("{{\"source_ids\":[\"{source_id}\"]}}")}}]}}],
+                "usage":{"prompt_tokens":10,"completion_tokens":1,"cost":0.00001}
+            })],
+        )
+    }
+
+    fn terminal_response(status: u16) -> TransportResponse {
+        TransportResponse {
+            status,
+            generation_id: None,
+            retry_after: Some(Duration::ZERO),
+            content_type: Some("application/json".into()),
+            body: Box::pin(futures::stream::empty()),
         }
     }
 
@@ -1952,6 +2115,152 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn later_missing_or_duplicate_generation_keeps_current_reservation_unsettled() {
+        for duplicate in [false, true] {
+            let (workspace, source_id, _) = workspace();
+            let first = evidence_response("gen-prior", "call-prior", source_id);
+            let mut second = sse_response(
+                "gen-current",
+                vec![json!({
+                    "model":"anthropic/claude-sonnet-5","provider":"Azure",
+                    "choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-current","function":{"name":"finish","arguments":"{\"source_ids\":[]}"}}]}}],
+                    "usage":{"prompt_tokens":20,"completion_tokens":1,"cost":0.00002}
+                })],
+            );
+            second.generation_id = duplicate.then(|| "gen-prior".to_string());
+            let transport = Arc::new(ScriptTransport::new(vec![first, second]));
+            let provider = OpenRouterDeepRecall::with_transport(config(), transport.clone());
+            let result = provider
+                .gather(DeepRecallProviderRequest {
+                    query: "q".into(),
+                    workspace,
+                })
+                .await
+                .unwrap();
+
+            assert_eq!(result.status, DeepRecallStatus::Partial);
+            assert_eq!(result.stop_reason, DeepRecallStopReason::InvalidOutput);
+            assert_eq!(result.source_ids, vec![source_id]);
+            assert_eq!(result.generation_ids, vec!["gen-prior"]);
+            assert_eq!(result.usage.context_tokens, 10);
+            assert_eq!(result.usage.spend_micros, 10);
+            assert!(result.usage.unsettled_context_tokens_upper_bound > 0);
+            assert!(result.usage.unsettled_spend_micros_upper_bound > 0);
+            assert!(transport.generation_requests.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn later_pre_header_error_never_resettles_prior_generation() {
+        let (workspace, source_id, _) = workspace();
+        let transport = Arc::new(ScriptTransport::with_results(vec![
+            Ok(evidence_response("gen-prior", "call-prior", source_id)),
+            Err(TransportError),
+        ]));
+        let provider = OpenRouterDeepRecall::with_transport(config(), transport.clone());
+        let result = provider
+            .gather(DeepRecallProviderRequest {
+                query: "q".into(),
+                workspace,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, DeepRecallStatus::Partial);
+        assert_eq!(result.stop_reason, DeepRecallStopReason::ProviderError);
+        assert_eq!(result.generation_ids, vec!["gen-prior"]);
+        assert_eq!(result.usage.context_tokens, 10);
+        assert_eq!(result.usage.spend_micros, 10);
+        assert!(result.usage.unsettled_spend_micros_upper_bound > 0);
+        assert!(transport.generation_requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn later_body_error_settles_only_the_current_generation() {
+        let (workspace, source_id, _) = workspace();
+        let body_error = TransportResponse {
+            status: 200,
+            generation_id: Some("gen-current".into()),
+            retry_after: None,
+            content_type: Some("text/event-stream".into()),
+            body: Box::pin(futures::stream::iter([Err(TransportError)])),
+        };
+        let transport = Arc::new(ScriptTransport::new(vec![
+            evidence_response("gen-prior", "call-prior", source_id),
+            body_error,
+        ]));
+        let provider = OpenRouterDeepRecall::with_transport(config(), transport.clone());
+        let result = provider
+            .gather(DeepRecallProviderRequest {
+                query: "q".into(),
+                workspace,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, DeepRecallStatus::Partial);
+        assert_eq!(result.stop_reason, DeepRecallStopReason::ProviderError);
+        assert_eq!(result.generation_ids, vec!["gen-prior", "gen-current"]);
+        assert_eq!(result.usage.context_tokens, 10);
+        assert_eq!(result.usage.spend_micros, 10);
+        assert!(result.usage.unsettled_spend_micros_upper_bound > 0);
+        assert_eq!(
+            *transport.generation_requests.lock().unwrap(),
+            vec!["gen-current"]
+        );
+    }
+
+    #[tokio::test]
+    async fn later_terminal_no_id_http_failures_preserve_prior_paid_partial_facts() {
+        for status in [400, 401, 429, 500] {
+            let (workspace, source_id, _) = workspace();
+            let retry_count = if status == 429 || status == 500 { 3 } else { 1 };
+            let mut responses = vec![evidence_response("gen-prior", "call-prior", source_id)];
+            responses.extend((0..retry_count).map(|_| terminal_response(status)));
+            let transport = Arc::new(ScriptTransport::new(responses));
+            let provider = OpenRouterDeepRecall::with_transport(config(), transport.clone());
+            let result = provider
+                .gather(DeepRecallProviderRequest {
+                    query: "q".into(),
+                    workspace,
+                })
+                .await
+                .unwrap();
+
+            assert_eq!(result.status, DeepRecallStatus::Partial, "status {status}");
+            assert_eq!(
+                result.stop_reason,
+                DeepRecallStopReason::ProviderError,
+                "status {status}"
+            );
+            assert_eq!(result.source_ids, vec![source_id]);
+            assert_eq!(result.generation_ids, vec!["gen-prior"]);
+            assert_eq!(result.usage.context_tokens, 10);
+            assert_eq!(result.usage.spend_micros, 10);
+            assert_eq!(result.usage.unsettled_spend_micros_upper_bound, 0);
+            assert!(transport.generation_requests.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn pristine_terminal_no_id_http_failure_is_unavailable() {
+        let (workspace, _, _) = workspace();
+        let provider = OpenRouterDeepRecall::with_transport(
+            config(),
+            Arc::new(ScriptTransport::new(vec![terminal_response(400)])),
+        );
+        assert!(matches!(
+            provider
+                .gather(DeepRecallProviderRequest {
+                    query: "q".into(),
+                    workspace,
+                })
+                .await,
+            Err(DeepRecallProviderError::Unavailable)
+        ));
+    }
+
+    #[tokio::test]
     async fn accepted_generation_with_wrong_content_type_is_partial_and_unsettled() {
         let (workspace, _, _) = workspace();
         let mut response = sse_response(
@@ -2246,10 +2555,106 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reqwest_transport_streams_against_a_scripted_openrouter_server() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
+    async fn reqwest_transport_never_follows_cross_origin_redirects() {
+        let target_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let target_address = target_listener.local_addr().unwrap();
+        let (target_calls, target_server) = bounded_http_server(
+            target_listener,
+            Some(
+                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+            ),
+        );
+        let redirect_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let redirect_address = redirect_listener.local_addr().unwrap();
+        let redirect = format!(
+            "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{target_address}/capture\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        let (redirect_calls, redirect_server) =
+            bounded_http_server(redirect_listener, Some(redirect));
+        let config = config()
+            .with_openrouter_base_url(&format!("http://{redirect_address}/api/v1"))
+            .unwrap();
+        let transport = ReqwestTransport::new(&config).unwrap();
 
+        let response = transport
+            .post(&json!({"sensitive": "authorized source body"}))
+            .await
+            .unwrap();
+        assert_eq!(response.status, 307);
+        redirect_server.join().unwrap();
+        target_server.join().unwrap();
+        assert_eq!(redirect_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(target_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn reqwest_transport_ignores_ambient_proxy_configuration() {
+        let origin_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin_address = origin_listener.local_addr().unwrap();
+        let (origin_calls, origin_server) = bounded_http_server(
+            origin_listener,
+            Some(
+                "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+            ),
+        );
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_address = proxy_listener.local_addr().unwrap();
+        let (proxy_calls, proxy_server) = bounded_http_server(
+            proxy_listener,
+            Some(
+                "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+            ),
+        );
+        let proxy_url = format!("http://{proxy_address}");
+        let variables = [
+            ("HTTP_PROXY", proxy_url.clone()),
+            ("HTTPS_PROXY", proxy_url.clone()),
+            ("ALL_PROXY", proxy_url.clone()),
+            ("http_proxy", proxy_url.clone()),
+            ("https_proxy", proxy_url.clone()),
+            ("all_proxy", proxy_url),
+            ("NO_PROXY", String::new()),
+            ("no_proxy", String::new()),
+        ];
+        let config = config()
+            .with_openrouter_base_url(&format!("http://{origin_address}/api/v1"))
+            .unwrap();
+        let transport = {
+            let _env_lock = PROXY_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let _env = ScopedEnv::set(&variables);
+            ReqwestTransport::new(&config).unwrap()
+        };
+
+        let response = transport
+            .post(&json!({"sensitive": "authorized source body"}))
+            .await
+            .unwrap();
+        assert_eq!(response.status, 400);
+        origin_server.join().unwrap();
+        proxy_server.join().unwrap();
+        assert_eq!(origin_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(proxy_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn reqwest_transport_does_not_replay_after_connection_drop() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (calls, server) = bounded_http_server(listener, None);
+        let config = config()
+            .with_openrouter_base_url(&format!("http://{address}/api/v1"))
+            .unwrap();
+        let transport = ReqwestTransport::new(&config).unwrap();
+
+        assert!(transport.post(&json!({"request": "once"})).await.is_err());
+        server.join().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn reqwest_transport_streams_against_a_scripted_openrouter_server() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {

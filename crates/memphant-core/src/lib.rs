@@ -9368,10 +9368,21 @@ fn recall_stage_facts(vector_enabled: bool, deep: Option<&DeepRunFacts>) -> Vec<
         detail: if stage == "vector" && !vector_enabled {
             "disabled".to_string()
         } else if stage == "l4_exhaustive" {
-            match deep.map(|run| run.summary.stop_reason) {
+            match deep.map(|run| (run.summary.status, run.summary.stop_reason)) {
                 None => "disabled".to_string(),
-                Some(DeepRecallStopReason::Completed) => "completed".to_string(),
-                Some(reason) => format!("capped_{}", deep_stop_reason_name(reason)),
+                Some((DeepRecallStatus::Completed, DeepRecallStopReason::Completed)) => {
+                    "completed".to_string()
+                }
+                Some((DeepRecallStatus::Capped, reason)) => {
+                    format!("capped_{}", deep_stop_reason_name(reason))
+                }
+                Some((DeepRecallStatus::Partial, reason)) => {
+                    format!("partial_{}", deep_stop_reason_name(reason))
+                }
+                Some((status, reason)) => {
+                    debug_assert!(false, "invalid Deep status/reason: {status:?}/{reason:?}");
+                    format!("invalid_{}", deep_stop_reason_name(reason))
+                }
             }
         } else {
             "completed".to_string()
