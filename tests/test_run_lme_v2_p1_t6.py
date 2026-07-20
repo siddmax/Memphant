@@ -390,6 +390,21 @@ def test_decimal_cost_ceiling_never_rounds_liability_down() -> None:
     assert campaign.token_price_to_micros_per_million("0.00000015") == 150000
 
 
+def test_settled_proxy_cost_must_fit_its_pre_dispatch_reservation() -> None:
+    campaign = _load()
+    assert campaign._audit_cost({
+        "audit_status": "settled",
+        "max_liability_micros": 19,
+        "total_cost": 0.0000116,
+    }) == (12, 0)
+    with pytest.raises(RuntimeError, match="exceeds its reservation"):
+        campaign._audit_cost({
+            "audit_status": "settled",
+            "max_liability_micros": 11,
+            "total_cost": 0.0000116,
+        })
+
+
 def test_reader_policy_enforces_frozen_bf16_and_price_caps_before_dispatch() -> None:
     campaign = _load()
     reader = campaign.load_campaign_manifest()["protocol"]["reader"]

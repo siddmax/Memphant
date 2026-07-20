@@ -1664,7 +1664,12 @@ def run_reader_route_preflight(output: Path, manifest: dict) -> dict[str, object
             "dispatch_count": 0,
         }
         atomic_write_json(audit_path, audit)
-    successful = response_status == 200 and audit.get("audit_status") == "settled"
+    settled_cost_micros, unsettled_cost_micros = _audit_cost(audit)
+    successful = (
+        response_status == 200
+        and audit.get("audit_status") == "settled"
+        and unsettled_cost_micros == 0
+    )
     proof = {
         "schema_version": 1,
         "classification": (
@@ -1695,10 +1700,7 @@ def run_reader_route_preflight(output: Path, manifest: dict) -> dict[str, object
                 "tokens_prompt", "tokens_completion", "total_cost", "receipt_attempts",
             )
         },
-        "settled_cost_micros": (
-            usd_to_micros(audit["total_cost"])
-            if audit.get("total_cost") is not None else None
-        ),
+        "settled_cost_micros": settled_cost_micros,
         "endpoint_contract": endpoint_proof,
         "reader_route_sha256": sha256_file(audit_path),
         "paid_calls": 1 if audit.get("dispatch_count") == 1 else 0,
