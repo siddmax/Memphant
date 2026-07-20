@@ -450,7 +450,25 @@ def verify_campaign_manifest(manifest: dict) -> dict[str, int]:
             "arm order drift")
     spend = manifest["campaign_spend"]
     require(spend["hard_ceiling_usd"] == 15.0, "campaign spend ceiling drift")
-    require(spend["deep_max_liability_usd"] + spend["reader_and_judge_reserve_usd"] <= 15.0,
+    preexisting = spend["preexisting_liability"]
+    require(preexisting["settled_micros"] == 828
+            and preexisting["unsettled_upper_bound_micros"] == 3084
+            and preexisting["total_micros"] == 3912,
+            "preexisting campaign liability drift")
+    require(preexisting["settled_micros"] + preexisting["unsettled_upper_bound_micros"]
+            == preexisting["total_micros"], "preexisting liability sum drift")
+    for proof_path in preexisting["proofs"].values():
+        require((ROOT / proof_path).is_file(), f"preexisting liability proof missing: {proof_path}")
+    require(
+        usd_to_micros(spend["reader_and_judge_reserve_usd"])
+        == len(rows) * spend["reader_and_judge_max_liability_micros_per_row"],
+        "reader and judge campaign reserve drift",
+    )
+    fresh_liability = usd_to_micros(spend["deep_max_liability_usd"]) + usd_to_micros(
+        spend["reader_and_judge_reserve_usd"]
+    )
+    require(fresh_liability + preexisting["total_micros"]
+            <= usd_to_micros(spend["hard_ceiling_usd"]),
             "campaign liability exceeds hard ceiling")
     require(manifest["protocol"]["deep_prompt_sha256"]
             == sha256_file(ROOT / "config/deep-recall-v1.txt"), "Deep prompt lock drift")
@@ -1524,6 +1542,7 @@ def verify_resume_contract(frozen: dict, current: dict) -> None:
         "materialization", "git_commit", "binaries", "deep_prompt_sha256",
         "deep_config_hashes", "environment_contract_sha256", "python_environment",
         "binary_profile",
+        "preexisting_campaign_liability",
     ):
         require(frozen[field] == current[field], f"campaign resume contract drift: {field}")
     require({key: value["material_contract_sha256"] for key, value in frozen["endpoint_hashes"].items()}
@@ -2084,6 +2103,9 @@ def run_campaign(directory: Path, materialized: Path, output: Path, base_databas
         },
         "python_environment": preflight_proof["python"],
         "environment_contract_sha256": canonical_sha256(_clean_environment()),
+        "preexisting_campaign_liability": manifest["campaign_spend"][
+            "preexisting_liability"
+        ],
     }
     root_path = output / "pre-execution-proof.json"
     if root_path.exists():
@@ -2127,11 +2149,14 @@ def run_campaign(directory: Path, materialized: Path, output: Path, base_databas
                 os.replace(staging, output / row["row_id"])
                 continue
         prior = sum(json.loads(path.read_text())["max_liability_micros"] for path in ledger.glob("*.json"))
+        preexisting_liability = manifest["campaign_spend"]["preexisting_liability"][
+            "total_micros"
+        ]
         if ledger_row.exists():
             require(json.loads(ledger_row.read_text()) == expected_reservation,
                     "orphaned pre-dispatch reservation drift")
         else:
-            require(prior + expected_reservation["max_liability_micros"]
+            require(preexisting_liability + prior + expected_reservation["max_liability_micros"]
                     <= usd_to_micros(manifest["campaign_spend"]["hard_ceiling_usd"]),
                     "campaign spend ceiling reached before dispatch")
             atomic_write_json(ledger_row, expected_reservation)
@@ -2224,13 +2249,17 @@ def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
             "spend reservation order drift")
     require([item["row_id"] for item in settlements] == [row["row_id"] for row in rows],
             "spend settlement order drift")
-    require(sum(item["max_liability_micros"] for item in reservations)
+    preexisting_liability = manifest["campaign_spend"]["preexisting_liability"][
+        "total_micros"
+    ]
+    require(preexisting_liability + sum(item["max_liability_micros"] for item in reservations)
             <= usd_to_micros(manifest["campaign_spend"]["hard_ceiling_usd"]),
             "spend reservations exceed campaign ceiling")
     require(all(item["settled_micros"] + item["unsettled_upper_bound_micros"]
                 <= item["max_liability_micros"] for item in settlements),
             "row settlement exceeds reservation")
-    require(sum(item["settled_micros"] + item["unsettled_upper_bound_micros"]
+    require(preexisting_liability + sum(
+                item["settled_micros"] + item["unsettled_upper_bound_micros"]
                 for item in settlements)
             <= usd_to_micros(manifest["campaign_spend"]["hard_ceiling_usd"]),
             "settled plus outstanding campaign liability exceeds hard ceiling")
@@ -2406,9 +2435,13 @@ def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
         "primary_metric": "paired official per-question binary score",
         "failure_treatment_applied": True, "candidates": candidates,
         "spend_proof": {
+            "preexisting_liability": manifest["campaign_spend"]["preexisting_liability"],
             "reservation_hashes": [sha256_file(path) for path in reservation_paths],
             "settlement_hashes": [sha256_file(path) for path in settlement_paths],
             "max_liability_micros": sum(item["max_liability_micros"] for item in reservations),
+            "total_max_liability_micros": preexisting_liability + sum(
+                item["max_liability_micros"] for item in reservations
+            ),
             "settled_micros": sum(item["settled_micros"] for item in settlements),
             "unsettled_upper_bound_micros": sum(
                 item["unsettled_upper_bound_micros"] for item in settlements

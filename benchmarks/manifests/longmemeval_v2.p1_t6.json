@@ -78,6 +78,6 @@
     "expansion": "case-major Cartesian product; one-based monotonically increasing sequence"
   },
   "failure_treatment": "Any unavailable, provider-error, invalid-output, capped, partial, missing/unsettled/unaccounted proof, truncation, security/write failure, or missing pair scores zero and is operationally infeasible; completed billable rows are immutable.",
-  "campaign_spend": {"hard_ceiling_usd":15.0,"deep_max_liability_usd":10.8,"reader_and_judge_reserve_usd":4.2,"reader_and_judge_max_liability_micros_per_row":87500,"stop_before_dispatch_if_remaining_liability_exceeds_reserve":true},
+  "campaign_spend": {"hard_ceiling_usd":15.0,"deep_max_liability_usd":10.8,"reader_and_judge_reserve_usd":4.1952,"reader_and_judge_max_liability_micros_per_row":87400,"preexisting_liability":{"settled_micros":828,"unsettled_upper_bound_micros":3084,"total_micros":3912,"proofs":{"invalid_root":"docs/build-log/artifacts/p1-t6/run-ee1575a6/INVALIDATION-PROOF.json","settled_diagnostic":"docs/build-log/artifacts/p1-t6/diagnostic-ee1575a6-reader-route/PROOF.json","settled_route_probe":"docs/build-log/artifacts/p1-t6/live-reader-route-05e2bf66/PROOF.json"}},"stop_before_dispatch_if_remaining_liability_exceeds_reserve":true},
   "feasibility_predicates": {"complete_pairs":12,"mean_score_delta":"strictly_positive","wins":"greater_than_losses","latency_ms":{"p50_max":45000,"p95_max":90000,"max":90000,"hard_cap_not_reached":true},"settled_cost_usd":{"mean_max":0.10,"p95_max":0.20,"max":0.20,"hidden_or_unsettled":false},"memory_context_truncations":0}
 }
