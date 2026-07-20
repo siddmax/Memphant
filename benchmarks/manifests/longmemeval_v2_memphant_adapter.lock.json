@@ -1,11 +1,11 @@
 {
   "benchmark": "LongMemEval-V2",
   "adapter": "MemPhant packaged REST",
-  "schema_version": 5,
+  "schema_version": 6,
   "upstream_release_lock_sha256": "846c73224c456a981c7812741c33ee948dbdcd8de84a220240e534558fa8cbab",
   "openapi_sha256": "a5bac765d7c4c862a342d95b49049c27d3af57aea9f80af6d3a0a489ac055271",
   "files": {
-    "benchmarks/longmemeval_v2/memphant_memory.py": "97c5a8c3607801ff040d763e60a98edeb5b157c870d1450a165c94e16b8fbb3e",
+    "benchmarks/longmemeval_v2/memphant_memory.py": "4a30de55e439f2a430501047788dd3f7e95a94e594bb102f8b7219c249c6ee2a",
     "benchmarks/longmemeval_v2/harness_bootstrap.py": "97b17ebc7091ffd624859ff62b509ab4c7e96586448c7904f208c31ddd8ac8e6",
     "benchmarks/longmemeval_v2/memphant.memory.json": "a2fbdbf36101d9e863006121ef84860e496f9d7d11967de96322e58479b0fe29",
     "scripts/materialize_longmemeval_v2_runtime.py": "1af300126f98860db36bccc96d112f8b218d4249c15be354b172cf7faa869344",
@@ -14,7 +14,10 @@
   "retrieval": {
     "top_k": 20,
     "budget_tokens": 32768,
-    "mode": "deep"
+    "mode": "deep",
+    "default_request_timeout_seconds": 120,
+    "recall_request_timeout_seconds": 600,
+    "latency_accounting": "The wider recall deadline is benchmark transport margin only; per-row recall_duration_ms remains the measured latency and product-facing Fast SLOs are unchanged."
   },
   "isolation": {
     "unit": "one official question per harness invocation",

@@ -49,6 +49,12 @@ TENANT_PATTERN = re.compile(r"tenant_created id=([0-9a-fA-F-]{36})")
 # resources and multiply writes/embeddings without improving source fidelity.
 RESOURCE_FRAGMENT_BYTES = 1024 * 1024
 MAX_SERIALIZED_RETAIN_BYTES = 1536 * 1024
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 120
+# Correctness campaigns must not discard an otherwise valid row merely because
+# a contended benchmark host exceeds the product-facing recall SLO. The proof
+# still records the full recall duration; this wider client deadline is only a
+# transport safety margin for the official benchmark adapter.
+RECALL_REQUEST_TIMEOUT_SECONDS = 600
 
 
 def _require(condition: bool, message: str) -> None:
@@ -95,7 +101,14 @@ class _JsonClient:
             "Content-Type": "application/json",
         }
 
-    def request(self, method: str, path: str, payload: dict | None = None) -> dict:
+    def request(
+        self,
+        method: str,
+        path: str,
+        payload: dict | None = None,
+        *,
+        timeout_seconds: int = DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    ) -> dict:
         body = None if payload is None else _canonical_json(payload)
         headers = dict(self.headers)
         if method != "GET":
@@ -107,13 +120,17 @@ class _JsonClient:
             method=method,
         )
         try:
-            with urllib.request.urlopen(request, timeout=120) as response:
+            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
                 raw = response.read()
         except urllib.error.HTTPError as error:
             detail = error.read(512).decode("utf-8", errors="replace")
             raise RuntimeError(f"MemPhant {path} returned HTTP {error.code}: {detail}") from error
         except urllib.error.URLError as error:
             raise RuntimeError(f"MemPhant {path} request failed: {error.reason}") from error
+        except TimeoutError as error:
+            raise RuntimeError(
+                f"MemPhant {path} exceeded {timeout_seconds}s benchmark transport deadline"
+            ) from error
         try:
             value = json.loads(raw)
         except json.JSONDecodeError as error:
@@ -522,7 +539,12 @@ class MemphantMemory(Memory):
             "mode": self.params["mode"],
         }
         recall_started = time.perf_counter()
-        recalled = self.client.request("POST", "/v1/recall", recall_payload)
+        recalled = self.client.request(
+            "POST",
+            "/v1/recall",
+            recall_payload,
+            timeout_seconds=RECALL_REQUEST_TIMEOUT_SECONDS,
+        )
         recall_duration_ms = int(round((time.perf_counter() - recall_started) * 1000))
         _require(recalled.get("degraded") is False, "MemPhant recall was degraded")
         trace_id = recalled.get("trace_id")
@@ -568,6 +590,7 @@ class MemphantMemory(Memory):
                 "top_k": self.params["top_k"],
                 "budget_tokens": self.params["budget_tokens"],
                 "mode": self.params["mode"],
+                "recall_request_timeout_seconds": RECALL_REQUEST_TIMEOUT_SECONDS,
                 "binaries": self.binaries,
                 "gold_fields_consumed": [],
             },

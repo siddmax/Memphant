@@ -172,6 +172,42 @@ def test_worker_drain_archives_stdout_and_stderr_before_count_validation(
     assert (proof_dir / "worker.stderr").read_text() == completed.stderr
 
 
+def test_memphant_recall_uses_a_separate_benchmark_deadline(monkeypatch):
+    adapter, _registry = load_memphant_adapter(monkeypatch)
+    observed_timeouts = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    def fake_urlopen(_request, *, timeout):
+        observed_timeouts.append(timeout)
+        return Response()
+
+    monkeypatch.setattr(adapter.urllib.request, "urlopen", fake_urlopen)
+    client = adapter._JsonClient("http://fixture", "mk_fixture")
+
+    client.request("GET", "/v1/health")
+    client.request(
+        "POST",
+        "/v1/recall",
+        {"query": "fixture"},
+        timeout_seconds=adapter.RECALL_REQUEST_TIMEOUT_SECONDS,
+    )
+
+    assert observed_timeouts == [
+        adapter.DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        adapter.RECALL_REQUEST_TIMEOUT_SECONDS,
+    ]
+    assert adapter.RECALL_REQUEST_TIMEOUT_SECONDS == 600
+
+
 def test_memphant_memory_uses_isolated_rest_scope_and_emits_trace_proof(
     monkeypatch, tmp_path
 ):
@@ -210,9 +246,9 @@ def test_memphant_memory_uses_isolated_rest_scope_and_emits_trace_proof(
     requests = []
     resource_count = 0
 
-    def fake_request(method, path, payload=None):
+    def fake_request(method, path, payload=None, *, timeout_seconds=None):
         nonlocal resource_count
-        requests.append((method, path, payload))
+        requests.append((method, path, payload, timeout_seconds))
         if path.startswith("/v1/context-bindings/"):
             return {
                 "subject_id": "00000000-0000-0000-0000-000000000201",
@@ -321,17 +357,20 @@ def test_memphant_memory_uses_isolated_rest_scope_and_emits_trace_proof(
     )
 
     assert context == [{"type": "text", "value": "The retained answer evidence."}]
-    retain_payloads = [payload for _, path, payload in requests if path == "/v1/episodes"]
+    retain_payloads = [
+        payload for _, path, payload, _ in requests if path == "/v1/episodes"
+    ]
     assert len(retain_payloads) == 1
     assert retain_payloads[0]["scope_id"] == memory.scope_id
     assert retain_payloads[0]["subject_id"] == memory.context["subject_id"]
     assert retain_payloads[0]["payload"]["resource"]["kind"] == "document"
     assert "tenant_id" not in retain_payloads[0]
     assert "GOLD MUST NOT LEAK" not in json.dumps(requests)
-    recall = next(payload for _, path, payload in requests if path == "/v1/recall")
+    recall = next(payload for _, path, payload, _ in requests if path == "/v1/recall")
     assert recall["limit"] == 20
     assert recall["budget_tokens"] == 32768
     assert "allowed_scope_ids" not in recall
+    assert next(timeout for _, path, _, timeout in requests if path == "/v1/recall") == 600
     assert metadata["trace_id"] == "00000000-0000-0000-0000-000000000404"
     assert len(metadata["trace_sha256"]) == len(metadata["context_sha256"]) == 64
     proof = json.loads(next((tmp_path / "proof").glob("*.json")).read_text())
@@ -348,6 +387,7 @@ def test_memphant_memory_uses_isolated_rest_scope_and_emits_trace_proof(
     assert proof["contract"]["binaries"]["server"]["sha256"] == hashlib.sha256(
         b"fixture-server"
     ).hexdigest()
+    assert proof["contract"]["recall_request_timeout_seconds"] == 600
     assert any("create-tenant" in call for call in cli_calls)
 
 
