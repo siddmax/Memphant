@@ -1,0 +1,39 @@
+{
+  "classification": "tiny_reader_route_authorization",
+  "endpoint_contract": {
+    "inventory_sha256": "315d9b4a728538f3289e3c464f0deabbc310566900e08180680aea2f5fff4e41",
+    "matching_endpoint_sha256": [
+      "d38ef0b2f83fd862ae08cee90ecc435072ae2a4beea7326693cc40dbfcb9c423"
+    ],
+    "material_contract_sha256": "7a151a24435766a089675dbc36f47e2c270c6632c9ee4db140046c194850465d"
+  },
+  "git_commit": "05e2bf6609523e3634e6d2dc617cf1e9c46c6f22",
+  "paid_calls": 1,
+  "reader_route_sha256": "00abfdbb02c77ab51f7f9777b733d4525577f8b47032ff794b7025200de0bee2",
+  "request": {
+    "dispatch_count": 1,
+    "max_completion_tokens": 64,
+    "max_liability_micros": 19,
+    "reasoning_enabled": true,
+    "request_sha256": "e8b2c8ebf39b14daa572d16d1a665058b43e2e7c81a21552c4a610a73bf063c3"
+  },
+  "response": {
+    "elapsed_ms": 103788,
+    "sha256": "d4dac210c7f7eb0c60552238ac87f5bbab1c6b05f3c3ecab071933a258bf5dc7",
+    "status": 200,
+    "transport_error_type": null
+  },
+  "same_request_retry_authorized": false,
+  "schema_version": 1,
+  "settled_cost_micros": 12,
+  "settlement": {
+    "audit_status": "settled",
+    "generation_id": "gen-1784575624-lnr3sJ7nFa7jO8wcwMfJ",
+    "model": "qwen/qwen3.5-9b-20260310",
+    "provider_name": "DeepInfra",
+    "receipt_attempts": 6,
+    "tokens_completion": 69,
+    "tokens_prompt": 14,
+    "total_cost": 1.16e-05
+  }
+}

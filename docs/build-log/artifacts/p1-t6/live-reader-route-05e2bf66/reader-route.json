@@ -1,0 +1,17 @@
+{
+  "audit_status": "settled",
+  "completion_token_upper_bound": 64,
+  "dispatch_count": 1,
+  "generation_id": "gen-1784575624-lnr3sJ7nFa7jO8wcwMfJ",
+  "input_token_upper_bound": 85,
+  "max_liability_micros": 19,
+  "model": "qwen/qwen3.5-9b-20260310",
+  "provider_name": "DeepInfra",
+  "provider_policy_sha256": "dbd1302c34ff5ef3e979a55b59ddc4b24cd29f202dd183e218b69eaa42f581cc",
+  "receipt_attempts": 6,
+  "request_contract_sha256": "76227e41e1e9f20d6126f4cb3b2eda63cbdce890650cdbc70da11b304e7e3129",
+  "response_sha256": "d4dac210c7f7eb0c60552238ac87f5bbab1c6b05f3c3ecab071933a258bf5dc7",
+  "tokens_completion": 69,
+  "tokens_prompt": 14,
+  "total_cost": 1.16e-05
+}
