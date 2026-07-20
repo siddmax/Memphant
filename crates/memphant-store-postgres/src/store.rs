@@ -18,9 +18,9 @@ use memphant_types::{
     ContextBindingRequest, ContextBindingResponse, ContextualChunk, CorrectResult, EdgeId,
     EpisodeId, ForgetTarget, JobId, MemoryKind, NewEpisode, NewMemoryEdge, NewMemoryUnit,
     NewResource, QueuedReflectJob, RecallTime, RecordMaterial, ReflectJob, ReflectJobKind,
-    ReflectTrace, ResolvedMemorySource, ResourceId, RetainOutcome, RetrievalTrace, ScopeId,
-    StoredCitation, StoredEpisode, StoredMemoryEdge, StoredMemoryUnit, StoredResource, SubjectId,
-    TenantId, TraceId, TrustLevel, UnitId, agent_level_allows_memory_kind,
+    ReflectTrace, ResolvedMemorySource, ResourceAcl, ResourceId, RetainOutcome, RetrievalTrace,
+    ScopeId, StoredCitation, StoredEpisode, StoredMemoryEdge, StoredMemoryUnit, StoredResource,
+    SubjectId, TenantId, TraceId, TrustLevel, UnitId, agent_level_allows_memory_kind,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -1604,13 +1604,15 @@ impl MemoryStore for PgStore {
         )?;
         Self::validate_resource_context(&mut tx.tx, &resource).await?;
         let id = ResourceId::new();
+        let acl = serde_json::to_value(&resource.acl)
+            .map_err(|error| StoreError::Backend(format!("serialize resource ACL: {error}")))?;
         sqlx::query(
             "insert into memphant.resource
                (id, tenant_id, data_subject_id, scope_id, agent_node_id, subject_generation,
                 kind, uri, source_ref, observed_at, content_hash, actor_id, mime_type, revision,
-                body, source_trust)
+                body, source_trust, acl)
              values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::timestamptz, $11,
-                     $12, $13, $14, $15, $16)",
+                     $12, $13, $14, $15, $16, $17)",
         )
         .bind(id.as_uuid())
         .bind(resource.tenant_id.as_uuid())
@@ -1628,6 +1630,7 @@ impl MemoryStore for PgStore {
         .bind(&resource.revision)
         .bind(&resource.body)
         .bind(enum_str(&resource.source_trust))
+        .bind(acl)
         .execute(&mut *tx.tx)
         .await
         .map_err(backend)?;
@@ -2433,7 +2436,7 @@ impl MemoryStore for PgStore {
                     subject_generation, kind, uri, source_ref,
                     to_char(observed_at at time zone 'utc', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') as observed_at,
                     content_hash,
-                    mime_type, revision, body, source_trust, extractor_state
+                    mime_type, revision, body, source_trust, acl, extractor_state
              from memphant.resource
              where tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
                and scope_id = $4 and agent_node_id = $5 and actor_id = $6 and id = $7",
@@ -2449,6 +2452,11 @@ impl MemoryStore for PgStore {
         .await
         .map_err(backend)?;
         let Some(row) = row else { return Ok(None) };
+        let acl = serde_json::from_value::<ResourceAcl>(
+            row.try_get::<serde_json::Value, _>("acl")
+                .map_err(backend)?,
+        )
+        .map_err(|error| StoreError::Backend(format!("invalid resource ACL: {error}")))?;
         Ok(Some(StoredResource {
             id: ResourceId::from_u128(row.try_get::<Uuid, _>("id").map_err(backend)?.as_u128()),
             tenant_id: TenantId::from_u128(
@@ -2498,6 +2506,7 @@ impl MemoryStore for PgStore {
                     .as_str(),
             )
             .unwrap_or(TrustLevel::Quarantined),
+            acl,
             extractor_state: enum_from_str(
                 row.try_get::<String, _>("extractor_state")
                     .map_err(backend)?

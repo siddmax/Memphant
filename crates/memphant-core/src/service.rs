@@ -1112,6 +1112,7 @@ impl<S: MemoryStore> MemoryService<S> {
                             revision: resource.revision,
                             body: resource.body,
                             source_trust: assigned_trust,
+                            acl: memphant_types::ResourceAcl::default(),
                         },
                     )
                     .await?;

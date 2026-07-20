@@ -387,6 +387,48 @@ mod recall_mode_contract_tests {
     }
 }
 
+#[cfg(test)]
+mod resource_acl_contract_tests {
+    use super::{ResourceAcl, ResourceProtectedCategory, ScopeId, TrustLevel};
+
+    #[test]
+    fn resource_acl_is_strict_and_only_empty_is_deep_eligible() {
+        let empty: ResourceAcl = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(empty.is_empty());
+        assert!(empty.is_deep_eligible());
+        assert_eq!(serde_json::to_value(&empty).unwrap(), serde_json::json!({}));
+
+        let scope_id = ScopeId::new();
+        let acl: ResourceAcl = serde_json::from_value(serde_json::json!({
+            "scopes": [scope_id],
+            "trust_floor": "verified_tool",
+            "protected": "personal_identity"
+        }))
+        .unwrap();
+        assert_eq!(acl.scopes, vec![scope_id]);
+        assert_eq!(acl.trust_floor, Some(TrustLevel::VerifiedTool));
+        assert_eq!(
+            acl.protected,
+            Some(ResourceProtectedCategory::PersonalIdentity)
+        );
+        assert!(!acl.is_empty());
+        assert!(!acl.is_deep_eligible());
+
+        for invalid in [
+            serde_json::json!({"future_gate": true}),
+            serde_json::json!({"scopes": scope_id}),
+            serde_json::json!({"trust_floor": 3}),
+            serde_json::json!({"protected": {"category": "personal_identity"}}),
+            serde_json::json!({"protected": "future_category"}),
+        ] {
+            assert!(
+                serde_json::from_value::<ResourceAcl>(invalid).is_err(),
+                "unknown ACL fields, shapes, and tags must fail closed"
+            );
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RecallChannel {
@@ -822,6 +864,40 @@ pub enum ResourceKind {
     Other,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceProtectedCategory {
+    CredentialsSecrets,
+    PaymentFinancial,
+    MedicalLegal,
+    PersonalIdentity,
+    HighRiskToolArgs,
+    ChildPrivateScope,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ResourceAcl {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<ScopeId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trust_floor: Option<TrustLevel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protected: Option<ResourceProtectedCategory>,
+}
+
+impl ResourceAcl {
+    pub fn is_empty(&self) -> bool {
+        self.scopes.is_empty() && self.trust_floor.is_none() && self.protected.is_none()
+    }
+
+    /// Deep may export a resource only when its dormant ACL cannot be bypassed.
+    /// Ordinary recall enforcement is intentionally separate and remains pending.
+    pub fn is_deep_eligible(&self) -> bool {
+        self.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NewResource {
     pub tenant_id: TenantId,
@@ -842,6 +918,8 @@ pub struct NewResource {
     #[serde(default)]
     pub body: Option<String>,
     pub source_trust: TrustLevel,
+    #[serde(default)]
+    pub acl: ResourceAcl,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -865,6 +943,8 @@ pub struct StoredResource {
     #[serde(default)]
     pub body: Option<String>,
     pub source_trust: TrustLevel,
+    #[serde(default)]
+    pub acl: ResourceAcl,
     pub extractor_state: ResourceExtractorState,
 }
 

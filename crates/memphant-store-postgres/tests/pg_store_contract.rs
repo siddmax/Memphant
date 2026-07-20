@@ -556,6 +556,7 @@ macro_rules! pg_contract_test {
 
 pg_contract_test!(retain_episode_dedups_and_enqueues);
 pg_contract_test!(retain_resource_registers_and_enqueues);
+pg_contract_test!(resource_acl_round_trips_empty_and_non_empty);
 pg_contract_test!(commit_publishes_staged_episode_and_unit);
 pg_contract_test!(drop_rolls_back_staged_rows);
 pg_contract_test!(recall_candidates_are_tenant_and_scope_scoped);
@@ -568,6 +569,62 @@ pg_contract_test!(forget_by_unit_closes_and_purges);
 pg_contract_test!(fetch_episodes_honors_large_limit);
 pg_contract_test!(semantic_update_supersedes_unit_aged_past_recall_window);
 pg_contract_test!(scope_memory_page_paginates_without_overlap);
+
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn resource_acl_unknown_shape_fails_closed() {
+    let store = connect().await;
+    let tenant = fresh_tenant(&store).await;
+    let context = fresh_memory_context(&store, tenant).await;
+    let retained = retain_resource(
+        &store,
+        &context,
+        RetainResourceRequest {
+            tenant_id: tenant,
+            data_subject_id: context.data_subject_id,
+            scope_id: context.scope_id,
+            actor_id: context.actor_id,
+            agent_node_id: context.agent_node_id,
+            subject_generation: context.subject_generation,
+            uri: "memphant://invalid-acl".to_string(),
+            source_ref: "pg-contract:invalid-acl".to_string(),
+            observed_at: CLOCK.0.to_string(),
+            kind: None,
+            content_hash: "sha256:invalid-acl".to_string(),
+            mime_type: "text/plain".to_string(),
+            revision: None,
+            body: Some("invalid ACL fixture".to_string()),
+            source_trust: TrustLevel::TrustedUser,
+            compiler_version: "compiler-pg-contract".to_string(),
+        },
+    )
+    .await
+    .expect("retain resource");
+
+    let pool = sqlx::PgPool::connect(&db_url())
+        .await
+        .expect("connect raw pool");
+    let mut tx = pool.begin().await.expect("begin raw transaction");
+    sqlx::query("select memphant.bind_tenant($1)")
+        .bind(tenant.as_uuid())
+        .execute(&mut *tx)
+        .await
+        .expect("bind tenant");
+    sqlx::query("update memphant.resource set acl = $1 where tenant_id = $2 and id = $3")
+        .bind(serde_json::json!({"future_gate": true}))
+        .bind(tenant.as_uuid())
+        .bind(retained.resource_id.as_uuid())
+        .execute(&mut *tx)
+        .await
+        .expect("corrupt ACL fixture");
+    tx.commit().await.expect("commit malformed ACL");
+
+    let error = store
+        .fetch_resource(&context, retained.resource_id)
+        .await
+        .expect_err("unknown ACL data must fail closed");
+    assert!(matches!(error, memphant_core::StoreError::Backend(_)));
+}
 
 #[tokio::test]
 #[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]

@@ -40,6 +40,7 @@ macro_rules! contract_test {
 
 contract_test!(retain_episode_dedups_and_enqueues);
 contract_test!(retain_resource_registers_and_enqueues);
+contract_test!(resource_acl_round_trips_empty_and_non_empty);
 contract_test!(commit_publishes_staged_episode_and_unit);
 contract_test!(drop_rolls_back_staged_rows);
 contract_test!(recall_candidates_are_tenant_and_scope_scoped);

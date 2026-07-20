@@ -189,6 +189,7 @@ async fn seed_subject(store: &InMemoryStore, context: &ResolvedMemoryContext, la
                 revision: None,
                 body: Some(label.to_string()),
                 source_trust: TrustLevel::TrustedUser,
+                acl: memphant_types::ResourceAcl::default(),
             },
         )
         .await

@@ -36,7 +36,7 @@ use memphant_types::{
     StoredMemoryEdge, StoredMemoryUnit, StoredResource, SubjectId, TenantId, TraceId, TrustLevel,
     UnitId, UnitState, agent_level_allows_memory_kind,
 };
-use memphant_types::{NewResource, ResourceExtractorState, ResourceId};
+use memphant_types::{NewResource, ResourceAcl, ResourceExtractorState, ResourceId};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -2879,6 +2879,7 @@ impl MemoryStore for InMemoryStore {
             revision: resource.revision,
             body: resource.body,
             source_trust: resource.source_trust,
+            acl: resource.acl,
             extractor_state: ResourceExtractorState::Registered,
         });
         Ok(id)
@@ -4760,6 +4761,7 @@ where
                 revision: request.revision,
                 body: request.body,
                 source_trust: request.source_trust,
+                acl: ResourceAcl::default(),
             },
         )
         .await?;

@@ -26,10 +26,11 @@ use memphant_types::{
     ActorId, AgentNodeId, ContextBindingAgentRef, ContextBindingEntityRef, ContextBindingRequest,
     ContextBindingScopeRef, CorrectRequest, CorrectSelector, CorrectionPayload, ForgetRequest,
     ForgetSelector, JobId, MarkOutcome, MarkRequest, MemoryKind, NewEpisode, NewMemoryUnit,
-    RecallContextItem, RecallMode, RecallRequest, RecallTime, ReflectCandidate, ReflectInput,
-    ResolvedMemoryContext, ResolvedMemorySource, ResourceExtractorState, RetainEpisodeHttpRequest,
-    RetainPayload, RetainRequest, RetainResourceRequest, RetainUnitPayload, RetrievalTrace,
-    ScopeId, SubjectId, TenantId, TraceId, TrustLevel, UnitId, UnitState,
+    NewResource, RecallContextItem, RecallMode, RecallRequest, RecallTime, ReflectCandidate,
+    ReflectInput, ResolvedMemoryContext, ResolvedMemorySource, ResourceAcl, ResourceExtractorState,
+    ResourceKind, ResourceProtectedCategory, RetainEpisodeHttpRequest, RetainPayload,
+    RetainRequest, RetainResourceRequest, RetainUnitPayload, RetrievalTrace, ScopeId, SubjectId,
+    TenantId, TraceId, TrustLevel, UnitId, UnitState,
 };
 use uuid::Uuid;
 
@@ -288,8 +289,66 @@ pub async fn retain_resource_registers_and_enqueues<H: StoreHarness>(h: &H) {
         .expect("fetch")
         .expect("resource exists");
     assert_eq!(resource.id, retained.resource_id);
+    assert_eq!(resource.acl, ResourceAcl::default());
+    assert!(resource.acl.is_deep_eligible());
     assert_eq!(resource.extractor_state, ResourceExtractorState::Registered);
     assert_eq!(store.pending_job_count(&context).await.expect("count"), 1);
+}
+
+/// Resource ACLs are persisted exactly by both stores. Public retain above
+/// remains default-empty; this direct store contract covers the dormant typed
+/// ACL read path without exposing ACL authoring on the public API.
+pub async fn resource_acl_round_trips_empty_and_non_empty<H: StoreHarness>(h: &H) {
+    let store = h.store();
+    let tenant = h.fresh_tenant().await;
+    let context = bind_context(store, tenant).await;
+
+    for acl in [
+        ResourceAcl::default(),
+        ResourceAcl {
+            scopes: vec![context.scope_id],
+            trust_floor: Some(TrustLevel::VerifiedTool),
+            protected: Some(ResourceProtectedCategory::PersonalIdentity),
+        },
+    ] {
+        let mut tx = store.begin(&context).await.expect("begin");
+        let resource_id = store
+            .stage_resource(
+                &mut tx,
+                NewResource {
+                    tenant_id: tenant,
+                    data_subject_id: context.data_subject_id,
+                    scope_id: context.scope_id,
+                    actor_id: context.actor_id,
+                    agent_node_id: context.agent_node_id,
+                    subject_generation: context.subject_generation,
+                    uri: format!(
+                        "memphant://resource/{resource_id}",
+                        resource_id = Uuid::now_v7()
+                    ),
+                    source_ref: "testkit:resource-acl".to_string(),
+                    observed_at: CLOCK.0.to_string(),
+                    kind: ResourceKind::Document,
+                    content_hash: format!("sha256:{}", Uuid::now_v7()),
+                    mime_type: "text/plain".to_string(),
+                    revision: None,
+                    body: Some("ACL round-trip body".to_string()),
+                    source_trust: TrustLevel::TrustedUser,
+                    acl: acl.clone(),
+                },
+            )
+            .await
+            .expect("stage resource");
+        store.commit(tx).await.expect("commit");
+
+        let stored = store
+            .fetch_resource(&context, resource_id)
+            .await
+            .expect("fetch resource")
+            .expect("resource exists");
+        assert_eq!(stored.acl, acl);
+        assert_eq!(stored.acl.is_deep_eligible(), stored.acl.is_empty());
+    }
 }
 
 /// A committed staged transaction publishes both the episode and the unit; a

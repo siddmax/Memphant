@@ -132,6 +132,7 @@ async fn exact_agent_pairs_deny_siblings_until_explicit_grant_across_all_channel
                 source_ref: "test:private-resource".to_string(),
                 observed_at: "2026-07-09T00:00:00Z".to_string(),
                 source_trust: TrustLevel::TrustedUser,
+                acl: memphant_types::ResourceAcl::default(),
             },
         )
         .await
