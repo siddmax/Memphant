@@ -557,6 +557,9 @@ macro_rules! pg_contract_test {
 pg_contract_test!(retain_episode_dedups_and_enqueues);
 pg_contract_test!(retain_resource_registers_and_enqueues);
 pg_contract_test!(resource_acl_round_trips_empty_and_non_empty);
+pg_contract_test!(deep_snapshot_is_authorized_stable_and_read_only);
+pg_contract_test!(deep_snapshot_binds_historical_rectangle_only);
+pg_contract_test!(deep_snapshot_does_not_treat_actor_as_read_partition);
 pg_contract_test!(commit_publishes_staged_episode_and_unit);
 pg_contract_test!(drop_rolls_back_staged_rows);
 pg_contract_test!(recall_candidates_are_tenant_and_scope_scoped);

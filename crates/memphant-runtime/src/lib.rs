@@ -23,10 +23,11 @@ use memphant_core::{
 };
 use memphant_store_postgres::{PgStore, PgTxn};
 use memphant_types::{
-    ActorId, AgentNodeId, ContextBindingRequest, ContextBindingResponse, EpisodeId, JobId,
-    MemoryKind, NewEpisode, NewMemoryEdge, NewMemoryUnit, NewResource, RecallTime, RecordMaterial,
-    ReflectJob, ReflectTrace, ResourceId, RetainOutcome, RetrievalTrace, ScopeId, StoredEpisode,
-    StoredMemoryEdge, StoredMemoryUnit, StoredResource, SubjectId, TenantId, TraceId, UnitId,
+    ActorId, AgentNodeId, ContextBindingRequest, ContextBindingResponse, DeepSnapshotEntry,
+    EpisodeId, JobId, MemoryKind, NewEpisode, NewMemoryEdge, NewMemoryUnit, NewResource,
+    RecallTime, RecordMaterial, ReflectJob, ReflectTrace, ResourceId, RetainOutcome,
+    RetrievalTrace, ScopeId, StoredEpisode, StoredMemoryEdge, StoredMemoryUnit, StoredResource,
+    SubjectId, TenantId, TraceId, UnitId,
 };
 use uuid::Uuid;
 
@@ -626,6 +627,14 @@ impl MemoryStore for AnyStore {
         delegate!(self, store => store
             .fetch_recall_candidates(context, kinds, query_terms, time, limit)
             .await)
+    }
+
+    async fn fetch_deep_snapshot(
+        &self,
+        context: &ResolvedMemoryContext,
+        time: &RecallTime,
+    ) -> Result<Vec<DeepSnapshotEntry>, StoreError> {
+        delegate!(self, store => store.fetch_deep_snapshot(context, time).await)
     }
 
     async fn fetch_scope_open_units(

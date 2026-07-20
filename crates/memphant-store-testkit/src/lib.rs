@@ -18,17 +18,19 @@ use std::sync::Arc;
 
 use memphant_core::service::MemoryService;
 use memphant_core::{
-    EmbeddingProfileRow, EmbeddingRow, FixedClock, JobFilter, MemoryStore, MutationLedgerStore,
-    NoopEmbedding, correct_memory, derive_fact_key, forget_memory, recall, record_mark,
+    EmbeddingProfileRow, EmbeddingRow, FixedClock, JobFilter, MemoryStore, MutationClaim,
+    MutationClaimOutcome, MutationLedgerStore, MutationVerb, NoopEmbedding, StoreError,
+    build_deep_workspace, correct_memory, derive_fact_key, forget_memory, recall, record_mark,
     reflect_recorded, retain_episode, retain_resource,
 };
 use memphant_types::{
-    ActorId, AgentNodeId, ContextBindingAgentRef, ContextBindingEntityRef, ContextBindingRequest,
-    ContextBindingScopeRef, CorrectRequest, CorrectSelector, CorrectionPayload, ForgetRequest,
+    ActorId, AgentNodeId, ContextBindingAccessPolicy, ContextBindingAgentRef,
+    ContextBindingEntityRef, ContextBindingRequest, ContextBindingScopeRef, CorrectRequest,
+    CorrectSelector, CorrectionPayload, DeepSnapshotSourceKind, EpisodeId, ForgetRequest,
     ForgetSelector, JobId, MarkOutcome, MarkRequest, MemoryKind, NewEpisode, NewMemoryUnit,
     NewResource, RecallContextItem, RecallMode, RecallRequest, RecallTime, ReflectCandidate,
     ReflectInput, ResolvedMemoryContext, ResolvedMemorySource, ResourceAcl, ResourceExtractorState,
-    ResourceKind, ResourceProtectedCategory, RetainEpisodeHttpRequest, RetainPayload,
+    ResourceId, ResourceKind, ResourceProtectedCategory, RetainEpisodeHttpRequest, RetainPayload,
     RetainRequest, RetainResourceRequest, RetainUnitPayload, RetrievalTrace, ScopeId, SubjectId,
     TenantId, TraceId, TrustLevel, UnitId, UnitState,
 };
@@ -349,6 +351,876 @@ pub async fn resource_acl_round_trips_empty_and_non_empty<H: StoreHarness>(h: &H
         assert_eq!(stored.acl, acl);
         assert_eq!(stored.acl.is_deep_eligible(), stored.acl.is_empty());
     }
+}
+
+fn deep_time(transaction_as_of: &str) -> RecallTime {
+    RecallTime {
+        evaluated_at: transaction_as_of.to_string(),
+        transaction_as_of: transaction_as_of.to_string(),
+        valid_at: transaction_as_of.to_string(),
+    }
+}
+
+async fn stage_deep_episode<S: MemoryStore>(
+    store: &S,
+    context: &ResolvedMemoryContext,
+    source_body: &str,
+    source_trust: TrustLevel,
+    unit_state: UnitState,
+    unit_trust: TrustLevel,
+    transaction_rectangle: Option<(&str, &str)>,
+) -> (EpisodeId, UnitId) {
+    let mut tx = store.begin(context).await.expect("begin deep episode");
+    let episode = store
+        .stage_episode(
+            &mut tx,
+            NewEpisode {
+                tenant_id: context.tenant_id,
+                data_subject_id: context.data_subject_id,
+                scope_id: context.scope_id,
+                actor_id: context.actor_id,
+                agent_node_id: context.agent_node_id,
+                subject_generation: context.subject_generation,
+                source_kind: "user".to_string(),
+                source_ref: format!("testkit:deep:{}", Uuid::now_v7()),
+                observed_at: CLOCK.0.to_string(),
+                source_trust,
+                dedup_key: Uuid::now_v7().to_string(),
+                body: source_body.to_string(),
+            },
+        )
+        .await
+        .expect("stage deep episode");
+    let unit_id = store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id: context.tenant_id,
+                data_subject_id: context.data_subject_id,
+                scope_id: context.scope_id,
+                agent_node_id: context.agent_node_id,
+                subject_generation: context.subject_generation,
+                kind: MemoryKind::Semantic,
+                state: unit_state,
+                fact_key: None,
+                predicate: None,
+                body: format!("Derived from {source_body}"),
+                confidence: None,
+                trust_level: unit_trust,
+                churn_class: None,
+                freshness_due_at: None,
+                actor_id: Some(context.actor_id),
+                source_kind: None,
+                source_ref: "testkit:deep-unit".to_string(),
+                observed_at: CLOCK.0.to_string(),
+                source_episode_id: Some(episode.episode_id),
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: transaction_rectangle.map(|(from, _)| from.to_string()),
+                transaction_to: transaction_rectangle.map(|(_, to)| to.to_string()),
+            },
+        )
+        .await
+        .expect("stage deep episode unit");
+    store.commit(tx).await.expect("commit deep episode");
+    (episode.episode_id, unit_id)
+}
+
+async fn stage_deep_resource<S: MemoryStore>(
+    store: &S,
+    context: &ResolvedMemoryContext,
+    source_body: &str,
+    acl: ResourceAcl,
+) -> (ResourceId, UnitId) {
+    let mut tx = store.begin(context).await.expect("begin deep resource");
+    let resource_id = store
+        .stage_resource(
+            &mut tx,
+            NewResource {
+                tenant_id: context.tenant_id,
+                data_subject_id: context.data_subject_id,
+                scope_id: context.scope_id,
+                actor_id: context.actor_id,
+                agent_node_id: context.agent_node_id,
+                subject_generation: context.subject_generation,
+                uri: format!("memphant://resource/{}", Uuid::now_v7()),
+                source_ref: format!("testkit:deep:{}", Uuid::now_v7()),
+                observed_at: CLOCK.0.to_string(),
+                kind: ResourceKind::Document,
+                content_hash: "sha256:untrusted-stored-value".to_string(),
+                mime_type: "text/plain".to_string(),
+                revision: None,
+                body: Some(source_body.to_string()),
+                source_trust: TrustLevel::TrustedUser,
+                acl,
+            },
+        )
+        .await
+        .expect("stage deep resource");
+    let unit_id = store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id: context.tenant_id,
+                data_subject_id: context.data_subject_id,
+                scope_id: context.scope_id,
+                agent_node_id: context.agent_node_id,
+                subject_generation: context.subject_generation,
+                kind: MemoryKind::Semantic,
+                state: UnitState::Active,
+                fact_key: None,
+                predicate: None,
+                body: format!("Derived from {source_body}"),
+                confidence: None,
+                trust_level: TrustLevel::TrustedUser,
+                churn_class: None,
+                freshness_due_at: None,
+                actor_id: Some(context.actor_id),
+                source_kind: None,
+                source_ref: "testkit:deep-resource-unit".to_string(),
+                observed_at: CLOCK.0.to_string(),
+                source_episode_id: None,
+                source_resource_id: Some(resource_id),
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
+            },
+        )
+        .await
+        .expect("stage deep resource unit");
+    store.commit(tx).await.expect("commit deep resource");
+    (resource_id, unit_id)
+}
+
+/// The Deep read seam exports only raw sources with at least one independently
+/// authorized, recallable direct-link unit. Every negative source body is
+/// asserted against the final snapshot so a future query rewrite cannot turn
+/// this into a metadata-only authorization test.
+pub async fn deep_snapshot_is_authorized_stable_and_read_only<H: StoreHarness>(h: &H) {
+    let store = h.store();
+    let tenant = h.fresh_tenant().await;
+    let context = bind_context(store, tenant).await;
+
+    let (authorized_episode, authorized_episode_unit) = stage_deep_episode(
+        store,
+        &context,
+        "Authorized episode body.",
+        TrustLevel::TrustedUser,
+        UnitState::Active,
+        TrustLevel::TrustedUser,
+        None,
+    )
+    .await;
+    let (authorized_resource, authorized_resource_unit) = stage_deep_resource(
+        store,
+        &context,
+        "Authorized resource body.",
+        ResourceAcl::default(),
+    )
+    .await;
+    let mut mixed_tx = store
+        .begin(&context)
+        .await
+        .expect("begin mixed linked units");
+    let linked_unit = |state: UnitState, label: &str| NewMemoryUnit {
+        tenant_id: context.tenant_id,
+        data_subject_id: context.data_subject_id,
+        scope_id: context.scope_id,
+        agent_node_id: context.agent_node_id,
+        subject_generation: context.subject_generation,
+        kind: MemoryKind::Semantic,
+        state,
+        fact_key: None,
+        predicate: None,
+        body: label.to_string(),
+        confidence: None,
+        trust_level: if state == UnitState::Quarantined {
+            TrustLevel::Quarantined
+        } else {
+            TrustLevel::TrustedUser
+        },
+        churn_class: None,
+        freshness_due_at: None,
+        actor_id: Some(context.actor_id),
+        source_kind: None,
+        source_ref: "testkit:deep:mixed".to_string(),
+        observed_at: CLOCK.0.to_string(),
+        source_episode_id: Some(authorized_episode),
+        source_resource_id: None,
+        deletion_generation: None,
+        contextual_chunks: Vec::new(),
+        valid_from: None,
+        valid_to: None,
+        transaction_from: None,
+        transaction_to: None,
+    };
+    let second_authorized_unit = store
+        .stage_memory_unit(
+            &mut mixed_tx,
+            linked_unit(UnitState::Validated, "Second authorized linked unit."),
+        )
+        .await
+        .expect("stage second authorized linked unit");
+    let stale_linked_unit = store
+        .stage_memory_unit(
+            &mut mixed_tx,
+            linked_unit(UnitState::Expired, "Negative stale linked unit."),
+        )
+        .await
+        .expect("stage stale linked unit");
+    store
+        .commit(mixed_tx)
+        .await
+        .expect("commit mixed linked units");
+
+    stage_deep_episode(
+        store,
+        &context,
+        "Negative quarantined-unit body.",
+        TrustLevel::TrustedUser,
+        UnitState::Quarantined,
+        TrustLevel::Quarantined,
+        None,
+    )
+    .await;
+    stage_deep_episode(
+        store,
+        &context,
+        "Negative quarantined-source body.",
+        TrustLevel::Quarantined,
+        UnitState::Active,
+        TrustLevel::TrustedUser,
+        None,
+    )
+    .await;
+    stage_deep_episode(
+        store,
+        &context,
+        "Negative non-live-unit body.",
+        TrustLevel::TrustedUser,
+        UnitState::Candidate,
+        TrustLevel::TrustedUser,
+        None,
+    )
+    .await;
+    stage_deep_resource(
+        store,
+        &context,
+        "Negative resource ACL body.",
+        ResourceAcl {
+            scopes: vec![context.scope_id],
+            trust_floor: None,
+            protected: None,
+        },
+    )
+    .await;
+
+    let (unit_forgotten_source, unit_to_forget) = stage_deep_episode(
+        store,
+        &context,
+        "Negative forgotten memory-unit body.",
+        TrustLevel::TrustedUser,
+        UnitState::Active,
+        TrustLevel::TrustedUser,
+        None,
+    )
+    .await;
+    forget_memory(
+        store,
+        &context,
+        ForgetRequest {
+            subject_id: context.data_subject_id,
+            scope_id: context.scope_id,
+            actor_id: context.actor_id,
+            agent_node_id: context.agent_node_id,
+            subject_generation: context.subject_generation,
+            selector: ForgetSelector {
+                memory_unit_id: Some(unit_to_forget),
+                episode_id: None,
+                resource_id: None,
+                scope_id: context.scope_id,
+            },
+            reason: "deep snapshot unit tombstone contract".to_string(),
+        },
+        &CLOCK,
+    )
+    .await
+    .expect("forget memory unit");
+
+    let mut bad_link_tx = store.begin(&context).await.expect("begin bad links");
+    let dual_episode = store
+        .stage_episode(
+            &mut bad_link_tx,
+            NewEpisode {
+                tenant_id: context.tenant_id,
+                data_subject_id: context.data_subject_id,
+                scope_id: context.scope_id,
+                actor_id: context.actor_id,
+                agent_node_id: context.agent_node_id,
+                subject_generation: context.subject_generation,
+                source_kind: "user".to_string(),
+                source_ref: "testkit:deep:dual-episode".to_string(),
+                observed_at: CLOCK.0.to_string(),
+                source_trust: TrustLevel::TrustedUser,
+                dedup_key: Uuid::now_v7().to_string(),
+                body: "Negative dual-link episode body.".to_string(),
+            },
+        )
+        .await
+        .expect("stage dual-link episode");
+    let dual_resource = store
+        .stage_resource(
+            &mut bad_link_tx,
+            NewResource {
+                tenant_id: context.tenant_id,
+                data_subject_id: context.data_subject_id,
+                scope_id: context.scope_id,
+                actor_id: context.actor_id,
+                agent_node_id: context.agent_node_id,
+                subject_generation: context.subject_generation,
+                uri: format!("memphant://resource/{}", Uuid::now_v7()),
+                source_ref: "testkit:deep:dual-resource".to_string(),
+                observed_at: CLOCK.0.to_string(),
+                kind: ResourceKind::Document,
+                content_hash: "sha256:dual".to_string(),
+                mime_type: "text/plain".to_string(),
+                revision: None,
+                body: Some("Negative dual-link resource body.".to_string()),
+                source_trust: TrustLevel::TrustedUser,
+                acl: ResourceAcl::default(),
+            },
+        )
+        .await
+        .expect("stage dual-link resource");
+    let dual_link_unit = store
+        .stage_memory_unit(
+            &mut bad_link_tx,
+            NewMemoryUnit {
+                tenant_id: context.tenant_id,
+                data_subject_id: context.data_subject_id,
+                scope_id: context.scope_id,
+                agent_node_id: context.agent_node_id,
+                subject_generation: context.subject_generation,
+                kind: MemoryKind::Semantic,
+                state: UnitState::Active,
+                fact_key: None,
+                predicate: None,
+                body: "Negative dual-link unit.".to_string(),
+                confidence: None,
+                trust_level: TrustLevel::TrustedUser,
+                churn_class: None,
+                freshness_due_at: None,
+                actor_id: Some(context.actor_id),
+                source_kind: None,
+                source_ref: "testkit:deep:dual".to_string(),
+                observed_at: CLOCK.0.to_string(),
+                source_episode_id: Some(dual_episode.episode_id),
+                source_resource_id: Some(dual_resource),
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
+            },
+        )
+        .await
+        .expect("stage dual-link unit");
+    let no_link_unit = store
+        .stage_memory_unit(
+            &mut bad_link_tx,
+            NewMemoryUnit {
+                tenant_id: context.tenant_id,
+                data_subject_id: context.data_subject_id,
+                scope_id: context.scope_id,
+                agent_node_id: context.agent_node_id,
+                subject_generation: context.subject_generation,
+                kind: MemoryKind::Semantic,
+                state: UnitState::Active,
+                fact_key: None,
+                predicate: None,
+                body: "Negative no-link unit.".to_string(),
+                confidence: None,
+                trust_level: TrustLevel::TrustedUser,
+                churn_class: None,
+                freshness_due_at: None,
+                actor_id: Some(context.actor_id),
+                source_kind: None,
+                source_ref: "testkit:deep:no-link".to_string(),
+                observed_at: CLOCK.0.to_string(),
+                source_episode_id: None,
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
+            },
+        )
+        .await
+        .expect("stage no-link unit");
+    store.commit(bad_link_tx).await.expect("commit bad links");
+
+    let mut no_unit_tx = store.begin(&context).await.expect("begin no-unit source");
+    store
+        .stage_episode(
+            &mut no_unit_tx,
+            NewEpisode {
+                tenant_id: context.tenant_id,
+                data_subject_id: context.data_subject_id,
+                scope_id: context.scope_id,
+                actor_id: context.actor_id,
+                agent_node_id: context.agent_node_id,
+                subject_generation: context.subject_generation,
+                source_kind: "user".to_string(),
+                source_ref: "testkit:deep:no-unit".to_string(),
+                observed_at: CLOCK.0.to_string(),
+                source_trust: TrustLevel::TrustedUser,
+                dedup_key: Uuid::now_v7().to_string(),
+                body: "Negative no-eligible-unit body.".to_string(),
+            },
+        )
+        .await
+        .expect("stage no-unit source");
+    store
+        .commit(no_unit_tx)
+        .await
+        .expect("commit no-unit source");
+
+    let (forgotten_episode, _) = stage_deep_episode(
+        store,
+        &context,
+        "Negative forgotten episode body.",
+        TrustLevel::TrustedUser,
+        UnitState::Active,
+        TrustLevel::TrustedUser,
+        None,
+    )
+    .await;
+    forget_memory(
+        store,
+        &context,
+        ForgetRequest {
+            subject_id: context.data_subject_id,
+            scope_id: context.scope_id,
+            actor_id: context.actor_id,
+            agent_node_id: context.agent_node_id,
+            subject_generation: context.subject_generation,
+            selector: ForgetSelector {
+                memory_unit_id: None,
+                episode_id: Some(forgotten_episode),
+                resource_id: None,
+                scope_id: context.scope_id,
+            },
+            reason: "deep snapshot contract".to_string(),
+        },
+        &CLOCK,
+    )
+    .await
+    .expect("forget episode source");
+
+    let (forgotten_resource, _) = stage_deep_resource(
+        store,
+        &context,
+        "Negative forgotten resource body.",
+        ResourceAcl::default(),
+    )
+    .await;
+    forget_memory(
+        store,
+        &context,
+        ForgetRequest {
+            subject_id: context.data_subject_id,
+            scope_id: context.scope_id,
+            actor_id: context.actor_id,
+            agent_node_id: context.agent_node_id,
+            subject_generation: context.subject_generation,
+            selector: ForgetSelector {
+                memory_unit_id: None,
+                episode_id: None,
+                resource_id: Some(forgotten_resource),
+                scope_id: context.scope_id,
+            },
+            reason: "deep snapshot contract".to_string(),
+        },
+        &CLOCK,
+    )
+    .await
+    .expect("forget resource source");
+
+    let other_context = bind_context(store, tenant).await;
+    stage_deep_episode(
+        store,
+        &other_context,
+        "Negative sibling-agent body.",
+        TrustLevel::TrustedUser,
+        UnitState::Active,
+        TrustLevel::TrustedUser,
+        None,
+    )
+    .await;
+
+    let pending_before = store
+        .pending_job_count(&context)
+        .await
+        .expect("pending jobs before snapshot");
+    let snapshot = store
+        .fetch_deep_snapshot(&context, &deep_time(CLOCK.0))
+        .await
+        .expect("deep snapshot");
+    let repeated = store
+        .fetch_deep_snapshot(&context, &deep_time(CLOCK.0))
+        .await
+        .expect("repeat deep snapshot");
+    assert_eq!(snapshot, repeated, "snapshot is stable and read-only");
+    assert_eq!(
+        pending_before,
+        store
+            .pending_job_count(&context)
+            .await
+            .expect("pending jobs after snapshot"),
+        "snapshot performs no writes"
+    );
+
+    assert_eq!(snapshot.len(), 2);
+    assert_eq!(snapshot[0].source_kind, DeepSnapshotSourceKind::Episode);
+    assert_eq!(snapshot[0].source_id, authorized_episode.as_uuid());
+    assert_eq!(
+        snapshot[0].path,
+        format!("episodes/{}.md", authorized_episode.as_uuid())
+    );
+    assert_eq!(
+        snapshot[0].body_sha256,
+        "fcf2595e49f470cf4e0b77c4f2332036b9da192aa8eae537a26f2a3d1ea0ea29"
+    );
+    let mut expected_episode_units = vec![authorized_episode_unit, second_authorized_unit];
+    expected_episode_units.sort_unstable_by_key(|id| id.as_uuid());
+    assert_eq!(snapshot[0].eligible_unit_ids(), expected_episode_units);
+    assert!(
+        snapshot[0]
+            .bound_units
+            .windows(2)
+            .all(|units| units[0].id.as_uuid() < units[1].id.as_uuid())
+    );
+    assert!(!snapshot[0].eligible_unit_ids().contains(&stale_linked_unit));
+    assert_eq!(snapshot[1].source_kind, DeepSnapshotSourceKind::Resource);
+    assert_eq!(snapshot[1].source_id, authorized_resource.as_uuid());
+    assert_eq!(
+        snapshot[1].path,
+        format!("resources/{}.md", authorized_resource.as_uuid())
+    );
+    assert_eq!(
+        snapshot[1].body_sha256,
+        "91c82d760ae9ce7627f3ca9202e1c0a6d2940540584cfd2fac364977b25e0a7b"
+    );
+    assert_eq!(
+        snapshot[1].eligible_unit_ids(),
+        vec![authorized_resource_unit]
+    );
+    assert_eq!(snapshot[1].bound_units[0].id, authorized_resource_unit);
+
+    let exported_bodies: Vec<_> = snapshot.iter().map(|entry| entry.body.as_str()).collect();
+    for forbidden in [
+        "Negative quarantined-unit body.",
+        "Negative quarantined-source body.",
+        "Negative non-live-unit body.",
+        "Negative resource ACL body.",
+        "Negative forgotten memory-unit body.",
+        "Negative dual-link episode body.",
+        "Negative dual-link resource body.",
+        "Negative no-eligible-unit body.",
+        "Negative forgotten episode body.",
+        "Negative forgotten resource body.",
+        "Negative sibling-agent body.",
+    ] {
+        assert!(!exported_bodies.contains(&forbidden), "leaked {forbidden}");
+    }
+    let bound_ids: Vec<_> = snapshot
+        .iter()
+        .flat_map(|entry| entry.eligible_unit_ids())
+        .collect();
+    assert!(!bound_ids.contains(&dual_link_unit));
+    assert!(!bound_ids.contains(&no_link_unit));
+    assert_eq!(
+        store
+            .fetch_episode(&context, unit_forgotten_source)
+            .await
+            .expect("forgotten-unit source still readable")
+            .expect("forgetting a unit does not delete its source")
+            .body,
+        "Negative forgotten memory-unit body."
+    );
+
+    let workspace = build_deep_workspace(&snapshot);
+    assert_eq!(
+        workspace
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "WORKFLOW.md",
+            "manifest.jsonl",
+            snapshot[0].path.as_str(),
+            snapshot[1].path.as_str(),
+        ]
+    );
+    assert!(workspace.files[0].body.contains("read-only"));
+    assert!(
+        workspace.files[1]
+            .body
+            .contains(&authorized_episode.as_uuid().to_string())
+    );
+    assert!(
+        workspace.files[1]
+            .body
+            .contains(&authorized_resource.as_uuid().to_string())
+    );
+    assert!(!workspace.manifest_sha256.is_empty());
+    assert!(!workspace.workspace_sha256.is_empty());
+
+    let mut semantic_only = context.clone();
+    semantic_only.sources_by_kind.remove(&MemoryKind::Episodic);
+    let semantic_snapshot = store
+        .fetch_deep_snapshot(&semantic_only, &deep_time(CLOCK.0))
+        .await
+        .expect("semantic-only deep snapshot");
+    assert!(
+        semantic_snapshot
+            .iter()
+            .all(|entry| entry.source_kind != DeepSnapshotSourceKind::Episode),
+        "a semantic unit grant cannot reveal its raw episode"
+    );
+    let mut no_resource_grant = context.clone();
+    no_resource_grant
+        .sources_by_kind
+        .remove(&MemoryKind::Resource);
+    let no_resource_snapshot = store
+        .fetch_deep_snapshot(&no_resource_grant, &deep_time(CLOCK.0))
+        .await
+        .expect("no-resource-grant deep snapshot");
+    assert!(
+        no_resource_snapshot
+            .iter()
+            .all(|entry| entry.source_kind != DeepSnapshotSourceKind::Resource),
+        "a semantic unit grant cannot reveal its raw resource"
+    );
+
+    let mut erasure = store
+        .begin(&context)
+        .await
+        .expect("begin generation advance");
+    assert_eq!(
+        store
+            .stage_mutation_claim(
+                &mut erasure,
+                MutationClaim::new(
+                    &context,
+                    MutationVerb::EraseSubject,
+                    "deep-snapshot-prior-generation",
+                    [MutationVerb::EraseSubject as u8; 32],
+                )
+                .expect("valid erasure claim"),
+            )
+            .await
+            .expect("stage erasure claim"),
+        MutationClaimOutcome::Execute
+    );
+    store
+        .stage_subject_erasure(&mut erasure)
+        .await
+        .expect("advance subject generation");
+    store
+        .commit(erasure)
+        .await
+        .expect("commit generation advance");
+    match store
+        .fetch_deep_snapshot(&context, &deep_time(CLOCK.0))
+        .await
+    {
+        Ok(snapshot) => assert!(
+            snapshot.is_empty(),
+            "prior-generation source bytes must not survive into Deep"
+        ),
+        Err(StoreError::StaleSubjectGeneration | StoreError::SubjectErased) => {}
+        Err(error) => panic!("unexpected prior-generation snapshot error: {error}"),
+    }
+}
+
+/// Closed correction rectangles remain reproducible: only the unit visible at
+/// the requested transaction snapshot is bound to the raw source.
+pub async fn deep_snapshot_binds_historical_rectangle_only<H: StoreHarness>(h: &H) {
+    let store = h.store();
+    let tenant = h.fresh_tenant().await;
+    let context = bind_context(store, tenant).await;
+    let (episode_id, historical_unit) = stage_deep_episode(
+        store,
+        &context,
+        "Historical source body.",
+        TrustLevel::TrustedUser,
+        UnitState::Superseded,
+        TrustLevel::TrustedUser,
+        Some(("2029-01-01T00:00:00Z", "2031-01-01T00:00:00Z")),
+    )
+    .await;
+
+    let mut tx = store
+        .begin(&context)
+        .await
+        .expect("begin current correction");
+    let current_unit = store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id: context.tenant_id,
+                data_subject_id: context.data_subject_id,
+                scope_id: context.scope_id,
+                agent_node_id: context.agent_node_id,
+                subject_generation: context.subject_generation,
+                kind: MemoryKind::Semantic,
+                state: UnitState::Active,
+                fact_key: None,
+                predicate: None,
+                body: "Current derived correction.".to_string(),
+                confidence: None,
+                trust_level: TrustLevel::TrustedUser,
+                churn_class: None,
+                freshness_due_at: None,
+                actor_id: Some(context.actor_id),
+                source_kind: None,
+                source_ref: "testkit:deep-current".to_string(),
+                observed_at: "2031-01-01T00:00:00Z".to_string(),
+                source_episode_id: Some(episode_id),
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: Some("2031-01-01T00:00:00Z".to_string()),
+                transaction_to: None,
+            },
+        )
+        .await
+        .expect("stage current correction");
+    store.commit(tx).await.expect("commit current correction");
+
+    let historical = store
+        .fetch_deep_snapshot(&context, &deep_time("2030-01-01T00:00:00Z"))
+        .await
+        .expect("historical snapshot");
+    assert_eq!(historical.len(), 1);
+    assert_eq!(historical[0].eligible_unit_ids(), vec![historical_unit]);
+
+    let current = store
+        .fetch_deep_snapshot(&context, &deep_time("2032-01-01T00:00:00Z"))
+        .await
+        .expect("current snapshot");
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0].eligible_unit_ids(), vec![current_unit]);
+}
+
+/// Actor identity is source provenance, not a read partition. A second caller
+/// bound to the same subject/scope/agent source tuple sees authorized memory
+/// even though it did not author the source.
+pub async fn deep_snapshot_does_not_treat_actor_as_read_partition<H: StoreHarness>(h: &H) {
+    let store = h.store();
+    let tenant = h.fresh_tenant().await;
+    let suffix = Uuid::now_v7();
+    let author_binding = ContextBindingRequest {
+        subject: ContextBindingEntityRef {
+            external_ref: format!("deep-subject:{suffix}"),
+            kind: "user".to_string(),
+        },
+        actor: ContextBindingEntityRef {
+            external_ref: format!("deep-actor:{suffix}:author"),
+            kind: "user".to_string(),
+        },
+        scope: ContextBindingScopeRef {
+            external_ref: format!("deep-scope:{suffix}:source"),
+            kind: "user_root".to_string(),
+            parent_external_ref: None,
+        },
+        agent_node: ContextBindingAgentRef {
+            external_ref: format!("deep-agent:{suffix}:source"),
+            parent_external_ref: None,
+        },
+        access_policies: vec![],
+    };
+    let author = bind_context_request(
+        store,
+        tenant,
+        format!("deep-author:{suffix}"),
+        author_binding,
+    )
+    .await;
+    let caller_binding = ContextBindingRequest {
+        subject: ContextBindingEntityRef {
+            external_ref: format!("deep-subject:{suffix}"),
+            kind: "user".to_string(),
+        },
+        actor: ContextBindingEntityRef {
+            external_ref: format!("deep-actor:{suffix}:caller"),
+            kind: "user".to_string(),
+        },
+        scope: ContextBindingScopeRef {
+            external_ref: format!("deep-scope:{suffix}:caller"),
+            kind: "user_root".to_string(),
+            parent_external_ref: None,
+        },
+        agent_node: ContextBindingAgentRef {
+            external_ref: format!("deep-agent:{suffix}:caller"),
+            parent_external_ref: None,
+        },
+        access_policies: vec![
+            ContextBindingAccessPolicy::Grant {
+                source_scope_external_ref: format!("deep-scope:{suffix}:source"),
+                source_agent_node_external_ref: format!("deep-agent:{suffix}:source"),
+                kind: MemoryKind::Episodic,
+            },
+            ContextBindingAccessPolicy::Grant {
+                source_scope_external_ref: format!("deep-scope:{suffix}:source"),
+                source_agent_node_external_ref: format!("deep-agent:{suffix}:source"),
+                kind: MemoryKind::Semantic,
+            },
+        ],
+    };
+    let caller = bind_context_request(
+        store,
+        tenant,
+        format!("deep-caller:{suffix}"),
+        caller_binding,
+    )
+    .await;
+    assert_ne!(author.actor_id, caller.actor_id);
+    assert_eq!(author.data_subject_id, caller.data_subject_id);
+    assert!(caller.allows(MemoryKind::Episodic, author.scope_id, author.agent_node_id));
+    assert!(caller.allows(MemoryKind::Semantic, author.scope_id, author.agent_node_id));
+
+    let (_, unit_id) = stage_deep_episode(
+        store,
+        &author,
+        "Authorized cross-actor provenance body.",
+        TrustLevel::TrustedUser,
+        UnitState::Active,
+        TrustLevel::TrustedUser,
+        None,
+    )
+    .await;
+    let snapshot = store
+        .fetch_deep_snapshot(&caller, &deep_time(CLOCK.0))
+        .await
+        .expect("cross-actor deep snapshot");
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(snapshot[0].body, "Authorized cross-actor provenance body.");
+    assert_eq!(snapshot[0].eligible_unit_ids(), vec![unit_id]);
+    assert_eq!(snapshot[0].bound_units[0].actor_id, Some(author.actor_id));
 }
 
 /// A committed staged transaction publishes both the episode and the unit; a

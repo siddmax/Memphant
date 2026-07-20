@@ -1032,6 +1032,49 @@ pub struct StoredMemoryUnit {
     pub reinforcement_count: u32,
 }
 
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum DeepSnapshotSourceKind {
+    Episode,
+    Resource,
+}
+
+/// One authorized canonical raw source and the exact unit records that made
+/// it eligible for a Deep query snapshot. Keeping the records bound here lets
+/// later query-policy gates run without a second, racy store read.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct DeepSnapshotEntry {
+    pub source_kind: DeepSnapshotSourceKind,
+    pub source_id: Uuid,
+    pub path: String,
+    pub body: String,
+    pub body_sha256: String,
+    pub bound_units: Vec<StoredMemoryUnit>,
+}
+
+impl DeepSnapshotEntry {
+    pub fn eligible_unit_ids(&self) -> Vec<UnitId> {
+        let mut ids: Vec<_> = self.bound_units.iter().map(|unit| unit.id).collect();
+        ids.sort_unstable_by_key(|id| id.as_uuid());
+        ids
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DeepWorkspaceFile {
+    pub path: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DeepWorkspace {
+    pub files: Vec<DeepWorkspaceFile>,
+    pub manifest_sha256: String,
+    pub workspace_sha256: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredCitation {
     pub id: Uuid,

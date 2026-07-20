@@ -3,7 +3,7 @@
 //! primary keys, the reused `job_state` queue, `body_tsv` FTS,
 //! `forgotten_source` tombstones and `api_key.max_trust` ceilings.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::str::FromStr;
 
 use memphant_core::{
@@ -11,16 +11,17 @@ use memphant_core::{
     EmbeddingProfileRow, EmbeddingRow, ForgetOutcome, ForgetWrite, JOB_DEAD_LETTER_ATTEMPTS,
     JobFilter, MemoryStore, MutationClaim, MutationClaimOutcome, MutationLedgerStore,
     MutationResponse, ReflectJobRow, ResolvedMemoryContext, ReviewEventRow, ScopePage, StoreError,
-    SubjectErasureReceipt, correction_rectangles,
+    SubjectErasureReceipt, correction_rectangles, deep_unit_is_snapshot_eligible,
 };
 use memphant_types::{
     ActorId, AgentNodeId, CitationSpan, ContextBindingAccessPolicy, ContextBindingPolicyMode,
-    ContextBindingRequest, ContextBindingResponse, ContextualChunk, CorrectResult, EdgeId,
-    EpisodeId, ForgetTarget, JobId, MemoryKind, NewEpisode, NewMemoryEdge, NewMemoryUnit,
-    NewResource, QueuedReflectJob, RecallTime, RecordMaterial, ReflectJob, ReflectJobKind,
-    ReflectTrace, ResolvedMemorySource, ResourceAcl, ResourceId, RetainOutcome, RetrievalTrace,
-    ScopeId, StoredCitation, StoredEpisode, StoredMemoryEdge, StoredMemoryUnit, StoredResource,
-    SubjectId, TenantId, TraceId, TrustLevel, UnitId, agent_level_allows_memory_kind,
+    ContextBindingRequest, ContextBindingResponse, ContextualChunk, CorrectResult,
+    DeepSnapshotEntry, DeepSnapshotSourceKind, EdgeId, EpisodeId, ForgetTarget, JobId, MemoryKind,
+    NewEpisode, NewMemoryEdge, NewMemoryUnit, NewResource, QueuedReflectJob, RecallTime,
+    RecordMaterial, ReflectJob, ReflectJobKind, ReflectTrace, ResolvedMemorySource, ResourceAcl,
+    ResourceId, RetainOutcome, RetrievalTrace, ScopeId, StoredCitation, StoredEpisode,
+    StoredMemoryEdge, StoredMemoryUnit, StoredResource, SubjectId, TenantId, TraceId, TrustLevel,
+    UnitId, agent_level_allows_memory_kind,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -1933,6 +1934,218 @@ impl MemoryStore for PgStore {
 
         units.truncate(limit.min(1_000));
         Ok(units)
+    }
+
+    async fn fetch_deep_snapshot(
+        &self,
+        context: &ResolvedMemoryContext,
+        time: &RecallTime,
+    ) -> Result<Vec<DeepSnapshotEntry>, StoreError> {
+        let mut tx = self.tenant_tx(context.tenant_id).await?;
+        let (unit_scopes, unit_agents, unit_kinds) = source_kind_triples(context, &[]);
+        let source_pairs = |kind: MemoryKind| {
+            context
+                .sources_by_kind
+                .get(&kind)
+                .into_iter()
+                .flatten()
+                .map(|source| (source.scope_id.as_uuid(), source.agent_node_id.as_uuid()))
+                .unzip::<_, _, Vec<_>, Vec<_>>()
+        };
+        let (episode_scopes, episode_agents) = source_pairs(MemoryKind::Episodic);
+        let (resource_scopes, resource_agents) = source_pairs(MemoryKind::Resource);
+
+        // One joined snapshot query: raw bodies and their authorizing unit
+        // records are read together, with source/unit tombstones and all owner
+        // predicates applied before a body can enter the returned row set.
+        let rows = sqlx::query(
+            r#"with eligible_unit as (
+                 select unit.*
+                 from memphant.memory_unit unit
+                 where unit.tenant_id = $1
+                   and unit.data_subject_id = $2
+                   and unit.subject_generation = $3
+                   and exists (
+                     select 1 from unnest($4::uuid[], $5::uuid[], $6::text[])
+                       allowed(scope_id, agent_node_id, kind)
+                     where allowed.scope_id = unit.scope_id
+                       and allowed.agent_node_id = unit.agent_node_id
+                       and allowed.kind = unit.kind
+                   )
+                   and ((unit.source_episode_id is not null)::int
+                      + (unit.source_resource_id is not null)::int) = 1
+                   and unit.deletion_generation is null
+                   and unit.state <> 'deleted'
+                   and unit.trust_level <> 'quarantined'
+                   and (unit.state in ('active', 'validated')
+                        or (unit.state = 'superseded' and unit.transaction_to is not null))
+                   and coalesce(unit.transaction_from, '-infinity'::timestamptz) <= $11::timestamptz
+                   and $11::timestamptz < coalesce(unit.transaction_to, 'infinity'::timestamptz)
+                   and coalesce(unit.valid_from, '-infinity'::timestamptz) <= $12::timestamptz
+                   and $12::timestamptz < coalesce(unit.valid_to, 'infinity'::timestamptz)
+                   and not exists (
+                     select 1 from memphant.forgotten_source forgotten
+                     where forgotten.tenant_id = unit.tenant_id
+                       and forgotten.data_subject_id = unit.data_subject_id
+                       and forgotten.subject_generation = unit.subject_generation
+                       and forgotten.scope_id = unit.scope_id
+                       and forgotten.agent_node_id = unit.agent_node_id
+                       and forgotten.source_kind = 'memory_unit'
+                       and forgotten.source_id = unit.id
+                   )
+               ), source_row as (
+                 select unit.*, 'episode'::text as deep_source_kind,
+                        episode.id as deep_source_id, episode.body as deep_source_body,
+                        '{}'::jsonb as deep_source_acl
+                 from eligible_unit unit
+                 join memphant.episode episode
+                   on episode.tenant_id = unit.tenant_id
+                  and episode.data_subject_id = unit.data_subject_id
+                  and episode.subject_generation = unit.subject_generation
+                  and episode.scope_id = unit.scope_id
+                  and episode.agent_node_id = unit.agent_node_id
+                  and episode.id = unit.source_episode_id
+                 where exists (
+                     select 1 from unnest($7::uuid[], $8::uuid[]) allowed(scope_id, agent_node_id)
+                     where allowed.scope_id = episode.scope_id
+                       and allowed.agent_node_id = episode.agent_node_id
+                   )
+                   and episode.deletion_generation is null
+                   and episode.source_trust <> 'quarantined'
+                   and not exists (
+                     select 1 from memphant.forgotten_source forgotten
+                     where forgotten.tenant_id = episode.tenant_id
+                       and forgotten.data_subject_id = episode.data_subject_id
+                       and forgotten.subject_generation = episode.subject_generation
+                       and forgotten.scope_id = episode.scope_id
+                       and forgotten.agent_node_id = episode.agent_node_id
+                       and forgotten.source_kind = 'episode'
+                       and forgotten.source_id = episode.id
+                   )
+                 union all
+                 select unit.*, 'resource'::text as deep_source_kind,
+                        resource.id as deep_source_id, resource.body as deep_source_body,
+                        resource.acl as deep_source_acl
+                 from eligible_unit unit
+                 join memphant.resource resource
+                   on resource.tenant_id = unit.tenant_id
+                  and resource.data_subject_id = unit.data_subject_id
+                  and resource.subject_generation = unit.subject_generation
+                  and resource.scope_id = unit.scope_id
+                  and resource.agent_node_id = unit.agent_node_id
+                  and resource.id = unit.source_resource_id
+                 where exists (
+                     select 1 from unnest($9::uuid[], $10::uuid[]) allowed(scope_id, agent_node_id)
+                     where allowed.scope_id = resource.scope_id
+                       and allowed.agent_node_id = resource.agent_node_id
+                   )
+                   and resource.source_trust <> 'quarantined'
+                   and resource.body is not null
+                   and resource.acl = '{}'::jsonb
+                   and not exists (
+                     select 1 from memphant.forgotten_source forgotten
+                     where forgotten.tenant_id = resource.tenant_id
+                       and forgotten.data_subject_id = resource.data_subject_id
+                       and forgotten.subject_generation = resource.subject_generation
+                       and forgotten.scope_id = resource.scope_id
+                       and forgotten.agent_node_id = resource.agent_node_id
+                       and forgotten.source_kind = 'resource'
+                       and forgotten.source_id = resource.id
+                   )
+               )
+               select id, data_subject_id, scope_id, agent_node_id, subject_generation,
+                      kind, state, fact_key, predicate, body, confidence, trust_level,
+                      churn_class,
+                      to_char(freshness_due_at at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as freshness_due_at,
+                      actor_id, source_kind, source_ref,
+                      to_char(observed_at at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as observed_at,
+                      source_episode_id, source_resource_id, deletion_generation, payload,
+                      to_char(valid_from at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as valid_from,
+                      to_char(valid_to at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as valid_to,
+                      to_char(transaction_from at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as transaction_from,
+                      to_char(transaction_to at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as transaction_to,
+                      difficulty, stability_days,
+                      to_char(last_reinforced_at at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as last_reinforced_at,
+                      reinforcement_count, tenant_id, deep_source_kind, deep_source_id,
+                      deep_source_body, deep_source_acl
+               from source_row
+               order by deep_source_kind, deep_source_id, id"#,
+        )
+        .bind(context.tenant_id.as_uuid())
+        .bind(context.data_subject_id.as_uuid())
+        .bind(context.subject_generation as i64)
+        .bind(unit_scopes)
+        .bind(unit_agents)
+        .bind(unit_kinds)
+        .bind(episode_scopes)
+        .bind(episode_agents)
+        .bind(resource_scopes)
+        .bind(resource_agents)
+        .bind(&time.transaction_as_of)
+        .bind(&time.valid_at)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(backend)?;
+
+        let mut grouped: BTreeMap<(DeepSnapshotSourceKind, Uuid), (String, Vec<StoredMemoryUnit>)> =
+            BTreeMap::new();
+        for row in rows {
+            let source_kind = match row
+                .try_get::<String, _>("deep_source_kind")
+                .map_err(backend)?
+                .as_str()
+            {
+                "episode" => DeepSnapshotSourceKind::Episode,
+                "resource" => DeepSnapshotSourceKind::Resource,
+                other => {
+                    return Err(StoreError::Backend(format!(
+                        "unknown Deep source kind: {other}"
+                    )));
+                }
+            };
+            let source_id: Uuid = row.try_get("deep_source_id").map_err(backend)?;
+            let source_body: String = row.try_get("deep_source_body").map_err(backend)?;
+            let source_acl = serde_json::from_value::<ResourceAcl>(
+                row.try_get::<serde_json::Value, _>("deep_source_acl")
+                    .map_err(backend)?,
+            )
+            .map_err(|error| StoreError::Backend(format!("invalid resource ACL: {error}")))?;
+            if source_kind == DeepSnapshotSourceKind::Resource && !source_acl.is_deep_eligible() {
+                return Err(StoreError::Backend(
+                    "Deep snapshot SQL returned an ACL-restricted resource".to_string(),
+                ));
+            }
+            let unit = Self::unit_from_row(&row)?;
+            if !deep_unit_is_snapshot_eligible(&unit, time) {
+                return Err(StoreError::Backend(
+                    "Deep snapshot SQL returned an ineligible unit".to_string(),
+                ));
+            }
+            grouped
+                .entry((source_kind, source_id))
+                .or_insert_with(|| (source_body, Vec::new()))
+                .1
+                .push(unit);
+        }
+
+        Ok(grouped
+            .into_iter()
+            .map(|((source_kind, source_id), (body, mut bound_units))| {
+                bound_units.sort_unstable_by_key(|unit| unit.id.as_uuid());
+                let directory = match source_kind {
+                    DeepSnapshotSourceKind::Episode => "episodes",
+                    DeepSnapshotSourceKind::Resource => "resources",
+                };
+                DeepSnapshotEntry {
+                    source_kind,
+                    source_id,
+                    path: format!("{directory}/{source_id}.md"),
+                    body_sha256: format!("{:x}", Sha256::digest(body.as_bytes())),
+                    body,
+                    bound_units,
+                }
+            })
+            .collect())
     }
 
     async fn fetch_scope_open_units(

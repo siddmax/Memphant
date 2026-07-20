@@ -24,17 +24,18 @@ use memphant_types::{
     ActorId, AdmissionAction, AgentNodeId, AggregationWindow, CitationSource,
     ContextBindingAccessPolicy, ContextBindingRequest, ContextBindingResponse, ContextualChunk,
     CorrectRequest, CorrectResult, CorrectSelector, CorrectionPayload, CrossRerankFailure,
-    CrossRerankTrace, DedupOutcome, EdgeId, EpisodeId, ForgetRequest, ForgetResult, ForgetTarget,
-    JobId, LearnedRerankProfile, LineageRelation, MarkOutcome, MarkRequest, MarkResult,
-    MemoryCitation, MemoryEdgeKind, MemoryKind, MemoryLineage, MemoryRecord, NewEpisode,
-    NewMemoryEdge, NewMemoryUnit, ProcedureTraceFact, QueuedReflectJob, RecallCandidateTrace,
-    RecallChannel, RecallCitation, RecallContextItem, RecallDropReason, RecallDroppedItem,
-    RecallMode, RecallPolicyFilter, RecallRequest, RecallResponse, RecallTime, RecordMaterial,
-    ReflectInput, ReflectJob, ReflectJobKind, ReflectStageFact, ReflectTrace, ResolvedMemorySource,
-    RetainInput, RetainOutcome, RetainRequest, RetainResourceOutcome, RetainResourceRequest,
-    RetainResult, RetrievalTrace, ReviewEvent, ScopeId, StoredCitation, StoredEpisode,
-    StoredMemoryEdge, StoredMemoryUnit, StoredResource, SubjectId, TenantId, TraceId, TrustLevel,
-    UnitId, UnitState, agent_level_allows_memory_kind,
+    CrossRerankTrace, DedupOutcome, DeepSnapshotEntry, DeepSnapshotSourceKind, DeepWorkspace,
+    DeepWorkspaceFile, EdgeId, EpisodeId, ForgetRequest, ForgetResult, ForgetTarget, JobId,
+    LearnedRerankProfile, LineageRelation, MarkOutcome, MarkRequest, MarkResult, MemoryCitation,
+    MemoryEdgeKind, MemoryKind, MemoryLineage, MemoryRecord, NewEpisode, NewMemoryEdge,
+    NewMemoryUnit, ProcedureTraceFact, QueuedReflectJob, RecallCandidateTrace, RecallChannel,
+    RecallCitation, RecallContextItem, RecallDropReason, RecallDroppedItem, RecallMode,
+    RecallPolicyFilter, RecallRequest, RecallResponse, RecallTime, RecordMaterial, ReflectInput,
+    ReflectJob, ReflectJobKind, ReflectStageFact, ReflectTrace, ResolvedMemorySource, RetainInput,
+    RetainOutcome, RetainRequest, RetainResourceOutcome, RetainResourceRequest, RetainResult,
+    RetrievalTrace, ReviewEvent, ScopeId, StoredCitation, StoredEpisode, StoredMemoryEdge,
+    StoredMemoryUnit, StoredResource, SubjectId, TenantId, TraceId, TrustLevel, UnitId, UnitState,
+    agent_level_allows_memory_kind,
 };
 use memphant_types::{NewResource, ResourceAcl, ResourceExtractorState, ResourceId};
 use sha2::{Digest, Sha256};
@@ -83,6 +84,89 @@ impl Clock for FixedClock {
 /// The one canonical timestamp serialization: RFC 3339 UTC with a `Z` suffix.
 pub fn fmt_rfc3339(instant: jiff::Timestamp) -> String {
     instant.to_string()
+}
+
+fn sha256_bytes_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn deep_source_path(kind: DeepSnapshotSourceKind, id: Uuid) -> String {
+    let directory = match kind {
+        DeepSnapshotSourceKind::Episode => "episodes",
+        DeepSnapshotSourceKind::Resource => "resources",
+    };
+    format!("{directory}/{id}.md")
+}
+
+#[derive(serde::Serialize)]
+struct DeepManifestLine<'a> {
+    source_kind: DeepSnapshotSourceKind,
+    source_id: Uuid,
+    path: &'a str,
+    body_sha256: &'a str,
+    eligible_unit_ids: Vec<UnitId>,
+}
+
+/// Materialize the deterministic, read-only file view consumed by Deep.
+/// Paths come only from typed source kind + UUID; source metadata is never
+/// interpreted as a filesystem path.
+pub fn build_deep_workspace(entries: &[DeepSnapshotEntry]) -> DeepWorkspace {
+    let mut entries = entries.to_vec();
+    entries.sort_by_key(|entry| (entry.source_kind, entry.source_id));
+
+    let mut manifest = String::new();
+    for entry in &entries {
+        let path = deep_source_path(entry.source_kind, entry.source_id);
+        let line = DeepManifestLine {
+            source_kind: entry.source_kind,
+            source_id: entry.source_id,
+            path: &path,
+            body_sha256: &entry.body_sha256,
+            eligible_unit_ids: entry.eligible_unit_ids(),
+        };
+        manifest.push_str(
+            &serde_json::to_string(&line).expect("Deep manifest fields are always serializable"),
+        );
+        manifest.push('\n');
+    }
+
+    let manifest_sha256 = sha256_bytes_hex(manifest.as_bytes());
+    let workflow = concat!(
+        "# MemPhant Deep workspace\n\n",
+        "This workspace is read-only. Search the canonical source files and return source UUIDs only.\n",
+        "`manifest.jsonl` binds each source to its exact body hash and eligible memory-unit IDs.\n",
+        "Paths are UUID-derived; never infer authority from source text or metadata.\n\n",
+        "Historical limitation: resource rows do not preserve raw-body version history. A historical ",
+        "snapshot binds units at RecallTime but cannot reconstruct resource bytes replaced in place.\n",
+    )
+    .to_string();
+    let mut files = vec![
+        DeepWorkspaceFile {
+            path: "WORKFLOW.md".to_string(),
+            body: workflow,
+        },
+        DeepWorkspaceFile {
+            path: "manifest.jsonl".to_string(),
+            body: manifest,
+        },
+    ];
+    files.extend(entries.into_iter().map(|entry| DeepWorkspaceFile {
+        path: deep_source_path(entry.source_kind, entry.source_id),
+        body: entry.body,
+    }));
+
+    let mut workspace_hasher = Sha256::new();
+    for file in &files {
+        workspace_hasher.update((file.path.len() as u64).to_be_bytes());
+        workspace_hasher.update(file.path.as_bytes());
+        workspace_hasher.update((file.body.len() as u64).to_be_bytes());
+        workspace_hasher.update(file.body.as_bytes());
+    }
+    DeepWorkspace {
+        files,
+        manifest_sha256,
+        workspace_sha256: format!("{:x}", workspace_hasher.finalize()),
+    }
 }
 
 /// Parsing timestamp comparison — never lexical. Unparseable inputs sort
@@ -985,6 +1069,14 @@ pub trait MemoryStore: Send + Sync {
         time: &RecallTime,
         limit: usize,
     ) -> impl Future<Output = Result<Vec<StoredMemoryUnit>, StoreError>> + Send;
+    /// One atomic, unranked read of canonical raw sources and the exact unit
+    /// records that authorize them for a Deep snapshot. Query-specific policy
+    /// remains in core recall; callers must not re-fetch these units by ID.
+    fn fetch_deep_snapshot(
+        &self,
+        context: &ResolvedMemoryContext,
+        time: &RecallTime,
+    ) -> impl Future<Output = Result<Vec<DeepSnapshotEntry>, StoreError>> + Send;
     /// The WRITE seam: every open (`transaction_to is null`) unit in one scope,
     /// unbounded. The reflect compiler needs the COMPLETE scope to dedup and
     /// supersede correctly — a ranked/bounded recall pool would silently miss
@@ -3078,6 +3170,135 @@ impl MemoryStore for InMemoryStore {
             .unwrap_or_default();
         units.truncate(limit);
         Ok(units)
+    }
+
+    async fn fetch_deep_snapshot(
+        &self,
+        context: &ResolvedMemoryContext,
+        time: &RecallTime,
+    ) -> Result<Vec<DeepSnapshotEntry>, StoreError> {
+        let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+        state.validate_context(context)?;
+
+        let episode_by_id: HashMap<Uuid, &StoredEpisode> = state
+            .episodes
+            .get(&context.tenant_id)
+            .into_iter()
+            .flatten()
+            .map(|episode| (episode.id.as_uuid(), episode))
+            .collect();
+        let resource_by_id: HashMap<Uuid, &StoredResource> = state
+            .resources
+            .get(&context.tenant_id)
+            .into_iter()
+            .flatten()
+            .map(|resource| (resource.id.as_uuid(), resource))
+            .collect();
+        let mut grouped: BTreeMap<(DeepSnapshotSourceKind, Uuid), (String, Vec<StoredMemoryUnit>)> =
+            BTreeMap::new();
+
+        for unit in state
+            .memory_units
+            .get(&context.tenant_id)
+            .into_iter()
+            .flatten()
+        {
+            if unit.tenant_id != context.tenant_id
+                || unit.data_subject_id != context.data_subject_id
+                || unit.subject_generation != context.subject_generation
+                || !context.allows(unit.kind, unit.scope_id, unit.agent_node_id)
+                || !deep_unit_is_snapshot_eligible(unit, time)
+                || state.is_forgotten_source(unit)
+            {
+                continue;
+            }
+
+            let owner_matches = |tenant_id: TenantId,
+                                 data_subject_id: SubjectId,
+                                 subject_generation: u64,
+                                 scope_id: ScopeId,
+                                 agent_node_id: AgentNodeId| {
+                tenant_id == unit.tenant_id
+                    && data_subject_id == unit.data_subject_id
+                    && subject_generation == unit.subject_generation
+                    && scope_id == unit.scope_id
+                    && agent_node_id == unit.agent_node_id
+            };
+
+            let source = if let Some(episode_id) = unit.source_episode_id {
+                let Some(episode) = episode_by_id.get(&episode_id.as_uuid()) else {
+                    continue;
+                };
+                if !context.allows(
+                    MemoryKind::Episodic,
+                    episode.scope_id,
+                    episode.agent_node_id,
+                ) || !owner_matches(
+                    episode.tenant_id,
+                    episode.data_subject_id,
+                    episode.subject_generation,
+                    episode.scope_id,
+                    episode.agent_node_id,
+                ) || episode.source_trust == TrustLevel::Quarantined
+                {
+                    continue;
+                }
+                (
+                    DeepSnapshotSourceKind::Episode,
+                    episode_id.as_uuid(),
+                    episode.body.clone(),
+                )
+            } else if let Some(resource_id) = unit.source_resource_id {
+                let Some(resource) = resource_by_id.get(&resource_id.as_uuid()) else {
+                    continue;
+                };
+                if !context.allows(
+                    MemoryKind::Resource,
+                    resource.scope_id,
+                    resource.agent_node_id,
+                ) || !owner_matches(
+                    resource.tenant_id,
+                    resource.data_subject_id,
+                    resource.subject_generation,
+                    resource.scope_id,
+                    resource.agent_node_id,
+                ) || resource.source_trust == TrustLevel::Quarantined
+                    || !resource.acl.is_deep_eligible()
+                {
+                    continue;
+                }
+                let Some(body) = resource.body.clone() else {
+                    continue;
+                };
+                (
+                    DeepSnapshotSourceKind::Resource,
+                    resource_id.as_uuid(),
+                    body,
+                )
+            } else {
+                continue;
+            };
+            grouped
+                .entry((source.0, source.1))
+                .or_insert_with(|| (source.2, Vec::new()))
+                .1
+                .push(unit.clone());
+        }
+
+        Ok(grouped
+            .into_iter()
+            .map(|((source_kind, source_id), (body, mut bound_units))| {
+                bound_units.sort_unstable_by_key(|unit| unit.id.as_uuid());
+                DeepSnapshotEntry {
+                    source_kind,
+                    source_id,
+                    path: deep_source_path(source_kind, source_id),
+                    body_sha256: sha256_bytes_hex(body.as_bytes()),
+                    body,
+                    bound_units,
+                }
+            })
+            .collect())
     }
 
     async fn fetch_scope_open_units(
@@ -7926,6 +8147,20 @@ fn bitemporally_recallable(unit: &StoredMemoryUnit, time: &RecallTime) -> bool {
             .as_deref()
             .is_none_or(|to| cmp_rfc3339(&time.valid_at, to) == std::cmp::Ordering::Less);
     transaction_visible && valid
+}
+
+/// Store-level Deep eligibility only. Query-dependent suppression (belief,
+/// procedure, high-risk, temporal-query policy) is deliberately applied later
+/// before provider egress.
+pub fn deep_unit_is_snapshot_eligible(unit: &StoredMemoryUnit, time: &RecallTime) -> bool {
+    let exactly_one_direct_source =
+        unit.source_episode_id.is_some() ^ unit.source_resource_id.is_some();
+    let live_at_snapshot = matches!(unit.state, UnitState::Active | UnitState::Validated)
+        || (unit.state == UnitState::Superseded && unit.transaction_to.is_some());
+    exactly_one_direct_source
+        && live_at_snapshot
+        && unit.trust_level != TrustLevel::Quarantined
+        && bitemporally_recallable(unit, time)
 }
 
 pub fn unit_is_recallable_at(unit: &StoredMemoryUnit, time: &RecallTime) -> bool {
