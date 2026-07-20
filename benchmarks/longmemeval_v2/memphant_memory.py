@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -479,7 +480,9 @@ class MemphantMemory(Memory):
             "budget_tokens": self.params["budget_tokens"],
             "mode": self.params["mode"],
         }
+        recall_started = time.perf_counter()
         recalled = self.client.request("POST", "/v1/recall", recall_payload)
+        recall_duration_ms = int(round((time.perf_counter() - recall_started) * 1000))
         _require(recalled.get("degraded") is False, "MemPhant recall was degraded")
         trace_id = recalled.get("trace_id")
         items = recalled.get("items")
@@ -515,6 +518,7 @@ class MemphantMemory(Memory):
             "trace_id": trace_id,
             "trace_sha256": _sha256_json(trace),
             "context_sha256": _sha256_json(memory_context),
+            "recall_duration_ms": recall_duration_ms,
         }
         proof = {
             "contract": {

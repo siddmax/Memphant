@@ -27,6 +27,32 @@ def _load():
     return module
 
 
+def _write_synthetic_root(campaign, output: Path, manifest: dict) -> None:
+    campaign._fingerprint = lambda path: {
+        "path": str(path.resolve()), "bytes": 1, "sha256": "f" * 64
+    }
+    binaries = {
+        name: campaign._fingerprint(campaign.ROOT / "target/debug" / f"memphant-{name}")
+        for name in ("server", "worker", "cli")
+    }
+    campaign.atomic_write_json(output / "pre-execution-proof.json", {
+        "manifest_sha256": campaign.sha256_file(campaign.CAMPAIGN_MANIFEST),
+        "endpoint_hashes": {}, "run_order_sha256": campaign.canonical_sha256(
+            campaign.expanded_run_order(manifest)
+        ),
+        "outputs_observed_before_freeze": False,
+        "git_commit": campaign.subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=campaign.ROOT,
+            capture_output=True, text=True, check=True,
+        ).stdout.strip(),
+        "binaries": binaries,
+        "deep_prompt_sha256": campaign.sha256_file(campaign.ROOT / "config/deep-recall-v1.txt"),
+        "materialization": {"proof_sha256": "a" * 64, "cases": {
+            case["id"]: {"synthetic": case["id"]} for case in manifest["selection"]["cases"]
+        }},
+    })
+
+
 def _load_memory_adapter(monkeypatch):
     package = types.ModuleType("memory_modules")
     memory = types.ModuleType("memory_modules.memory")
@@ -189,6 +215,152 @@ def test_manifest_rejects_order_and_spend_ceiling_drift() -> None:
         campaign.verify_campaign_manifest(manifest)
 
 
+def test_material_endpoint_predicate_ignores_additive_inventory_drift() -> None:
+    campaign = _load()
+    contract = {
+        "name": "Azure | exact-model-20260709", "model_id": "exact-model",
+        "provider_name": "Azure", "min_context_length": 100000,
+        "min_completion_tokens": 4096,
+        "required_parameters": ["tools", "tool_choice", "max_completion_tokens"],
+        "prompt_price_micros_per_million_max": 2_000_000,
+        "completion_price_micros_per_million_max": 10_000_000,
+    }
+    endpoint = {
+        "name": contract["name"], "model_id": contract["model_id"],
+        "provider_name": "Azure", "tag": "new-region", "quantization": "unknown",
+        "context_length": 1_000_000, "max_completion_tokens": 128_000,
+        "max_prompt_tokens": None,
+        "supported_parameters": ["tools", "tool_choice", "max_completion_tokens", "new_parameter"],
+        "pricing": {"prompt": "0.000002", "completion": "0.00001"},
+        "name_not_in_contract": "additive metadata is harmless",
+    }
+    assert campaign._matching_endpoints([endpoint], contract) == [endpoint]
+    endpoint["pricing"]["completion"] = "0.000010000001"
+    assert campaign._matching_endpoints([endpoint], contract) == []
+
+
+def test_resume_keeps_initial_inventory_evidence_when_material_contract_is_stable() -> None:
+    campaign = _load()
+    common = {
+        "manifest_sha256": "a", "run_order_sha256": "b",
+        "outputs_observed_before_freeze": False, "materialization": {"c": "d"},
+        "git_commit": "e", "binaries": {"f": "g"}, "deep_prompt_sha256": "h",
+    }
+    frozen = {**common, "endpoint_hashes": {
+        "reader": {"inventory_sha256": "old", "material_contract_sha256": "stable"}
+    }}
+    current = {**common, "endpoint_hashes": {
+        "reader": {"inventory_sha256": "new", "material_contract_sha256": "stable"}
+    }}
+    campaign.verify_resume_contract(frozen, current)
+    current["endpoint_hashes"]["reader"]["material_contract_sha256"] = "drift"
+    with pytest.raises(RuntimeError, match="material endpoint contract drift"):
+        campaign.verify_resume_contract(frozen, current)
+
+
+def test_decimal_cost_ceiling_never_rounds_liability_down() -> None:
+    campaign = _load()
+    assert campaign.usd_to_micros("0.0000001") == 1
+    assert campaign.usd_to_micros("0.001234000001") == 1235
+    assert campaign.token_price_to_micros_per_million("0.00000015") == 150000
+
+
+def test_synthetic_all_failure_aggregate_is_complete_and_zero_scored(tmp_path: Path) -> None:
+    campaign = _load()
+    manifest = campaign.load_campaign_manifest()
+    rows = campaign.expanded_run_order(manifest)
+    _write_synthetic_root(campaign, tmp_path, manifest)
+    ledger = tmp_path / "spend-ledger"
+    ledger.mkdir()
+    for row in rows:
+        reservation_path = ledger / f"{row['sequence']:04d}.json"
+        campaign.atomic_write_json(reservation_path, campaign._reservation(row, manifest))
+        row_dir = tmp_path / row["row_id"]
+        row_dir.mkdir()
+        campaign.atomic_write_json(row_dir / "failure.json", {"reason": "synthetic"})
+        campaign._write_row_proof(
+            row_dir, row, reservation_path, "operational_failure",
+            {"failure_reason": "synthetic"}, orphaned=True,
+        )
+    aggregate = campaign.aggregate_campaign(tmp_path, manifest)
+    assert aggregate["decision"] == "retire_deep_product_code"
+    assert aggregate["advance_to_separate_confirmation"] == []
+    assert all(not candidate["feasible"] for candidate in aggregate["candidates"].values())
+    assert all(
+        pair["deep_score"] == 0.0
+        for candidate in aggregate["candidates"].values()
+        for pair in candidate["pairs"]
+    )
+
+
+def test_synthetic_success_aggregate_applies_registered_ranking(tmp_path: Path) -> None:
+    campaign = _load()
+    manifest = campaign.load_campaign_manifest()
+    rows = campaign.expanded_run_order(manifest)
+    _write_synthetic_root(campaign, tmp_path, manifest)
+    ledger = tmp_path / "spend-ledger"
+    ledger.mkdir()
+    for row in rows:
+        reservation_path = ledger / f"{row['sequence']:04d}.json"
+        campaign.atomic_write_json(reservation_path, campaign._reservation(row, manifest))
+        row_dir = tmp_path / row["row_id"]
+        (row_dir / "memory-proofs").mkdir(parents=True)
+        deep = None
+        trace = {"id": "trace", "deep": None}
+        if row["arm"] != "fast":
+            candidate = manifest["protocol"]["deep_candidates"][row["arm"]]
+            deep = {
+                "status": "completed", "stop_reason": "completed",
+                "generation_ids": [f"generation-{row['row_id']}"],
+                "usage": {"spend_micros": 1000,
+                          "unsettled_spend_micros_upper_bound": 0,
+                          "unsettled_context_tokens_upper_bound": 0},
+            }
+            trace.update({
+                "deep": deep, "l4_model": candidate["model"], "l4_provider": "azure",
+                "l4_observed_provider": "Azure", "l4_observed_model": candidate["model"],
+                "l4_prompt_hash": manifest["protocol"]["deep_prompt_sha256"],
+                "l4_config_hash": "b" * 64,
+            })
+        memory = {
+            "public": {"recall_response": {"trace_id": "trace", "deep": deep}, "trace": trace},
+            "recall_mutation_proof": {"corpus_policy_job_tables_unchanged": True},
+            "query": {"recall_duration_ms": 1000},
+        }
+        memory_path = row_dir / "memory-proofs/proof.json"
+        campaign.atomic_write_json(memory_path, memory)
+        campaign.atomic_write_json(row_dir / "reader-route.json", {
+            "audit_status": "settled", "max_liability_micros": 5000,
+            "total_cost": "0.001", "provider_name": "DeepInfra",
+            "model": "qwen/qwen3.5-9b",
+            "provider_policy_sha256": campaign.canonical_sha256(
+                manifest["protocol"]["reader"]["provider_policy"]
+            ),
+        })
+        (row_dir / "judge-routes").mkdir()
+        (row_dir / "official").mkdir()
+        score_path = row_dir / "official/per_question.jsonl"
+        score_path.write_text(json.dumps({
+            "question_id": row["question_id"], "eval_function": "mc_choice_match",
+            "score": 0.0 if row["arm"] == "fast" else 1.0,
+            "memory_context_was_truncated": False,
+        }) + "\n")
+        campaign._write_row_proof(row_dir, row, reservation_path, "success", {
+            "execution_complete": True, "treatment_operational": True,
+            "binaries": json.loads((tmp_path / "pre-execution-proof.json").read_text())["binaries"],
+            "memory_proof_sha256": campaign.sha256_file(memory_path),
+            "reader_route_sha256": campaign.sha256_file(row_dir / "reader-route.json"),
+            "judge_route_sha256": campaign.canonical_sha256([]),
+            "official_score_sha256": campaign.sha256_file(score_path),
+        })
+    aggregate = campaign.aggregate_campaign(tmp_path, manifest)
+    assert all(candidate["feasible"] for candidate in aggregate["candidates"].values())
+    assert all(candidate["predicates"]["no_context_truncation"]
+               for candidate in aggregate["candidates"].values())
+    assert aggregate["advance_to_separate_confirmation"] == ["sonnet", "luna"]
+    assert aggregate["decision"] == "confirmation_manifest_required"
+
+
 class _FakeResponse:
     def __init__(self, body: bytes):
         self.body = body
@@ -219,7 +391,8 @@ def test_reader_post_acceptance_audit_failure_never_replays_or_changes_2xx(
     monkeypatch.setattr(campaign.urllib.request, "build_opener", lambda *_args: Opener())
     monkeypatch.setattr(campaign, "_json_url", lambda *_args: (_ for _ in ()).throw(RuntimeError("late audit failure")))
     monkeypatch.setattr(campaign.time, "sleep", lambda _seconds: None)
-    server, base = campaign._reader_proxy("secret", tmp_path / "reader.json")
+    manifest = campaign.load_campaign_manifest()
+    server, base = campaign._reader_proxy("secret", tmp_path / "reader.json", manifest)
     try:
         connection = http.client.HTTPConnection(base.removeprefix("http://"))
         connection.request(
@@ -230,6 +403,14 @@ def test_reader_post_acceptance_audit_failure_never_replays_or_changes_2xx(
         response = connection.getresponse()
         assert response.status == 200
         assert response.read() == original
+        connection.request(
+            "POST", "/chat/completions",
+            body=json.dumps({"model": "Qwen/Qwen3.5-9B", "messages": []}),
+            headers={"content-type": "application/json"},
+        )
+        retry = connection.getresponse()
+        assert retry.status == 422
+        retry.read()
         connection.close()
     finally:
         server.shutdown()
@@ -252,6 +433,9 @@ def test_judge_post_acceptance_audit_failure_never_replays_or_changes_2xx(
 
     monkeypatch.setattr(campaign.urllib.request, "build_opener", lambda *_args: Opener())
     manifest = campaign.load_campaign_manifest()
+    campaign.atomic_write_json(tmp_path / "reader-route.json", {
+        "audit_status": "settled", "max_liability_micros": 1000, "total_cost": "0.001"
+    })
     server, base = campaign._judge_proxy("secret", tmp_path / "judge", manifest)
     try:
         body = {
@@ -266,6 +450,13 @@ def test_judge_post_acceptance_audit_failure_never_replays_or_changes_2xx(
         response = connection.getresponse()
         assert response.status == 200
         assert response.read() == original
+        connection.request(
+            "POST", "/chat/completions", body=json.dumps(body),
+            headers={"content-type": "application/json"},
+        )
+        retry = connection.getresponse()
+        assert retry.status == 422
+        retry.read()
         connection.close()
     finally:
         server.shutdown()

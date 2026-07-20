@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from decimal import Decimal, ROUND_CEILING
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
@@ -32,6 +33,8 @@ RELEASE_MANIFEST = ROOT / "benchmarks/manifests/longmemeval_v2.lock.json"
 MEMORY_CONFIG = ROOT / "benchmarks/longmemeval_v2/memphant.memory.json"
 MATERIALIZER = ROOT / "scripts/materialize_longmemeval_v2_runtime.py"
 SCRATCH_HELPER = ROOT / "scripts/with_scratch_db.sh"
+MATERIALIZATION_SUMMARY = ROOT / "docs/build-log/artifacts/p1-t6/MATERIALIZATION-SUMMARY.json"
+PAIRING_PROOFS = ROOT / "docs/build-log/artifacts/p1-t6/PAIRING-PROOFS.json"
 SELECTION_SHA256 = "d7762dbaffff7acfe779162d4993c8c09ef0440e3c1a25e0d3408127d73e25fa"
 SEED_SHA256 = "1d5ce2760cf354b45c102bab25c3a31bbff6f96f8a36425480da54473348e4dd"
 ABILITIES = {
@@ -49,6 +52,8 @@ ENDPOINT_FIELDS = (
     "name", "model_id", "provider_name", "tag", "quantization", "context_length",
     "max_completion_tokens", "max_prompt_tokens", "supported_parameters", "pricing",
 )
+MICROS_PER_USD = Decimal(1_000_000)
+MILLION = Decimal(1_000_000)
 
 
 def require(condition: bool, message: str) -> None:
@@ -72,6 +77,32 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def usd_to_micros(value: object) -> int:
+    return int((Decimal(str(value)) * MICROS_PER_USD).to_integral_value(rounding=ROUND_CEILING))
+
+
+def token_price_to_micros_per_million(value: object) -> int:
+    return int(
+        (Decimal(str(value)) * MILLION * MICROS_PER_USD).to_integral_value(
+            rounding=ROUND_CEILING
+        )
+    )
+
+
+def liability_micros(token_upper_bound: int, price_micros_per_million: int) -> int:
+    require(token_upper_bound >= 0 and price_micros_per_million >= 0, "negative liability")
+    return (token_upper_bound * price_micros_per_million + 999_999) // 1_000_000
+
+
+def artifact_hashes(directory: Path, *, exclude: set[str] | None = None) -> dict[str, str]:
+    excluded = exclude or set()
+    return {
+        str(path.relative_to(directory)): sha256_file(path)
+        for path in sorted(directory.rglob("*"))
+        if path.is_file() and str(path.relative_to(directory)) not in excluded
+    }
 
 
 def ability(question_type: str) -> str:
@@ -192,6 +223,8 @@ def verify_campaign_manifest(manifest: dict) -> dict[str, int]:
     require(spend["hard_ceiling_usd"] == 15.0, "campaign spend ceiling drift")
     require(spend["deep_max_liability_usd"] + spend["reader_and_judge_reserve_usd"] <= 15.0,
             "campaign liability exceeds hard ceiling")
+    require(manifest["protocol"]["deep_prompt_sha256"]
+            == sha256_file(ROOT / "config/deep-recall-v1.txt"), "Deep prompt lock drift")
     return {"cases": 12, "rows": 48, "arms": 4}
 
 
@@ -317,6 +350,9 @@ def _load_adapter(official: Path):
 def materialize(directory: Path, output: Path, manifest: dict) -> dict[str, object]:
     acquire_minimal(directory, manifest)
     require(not output.exists(), f"refusing to overwrite materialization: {output}")
+    final_output = output
+    output = final_output.with_name(".staging-" + final_output.name)
+    require(not output.exists(), f"stale materialization staging requires review: {output}")
     output.mkdir(parents=True)
     official = directory / "official"
     data = directory / "data"
@@ -430,20 +466,99 @@ def materialize(directory: Path, output: Path, manifest: dict) -> dict[str, obje
     (output / "materialization-proof.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
+    directory_fd = os.open(output, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+    os.replace(output, final_output)
     return summary
+
+
+def verify_materialization(directory: Path, materialized: Path, manifest: dict) -> dict[str, object]:
+    proof_path = materialized / "materialization-proof.json"
+    require(proof_path.is_file(), "materialization missing")
+    expected_summary = json.loads(MATERIALIZATION_SUMMARY.read_text())
+    proof_hash = sha256_file(proof_path)
+    require(proof_hash == expected_summary["materialization_sha256"],
+            "materialization summary drift")
+    archived_pairs = {
+        item["question_id"]: item
+        for item in json.loads(PAIRING_PROOFS.read_text())["pairs"]
+    }
+    require(set(archived_pairs) == {case["id"] for case in manifest["selection"]["cases"]},
+            "archived pairing set drift")
+    case_contracts: dict[str, dict[str, str]] = {}
+    trajectory_hashes: dict[str, str] = {}
+    for case in manifest["selection"]["cases"]:
+        question_id = case["id"]
+        case_dir = materialized / question_id
+        pairing_path = case_dir / "pairing.json"
+        pairing = json.loads(pairing_path.read_text())
+        require(pairing["question_id"] == question_id and pairing["domain"] == case["domain"],
+                f"pairing identity drift: {question_id}")
+        require(pairing["gold_fields_copied_to_memory"] == [], "gold-memory isolation proof failed")
+        question_path = case_dir / "questions.json"
+        haystack_path = case_dir / "haystack.json"
+        require(sha256_file(question_path) == pairing["question_input_sha256"],
+                f"question materialization drift: {question_id}")
+        require(sha256_file(haystack_path) == pairing["haystack_input_sha256"],
+                f"haystack materialization drift: {question_id}")
+        haystack = json.loads(haystack_path.read_text())
+        require(list(haystack) == [question_id], f"haystack identity drift: {question_id}")
+        require(haystack[question_id] == [item["trajectory_id"] for item in pairing["trajectories"]],
+                f"trajectory order drift: {question_id}")
+        for item in pairing["trajectories"]:
+            prior = trajectory_hashes.setdefault(item["trajectory_id"], item["row_sha256"])
+            require(prior == item["row_sha256"],
+                    f"cross-case trajectory hash drift: {item['trajectory_id']}")
+        for mode in ("fast", "deep"):
+            config = json.loads((case_dir / f"memory.{mode}.json").read_text())
+            require(config["memory_params"]["mode"] == mode, f"memory mode drift: {question_id}/{mode}")
+        archived = archived_pairs[question_id]
+        require(sha256_file(pairing_path) == archived["pairing_sha256"],
+                f"archived pairing proof drift: {question_id}")
+        require(archived["question_input_sha256"] == pairing["question_input_sha256"]
+                and archived["haystack_input_sha256"] == pairing["haystack_input_sha256"],
+                f"archived input proof drift: {question_id}")
+        case_contracts[question_id] = {
+            "questions_sha256": pairing["question_input_sha256"],
+            "haystack_sha256": pairing["haystack_input_sha256"],
+            "pairing_sha256": archived["pairing_sha256"],
+            "fast_config_sha256": sha256_file(case_dir / "memory.fast.json"),
+            "deep_config_sha256": sha256_file(case_dir / "memory.deep.json"),
+        }
+    found: set[str] = set()
+    with (directory / "data/trajectories.jsonl").open(encoding="utf-8") as handle:
+        for line in handle:
+            row = json.loads(line)
+            trajectory_id = row.get("id")
+            if trajectory_id not in trajectory_hashes:
+                continue
+            require(hashlib.sha256(line.rstrip("\n").encode()).hexdigest()
+                    == trajectory_hashes[trajectory_id],
+                    f"pinned trajectory row drift: {trajectory_id}")
+            found.add(trajectory_id)
+    require(found == set(trajectory_hashes), "materialized trajectory set is incomplete")
+    return {"proof_sha256": proof_hash, "cases": case_contracts}
+
+
+def verify_case_materialization(case_dir: Path, contract: dict[str, str]) -> None:
+    for relative, key in (
+        ("questions.json", "questions_sha256"), ("haystack.json", "haystack_sha256"),
+        ("pairing.json", "pairing_sha256"), ("memory.fast.json", "fast_config_sha256"),
+        ("memory.deep.json", "deep_config_sha256"),
+    ):
+        require(sha256_file(case_dir / relative) == contract[key],
+                f"materialized case changed after preflight: {case_dir.name}/{relative}")
 
 
 def preflight(directory: Path, materialized: Path, manifest: dict) -> dict[str, object]:
     verify_campaign_manifest(manifest)
     acquired = acquire_minimal(directory, manifest)
-    require((materialized / "materialization-proof.json").is_file(), "materialization missing")
-    for case in manifest["selection"]["cases"]:
-        case_dir = materialized / case["id"]
-        require((case_dir / "pairing.json").is_file(), f"pairing missing: {case['id']}")
-        require(json.loads((case_dir / "pairing.json").read_text())["gold_fields_copied_to_memory"] == [],
-                "gold-memory isolation proof failed")
+    materialization = verify_materialization(directory, materialized, manifest)
     return {"campaign": verify_campaign_manifest(manifest), "acquisition": acquired,
-            "materialization_sha256": sha256_file(materialized / "materialization-proof.json")}
+            "materialization": materialization}
 
 
 def _json_url(url: str, api_key: str | None = None) -> dict:
@@ -458,30 +573,68 @@ def _json_url(url: str, api_key: str | None = None) -> dict:
     return value
 
 
-def verify_endpoint_inventory(manifest: dict) -> dict[str, str]:
+def _matching_endpoints(endpoints: list[dict], contract: dict) -> list[dict]:
+    matches = []
+    for endpoint in endpoints:
+        if any(endpoint.get(key) != contract[key] for key in
+               ("name", "model_id", "provider_name") if key in contract):
+            continue
+        if contract.get("tag") is not None and endpoint.get("tag") != contract["tag"]:
+            continue
+        if contract.get("quantization") is not None and endpoint.get("quantization") != contract["quantization"]:
+            continue
+        if int(endpoint.get("context_length") or 0) < contract["min_context_length"]:
+            continue
+        if int(endpoint.get("max_completion_tokens") or 0) < contract["min_completion_tokens"]:
+            continue
+        if not set(contract["required_parameters"]) <= set(endpoint.get("supported_parameters") or []):
+            continue
+        pricing = endpoint.get("pricing") or {}
+        if pricing.get("prompt") is None or pricing.get("completion") is None:
+            continue
+        if token_price_to_micros_per_million(pricing["prompt"]) > contract["prompt_price_micros_per_million_max"]:
+            continue
+        if token_price_to_micros_per_million(pricing["completion"]) > contract["completion_price_micros_per_million_max"]:
+            continue
+        matches.append(endpoint)
+    return matches
+
+
+def verify_endpoint_inventory(manifest: dict) -> dict[str, object]:
     checks = [
         ("qwen/qwen3.5-9b", "reader", "all"),
         ("anthropic/claude-sonnet-5-20260630", "sonnet", "azure"),
         ("openai/gpt-5.6-luna-20260709", "luna", "azure"),
         ("openai/gpt-5.6-sol-20260709", "sol", "azure"),
     ]
-    proven: dict[str, str] = {}
+    proven: dict[str, object] = {}
     for slug, key, provider in checks:
         payload = _json_url(f"https://openrouter.ai/api/v1/models/{slug}/endpoints")
         endpoints = payload["data"]["endpoints"]
-        stable = [
+        inventory = [
             {field: endpoint[field] for field in ENDPOINT_FIELDS}
             for endpoint in endpoints
             if provider == "all" or endpoint["provider_name"].lower() == provider
         ]
-        digest = canonical_sha256(stable)
-        expected = (
-            manifest["protocol"]["reader"]["endpoint_inventory_sha256"]
-            if key == "reader"
-            else manifest["protocol"]["deep_candidates"][key]["endpoint_metadata_sha256"]
-        )
-        require(digest == expected, f"OpenRouter endpoint inventory drift: {key}")
-        proven[key] = digest
+        if key == "reader":
+            contract = manifest["protocol"]["reader"]["endpoint_contract"]
+        else:
+            candidate = manifest["protocol"]["deep_candidates"][key]
+            contract = {
+                "name": f"{candidate['providers'][0].title()} | {candidate['model']}",
+                "model_id": candidate["endpoint_model_id"], "provider_name": "Azure",
+                "min_context_length": 100000, "min_completion_tokens": 4096,
+                "required_parameters": ["tools", "tool_choice", "max_completion_tokens"],
+                "prompt_price_micros_per_million_max": candidate["input_price_micros_per_million"],
+                "completion_price_micros_per_million_max": candidate["output_price_micros_per_million"],
+            }
+        matches = _matching_endpoints(inventory, contract)
+        require(matches, f"OpenRouter material endpoint contract unavailable: {key}")
+        proven[key] = {
+            "inventory_sha256": canonical_sha256(inventory),
+            "matching_endpoint_sha256": [canonical_sha256(endpoint) for endpoint in matches],
+            "material_contract_sha256": canonical_sha256(contract),
+        }
     return proven
 
 
@@ -491,20 +644,36 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def _reader_proxy(api_key: str, audit_path: Path) -> tuple[ThreadingHTTPServer, str]:
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *_args: object, **_kwargs: object):
+        return None
+
+
+def _direct_opener():
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+
+
+def _reader_proxy(api_key: str, audit_path: Path, manifest: dict) -> tuple[ThreadingHTTPServer, str]:
     policy = {
         "only": ["deepinfra"], "allow_fallbacks": False,
         "require_parameters": True, "data_collection": "deny", "zdr": True,
     }
+    contract = manifest["protocol"]["reader"]
+    dispatch_lock = threading.Lock()
+    dispatched = False
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args: object) -> None:
             return None
 
         def do_POST(self) -> None:
+            nonlocal dispatched
             response_body: bytes | None = None
-            status = 502
+            status = 422
             try:
+                with dispatch_lock:
+                    require(not dispatched, "reader proxy dispatch already consumed")
+                    dispatched = True
                 require(self.path == "/chat/completions", "reader proxy path denied")
                 length = int(self.headers.get("content-length", "0"))
                 body = self.rfile.read(length)
@@ -512,24 +681,41 @@ def _reader_proxy(api_key: str, audit_path: Path) -> tuple[ThreadingHTTPServer, 
                 require(request.get("model") == "Qwen/Qwen3.5-9B", "reader model drift")
                 request["provider"] = policy
                 upstream_body = canonical_bytes(request)
+                input_upper_bound = len(canonical_bytes(request.get("messages", [])))
+                completion_upper_bound = int(
+                    request.get("max_completion_tokens", request.get("max_tokens", 20_000))
+                )
+                max_liability = liability_micros(
+                    input_upper_bound, contract["prompt_price_micros_per_million"]
+                ) + liability_micros(
+                    completion_upper_bound, contract["completion_price_micros_per_million"]
+                )
+                require(max_liability <= manifest["campaign_spend"]["reader_and_judge_max_liability_micros_per_row"],
+                        "reader request exceeds row spend reserve")
+                audit = {
+                    "audit_status": "pending", "dispatch_count": 1,
+                    "request_contract_sha256": hashlib.sha256(upstream_body).hexdigest(),
+                    "provider_policy_sha256": canonical_sha256(policy),
+                    "input_token_upper_bound": input_upper_bound,
+                    "completion_token_upper_bound": completion_upper_bound,
+                    "max_liability_micros": max_liability,
+                }
+                atomic_write_json(audit_path, audit)
                 upstream_request = urllib.request.Request(
                     "https://openrouter.ai/api/v1/chat/completions",
                     data=upstream_body,
                     method="POST",
                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                 )
-                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-                with opener.open(upstream_request, timeout=300) as response:
+                with _direct_opener().open(upstream_request, timeout=300) as response:
                     response_body = response.read()
                     status = response.status
                 parsed = json.loads(response_body)
+                require(parsed.get("model") in contract["settlement_models"],
+                        "reader response model drift")
                 generation_id = parsed.get("id")
-                audit = {
-                    "audit_status": "pending",
-                    "request_contract_sha256": hashlib.sha256(upstream_body).hexdigest(),
-                    "provider_policy_sha256": canonical_sha256(policy),
-                    "generation_id": generation_id,
-                }
+                audit.update({"generation_id": generation_id,
+                              "response_sha256": hashlib.sha256(response_body).hexdigest()})
                 try:
                     require(isinstance(generation_id, str) and generation_id, "reader omitted generation id")
                     settlement = None
@@ -545,7 +731,8 @@ def _reader_proxy(api_key: str, audit_path: Path) -> tuple[ThreadingHTTPServer, 
                     require(isinstance(settlement, dict), "reader settlement unresolved")
                     require(settlement.get("provider_name") == "DeepInfra", "reader route drift")
                     model = str(settlement.get("model", "")).lower()
-                    require("qwen3.5-9b" in model, "reader settled model drift")
+                    require(model in {item.lower() for item in contract["settlement_models"]},
+                            "reader settled model drift")
                     require(all(settlement.get(field) is not None for field in ("tokens_prompt", "tokens_completion", "total_cost")),
                             "reader settlement incomplete")
                     audit.update({
@@ -555,8 +742,7 @@ def _reader_proxy(api_key: str, audit_path: Path) -> tuple[ThreadingHTTPServer, 
                     })
                 except Exception as error:
                     audit.update({"audit_status": "invalid", "audit_error": str(error)})
-                audit_path.parent.mkdir(parents=True, exist_ok=True)
-                audit_path.write_text(json.dumps(audit, indent=2, sort_keys=True) + "\n")
+                atomic_write_json(audit_path, audit)
             except Exception as error:
                 if response_body is None:
                     response_body = canonical_bytes({"error": {"message": str(error), "type": "reader_route_proof"}})
@@ -575,16 +761,20 @@ def _judge_proxy(api_key: str, audit_dir: Path, manifest: dict) -> tuple[Threadi
     contract = manifest["protocol"]["judge"]
     lock = threading.Lock()
     call_count = 0
+    dispatched = False
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args: object) -> None:
             return None
 
         def do_POST(self) -> None:
-            nonlocal call_count
+            nonlocal call_count, dispatched
             response_body: bytes | None = None
-            status = 502
+            status = 422
             try:
+                with lock:
+                    require(not dispatched, "judge proxy dispatch already consumed")
+                    dispatched = True
                 require(self.path == "/chat/completions", "judge proxy path denied")
                 body = self.rfile.read(int(self.headers.get("content-length", "0")))
                 request = json.loads(body)
@@ -593,29 +783,36 @@ def _judge_proxy(api_key: str, audit_dir: Path, manifest: dict) -> tuple[Threadi
                 max_tokens = request.get("max_completion_tokens", request.get("max_tokens"))
                 require(max_tokens == contract["max_completion_tokens"], "judge completion cap drift")
                 prompt_chars = len(canonical_bytes(request.get("messages", [])))
-                worst_micros = (
-                    prompt_chars * contract["input_price_micros_per_million"]
-                    + max_tokens * contract["output_price_micros_per_million"] + 999_999
-                ) // 1_000_000
-                reader_reserve = 6_277
+                worst_micros = liability_micros(
+                    prompt_chars, contract["input_price_micros_per_million"]
+                ) + liability_micros(max_tokens, contract["output_price_micros_per_million"])
+                reader_audit = json.loads((audit_dir.parent / "reader-route.json").read_text())
+                reader_reserve = int(reader_audit["max_liability_micros"])
                 require(
                     worst_micros + reader_reserve
                     <= manifest["campaign_spend"]["reader_and_judge_max_liability_micros_per_row"],
                     "judge request exceeds row spend reserve",
                 )
+                request_body = canonical_bytes(request)
+                audit = {
+                    "audit_status": "pending", "dispatch_count": 1,
+                    "request_contract_sha256": hashlib.sha256(request_body).hexdigest(),
+                    "max_liability_micros": worst_micros,
+                }
+                audit_dir.mkdir(parents=True, exist_ok=True)
+                audit_path = audit_dir / "0001.json"
+                atomic_write_json(audit_path, audit)
                 upstream = urllib.request.Request(
-                    "https://api.openai.com/v1/chat/completions", data=canonical_bytes(request),
+                    "https://api.openai.com/v1/chat/completions", data=request_body,
                     method="POST", headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                 )
-                with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(upstream, timeout=300) as response:
+                with _direct_opener().open(upstream, timeout=300) as response:
                     response_body = response.read()
                     status = response.status
                 parsed = json.loads(response_body)
-                audit = {
-                    "audit_status": "pending",
-                    "request_contract_sha256": hashlib.sha256(canonical_bytes(request)).hexdigest(),
-                    "response_id": parsed.get("id"), "max_liability_micros": worst_micros,
-                }
+                audit.update({"response_id": parsed.get("id"),
+                              "response_sha256": hashlib.sha256(response_body).hexdigest(),
+                              "response": parsed})
                 try:
                     require(parsed.get("model") == contract["model"], "judge observed snapshot drift")
                     usage = parsed.get("usage")
@@ -642,11 +839,7 @@ def _judge_proxy(api_key: str, audit_dir: Path, manifest: dict) -> tuple[Threadi
                     audit.update({"audit_status": "invalid", "audit_error": str(error)})
                 with lock:
                     call_count += 1
-                    index = call_count
-                audit_dir.mkdir(parents=True, exist_ok=True)
-                (audit_dir / f"{index:04d}.json").write_text(
-                    json.dumps(audit, indent=2, sort_keys=True) + "\n"
-                )
+                atomic_write_json(audit_path, audit)
             except Exception as error:
                 if response_body is None:
                     response_body = canonical_bytes({"error": {"message": str(error), "type": "judge_route_proof"}})
@@ -664,6 +857,140 @@ def _judge_proxy(api_key: str, audit_dir: Path, manifest: dict) -> tuple[Threadi
 def _fingerprint(path: Path) -> dict[str, object]:
     require(path.is_file(), f"binary missing: {path}")
     return {"path": str(path.resolve()), "bytes": path.stat().st_size, "sha256": sha256_file(path)}
+
+
+def _reservation(row: dict, manifest: dict) -> dict[str, object]:
+    deep = 0 if row["arm"] == "fast" else int(manifest["protocol"]["deep_limits"]["max_spend_micros"])
+    external = int(manifest["campaign_spend"]["reader_and_judge_max_liability_micros_per_row"])
+    return {
+        "row_id": row["row_id"], "max_liability_micros": deep + external,
+        "deep_hard_cap_micros": deep, "reader_and_judge_reserve_micros": external,
+        "charged_before_dispatch": True,
+    }
+
+
+def _audit_cost(audit: dict) -> tuple[int, int]:
+    maximum = int(audit.get("max_liability_micros", 0))
+    if audit.get("audit_status") != "settled":
+        return 0, maximum
+    if "total_cost" in audit:
+        settled = usd_to_micros(audit["total_cost"])
+    else:
+        settled = int(audit["cost_micros"])
+    require(settled <= maximum, "settled proxy cost exceeds its reservation")
+    return settled, 0
+
+
+def _row_settlement(row_dir: Path, row: dict, reservation: dict, *, orphaned: bool) -> dict[str, object]:
+    deep_settled = 0
+    deep_unsettled = 0
+    memory_proofs = list((row_dir / "memory-proofs").glob("*.json")) if (row_dir / "memory-proofs").exists() else []
+    if memory_proofs:
+        require(len(memory_proofs) == 1, "row has multiple memory proofs")
+        memory = json.loads(memory_proofs[0].read_text())
+        usage = ((memory.get("public") or {}).get("recall_response") or {}).get("deep") or {}
+        usage = usage.get("usage") or {}
+        deep_settled = int(usage.get("spend_micros", 0))
+        deep_unsettled = int(usage.get("unsettled_spend_micros_upper_bound", 0))
+    elif row["arm"] != "fast":
+        deep_unsettled = int(reservation["deep_hard_cap_micros"])
+
+    reader_settled = reader_unsettled = 0
+    reader_path = row_dir / "reader-route.json"
+    if reader_path.exists():
+        reader_settled, reader_unsettled = _audit_cost(json.loads(reader_path.read_text()))
+    judge_settled = judge_unsettled = 0
+    for path in sorted((row_dir / "judge-routes").glob("*.json")) if (row_dir / "judge-routes").exists() else []:
+        settled, unsettled = _audit_cost(json.loads(path.read_text()))
+        judge_settled += settled
+        judge_unsettled += unsettled
+    settled = deep_settled + reader_settled + judge_settled
+    unsettled = deep_unsettled + reader_unsettled + judge_unsettled
+    maximum = int(reservation["max_liability_micros"])
+    if orphaned:
+        unsettled = maximum - settled
+    require(0 <= settled <= maximum and 0 <= unsettled <= maximum - settled,
+            "row accounting exceeds its pre-dispatch reservation")
+    return {
+        "row_id": row["row_id"], "reservation_sha256": canonical_sha256(reservation),
+        "max_liability_micros": maximum, "settled_micros": settled,
+        "unsettled_upper_bound_micros": unsettled,
+        "deep_settled_micros": deep_settled, "deep_unsettled_upper_bound_micros": deep_unsettled,
+        "reader_settled_micros": reader_settled,
+        "reader_unsettled_upper_bound_micros": reader_unsettled,
+        "judge_settled_micros": judge_settled,
+        "judge_unsettled_upper_bound_micros": judge_unsettled,
+        "orphaned_attempt": orphaned,
+    }
+
+
+def _write_row_proof(row_dir: Path, row: dict, reservation_path: Path, outcome: str,
+                     extra: dict[str, object] | None = None, *, orphaned: bool = False) -> dict:
+    reservation = json.loads(reservation_path.read_text())
+    require(reservation == _reservation(row, load_campaign_manifest()), "row reservation drift")
+    settlement = _row_settlement(row_dir, row, reservation, orphaned=orphaned)
+    atomic_write_json(row_dir / "spend-settlement.json", settlement)
+    root_path = row_dir.parent / "pre-execution-proof.json"
+    root_proof = json.loads(root_path.read_text())
+    case_contract = root_proof["materialization"]["cases"][row["question_id"]]
+    proof = {
+        "row": row, "outcome": outcome, "operational": outcome == "success",
+        "reservation_sha256": sha256_file(reservation_path),
+        "settlement_sha256": sha256_file(row_dir / "spend-settlement.json"),
+        "pre_execution_proof_sha256": sha256_file(root_path),
+        "case_materialization_contract_sha256": canonical_sha256(case_contract),
+        "frozen_binaries": root_proof["binaries"],
+        "git_commit": subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
+                                     capture_output=True, text=True, check=True).stdout.strip(),
+        "manifest_sha256": sha256_file(CAMPAIGN_MANIFEST), "immutable": True, "complete": True,
+    }
+    proof.update(extra or {})
+    proof["artifact_hashes"] = artifact_hashes(row_dir, exclude={"row-proof.json"})
+    atomic_write_json(row_dir / "row-proof.json", proof)
+    return proof
+
+
+def _pid_alive(pid: object) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def verify_resume_contract(frozen: dict, current: dict) -> None:
+    for field in (
+        "manifest_sha256", "run_order_sha256", "outputs_observed_before_freeze",
+        "materialization", "git_commit", "binaries", "deep_prompt_sha256",
+    ):
+        require(frozen[field] == current[field], f"campaign resume contract drift: {field}")
+    require({key: value["material_contract_sha256"] for key, value in frozen["endpoint_hashes"].items()}
+            == {key: value["material_contract_sha256"] for key, value in current["endpoint_hashes"].items()},
+            "campaign material endpoint contract drift")
+
+
+def _treatment_operational(public: dict, row: dict, manifest: dict, *, truncated: bool) -> bool:
+    if truncated:
+        return False
+    deep = public["recall_response"].get("deep")
+    trace = public["trace"]
+    if row["arm"] == "fast":
+        return deep is None and trace.get("deep") is None
+    configured = manifest["protocol"]["deep_candidates"][row["arm"]]
+    return bool(
+        deep and deep["status"] == "completed" and deep["stop_reason"] == "completed"
+        and deep["usage"]["unsettled_context_tokens_upper_bound"] == 0
+        and deep["usage"]["unsettled_spend_micros_upper_bound"] == 0
+        and trace.get("deep") == deep and deep.get("generation_ids")
+        and trace.get("l4_model") == configured["model"]
+        and str(trace.get("l4_provider", "")).lower() == "azure"
+        and str(trace.get("l4_observed_provider", "")).lower() == "azure"
+        and trace.get("l4_observed_model") == configured["model"]
+        and trace.get("l4_prompt_hash") == manifest["protocol"]["deep_prompt_sha256"]
+        and isinstance(trace.get("l4_config_hash"), str) and len(trace["l4_config_hash"]) == 64
+    )
 
 
 def _wait_health(base_url: str, process: subprocess.Popen) -> None:
@@ -687,15 +1014,19 @@ def run_row(directory: Path, materialized: Path, output: Path, row: dict, manife
     final_dir = output / row["row_id"]
     require_new_row_dir(final_dir)
     row_dir = output / (".staging-" + row["row_id"])
-    require(not row_dir.exists(), f"incomplete staging row requires review: {row_dir}")
-    row_dir.mkdir(parents=True)
-    proxy, reader_url = _reader_proxy(openrouter_key, row_dir / "reader-route.json")
+    require(row_dir.is_dir() and (row_dir / "attempt.json").is_file(),
+            f"row lacks pre-dispatch attempt marker: {row_dir}")
+    attempt = json.loads((row_dir / "attempt.json").read_text())
+    require(attempt["row"] == row and attempt["dispatch_started"] is True, "attempt marker drift")
+    reservation_path = output / "spend-ledger" / f"{row['sequence']:04d}.json"
+    proxy, reader_url = _reader_proxy(openrouter_key, row_dir / "reader-route.json", manifest)
     judge_proxy, judge_url = _judge_proxy(openai_key, row_dir / "judge-routes", manifest)
     port = _free_port()
     server_url = f"http://127.0.0.1:{port}"
     binaries = {name: ROOT / "target/debug" / f"memphant-{name}" for name in ("server", "worker", "cli")}
     server_env = dict(os.environ)
     server_env.pop("DATABASE_URL", None)
+    server_env.pop("OPENAI_API_KEY", None)
     server_env.update({
         "MEMPHANT_APP_DATABASE_URL": database_url,
         "MEMPHANT_AUTHN_DATABASE_URL": database_url,
@@ -725,9 +1056,13 @@ def run_row(directory: Path, materialized: Path, output: Path, row: dict, manife
     try:
         _wait_health(server_url, server)
         case_dir = materialized / row["question_id"]
+        root_proof = json.loads((output / "pre-execution-proof.json").read_text())
+        verify_case_materialization(case_dir, root_proof["materialization"]["cases"][row["question_id"]])
         proof_dir = row_dir / "memory-proofs"
         proof_dir.mkdir()
         child_env = dict(os.environ)
+        child_env.pop("OPENROUTER_API_KEY", None)
+        child_env.pop("OPENAI_API_KEY", None)
         child_env.update({
             "MEMPHANT_LME_SERVER_URL": server_url,
             "MEMPHANT_CLI_BIN": str(binaries["cli"]),
@@ -736,6 +1071,7 @@ def run_row(directory: Path, materialized: Path, output: Path, row: dict, manife
             "MEMPHANT_LME_PROOF_DIR": str(proof_dir),
             "MEMPHANT_LME_RUN_ID": row["row_id"],
             "LME_READER_PROXY_KEY": "loopback-route-bound",
+            "LME_JUDGE_PROXY_KEY": "loopback-route-bound",
         })
         sys.path.insert(0, str(ROOT / "scripts"))
         import run_longmemeval_v2 as official_adapter
@@ -752,7 +1088,7 @@ def run_row(directory: Path, materialized: Path, output: Path, row: dict, manife
         )
         command += [
             "--api-key-env", "LME_READER_PROXY_KEY",
-            "--evaluator-api-key-env", "OPENAI_API_KEY",
+            "--evaluator-api-key-env", "LME_JUDGE_PROXY_KEY",
             "--evaluator-reasoning-effort", "medium",
             "--prompt-build-max-workers", "1", "--reader-max-concurrent-requests", "1",
         ]
@@ -769,11 +1105,16 @@ def run_row(directory: Path, materialized: Path, output: Path, row: dict, manife
         judge_proxy.shutdown()
         judge_proxy.server_close()
     if exit_code != 0:
-        (row_dir / "incomplete.json").write_text(json.dumps({
+        atomic_write_json(row_dir / "failure.json", {
             "row": row, "official_exit_code": exit_code,
             "retry_authorized": False, "requires_generation_and_billing_audit": True,
-        }, indent=2, sort_keys=True) + "\n")
-        raise RuntimeError(f"row failed and remains staged for audit: {row['row_id']}")
+        })
+        proof = _write_row_proof(
+            row_dir, row, reservation_path, "operational_failure",
+            {"official_exit_code": exit_code},
+        )
+        os.replace(row_dir, final_dir)
+        return proof
     memory_proofs = list((row_dir / "memory-proofs").glob("*.json"))
     require(len(memory_proofs) == 1, "row must archive exactly one memory proof")
     memory_proof = json.loads(memory_proofs[0].read_text())
@@ -787,100 +1128,131 @@ def run_row(directory: Path, materialized: Path, output: Path, row: dict, manife
             "row lacks one official score")
     official_score = json.loads(per_question.read_text())
     judge_routes = sorted((row_dir / "judge-routes").glob("*.json"))
-    if str(official_score.get("eval_name", "")).startswith("llm_"):
+    eval_name = str(official_score.get("eval_function", "")).split("|", 1)[0]
+    if eval_name.startswith("llm_"):
         require(len(judge_routes) == 1, "LLM-scored row requires exactly one judge proof")
         require(json.loads(judge_routes[0].read_text())["audit_status"] == "settled",
                 "judge audit is unresolved or invalid")
     else:
         require(not judge_routes, "deterministic scorer unexpectedly called judge")
-    proof = {
-        "row": row, "official_exit_code": exit_code,
+    treatment_operational = _treatment_operational(
+        memory_proof["public"], row, manifest,
+        truncated=bool(official_score["memory_context_was_truncated"]),
+    )
+    extra = {
+        "official_exit_code": exit_code,
+        "execution_complete": True, "treatment_operational": treatment_operational,
         "scratch_database_identity": database_url.rsplit("/", 1)[-1],
         "binaries": {name: _fingerprint(path) for name, path in binaries.items()},
-        "manifest_sha256": sha256_file(CAMPAIGN_MANIFEST),
-        "git_commit": subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip(),
         "memory_proof_sha256": sha256_file(memory_proofs[0]),
         "reader_route_sha256": sha256_file(row_dir / "reader-route.json"),
         "judge_route_sha256": canonical_sha256([sha256_file(path) for path in judge_routes]),
         "official_score_sha256": sha256_file(per_question),
-        "immutable": True, "complete": True,
     }
-    (row_dir / "row-proof.json").write_text(json.dumps(proof, indent=2, sort_keys=True) + "\n")
+    proof = _write_row_proof(
+        row_dir, row, reservation_path,
+        "success" if treatment_operational else "operational_failure", extra,
+    )
     os.replace(row_dir, final_dir)
     return proof
 
 
 def run_campaign(directory: Path, materialized: Path, output: Path, base_database_url: str, manifest: dict) -> dict:
-    preflight(directory, materialized, manifest)
+    preflight_proof = preflight(directory, materialized, manifest)
     endpoint_hashes = verify_endpoint_inventory(manifest)
     subprocess.run(["cargo", "build", "-p", "memphant-server", "-p", "memphant-worker", "-p", "memphant-cli"], cwd=ROOT, check=True)
     output.mkdir(parents=True, exist_ok=True)
     rows = expanded_run_order(manifest)
-    root_proof = {
+    frozen_binaries = {
+        name: _fingerprint(ROOT / "target/debug" / f"memphant-{name}")
+        for name in ("server", "worker", "cli")
+    }
+    root_contract = {
         "manifest_sha256": sha256_file(CAMPAIGN_MANIFEST), "endpoint_hashes": endpoint_hashes,
         "run_order_sha256": canonical_sha256(rows), "outputs_observed_before_freeze": False,
+        "materialization": preflight_proof["materialization"],
+        "git_commit": subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
+                                     capture_output=True, text=True, check=True).stdout.strip(),
+        "binaries": frozen_binaries,
+        "deep_prompt_sha256": sha256_file(ROOT / "config/deep-recall-v1.txt"),
     }
     root_path = output / "pre-execution-proof.json"
     if root_path.exists():
-        require(json.loads(root_path.read_text()) == root_proof, "campaign resume contract drift")
+        verify_resume_contract(json.loads(root_path.read_text()), root_contract)
     else:
-        root_path.write_text(json.dumps(root_proof, indent=2, sort_keys=True) + "\n")
-        (output / "frozen-run-order.json").write_text(json.dumps(rows, indent=2, sort_keys=True) + "\n")
+        atomic_write_json(root_path, root_contract)
+    order_path = output / "frozen-run-order.json"
+    if order_path.exists():
+        require(json.loads(order_path.read_text()) == rows, "frozen run order drift")
+    else:
+        atomic_write_json(order_path, rows)
     ledger = output / "spend-ledger"
     ledger.mkdir(exist_ok=True)
-    settlements = output / "spend-settlements"
-    settlements.mkdir(exist_ok=True)
     for row in rows:
+        ledger_row = ledger / f"{row['sequence']:04d}.json"
+        expected_reservation = _reservation(row, manifest)
         if (output / row["row_id"]).is_dir():
             require(json.loads((output / row["row_id"] / "row-proof.json").read_text())["complete"] is True,
                     "completed row proof drift")
-            require((ledger / f"{row['sequence']:04d}.json").is_file(), "completed row lacks reservation")
-            require((settlements / f"{row['sequence']:04d}.json").is_file(), "completed row lacks settlement")
+            require(json.loads(ledger_row.read_text()) == expected_reservation,
+                    "completed row reservation drift")
+            require((output / row["row_id"] / "spend-settlement.json").is_file(),
+                    "completed row lacks settlement")
             continue
-        require(not (output / (".staging-" + row["row_id"])).exists(),
-                f"staged row requires audit before resume: {row['row_id']}")
+        staging = output / (".staging-" + row["row_id"])
+        if staging.exists():
+            attempt_path = staging / "attempt.json"
+            if not attempt_path.exists():
+                require(not any(staging.iterdir()), "unmarked staging contains ambiguous evidence")
+                staging.rmdir()
+            else:
+                attempt = json.loads(attempt_path.read_text())
+                require(not _pid_alive(attempt.get("child_pid")),
+                        f"row attempt is still active: {row['row_id']}")
+                atomic_write_json(staging / "failure.json", {
+                    "row": row, "reason": "orphaned_attempt_recovered_without_replay",
+                    "retry_authorized": False,
+                })
+                _write_row_proof(staging, row, ledger_row, "operational_failure",
+                                 {"failure_reason": "orphaned_attempt"}, orphaned=True)
+                os.replace(staging, output / row["row_id"])
+                continue
         prior = sum(json.loads(path.read_text())["max_liability_micros"] for path in ledger.glob("*.json"))
-        deep = 0 if row["arm"] == "fast" else 300000
-        reservation = deep + manifest["campaign_spend"]["reader_and_judge_max_liability_micros_per_row"]
-        require(prior + reservation <= int(manifest["campaign_spend"]["hard_ceiling_usd"] * 1_000_000),
-                "campaign spend ceiling reached before dispatch")
-        ledger_row = ledger / f"{row['sequence']:04d}.json"
-        require(not ledger_row.exists(), "spend reservation already exists without completed row")
-        atomic_write_json(ledger_row, {
-            "row_id": row["row_id"], "max_liability_micros": reservation,
-            "deep_hard_cap_micros": deep,
-            "reader_and_judge_reserve_micros": reservation - deep,
-            "charged_before_dispatch": True,
-        })
+        if ledger_row.exists():
+            require(json.loads(ledger_row.read_text()) == expected_reservation,
+                    "orphaned pre-dispatch reservation drift")
+        else:
+            require(prior + expected_reservation["max_liability_micros"]
+                    <= usd_to_micros(manifest["campaign_spend"]["hard_ceiling_usd"]),
+                    "campaign spend ceiling reached before dispatch")
+            atomic_write_json(ledger_row, expected_reservation)
+        staging.mkdir()
+        attempt = {"row": row, "dispatch_started": True, "coordinator_pid": os.getpid(),
+                   "child_pid": None, "reservation_sha256": sha256_file(ledger_row)}
+        atomic_write_json(staging / "attempt.json", attempt)
         command = [
             "env", "MEMPHANT_SCRATCH_ACTIVE=1", "bash", str(SCRATCH_HELPER),
             base_database_url, "MEMPHANT_TEST_DATABASE_URL", sys.executable, __file__, "_run-row",
             "--directory", str(directory), "--output", str(output),
             "--materialized", str(materialized), "--row-id", row["row_id"],
         ]
-        subprocess.run(command, cwd=ROOT, check=True)
+        process = subprocess.Popen(command, cwd=ROOT)
+        attempt["child_pid"] = process.pid
+        if staging.exists():
+            atomic_write_json(staging / "attempt.json", attempt)
+        returncode = process.wait()
         final_dir = output / row["row_id"]
-        memory = json.loads(next((final_dir / "memory-proofs").glob("*.json")).read_text())
-        deep_summary = memory["public"]["recall_response"].get("deep") or {}
-        deep_usage = deep_summary.get("usage") or {}
-        deep_settled = int(deep_usage.get("spend_micros", 0))
-        deep_unsettled = int(deep_usage.get("unsettled_spend_micros_upper_bound", 0))
-        reader = json.loads((final_dir / "reader-route.json").read_text())
-        reader_settled = int(round(float(reader["total_cost"]) * 1_000_000))
-        judge_settled = sum(
-            int(json.loads(path.read_text())["cost_micros"])
-            for path in (final_dir / "judge-routes").glob("*.json")
-        )
-        settlement_row = settlements / f"{row['sequence']:04d}.json"
-        require(not settlement_row.exists(), "spend settlement already exists")
-        atomic_write_json(settlement_row, {
-            "row_id": row["row_id"],
-            "settled_micros": deep_settled + reader_settled + judge_settled,
-            "deep_settled_micros": deep_settled,
-            "deep_unsettled_upper_bound_micros": deep_unsettled,
-            "reader_settled_micros": reader_settled,
-            "judge_settled_micros": judge_settled,
-        })
+        if returncode != 0:
+            require(staging.is_dir(), "failed row lost its staging evidence")
+            atomic_write_json(staging / "failure.json", {
+                "row": row, "reason": "row_process_failed", "exit_code": returncode,
+                "retry_authorized": False,
+            })
+            _write_row_proof(staging, row, ledger_row, "operational_failure",
+                             {"failure_reason": "row_process_failed", "row_process_exit_code": returncode},
+                             orphaned=True)
+            os.replace(staging, final_dir)
+        require(final_dir.is_dir(), f"row process did not finalize evidence: {row['row_id']}")
     return {"rows": len(rows), "output": str(output)}
 
 
@@ -893,17 +1265,33 @@ def _percentile(values: list[int], fraction: float) -> int:
 
 def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
     rows = expanded_run_order(manifest)
+    root_path = output / "pre-execution-proof.json"
+    root_proof = json.loads(root_path.read_text())
+    require(root_proof["manifest_sha256"] == sha256_file(CAMPAIGN_MANIFEST)
+            and root_proof["run_order_sha256"] == canonical_sha256(rows),
+            "pre-execution proof contract drift")
+    require(root_proof["git_commit"] == subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=True
+    ).stdout.strip(), "aggregate commit differs from frozen measured commit")
+    require(root_proof["deep_prompt_sha256"] == manifest["protocol"]["deep_prompt_sha256"]
+            == sha256_file(ROOT / "config/deep-recall-v1.txt"),
+            "Deep prompt changed after execution freeze")
+    require(root_proof["binaries"] == {
+        name: _fingerprint(ROOT / "target/debug" / f"memphant-{name}")
+        for name in ("server", "worker", "cli")
+    }, "packaged binaries changed after execution freeze")
+    root_sha256 = sha256_file(root_path)
     expected_row_ids = {row["row_id"] for row in rows}
     observed_row_ids = {
         path.name for path in output.iterdir()
         if path.is_dir() and not path.name.startswith(".")
-        and path.name not in {"spend-ledger", "spend-settlements"}
+        and path.name != "spend-ledger"
     }
     require(observed_row_ids == expected_row_ids, "missing or extra finalized rows")
     reservation_paths = sorted((output / "spend-ledger").glob("*.json"))
-    settlement_paths = sorted((output / "spend-settlements").glob("*.json"))
-    require(len(reservation_paths) == len(rows) == len(settlement_paths),
-            "spend ledger is incomplete or duplicated")
+    settlement_paths = [output / row["row_id"] / "spend-settlement.json" for row in rows]
+    require(len(reservation_paths) == len(rows) and all(path.is_file() for path in settlement_paths),
+            "spend ledger is incomplete")
     reservations = [json.loads(path.read_text()) for path in reservation_paths]
     settlements = [json.loads(path.read_text()) for path in settlement_paths]
     require([item["row_id"] for item in reservations] == [row["row_id"] for row in rows],
@@ -911,17 +1299,66 @@ def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
     require([item["row_id"] for item in settlements] == [row["row_id"] for row in rows],
             "spend settlement order drift")
     require(sum(item["max_liability_micros"] for item in reservations)
-            <= int(manifest["campaign_spend"]["hard_ceiling_usd"] * 1_000_000),
+            <= usd_to_micros(manifest["campaign_spend"]["hard_ceiling_usd"]),
             "spend reservations exceed campaign ceiling")
+    require(all(item["settled_micros"] + item["unsettled_upper_bound_micros"]
+                <= item["max_liability_micros"] for item in settlements),
+            "row settlement exceeds reservation")
+    require(sum(item["settled_micros"] + item["unsettled_upper_bound_micros"]
+                for item in settlements)
+            <= usd_to_micros(manifest["campaign_spend"]["hard_ceiling_usd"]),
+            "settled plus outstanding campaign liability exceeds hard ceiling")
     records: dict[tuple[str, str], dict[str, object]] = {}
     for row in rows:
         row_dir = output / row["row_id"]
         proof = json.loads((row_dir / "row-proof.json").read_text())
         require(proof.get("complete") is True, f"row incomplete: {row['row_id']}")
-        memory_path = next((row_dir / "memory-proofs").glob("*.json"))
+        require(proof["row"] == row and proof["manifest_sha256"] == sha256_file(CAMPAIGN_MANIFEST),
+                "row proof contract drift")
+        require(proof["pre_execution_proof_sha256"] == root_sha256
+                and proof["case_materialization_contract_sha256"]
+                == canonical_sha256(root_proof["materialization"]["cases"][row["question_id"]]),
+                "row is not bound to frozen execution/materialization proof")
+        require(proof["git_commit"] == root_proof["git_commit"]
+                and proof["frozen_binaries"] == root_proof["binaries"],
+                "row commit/binary freeze drift")
+        if "binaries" in proof:
+            require(proof["binaries"] == root_proof["binaries"], "row used mixed binaries")
+        require(proof["artifact_hashes"] == artifact_hashes(row_dir, exclude={"row-proof.json"}),
+                "row artifact inventory drift")
+        reservation = reservations[row["sequence"] - 1]
+        settlement = settlements[row["sequence"] - 1]
+        require(reservation == _reservation(row, manifest), "row reservation contract drift")
+        require(proof["reservation_sha256"] == sha256_file(reservation_paths[row["sequence"] - 1]),
+                "row reservation hash drift")
+        require(proof["settlement_sha256"] == sha256_file(settlement_paths[row["sequence"] - 1]),
+                "row settlement hash drift")
+        require(settlement == _row_settlement(
+            row_dir, row, reservation, orphaned=bool(settlement["orphaned_attempt"])
+        ), "row settlement does not reconcile to archived provider evidence")
+        if proof["outcome"] != "success":
+            records[(row["question_id"], row["arm"])] = {
+                "score": 0.0, "raw_score": 0.0, "operational": False,
+                "truncated": True, "latency_ms": 120000,
+                "deep_cost_micros": int(settlement["deep_settled_micros"]),
+                "deep_config_hash": None,
+                "memory_proof_sha256": proof.get("memory_proof_sha256"),
+            }
+            continue
+        memory_paths = list((row_dir / "memory-proofs").glob("*.json"))
+        require(len(memory_paths) == 1, "successful row lacks one memory proof")
+        memory_path = memory_paths[0]
         require(sha256_file(memory_path) == proof["memory_proof_sha256"], "memory proof hash drift")
         require(sha256_file(row_dir / "reader-route.json") == proof["reader_route_sha256"],
                 "reader route hash drift")
+        reader_audit = json.loads((row_dir / "reader-route.json").read_text())
+        require(reader_audit.get("audit_status") == "settled"
+                and reader_audit.get("provider_name") == "DeepInfra"
+                and reader_audit.get("model") in manifest["protocol"]["reader"]["settlement_models"],
+                "reader route was not exactly settled")
+        require(reader_audit.get("provider_policy_sha256")
+                == canonical_sha256(manifest["protocol"]["reader"]["provider_policy"]),
+                "reader provider policy drift")
         require(sha256_file(row_dir / "official/per_question.jsonl") == proof["official_score_sha256"],
                 "official score hash drift")
         judge_hashes = [sha256_file(path) for path in sorted((row_dir / "judge-routes").glob("*.json"))]
@@ -933,30 +1370,27 @@ def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
                 "recall mutation invariant failed")
         score_row = json.loads((row_dir / "official/per_question.jsonl").read_text())
         require(score_row["question_id"] == row["question_id"], "official score pairing drift")
+        eval_name = str(score_row.get("eval_function", "")).split("|", 1)[0]
+        require(len(judge_hashes) == (1 if eval_name.startswith("llm_") else 0),
+                "judge invocation count does not match official evaluator")
+        require(all(json.loads(path.read_text()).get("audit_status") == "settled"
+                    for path in sorted((row_dir / "judge-routes").glob("*.json"))),
+                "judge settlement is unresolved")
         deep = public["recall_response"].get("deep")
-        operational = True
-        if row["arm"] != "fast":
-            configured = manifest["protocol"]["deep_candidates"][row["arm"]]
-            trace = public["trace"]
-            operational = bool(
-                deep and deep["status"] == "completed" and deep["stop_reason"] == "completed"
-                and deep["usage"]["unsettled_context_tokens_upper_bound"] == 0
-                and deep["usage"]["unsettled_spend_micros_upper_bound"] == 0
-                and trace.get("deep") == deep and deep.get("generation_ids")
-                and trace.get("l4_model") == configured["model"]
-                and str(trace.get("l4_provider", "")).lower() == "azure"
-                and str(trace.get("l4_observed_provider", "")).lower() == "azure"
-                and trace.get("l4_observed_model") == configured["model"]
-                and isinstance(trace.get("l4_prompt_hash"), str) and len(trace["l4_prompt_hash"]) == 64
-                and isinstance(trace.get("l4_config_hash"), str) and len(trace["l4_config_hash"]) == 64
-            )
-        operational = operational and not score_row["memory_context_was_truncated"]
+        operational = settlement["unsettled_upper_bound_micros"] == 0 and _treatment_operational(
+            public, row, manifest, truncated=bool(score_row["memory_context_was_truncated"])
+        )
+        require(proof.get("treatment_operational") is True and operational,
+                "successful row proof misstates treatment operation")
         score = float(score_row["score"]) if operational else 0.0
+        recall_duration = int(memory["query"]["recall_duration_ms"])
         records[(row["question_id"], row["arm"])] = {
             "score": score, "raw_score": float(score_row["score"]),
             "operational": operational,
-            "latency_ms": int(round(float(score_row["memory_query_duration_seconds"]) * 1000)),
+            "truncated": bool(score_row["memory_context_was_truncated"]),
+            "latency_ms": recall_duration,
             "deep_cost_micros": int((deep or {}).get("usage", {}).get("spend_micros", 0)),
+            "deep_config_hash": public["trace"].get("l4_config_hash"),
             "memory_proof_sha256": proof["memory_proof_sha256"],
         }
 
@@ -979,6 +1413,12 @@ def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
         ties = 12 - wins - losses
         latencies = [records[(pair["question_id"], arm)]["latency_ms"] for pair in pairs]
         costs = [records[(pair["question_id"], arm)]["deep_cost_micros"] for pair in pairs]
+        config_hashes = {
+            records[(pair["question_id"], arm)]["deep_config_hash"]
+            for pair in pairs if records[(pair["question_id"], arm)]["deep_config_hash"] is not None
+        }
+        require(len(config_hashes) <= 1,
+                f"Deep config drift across candidate rows: {arm}")
         delta = sum(pair["delta"] for pair in pairs) / 12
         predicates = {
             "complete_operational_pairs": all(pair["operational"] for pair in pairs),
@@ -987,7 +1427,11 @@ def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
             and _percentile(latencies, 0.95) <= 90000 and max(latencies) <= 90000,
             "deep_cost": sum(costs) / 12 <= 100000
             and _percentile(costs, 0.95) <= 200000 and max(costs) <= 200000,
-            "no_context_truncation": all(pair["operational"] for pair in pairs),
+            "no_context_truncation": all(
+                not records[(pair["question_id"], "fast")]["truncated"]
+                and not records[(pair["question_id"], arm)]["truncated"]
+                for pair in pairs
+            ),
         }
         domain_scores = {
             domain: sum(pair["deep_score"] for pair in pairs if pair["domain"] == domain)
@@ -1032,6 +1476,9 @@ def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
             "settlement_hashes": [sha256_file(path) for path in settlement_paths],
             "max_liability_micros": sum(item["max_liability_micros"] for item in reservations),
             "settled_micros": sum(item["settled_micros"] for item in settlements),
+            "unsettled_upper_bound_micros": sum(
+                item["unsettled_upper_bound_micros"] for item in settlements
+            ),
         },
         "advance_to_separate_confirmation": advance,
         "decision": "confirmation_manifest_required" if advance else "retire_deep_product_code",
