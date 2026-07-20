@@ -60,6 +60,7 @@ SAFE_ENVIRONMENT_KEYS = (
     "HOME", "LANG", "LC_ALL", "PATH", "RUST_BACKTRACE", "RUST_LOG",
     "SSL_CERT_DIR", "SSL_CERT_FILE", "TMPDIR", "TZ",
 )
+PRODUCTION_BINARY_PROFILE = "release"
 
 
 def require(condition: bool, message: str) -> None:
@@ -83,6 +84,18 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _binary_path(name: str) -> Path:
+    require(name in {"server", "worker", "cli"}, f"unknown packaged binary: {name}")
+    return ROOT / "target" / PRODUCTION_BINARY_PROFILE / f"memphant-{name}"
+
+
+def _production_build_command() -> list[str]:
+    return [
+        "cargo", "build", "--release", "-p", "memphant-server",
+        "-p", "memphant-worker", "-p", "memphant-cli",
+    ]
 
 
 def usd_to_micros(value: object) -> int:
@@ -1271,6 +1284,7 @@ def verify_resume_contract(frozen: dict, current: dict) -> None:
         "manifest_sha256", "run_order_sha256", "outputs_observed_before_freeze",
         "materialization", "git_commit", "binaries", "deep_prompt_sha256",
         "deep_config_hashes", "environment_contract_sha256", "python_environment",
+        "binary_profile",
     ):
         require(frozen[field] == current[field], f"campaign resume contract drift: {field}")
     require({key: value["material_contract_sha256"] for key, value in frozen["endpoint_hashes"].items()}
@@ -1382,7 +1396,7 @@ def run_row(directory: Path, materialized: Path, output: Path, row: dict, manife
     judge_proxy, judge_url = _judge_proxy(openai_key, row_dir / "judge-routes", manifest)
     port = _free_port()
     server_url = f"http://127.0.0.1:{port}"
-    binaries = {name: ROOT / "target/debug" / f"memphant-{name}" for name in ("server", "worker", "cli")}
+    binaries = {name: _binary_path(name) for name in ("server", "worker", "cli")}
     server_env = _clean_environment({
         "MEMPHANT_APP_DATABASE_URL": database_url,
         "MEMPHANT_AUTHN_DATABASE_URL": database_url,
@@ -1542,11 +1556,11 @@ def run_campaign(directory: Path, materialized: Path, output: Path, base_databas
             "OPENROUTER_API_KEY and OPENAI_API_KEY are required")
     preflight_proof = preflight(directory, materialized, manifest)
     endpoint_hashes = verify_endpoint_inventory(manifest)
-    subprocess.run(["cargo", "build", "-p", "memphant-server", "-p", "memphant-worker", "-p", "memphant-cli"], cwd=ROOT, check=True)
+    subprocess.run(_production_build_command(), cwd=ROOT, check=True)
     output.mkdir(parents=True, exist_ok=True)
     rows = expanded_run_order(manifest)
     frozen_binaries = {
-        name: _fingerprint(ROOT / "target/debug" / f"memphant-{name}")
+        name: _fingerprint(_binary_path(name))
         for name in ("server", "worker", "cli")
     }
     root_contract = {
@@ -1556,6 +1570,7 @@ def run_campaign(directory: Path, materialized: Path, output: Path, base_databas
         "git_commit": subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
                                      capture_output=True, text=True, check=True).stdout.strip(),
         "binaries": frozen_binaries,
+        "binary_profile": PRODUCTION_BINARY_PROFILE,
         "deep_prompt_sha256": sha256_file(ROOT / "config/deep-recall-v1.txt"),
         "deep_config_hashes": {
             name: candidate["config_sha256"]
@@ -1677,8 +1692,12 @@ def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
         name: candidate["config_sha256"]
         for name, candidate in manifest["protocol"]["deep_candidates"].items()
     }, "frozen Deep runtime config hashes drifted")
+    require(
+        root_proof.get("binary_profile") == PRODUCTION_BINARY_PROFILE,
+        "campaign did not freeze production release binaries",
+    )
     require(root_proof["binaries"] == {
-        name: _fingerprint(ROOT / "target/debug" / f"memphant-{name}")
+        name: _fingerprint(_binary_path(name))
         for name in ("server", "worker", "cli")
     }, "packaged binaries changed after execution freeze")
     root_sha256 = sha256_file(root_path)

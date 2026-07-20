@@ -32,7 +32,7 @@ def _write_synthetic_root(campaign, output: Path, manifest: dict) -> None:
         "path": str(path.resolve()), "bytes": 1, "sha256": "f" * 64
     }
     binaries = {
-        name: campaign._fingerprint(campaign.ROOT / "target/debug" / f"memphant-{name}")
+        name: campaign._fingerprint(campaign._binary_path(name))
         for name in ("server", "worker", "cli")
     }
     campaign.atomic_write_json(output / "pre-execution-proof.json", {
@@ -46,6 +46,7 @@ def _write_synthetic_root(campaign, output: Path, manifest: dict) -> None:
             capture_output=True, text=True, check=True,
         ).stdout.strip(),
         "binaries": binaries,
+        "binary_profile": campaign.PRODUCTION_BINARY_PROFILE,
         "deep_prompt_sha256": campaign.sha256_file(campaign.ROOT / "config/deep-recall-v1.txt"),
         "deep_config_hashes": {
             name: candidate["config_sha256"]
@@ -181,6 +182,21 @@ def test_execution_paths_are_absolute_before_official_cwd_changes(
     assert all(path.is_absolute() for path in (directory, materialized, output))
 
 
+def test_campaign_packages_production_release_binaries() -> None:
+    campaign = _load()
+    assert campaign.PRODUCTION_BINARY_PROFILE == "release"
+    assert campaign._production_build_command() == [
+        "cargo", "build", "--release", "-p", "memphant-server",
+        "-p", "memphant-worker", "-p", "memphant-cli",
+    ]
+    for name in ("server", "worker", "cli"):
+        assert campaign._binary_path(name) == (
+            campaign.ROOT / "target" / "release" / f"memphant-{name}"
+        )
+    with pytest.raises(RuntimeError, match="unknown packaged binary"):
+        campaign._binary_path("debug-helper")
+
+
 def test_fast_and_deep_configs_differ_only_by_mode(tmp_path: Path) -> None:
     campaign = _load()
     base = json.loads(
@@ -270,6 +286,7 @@ def test_resume_keeps_initial_inventory_evidence_when_material_contract_is_stabl
         "deep_config_hashes": {"sonnet": "i"},
         "python_environment": {"packages_sha256": "p"},
         "environment_contract_sha256": "j",
+        "binary_profile": "release",
     }
     frozen = {**common, "endpoint_hashes": {
         "reader": {"inventory_sha256": "old", "material_contract_sha256": "stable"}

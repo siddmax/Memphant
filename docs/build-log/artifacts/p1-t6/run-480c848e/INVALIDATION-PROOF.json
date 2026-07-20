@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "attempt": "run-480c848e",
+  "classification": "production_binary_fidelity_failure",
+  "invalidated_at": "2026-07-20",
+  "measured_commit": "480c848e3ebdc2966e362f7feec6203051338a58",
+  "preserved_evidence": {
+    "pre_append_inventory_files": 21,
+    "pre_append_inventory_sha256": "ed758301007b79ec0d2c78d96360d7aad0204a3c265d78d43292e190e4b05e2e",
+    "finalized_failure_rows": [
+      "0001-19367bc7-fast"
+    ],
+    "interrupted_staging_rows": [
+      ".staging-0002-19367bc7-sonnet"
+    ]
+  },
+  "worker_proof": {
+    "completed_sources": 670,
+    "worker_failures": 0,
+    "stdout_sha256": "bbb046f9ff622a6ca702c8928d2055f68e7c5616afd3b9d9bdee0a8b7a123ac6",
+    "stderr_sha256": "059bdb08ef56b91b306382093246567bebafbf964ef758e5f5c5a4ef4dcdde8e"
+  },
+  "failure": {
+    "stage": "fast_recall_before_reader_dispatch",
+    "error": "TimeoutError: timed out",
+    "http_timeout_seconds": 120,
+    "packaged_binary_profile": "cargo debug",
+    "packaged_binary_path_prefix": "target/debug",
+    "reason": "The campaign measured unoptimized developer binaries rather than production release binaries, so its latency result is not product-representative."
+  },
+  "external_dispatch_audit": {
+    "reader_route_files": 0,
+    "judge_route_files": 0,
+    "deep_generation_receipt_files": 0,
+    "official_score_files": 0,
+    "settled_micros": 0,
+    "unsettled_upper_bound_micros": 0
+  },
+  "scratch_database_cleanup_verified": true,
+  "retry_decision": {
+    "same_output_root_replay_authorized": false,
+    "fresh_output_root_authorized_after_release_binary_and_live_fast_recall_proof": true
+  }
+}
