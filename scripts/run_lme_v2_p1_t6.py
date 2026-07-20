@@ -13,6 +13,7 @@ import math
 import os
 from pathlib import Path
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -33,6 +34,7 @@ RELEASE_MANIFEST = ROOT / "benchmarks/manifests/longmemeval_v2.lock.json"
 MEMORY_CONFIG = ROOT / "benchmarks/longmemeval_v2/memphant.memory.json"
 MATERIALIZER = ROOT / "scripts/materialize_longmemeval_v2_runtime.py"
 SCRATCH_HELPER = ROOT / "scripts/with_scratch_db.sh"
+MEMPHANT_BOOTSTRAP = ROOT / "benchmarks/longmemeval_v2/harness_bootstrap.py"
 MATERIALIZATION_SUMMARY = ROOT / "docs/build-log/artifacts/p1-t6/MATERIALIZATION-SUMMARY.json"
 PAIRING_PROOFS = ROOT / "docs/build-log/artifacts/p1-t6/PAIRING-PROOFS.json"
 SELECTION_SHA256 = "d7762dbaffff7acfe779162d4993c8c09ef0440e3c1a25e0d3408127d73e25fa"
@@ -109,6 +111,70 @@ def _clean_environment(extra: dict[str, str] | None = None) -> dict[str, str]:
     }
     clean.update(extra or {})
     return clean
+
+
+def verify_python_harness(directory: Path) -> dict[str, object]:
+    """Prove the exact sanitized interpreter can import the official harness."""
+    official = directory / "official"
+    requirements = official / "requirements.txt"
+    require(requirements.is_file(), "official Python requirements are missing")
+    environment = _clean_environment()
+    interpreter = Path(sys.executable).resolve()
+
+    checked = subprocess.run(
+        [sys.executable, "-m", "pip", "check"],
+        cwd=official,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    require(
+        checked.returncode == 0,
+        "official Python dependency graph is inconsistent: "
+        + (checked.stderr or checked.stdout).strip()[-500:],
+    )
+    frozen = subprocess.run(
+        [sys.executable, "-m", "pip", "freeze", "--all"],
+        cwd=official,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    require(frozen.returncode == 0, "could not freeze official Python environment")
+    packages = sorted(line.strip() for line in frozen.stdout.splitlines() if line.strip())
+    require(packages, "official Python package inventory is empty")
+
+    bootstrapped = subprocess.run(
+        [
+            sys.executable,
+            str(MEMPHANT_BOOTSTRAP),
+            "--official-dir",
+            str(official),
+            "--help",
+        ],
+        cwd=official,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    require(
+        bootstrapped.returncode == 0,
+        "official harness bootstrap import failed: "
+        + (bootstrapped.stderr or bootstrapped.stdout).strip()[-500:],
+    )
+    return {
+        "interpreter": _fingerprint(interpreter),
+        "python_version": sys.version,
+        "requirements_sha256": sha256_file(requirements),
+        "packages": packages,
+        "packages_sha256": canonical_sha256(packages),
+        "bootstrap_import_verified": True,
+        "bootstrap_stdout_sha256": hashlib.sha256(bootstrapped.stdout.encode()).hexdigest(),
+        "bootstrap_stderr_sha256": hashlib.sha256(bootstrapped.stderr.encode()).hexdigest(),
+    }
 
 
 def _redact_secrets(directory: Path, secrets: list[str]) -> None:
@@ -648,8 +714,9 @@ def preflight(directory: Path, materialized: Path, manifest: dict) -> dict[str, 
     verify_campaign_manifest(manifest)
     acquired = acquire_minimal(directory, manifest)
     materialization = verify_materialization(directory, materialized, manifest)
+    python = verify_python_harness(directory)
     return {"campaign": verify_campaign_manifest(manifest), "acquisition": acquired,
-            "materialization": materialization}
+            "materialization": materialization, "python": python}
 
 
 def _json_url(url: str, api_key: str | None = None) -> dict:
@@ -1197,7 +1264,7 @@ def verify_resume_contract(frozen: dict, current: dict) -> None:
     for field in (
         "manifest_sha256", "run_order_sha256", "outputs_observed_before_freeze",
         "materialization", "git_commit", "binaries", "deep_prompt_sha256",
-        "deep_config_hashes", "environment_contract_sha256",
+        "deep_config_hashes", "environment_contract_sha256", "python_environment",
     ):
         require(frozen[field] == current[field], f"campaign resume contract drift: {field}")
     require({key: value["material_contract_sha256"] for key, value in frozen["endpoint_hashes"].items()}
@@ -1245,6 +1312,46 @@ def _terminate_and_reap(process: subprocess.Popen) -> None:
     except subprocess.TimeoutExpired:
         process.kill()
         process.wait()
+
+
+def _terminate_process_group_and_reap(process: subprocess.Popen) -> None:
+    """Stop a scratch-helper process tree while preserving its EXIT cleanup trap."""
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+
+
+def _wait_and_reap_on_interrupt(process: subprocess.Popen) -> int:
+    try:
+        return process.wait()
+    except BaseException:
+        _terminate_process_group_and_reap(process)
+        raise
+
+
+def _run_logged_harness(
+    command: list[str], *, cwd: Path, environment: dict[str, str], row_dir: Path
+) -> subprocess.CompletedProcess:
+    with (row_dir / "official.stdout").open("wb") as stdout, (
+        row_dir / "official.stderr"
+    ).open("wb") as stderr:
+        return subprocess.run(
+            command,
+            cwd=cwd,
+            env=environment,
+            stdout=stdout,
+            stderr=stderr,
+            check=False,
+        )
 
 
 def run_row(directory: Path, materialized: Path, output: Path, row: dict, manifest: dict) -> dict:
@@ -1336,7 +1443,12 @@ def run_row(directory: Path, materialized: Path, output: Path, row: dict, manife
             "--evaluator-reasoning-effort", "medium",
             "--prompt-build-max-workers", "1", "--reader-max-concurrent-requests", "1",
         ]
-        completed = subprocess.run(command, cwd=directory / "official", env=child_env, check=False)
+        completed = _run_logged_harness(
+            command,
+            cwd=directory / "official",
+            environment=child_env,
+            row_dir=row_dir,
+        )
         exit_code = completed.returncode
     finally:
         _terminate_and_reap(server)
@@ -1437,6 +1549,7 @@ def run_campaign(directory: Path, materialized: Path, output: Path, base_databas
             name: candidate["config_sha256"]
             for name, candidate in manifest["protocol"]["deep_candidates"].items()
         },
+        "python_environment": preflight_proof["python"],
         "environment_contract_sha256": canonical_sha256(_clean_environment()),
     }
     root_path = output / "pre-execution-proof.json"
@@ -1507,11 +1620,12 @@ def run_campaign(directory: Path, materialized: Path, output: Path, base_databas
                 "OPENROUTER_API_KEY": os.environ["OPENROUTER_API_KEY"],
                 "OPENAI_API_KEY": os.environ["OPENAI_API_KEY"],
             }),
+            start_new_session=True,
         )
         attempt["child_pid"] = process.pid
         if staging.exists():
             atomic_write_json(staging / "attempt.json", attempt)
-        returncode = process.wait()
+        returncode = _wait_and_reap_on_interrupt(process)
         final_dir = output / row["row_id"]
         if returncode != 0:
             require(staging.is_dir(), "failed row lost its staging evidence")

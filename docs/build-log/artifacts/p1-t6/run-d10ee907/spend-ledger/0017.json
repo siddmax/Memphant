@@ -1,0 +1,7 @@
+{
+  "charged_before_dispatch": true,
+  "deep_hard_cap_micros": 0,
+  "max_liability_micros": 87500,
+  "reader_and_judge_reserve_micros": 87500,
+  "row_id": "0017-658fa827-fast"
+}

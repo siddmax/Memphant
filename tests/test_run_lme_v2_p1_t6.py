@@ -51,6 +51,7 @@ def _write_synthetic_root(campaign, output: Path, manifest: dict) -> None:
             name: candidate["config_sha256"]
             for name, candidate in manifest["protocol"]["deep_candidates"].items()
         },
+        "python_environment": {"synthetic": True},
         "environment_contract_sha256": campaign.canonical_sha256(
             campaign._clean_environment()
         ),
@@ -253,6 +254,7 @@ def test_resume_keeps_initial_inventory_evidence_when_material_contract_is_stabl
         "outputs_observed_before_freeze": False, "materialization": {"c": "d"},
         "git_commit": "e", "binaries": {"f": "g"}, "deep_prompt_sha256": "h",
         "deep_config_hashes": {"sonnet": "i"},
+        "python_environment": {"packages_sha256": "p"},
         "environment_contract_sha256": "j",
     }
     frozen = {**common, "endpoint_hashes": {
@@ -303,6 +305,71 @@ def test_clean_child_environment_drops_ambient_secrets_and_deep_overrides(
     assert "AWS_SECRET_ACCESS_KEY" not in child
     assert "UNRELATED_VENDOR_TOKEN" not in child
     assert not any(key.startswith("MEMPHANT_DEEP") for key in child)
+
+
+def test_python_harness_preflight_fails_closed_under_clean_environment(
+    tmp_path: Path, monkeypatch
+) -> None:
+    campaign = _load()
+    official = tmp_path / "official"
+    official.mkdir()
+    (official / "requirements.txt").write_text("openai-agents\n")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "must-not-cross")
+    monkeypatch.setattr(
+        campaign,
+        "_fingerprint",
+        lambda path: {"path": str(path), "bytes": 1, "sha256": "f" * 64},
+    )
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        if command[2:4] == ["pip", "check"]:
+            return campaign.subprocess.CompletedProcess(command, 0, "No broken requirements found.\n", "")
+        if command[2:5] == ["pip", "freeze", "--all"]:
+            return campaign.subprocess.CompletedProcess(command, 0, "openai-agents==0.18.3\n", "")
+        return campaign.subprocess.CompletedProcess(
+            command, 1, "", "ModuleNotFoundError: No module named 'agents'\n"
+        )
+
+    monkeypatch.setattr(campaign.subprocess, "run", run)
+    with pytest.raises(RuntimeError, match="official harness bootstrap import failed"):
+        campaign.verify_python_harness(tmp_path)
+    assert calls
+    for _command, kwargs in calls:
+        assert "OPENROUTER_API_KEY" not in kwargs["env"]
+
+
+def test_python_harness_preflight_freezes_interpreter_and_packages(
+    tmp_path: Path, monkeypatch
+) -> None:
+    campaign = _load()
+    official = tmp_path / "official"
+    official.mkdir()
+    (official / "requirements.txt").write_text("openai-agents\n")
+    monkeypatch.setattr(
+        campaign,
+        "_fingerprint",
+        lambda path: {"path": str(path), "bytes": 1, "sha256": "f" * 64},
+    )
+
+    def run(command, **_kwargs):
+        if command[2:4] == ["pip", "check"]:
+            return campaign.subprocess.CompletedProcess(command, 0, "No broken requirements found.\n", "")
+        if command[2:5] == ["pip", "freeze", "--all"]:
+            return campaign.subprocess.CompletedProcess(
+                command, 0, "openai==2.46.0\nopenai-agents==0.18.3\n", ""
+            )
+        return campaign.subprocess.CompletedProcess(command, 0, "usage: harness\n", "warning\n")
+
+    monkeypatch.setattr(campaign.subprocess, "run", run)
+    proof = campaign.verify_python_harness(tmp_path)
+    assert proof["requirements_sha256"] == campaign.sha256_file(
+        official / "requirements.txt"
+    )
+    assert proof["packages"] == ["openai-agents==0.18.3", "openai==2.46.0"]
+    assert proof["packages_sha256"] == campaign.canonical_sha256(proof["packages"])
+    assert proof["bootstrap_import_verified"] is True
 
 
 def test_secret_redaction_covers_nested_text_and_binary_artifacts(tmp_path: Path) -> None:
@@ -358,6 +425,50 @@ def test_forced_server_cleanup_reaps_child_before_artifact_redaction() -> None:
     assert process.events == [
         "terminate", ("wait", 10), "kill", ("wait", None),
     ]
+
+
+def test_campaign_interrupt_terminates_and_reaps_scratch_process_group(
+    monkeypatch,
+) -> None:
+    campaign = _load()
+    signals = []
+    monkeypatch.setattr(campaign.os, "killpg", lambda pid, signal: signals.append((pid, signal)))
+
+    class Process:
+        def __init__(self):
+            self.events = []
+            self.first_wait = True
+            self.pid = 4321
+
+        def wait(self, timeout=None):
+            self.events.append(("wait", timeout))
+            if self.first_wait:
+                self.first_wait = False
+                raise KeyboardInterrupt
+            return -15
+
+    process = Process()
+    with pytest.raises(KeyboardInterrupt):
+        campaign._wait_and_reap_on_interrupt(process)
+    assert process.events == [("wait", None), ("wait", 10)]
+    assert signals == [(4321, campaign.signal.SIGTERM)]
+
+
+def test_official_harness_output_is_archived_per_row(tmp_path: Path) -> None:
+    campaign = _load()
+    completed = campaign._run_logged_harness(
+        [
+            sys.executable,
+            "-c",
+            "import sys; print('official-out'); print('official-err', file=sys.stderr)",
+        ],
+        cwd=tmp_path,
+        environment=campaign._clean_environment(),
+        row_dir=tmp_path,
+    )
+    assert completed.returncode == 0
+    assert (tmp_path / "official.stdout").read_text() == "official-out\n"
+    assert (tmp_path / "official.stderr").read_text() == "official-err\n"
 
 
 def test_deep_receipts_must_exactly_reconcile_ids_route_tokens_and_cost(
