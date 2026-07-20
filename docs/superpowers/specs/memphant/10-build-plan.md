@@ -47,7 +47,7 @@ Do not publish broad claims until:
 |---|---|
 | Graph DB adapter | rejected; relational edges plus materialized 1-hop expansion are the core architecture. |
 | Full FSRS/DSR fitter | schema/events ship now; learned fitter turns on only with enough MemPhant review traces. |
-| L4 deliberate recall | interface frozen in v1 (`retrieval_mode=exhaustive` flag + trace fields); behavior builds at its `27` §2 rung as an explicit exhaustive/benchmark mode, never the default hot path. `29-implementation-plan.md` §2a owns the cut line. |
+| L4 deliberate recall | interface frozen in v1 (`retrieval_mode=deep` flag + trace fields); behavior builds at its `27` §2 rung as an explicit Deep/benchmark mode, never the default hot path. `29-implementation-plan.md` §2a owns the cut line. |
 | Skill compiler | rejected for first public build; procedural payload schema and validation status freeze in v1, with the procedural-memory lever built at its `27` §2 rung. |
 | Cache cluster | rejected until p95 traces prove repeated recall dominates cost; single-node/object-cache only. |
 | SQLite/PGLite local mode | rejected; Docker/plain Postgres is local mode. |

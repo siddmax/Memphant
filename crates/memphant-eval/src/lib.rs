@@ -1892,7 +1892,7 @@ async fn run_golden_case_inner(
     let recall_edge_expansion_enabled =
         controls.edge_expansion_enabled && !controls.filesystem_control_enabled;
     let requested_mode = case.mode.unwrap_or(RecallMode::Fast);
-    let mode = if requested_mode == RecallMode::Exhaustive && !controls.l4_exhaustive_enabled {
+    let mode = if requested_mode == RecallMode::Deep && !controls.l4_exhaustive_enabled {
         RecallMode::Balanced
     } else {
         requested_mode

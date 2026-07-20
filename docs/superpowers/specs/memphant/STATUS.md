@@ -123,7 +123,7 @@
 - [ ] 9 query decomposition (reopened 2026-07-09: promotion evidence was synthetic fixtures; 2026-07-10: zero paired delta on LME-S 30q incl. multi-session/temporal strata (`real-retrieval-20260710`); advance-when unmet; still missing: any real composite-query case the decomposer measurably improves)
 - [ ] 10 procedural memory (reopened 2026-07-09: promotion evidence was synthetic fixtures; 2026-07-10: LME-S chat corpus contains no procedural/replay cases, so this axis went unmeasured in `real-retrieval-20260710`; still missing: STATE-Bench-style task-success/pass^k evidence)
 - [ ] 11 DSR decay fold (reopened 2026-07-09: promotion evidence was synthetic fixtures; 2026-07-10: short retrieval benchmarks cannot exercise decay (`real-retrieval-20260710` ran with decay on; not the gate); still missing: the internally-run longitudinal MemoryStress-style suite required by `27` §2)
-- [ ] 12 L4 exhaustive (reopened 2026-07-09: promotion evidence was synthetic fixtures; 2026-07-10: measured for real — `mode=exhaustive` produced zero paired delta vs fast on LME-S 30q (`real-retrieval-20260710`); no accuracy-ceiling gain shown; still missing: hard-sample evidence where exhaustive recovers what fast misses)
+- [ ] 12 L4 Deep (reopened 2026-07-09: promotion evidence was synthetic fixtures; 2026-07-10: measured for real — the former public `mode=exhaustive` produced zero paired delta vs fast on LME-S 30q (`real-retrieval-20260710`); no accuracy-ceiling gain shown; still missing: hard-sample evidence where Deep recovers what fast misses)
 - [ ] 13 learned rerank/DSR (reopened 2026-07-09: promotion evidence was synthetic fixtures; 2026-07-10: unmeasured — the archived-trace training floor does not exist yet (the bench lane now emits real traces, which is progress toward the floor, not the floor); still missing: training data floor + paired held-out win over fixed rules)
 - [x] 14 external graph/vector escape hatch RETIRED (retirement stands: no graph-engine bottleneck evidence; relational edges evaluated in `real-retrieval-20260710` — they produced zero delta, which argues against, not for, a dedicated graph engine; proof: `docs/build-log/2026-07-10-real-retrieval-campaign.md`)
 - [ ] 15 inferred-belief composition (reopened 2026-07-09: promotion evidence was synthetic fixtures; 2026-07-10: unmeasured — the retrieval-only lane does not exercise composition; still missing: OP-Bench-style restraint check plus corroborated-promotion precision on a real corpus)
@@ -140,14 +140,14 @@
 
 | Item | Status |
 |---|---|
-| L4 exhaustive recall behavior | BUILT (`rung12_l4_exhaustive_profile_001`: explicit `mode=exhaustive` raw-episode scan recovered buried answer-bearing evidence; no-L4 control missed) |
+| L4 Deep recall behavior | BUILT (`rung12_l4_exhaustive_profile_001`: the then-public `mode=exhaustive` raw-episode scan recovered buried answer-bearing evidence; no-L4 control missed) |
 | Learned reranker | BUILT (`rung13_learned_rerank_profile_001`: archived memory-tuned linear profile recovered a protected-top-k rank-sensitive miss; no-learned-rerank control missed) |
 | Inferred-belief composition | BUILT (`rung15_inferred_belief_composition_profile_001`: guardrailed preference composition emits `derived_by=composition` belief-tier abstractions; no-composition control missed; OP-Bench-style restraint axis did not regress) |
 | Learned DSR/FSRS fitter | DORMANT (`rung13_learned_rerank_profile_001`: learned rerank proof is not the many-card MemPhant-native review-history floor required for FSRS parameter fitting) |
 | DSR decay fold (fsrs engine; ledger capture is v1) | BUILT (`rung11_dsr_decay_profile_001`: fixed-prior DSR fold over `review_event` active; no-decay control missed durable memory) |
 | Procedural replay-validation harness | BUILT (`rung10_procedural_memory_profile_001`: validated procedure recall active; unsafe procedure sketches suppressed) |
 | 3-tier DEK envelope encryption | DORMANT (`key_custody` shape frozen; no BYOC enterprise KEK contract) |
-| Ablation-voting recall (SMSR-style, exhaustive mode) | DORMANT (`wsi_local_gate_profile_001`: no containment gain worth multiplied read cost) |
+| Ablation-voting recall (SMSR-style, Deep mode) | DORMANT (`wsi_local_gate_profile_001`: no containment gain worth multiplied read cost) |
 | Delta recall / miss-repair re-extraction / retrievability probe | DORMANT (`wsi_local_gate_profile_001`: per-flag gates not met) |
 | Consolidation event delivery (outbox consumers) | DORMANT (taxonomy + outbox shape specced) |
 | Hermes memory-provider adapter (`08` §5.1b, R87) | DORMANT (`wsi_local_gate_profile_001`: no Hermes design partner or launch-window demand) |

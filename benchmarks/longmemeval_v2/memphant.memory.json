@@ -10,7 +10,7 @@
     "run_id_env": "MEMPHANT_LME_RUN_ID",
     "top_k": 20,
     "budget_tokens": 32768,
-    "mode": "exhaustive",
+    "mode": "deep",
     "source_kind": "tool",
     "source_trust": "trusted_system",
     "compiler_version": "longmemeval-v2-memphant-v1"

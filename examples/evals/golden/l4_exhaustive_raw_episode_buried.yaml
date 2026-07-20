@@ -1,7 +1,7 @@
 id: l4_exhaustive_raw_episode_buried
 second_author_confirmed: true
 query: "What is required before Stargate deploy?"
-mode: exhaustive
+mode: deep
 k: 1
 budget_tokens: 20
 seed:

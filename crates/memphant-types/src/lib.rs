@@ -373,7 +373,18 @@ pub struct RetainResourceRequest {
 pub enum RecallMode {
     Fast,
     Balanced,
-    Exhaustive,
+    Deep,
+}
+
+#[cfg(test)]
+mod recall_mode_contract_tests {
+    use super::RecallMode;
+
+    #[test]
+    fn deep_is_the_only_explicit_deliberate_recall_mode() {
+        assert!(serde_json::from_str::<RecallMode>(r#""deep""#).is_ok());
+        assert!(serde_json::from_str::<RecallMode>(r#""exhaustive""#).is_err());
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -384,7 +395,7 @@ pub enum RecallChannel {
     Vector,
     Temporal,
     Edge,
-    Exhaustive,
+    Deep,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

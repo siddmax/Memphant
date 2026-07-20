@@ -313,7 +313,7 @@ async fn dsr_decay_fold_promotes_reinforced_memory_over_ignored_stale_candidate(
 }
 
 #[tokio::test]
-async fn exhaustive_mode_does_not_expand_raw_episode_without_selected_child_anchor() {
+async fn deep_mode_does_not_expand_raw_episode_without_selected_child_anchor() {
     let store = InMemoryStore::default();
     let tenant_id = tenant(71_500);
     let scope_id = scope(71_501);
@@ -486,14 +486,14 @@ async fn exhaustive_mode_does_not_expand_raw_episode_without_selected_child_anch
             .any(|stage| { stage.stage == "l4_exhaustive" && stage.detail == "disabled" })
     );
 
-    let exhaustive = recall(
+    let deep = recall(
         &store,
         RecallRequest {
             context: memphant_store_testkit::resolved_context(tenant_id, scope_id, actor_id),
             query,
             k: 2,
             budget_tokens: 20,
-            mode: RecallMode::Exhaustive,
+            mode: RecallMode::Deep,
             include_beliefs: false,
             edge_expansion_enabled: true,
             context_packing_abstention_enabled: true,
@@ -511,15 +511,15 @@ async fn exhaustive_mode_does_not_expand_raw_episode_without_selected_child_anch
         &CLOCK,
     )
     .await
-    .expect("exhaustive recall succeeds");
+    .expect("deep recall succeeds");
 
-    assert_eq!(exhaustive.candidate_whitelist, vec![decoy_id]);
+    assert_eq!(deep.candidate_whitelist, vec![decoy_id]);
 
     let trace = store
-        .trace_by_id_any_tenant(exhaustive.trace_id)
-        .expect("trace recorded for exhaustive recall");
-    assert_eq!(trace.mode_requested, RecallMode::Exhaustive);
-    assert_eq!(trace.mode_executed, RecallMode::Exhaustive);
+        .trace_by_id_any_tenant(deep.trace_id)
+        .expect("trace recorded for deep recall");
+    assert_eq!(trace.mode_requested, RecallMode::Deep);
+    assert_eq!(trace.mode_executed, RecallMode::Deep);
     assert_eq!(trace.escalation_reason, "none");
     assert!(
         !trace
@@ -531,7 +531,7 @@ async fn exhaustive_mode_does_not_expand_raw_episode_without_selected_child_anch
     assert_eq!(trace.l4_sandbox_id, None);
     assert!(trace.l4_gathered_evidence_ids.is_empty());
     assert!(trace.candidates.iter().all(|candidate| {
-        candidate.unit_id != answer_id || candidate.channel != RecallChannel::Exhaustive
+        candidate.unit_id != answer_id || candidate.channel != RecallChannel::Deep
     }));
 }
 

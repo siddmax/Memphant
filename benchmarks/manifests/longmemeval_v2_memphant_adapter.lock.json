@@ -3,18 +3,18 @@
   "adapter": "MemPhant packaged REST",
   "schema_version": 2,
   "upstream_release_lock_sha256": "846c73224c456a981c7812741c33ee948dbdcd8de84a220240e534558fa8cbab",
-  "openapi_sha256": "f30002254deb83d345dadda617d4557db1f9ca28c96f85f82862f81add2a4ae3",
+  "openapi_sha256": "33bd190fc276db044e438dd32c63d8ec6f18f35e92091b9a6842bbb7dda01816",
   "files": {
-    "benchmarks/longmemeval_v2/memphant_memory.py": "0be983b231f96efce865885bc8a7d5eb67a076eaf132a126aefab7327354d3ed",
+    "benchmarks/longmemeval_v2/memphant_memory.py": "0bb2930c76577ef74041f16be5ad115fc178b670faa3d31dbaa9711276b10fd1",
     "benchmarks/longmemeval_v2/harness_bootstrap.py": "97b17ebc7091ffd624859ff62b509ab4c7e96586448c7904f208c31ddd8ac8e6",
-    "benchmarks/longmemeval_v2/memphant.memory.json": "fdca02ca3fc3fe419645a5af786055362382bfc6c77bca349fc481bbb5f453f5",
+    "benchmarks/longmemeval_v2/memphant.memory.json": "71784dc46d3d218695620f7c65336f619f1f41e9197fbed62adf16059d516d08",
     "scripts/materialize_longmemeval_v2_runtime.py": "1af300126f98860db36bccc96d112f8b218d4249c15be354b172cf7faa869344",
     "scripts/run_longmemeval_v2.py": "351209c99e8658541c169cfbedc5da391ffb9b7849fb0728c98f66578519f4c4"
   },
   "retrieval": {
     "top_k": 20,
     "budget_tokens": 32768,
-    "mode": "exhaustive"
+    "mode": "deep"
   },
   "isolation": {
     "unit": "one official question per harness invocation",

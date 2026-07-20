@@ -58,7 +58,7 @@ Primary-source anchors:
 | 9 | query decomposition | traceable subqueries for composite memory questions | composite LME-V2/STATE cases improve | subqueries retrieve uncited or irrelevant evidence |
 | 10 | procedural memory | validated procedure/failure-pattern units and replay checks | STATE-Bench task success/pass^k improves | unsafe procedure reuse appears |
 | 11 | DSR decay | fixed-prior DSR update fold over the day-one `review_event` ledger (`04` §8.2; v1 ranks by plain recency/exponential until this rung) | FSRS beats plain exponential decay on an **internally-run MemoryStress-style longitudinal suite executed in MemPhant's own harness** (`04` §8, `12` — running the corpus ourselves = internally measured; the vendor's published leaderboard number can never be the gate, R82) — short benchmarks can't exercise decay; stale/noisy memory decreases without losing durable facts | FSRS doesn't beat exponential on the internal longitudinal suite (→ keep exponential); identity/project facts decay incorrectly |
-| 12 | L4 exhaustive recall | sandbox/file/raw-episode agentic recall mode | accuracy ceiling improves on hard LME-V2/BEAM samples | latency/cost not worth Pareto claim |
+| 12 | L4 Deep recall | sandbox/file/raw-episode agentic recall mode | accuracy ceiling improves on hard LME-V2/BEAM samples | latency/cost not worth Pareto claim |
 | 13 | learned rerank/DSR | train/tune on archived traces only after data floor | paired evals beat fixed rules | overfits or fails held-out cases |
 | 14 | external graph DB escape hatch | implement graph adapter only if SQL edge traces prove bottleneck | multi-hop benchmark improves beyond SQL edge expansion | no material win over relational edges |
 | 15 | inferred-belief composition | reflect-stage abstraction inference minting belief candidates (`derived_by: composition` trace field; mechanism of record in `24` §2.3, R89) | corroborated-promotion precision on inferred beliefs holds AND the over-personalization score does not regress (production precedent: Syndai's guardrailed behavioral inference) | inferred beliefs promote wrongly, or over-personalization/sycophancy signal regresses (OP-Bench taxonomy) |
@@ -84,19 +84,19 @@ Rungs 0-12 are first-public-architecture **capability contracts** — their sche
 | query decomposition | `memphant-core` | query features/subqueries | subquery IDs, parent query hash | composite query oracle tests |
 | procedural memory | compiler + store | procedure units, validation status | procedure ID, validation state | replay/procedure safety tests |
 | DSR decay | compiler + store | review/reinforcement events | difficulty, stability, retrievability | decay monotonicity and retention tests |
-| L4 exhaustive | `memphant-eval`, service worker | raw episodes/resources/files | mode, sandbox ID, gathered evidence IDs | exhaustive-mode benchmark tests |
+| L4 Deep | `memphant-eval`, service worker | raw episodes/resources/files | mode, sandbox ID, gathered evidence IDs | Deep-mode benchmark tests |
 
 ## 4. Activation Rules
 
 | Symptom | Required evidence | Turn on next |
 |---|---|---|
 | answer-bearing unit was never written | write trace shows raw episode has no derived unit | write/extraction policy, contextual chunks |
-| answer-bearing memory absent from top-k | candidate trace misses source episode/resource | contextual chunks, query decomposition, L4 exhaustive |
+| answer-bearing memory absent from top-k | candidate trace misses source episode/resource | contextual chunks, query decomposition, L4 Deep |
 | answer-bearing unit was never written AND the query recurs | write trace: raw episode has no derived unit for a repeating `query_features_hash` | `reextract_on_miss` — surgical per-episode, query-conditioned re-extraction (`04` §9, R80) before any global extraction-policy change |
 | answer appears but rank too low | candidate exists but fused/rerank rank loses | RRF tuning, bounded rerank, learned rerank |
 | right candidate retrieved but answer wrong | context trace includes candidate but answer trace fails | context packing, citation packing, abstention |
 | stale memory wins | stale/validity trace shows old row active | temporal validity, DSR decay, contradiction edges |
-| multi-hop/resource evidence missing | direct candidates found but related evidence absent | edge expansion, L4 exhaustive |
+| multi-hop/resource evidence missing | direct candidates found but related evidence absent | edge expansion, L4 Deep |
 | procedure repeated incorrectly | task trace repeats failed steps | procedural memory promotion/replay |
 | poisoning memory retrieved | low-trust candidate passes filter | trust policy, quarantine, high-risk suppression |
 | latency high | stage latency shows dominant stage | caps, materialization, cache, mode split |
@@ -161,7 +161,7 @@ No public SOTA claim depends only on vendor-reported numbers.
 - Promoting **multiple** levers against the same cases applies a **family-wise/FDR correction** (Holm-Bonferroni → Benjamini-Hochberg as the set grows) and **resamples CIs by cluster** (session/corpus, not case); the promoted set is periodically re-checked by **leave-one-out** for interaction effects. Methodology detail is canonical in `05` §8/§9.3.
 - The SOTA bar is "beat the strongest *independently reproduced* baseline, or publish a Pareto win" — **never** "beat a vendor's blog number."
 - A lever promotes only if it improves the target metric and does not regress security/deletion/tenant isolation.
-- A lever with accuracy gain but unacceptable cost becomes `exhaustive` mode only.
+- A lever with accuracy gain but unacceptable cost becomes `deep` mode only.
 - A lever with no sampled gain after two independent runs is reverted or disabled by default.
 
 ## 9. Trace Archive Contract
@@ -194,7 +194,7 @@ Do not keep adding systems blindly. Stop and reassess when:
 
 - full release runs show no gain after rungs 0-12 are active
 - security gates fail under the configuration that improves accuracy
-- L4 exhaustive mode is the only winning mode and is too slow for any credible Pareto claim
+- L4 Deep mode is the only winning mode and is too slow for any credible Pareto claim
 - benchmark traces show the bottleneck is the downstream answer model, not memory retrieval
 
 If that happens, narrow the public claim to the part that wins: trace/eval harness, poisoning defense, coding-agent memory, or Syndai dogfood memory.

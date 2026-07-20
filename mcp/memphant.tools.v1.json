@@ -538,7 +538,7 @@
           "enum": [
             "fast",
             "balanced",
-            "exhaustive"
+            "deep"
           ],
           "type": "string"
         },
@@ -1660,7 +1660,7 @@
             "vector",
             "temporal",
             "edge",
-            "exhaustive"
+            "deep"
           ],
           "type": "string"
         },
@@ -1833,7 +1833,7 @@
           "enum": [
             "fast",
             "balanced",
-            "exhaustive"
+            "deep"
           ],
           "type": "string"
         },

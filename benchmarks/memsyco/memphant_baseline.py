@@ -23,7 +23,7 @@ from baselines.common import (  # noqa: E402
 
 
 BUDGET_TOKENS = 8192
-MODE = "exhaustive"
+MODE = "deep"
 OBSERVED_AT = "2025-06-01T00:00:00Z"
 ARBITRATION_CONTRACT = (
     "Decision contract: Retrieved preferences personalize subjective choices only; "

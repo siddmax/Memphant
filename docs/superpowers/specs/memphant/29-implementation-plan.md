@@ -25,7 +25,7 @@ This is the operational plan. `10-build-plan.md` is the short dependency summary
 The suite froze every interface; this section pins what v1 **builds**. The doctrine (§1 item 4) always said "store the fields, turn on the behavior at its gate" — R73 resolved the older build-everything phrasing in `00-MAIN` §5 / `05` §1 / `27` §2 to that doctrine.
 
 - **V1 built behavior = the §3 slices 1–13 PLUS the §5 alpha-gate completion set** (`correct`/`forget` through append-only generations, the full MCP verb set, Python SDK examples, DB exposure gate). Slices 1–13 alone stop at export-compare and are NOT a shippable v1.
-- **Rung-gated behavior is NOT built in v1** (interfaces frozen, engines at their `27` rung): Stage-4 edge expansion (rung 6), provider rerank (rung 8), query decomposition (rung 9), contextual-chunk enrichment (rung 4), procedural replay-validation harness (rung 10), DSR fold + fsrs integration (rung 11 — the `review_event` ledger CAPTURE is v1; only the fold engine waits), L4 exhaustive behavior (rung 12), learned levers (rung 13).
+- **Rung-gated behavior is NOT built in v1** (interfaces frozen, engines at their `27` rung): Stage-4 edge expansion (rung 6), provider rerank (rung 8), query decomposition (rung 9), contextual-chunk enrichment (rung 4), procedural replay-validation harness (rung 10), DSR fold + fsrs integration (rung 11 — the `review_event` ledger CAPTURE is v1; only the fold engine waits), L4 Deep behavior (rung 12), learned levers (rung 13).
 - **Soft calendar envelope:** alpha gate (§5) targets **~8–10 weeks of build effort** from WS-0 exit. This is a forcing function, not a promise: if the envelope is clearly unreachable, cut in this order before extending it — TypeScript SDK → contextual-chunk job → adaptive cascade → provider-rerank plumbing → `hnsw_binary`/scale levers (modulus-1 posture is fine for alpha). Never cut: tenant isolation, citations, deletion completeness, the trace spine, the golden oracle.
 - **Launch is NOT hostage to full Syndai cutover** (see WS-F stop-rule below): the public-launch dogfood proof is one low-risk surface exported + trace-compared; further surfaces migrate post-launch on their own gates.
 
@@ -221,7 +221,7 @@ Build only through the Section 8 gates.
 
 Exit packet:
 
-- Each lever has archived before/after traces, paired deltas, cost/latency, security/deletion result, and default/exhaustive-mode decision.
+- Each lever has archived before/after traces, paired deltas, cost/latency, security/deletion result, and default/Deep-mode decision.
 
 ## 3. First Implementation Slices
 
@@ -316,11 +316,11 @@ These are not "never." They are buildable when their gate is true. Interfaces ar
 | Compiled Markdown/Obsidian export | export schema, lock metadata | WS-E | trace/citation schema stable; export is read-only and verify can detect staleness; treat it as an inspection nicety unless a benchmark/user need proves quality impact. |
 | Eval trace notebooks | trace schema and golden result shape | WS-E | golden oracle and trace archive exist. |
 | Agent memory capsules | recall result fields | WS-C | citation whitelist and suppression labels pass. |
-| L4 exhaustive recall | `retrieval_mode=exhaustive`, trace fields | WS-I | answer-bearing misses remain after rungs 0-11; sampled benchmark gain beats latency/cost floor. |
+| L4 Deep recall | `retrieval_mode=deep`, trace fields | WS-I | answer-bearing misses remain after rungs 0-11; sampled benchmark gain beats latency/cost floor. |
 | DSR decay fold (fsrs engine) | DSR fields + day-one `review_event` ledger capture + `mark` grades | rung 11 | internally-run longitudinal suite shows FSRS beats plain exponential (`27` rung 11, R82); v1 ranks by recency/exponential. |
 | Procedural replay-validation harness | `kind='procedural'` + payload schema + validation-state fields | rung 10 | procedural recall is activating; adversarial replay gate (`04` §4.2) built then — schema now, harness at the rung. |
 | 3-tier DEK envelope encryption | `key_custody` table shape | first BYOC/enterprise customer | tombstone+compaction+RLS meet the design-partner threat model; envelope + crypto-shred build when a customer contract requires it (`06` §6.1.1; backup-window caveat stated honestly). |
-| Ablation-voting recall (SMSR-style) | none (recall-mode composition) | WS-I / exhaustive mode | high-stakes tenants demand it AND the `05` §9 arm shows containment gain worth k× read cost. |
+| Ablation-voting recall (SMSR-style) | none (recall-mode composition) | WS-I / Deep mode | high-stakes tenants demand it AND the `05` §9 arm shows containment gain worth k× read cost. |
 | Delta recall / miss-repair re-extraction / retrievability probe | `delta_base_trace_id` trace field; `reextract_on_miss` job row; probe flag (R80) | WS-I per flag | each promotes only on its own paired ablation; deletion-completeness eval covers the delta path before it enables. |
 | Consolidation event delivery (outbox consumers) | event taxonomy shapes (`20` §3) + `GET /v1/events` cursor contract | post-v1 | first external integrator needs push; outbox table lands with WS-B writes, delivery surface builds later (R78). |
 | Learned reranker | `Reranker` trait, trace field, archived training set ID | WS-I | bounded rerank leaves rank-sensitive misses; paired delta CI excludes zero and p95 stays in budget. |
@@ -372,7 +372,7 @@ Stop adding platform area and narrow the claim when:
 - internal Syndai contract fixtures fail.
 - tenant isolation, deletion completeness, or poisoning gates fail.
 - public sampled benchmarks show no differentiated win after rungs 0-12.
-- only L4 exhaustive mode wins and is too expensive for a credible Pareto claim.
+- only L4 Deep mode wins and is too expensive for a credible Pareto claim.
 - traces show the downstream answer model, not memory retrieval, is the bottleneck.
 
 Allowed narrowed products:

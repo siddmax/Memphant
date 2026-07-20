@@ -22,7 +22,7 @@ Stage 7: context assembly and citation packing
 Stage 8: trace write
 ```
 
-The first public build implements every stage **contract** — the stage slot, its feature flag, and its trace fields exist from day one, and a flag-disabled stage passes through and traces as such. The expensive stage **behavior** is built at its `27` rung (Stage-4 edge expansion → rung 6; Stage-6 rerank → rung 8; decomposition → rung 9; L4 → rung 12); the rungs 0–3 spine (gates, exact, FTS, vector, RRF, packing, trace) is v1 built behavior (R73). Fast mode caps Stage 4/6 work; balanced/exhaustive and benchmark modes expand them.
+The first public build implements every stage **contract** — the stage slot, its feature flag, and its trace fields exist from day one, and a flag-disabled stage passes through and traces as such. The expensive stage **behavior** is built at its `27` rung (Stage-4 edge expansion → rung 6; Stage-6 rerank → rung 8; decomposition → rung 9; L4 → rung 12); the rungs 0–3 spine (gates, exact, FTS, vector, RRF, packing, trace) is v1 built behavior (R73). Fast mode caps Stage 4/6 work; balanced/deep and benchmark modes expand them.
 
 ## 1.1 Stage Contracts
 
@@ -89,9 +89,9 @@ Retrieval is **kind-aware** (the `04` §1.1 "retrieval default" expanded to stag
 | belief | vector+lexical | excluded from default recall unless explicitly requested; never high-risk args | request-gated, always trust-labeled |
 | resource | exact(ID/hash)+vector over chunks | **in-stage ACL gate**: chunk `scope_id` ∩ `resource.acl` (scopes/trust_floor/protected), applied before ANN; denied → `dropped[]` `protected_category`/`below_trust_floor` (`04` §6.1, `06` §4.2) | medium (evidence support) |
 
-**Adaptive mode cascade.** Recall may self-escalate `fast → balanced` within one call when the cheap pass is provably insufficient — the predictor is a deterministic rule over trace features, **zero LLM tokens** on the hot path: escalate if top `fused_score` < per-kind sufficiency floor, OR < `k_min` candidates survived gates, OR an unresolved contradiction tops the set, OR `query_features.is_composite`. `exhaustive`/L4 is **never** auto (unbounded cost) — explicit opt-in or benchmark only. The trace records `mode_requested`, `mode_executed`, `escalation_reason`. The cascade is itself a cost ablation (always-balanced vs fast-with-escalation, reporting accuracy *and* p95).
+**Adaptive mode cascade.** Recall may self-escalate `fast → balanced` within one call when the cheap pass is provably insufficient — the predictor is a deterministic rule over trace features, **zero LLM tokens** on the hot path: escalate if top `fused_score` < per-kind sufficiency floor, OR < `k_min` candidates survived gates, OR an unresolved contradiction tops the set, OR `query_features.is_composite`. `deep`/L4 is **never** auto (unbounded cost) — explicit opt-in or benchmark only. The trace records `mode_requested`, `mode_executed`, `escalation_reason`. The cascade is itself a cost ablation (always-balanced vs fast-with-escalation, reporting accuracy *and* p95).
 
-**Query decomposition** (balanced/exhaustive only) fires on a deterministic compositeness check (≥2 of: multiple entity hits, comparative/causal connector, multi-constraint conjunction, temporal relation). Subqueries are derived **structurally** — one per entity/conjunct + the bridge as an edge-expansion subquery — **never HyDE** (no hypothetical-document synthesis that could hallucinate an out-of-corpus entity). Recombination is union-then-refuse: re-fuse once, allow a unit only if its provenance traces to ≥1 subquery; a bridge additionally requires the connecting `memory_edge`. The trace archives `subquery_ids[]` + `decomposition_reason` so a composite miss maps to "which subquery missed."
+**Query decomposition** (balanced/deep only) fires on a deterministic compositeness check (≥2 of: multiple entity hits, comparative/causal connector, multi-constraint conjunction, temporal relation). Subqueries are derived **structurally** — one per entity/conjunct + the bridge as an edge-expansion subquery — **never HyDE** (no hypothetical-document synthesis that could hallucinate an out-of-corpus entity). Recombination is union-then-refuse: re-fuse once, allow a unit only if its provenance traces to ≥1 subquery; a bridge additionally requires the connecting `memory_edge`. The trace archives `subquery_ids[]` + `decomposition_reason` so a composite miss maps to "which subquery missed."
 
 ## 1.4 Retrieval-Stage Micro-Levers (the "free points")
 
@@ -106,9 +106,9 @@ A 2026 six-dimension ablation (MemMachine, arXiv:2604.04853 — a ground-truth-p
 
 These are rung-3/7 refinements within the existing pipeline — the grounding for "improve retrieval before write" (the same study: retrieval method = ~20pt swing on LoCoMo, write strategy = 3–8pt; arXiv:2603.02473, which validates MemPhant's cheap durable write). Each is a paired-CI-gated ablation (§8); promote a lever only when its paired delta CI excludes zero on a MemPhant target.
 
-**Rerank upgrade — a *memory-tuned* cross-encoder reordering only the protected top-k.** The Stage-6 provider reranker (balanced/exhaustive) should be a **small memory-tuned** cross-encoder, not a generic one: a generic learned reranker does *not* beat a strong off-the-shelf cross-encoder (ConvMemory arXiv:2605.28062), whereas a memory-distilled reranker does — MemReranker-0.6B beats BGE-reranker-v2-m3 (0.7150 vs 0.6708 MAP on LoCoMo) at ~200ms, with gains concentrated on the hard cases (multi-hop/temporal/numerical/low-lexical-overlap; arXiv:2605.06132). Reorder **only the protected top-k** so recall is unchanged by construction (ConvMemory v2, arXiv:2606.10842: top-10 reorder lifts MRR 0.5824→0.6560 at ~68× lower cost than full-pool). (These are single-author preprints in part — adopt only if it beats the deterministic default by ≥0.03 MRR on a MemPhant target.)
+**Rerank upgrade — a *memory-tuned* cross-encoder reordering only the protected top-k.** The Stage-6 provider reranker (balanced/deep) should be a **small memory-tuned** cross-encoder, not a generic one: a generic learned reranker does *not* beat a strong off-the-shelf cross-encoder (ConvMemory arXiv:2605.28062), whereas a memory-distilled reranker does — MemReranker-0.6B beats BGE-reranker-v2-m3 (0.7150 vs 0.6708 MAP on LoCoMo) at ~200ms, with gains concentrated on the hard cases (multi-hop/temporal/numerical/low-lexical-overlap; arXiv:2605.06132). Reorder **only the protected top-k** so recall is unchanged by construction (ConvMemory v2, arXiv:2606.10842: top-10 reorder lifts MRR 0.5824→0.6560 at ~68× lower cost than full-pool). (These are single-author preprints in part — adopt only if it beats the deterministic default by ≥0.03 MRR on a MemPhant target.)
 
-**Query-complexity-gated reflection (HyMem pattern).** The adaptive cascade (§1.3) already gates *depth* on complexity; on the `balanced`/`exhaustive` escalation it also runs a **reflection pass** (re-read the pack, refine the query, re-retrieve once) — fired only on complex/escalated queries, never uniformly (HyMem arXiv:2602.13933, 92.6% cost cut by reserving the expensive path for hard queries). This is the same "cognitive economy" as the cascade, extended one step.
+**Query-complexity-gated reflection (HyMem pattern).** The adaptive cascade (§1.3) already gates *depth* on complexity; on the `balanced`/`deep` escalation it also runs a **reflection pass** (re-read the pack, refine the query, re-retrieve once) — fired only on complex/escalated queries, never uniformly (HyMem arXiv:2602.13933, 92.6% cost cut by reserving the expensive path for hard queries). This is the same "cognitive economy" as the cascade, extended one step.
 
 ## 1.5 Calibrated Restraint (the relevance gate — over-retrieval is a *measured* harm)
 
@@ -521,7 +521,7 @@ V1-required ablation dimensions:
 | decay | off | DSR-inspired decay |
 | rerank-light | off | bounded deterministic or cheap rerank |
 
-SOTA/exhaustive-mode ablation dimensions:
+SOTA/deep-mode ablation dimensions:
 
 | Lever | Baseline | Variant |
 |---|---|---|

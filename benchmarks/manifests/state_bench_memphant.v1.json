@@ -25,7 +25,7 @@
   "retrieval": {
     "budget_tokens": 4096,
     "limit": 3,
-    "mode": "exhaustive"
+    "mode": "deep"
   },
   "runtime": {
     "embed_model": "small",

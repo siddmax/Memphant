@@ -39,7 +39,7 @@ def test_memphant_arm_lock_freezes_official_protocol_and_runtime() -> None:
     assert lock["retrieval"] == {
         "budget_tokens": 4096,
         "limit": 3,
-        "mode": "exhaustive",
+        "mode": "deep",
     }
     assert lock["evidence"]["source"] == "official-train-trajectories-only"
     assert set(lock["hashes"]) == {
@@ -147,7 +147,7 @@ def test_agent_injects_only_official_read_only_retrieval() -> None:
     assert "def retrieve_learnings(self, query: str, top_k: int = 3) -> list[str]" in source
     assert 'if top_k != 3:' in source
     assert '"limit": 3' in source
-    assert '"mode": "exhaustive"' in source
+    assert '"mode": "deep"' in source
     assert "task_summary" not in source
     assert "task_requirements" not in source
     assert "state_requirements" not in source

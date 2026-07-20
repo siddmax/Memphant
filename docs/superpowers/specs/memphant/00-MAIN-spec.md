@@ -106,7 +106,7 @@ Current benchmark pressure supports this direction:
 
 ## 5. Build Philosophy
 
-Freeze the interfaces that would be painful to retrofit. Every SOTA-critical method exists in the first public architecture as a **contract** — schema columns, feature flag, retrieval mode, trace fields — and its expensive *behavior* is built when its `27` ladder rung activates, never speculatively. The hot path remains cheap; benchmark/exhaustive mode contracts exist from day one. (This resolves an earlier internal contradiction — "ship all the methods in the first build" vs `29` §1's "store the fields, activate behind gates" — in favor of the ladder; R73.)
+Freeze the interfaces that would be painful to retrofit. Every SOTA-critical method exists in the first public architecture as a **contract** — schema columns, feature flag, retrieval mode, trace fields — and its expensive *behavior* is built when its `27` ladder rung activates, never speculatively. The hot path remains cheap; benchmark/deep mode contracts exist from day one. (This resolves an earlier internal contradiction — "ship all the methods in the first build" vs `29` §1's "store the fields, activate behind gates" — in favor of the ladder; R73.)
 
 **Frozen in the first public architecture (schema/flags/contracts — cheap now, migrations later):**
 
@@ -115,7 +115,7 @@ Freeze the interfaces that would be painful to retrofit. Every SOTA-critical met
 - Write-path consolidation contract columns: `episode.retention_tier`, `episode.dedup_key`/`observation_count`, the `contradicts`/`supersedes` edge kinds, `subject_key` (`04` §2.4/§3/§5).
 - DSR fields (`stability_days`, `difficulty`) + the append-only `review_event` ledger (rows captured from day one — outcome/reinforcement labels cannot be backfilled; the fold engine is rung-11 work, `04` §8.2).
 - Procedural kind enum value + payload schema (the replay-validation harness is rung-10 work, `04` §4.2).
-- L4 deliberate recall as an explicit `exhaustive`/benchmark mode, not the default hot path — the mode/flag/trace contract from day one; the agentic behavior at rung 12.
+- L4 deliberate recall as an explicit `deep`/benchmark mode, not the default hot path — the mode/flag/trace contract from day one; the agentic behavior at rung 12.
 - All `05` §2 feature flags, retrieval-mode enum, and stage trace fields (a flag-disabled stage passes through and traces as such).
 - The `mark` outcome-feedback verb and consolidation event taxonomy shapes (`08`, R77/R78).
 
@@ -130,7 +130,7 @@ Freeze the interfaces that would be painful to retrofit. Every SOTA-critical met
 
 **Built at rung activation (interface frozen above; behavior lands when its `27` rung fires):**
 
-- Relational edge expansion (rung 6, against the no-edges + filesystem controls), bounded/provider rerank (rung 8), query decomposition (rung 9), contextual-chunk enrichment (rung 4), procedure promotion/replay (rung 10), DSR decay fold (rung 11 — v1 ranks by plain recency/exponential, the field-standard baseline), L4 exhaustive behavior (rung 12), learned levers (rung 13).
+- Relational edge expansion (rung 6, against the no-edges + filesystem controls), bounded/provider rerank (rung 8), query decomposition (rung 9), contextual-chunk enrichment (rung 4), procedure promotion/replay (rung 10), DSR decay fold (rung 11 — v1 ranks by plain recency/exponential, the field-standard baseline), L4 Deep behavior (rung 12), learned levers (rung 13).
 - TypeScript client (generated from OpenAPI; first external TS consumer or launch window, whichever first).
 - Public scorecard runner for LME-V2, BEAM, STATE-Bench, and poisoning suites (with the eval harness spine in place, at the sampled-public rung).
 

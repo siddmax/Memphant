@@ -62,7 +62,7 @@ Mixing IO-bound (await Postgres) and CPU-bound (fuse/rerank) stages on the wrong
 
 - **IO-bound stages 1–4 stay on tokio**, run concurrently via `tokio::try_join!` over independent `sqlx` queries (parallel candidate generation — the dominant read-path concurrency).
 - **CPU-bound deterministic fusion (Stage 5) + rerank (Stage 6 default) run on `spawn_blocking`**, never inline, so a large fused set cannot stall the async reactor other tenants share. Any future PyO3 native binding must prove the same section releases the GIL before shipping.
-- **Provider rerankers + L4 are `async` provider awaits** (balanced/exhaustive only, IO-bound, trace-labeled). The deterministic default path is the only one touching `spawn_blocking`.
+- **Provider rerankers + L4 are `async` provider awaits** (balanced/deep only, IO-bound, trace-labeled). The deterministic default path is the only one touching `spawn_blocking`.
 - **Backpressure is a `tower::limit::ConcurrencyLimit`** at admission — request count can never exceed what the pools can serve; excess sheds as `429`+`Retry-After`, never unbounded queue growth. (Distinct from §3.1's `consolidation_lag`, which is *extraction* falling behind; both bounded, both traced.)
 
 ### 1.3 Connection and Pool Architecture
@@ -213,7 +213,7 @@ client recall()
   -> citations and trace
 ```
 
-The live default path is bounded and deterministic. Provider-backed or heavier rerankers run only in `balanced`, `exhaustive`, or benchmark modes and are always trace-labeled.
+The live default path is bounded and deterministic. Provider-backed or heavier rerankers run only in `balanced`, `deep`, or benchmark modes and are always trace-labeled.
 
 **Hot-path latency SLO (falsifiable, validated at rung 3):** `fast`-mode recall targets **p50 < 200ms / p95 < 500ms** un-reranked on the reference corpus (companion to `retain` p95 < 200ms, `14` §7). "The hot path is cheap" is a number, not a vibe — the SLO is measured per release and a breach is a `27` §4 activation symptom, never silently absorbed.
 
@@ -230,8 +230,8 @@ V1 retrieval runs channels in parallel when possible:
 | Vector | Paraphrase and semantic similarity | on |
 | Temporal | Recent or time-windowed context | on |
 | Relational edge | Contradictions, supersessions, source resources, procedure lineage | on for 1-hop |
-| Query decomposition | Composite memory questions | on in balanced/exhaustive and benchmarks |
-| Deliberate L4 recall | Expensive agentic search/reasoning over memory | explicit exhaustive mode |
+| Query decomposition | Composite memory questions | on in balanced/deep and benchmarks |
+| Deliberate L4 recall | Expensive agentic search/reasoning over memory | explicit Deep mode |
 
 Hybrid retrieval is table stakes. The architecture keeps each channel separately traceable so a failed benchmark can map to a lever.
 

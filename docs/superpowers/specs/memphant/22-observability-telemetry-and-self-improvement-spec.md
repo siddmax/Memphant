@@ -131,7 +131,7 @@ Cost attribution splits the two profiles `02` §3 / `04` §9 already separate �
 
 | Cost class | Where | Attribution key |
 |---|---|---|
-| **recall cost** | `memphant.recall` span `cost_micros` (deterministic CPU + query-embed; near-flat) | per `(tenant, mode_executed)` — `exhaustive`/L4 is the tail |
+| **recall cost** | `memphant.recall` span `cost_micros` (deterministic CPU + query-embed; near-flat) | per `(tenant, mode_executed)` — `deep`/L4 is the tail |
 | **reflect cost** | `memphant.reflect.extract` `gen_ai.usage.*_tokens` (the expensive LLM pass) | per `(tenant, subject_key fan-out)` — the real bill |
 | **storage cost** | per retention tier (`04` §2.4) | per `(tenant, retention_tier)` |
 

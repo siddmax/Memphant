@@ -62,7 +62,7 @@ def _report(module, golden: Path, *, model: str, hits, latencies=(10, 20, 30, 40
         "runtime": "memphant-server resource ingest + /v1/recall",
         "embed_model": model,
         "k": 10,
-        "recall_mode": "exhaustive",
+        "recall_mode": "deep",
         "budget_tokens": 8192,
         "haystack_sections": 100,
         "golden_revision": golden_revision,

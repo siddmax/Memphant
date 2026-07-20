@@ -220,7 +220,7 @@ def test_stale_generation_lock_freezes_reader_and_evidence_contract() -> None:
         "cross_rerank": False,
         "embed_model": "small",
         "limit": 10,
-        "mode": "exhaustive",
+        "mode": "deep",
     }
     assert set(lock["prompt_sha256"]) == {"dim1", "dim2", "dim3"}
     assert len(lock["output_schema_sha256"]) == 64

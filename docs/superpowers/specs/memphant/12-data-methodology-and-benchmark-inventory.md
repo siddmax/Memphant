@@ -180,7 +180,7 @@ Minimum public ablations:
 | default + contextual chunks | write-path value |
 | default + rerank | reranker value |
 | default + trust gates | security impact |
-| default + L4 exhaustive | accuracy-latency frontier |
+| default + L4 Deep | accuracy-latency frontier |
 
 ## 6. Data Handling Rules
 

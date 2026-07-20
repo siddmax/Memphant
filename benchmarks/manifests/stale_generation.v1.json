@@ -22,6 +22,6 @@
     "cross_rerank": false,
     "embed_model": "small",
     "limit": 10,
-    "mode": "exhaustive"
+    "mode": "deep"
   }
 }

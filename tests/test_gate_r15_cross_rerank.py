@@ -199,7 +199,7 @@ def test_build_provenance_report_records_cross_rerank_true(gr):
         golden_path=Path("benchmarks/data/syndai_docs_golden.jsonl"),
         database_url="postgres://memphant:memphant@localhost:5432/memphant_scratch_1_2",
         k=10,
-        mode="exhaustive",
+        mode="deep",
         budget_tokens=8192,
         haystack_len=42,
         golden_sha="deadbeef",
@@ -219,7 +219,7 @@ def test_build_provenance_report_defaults_cross_rerank_false(gr):
         golden_path=Path("benchmarks/data/syndai_docs_golden.jsonl"),
         database_url="postgres://memphant:memphant@localhost:5432/memphant_scratch_1_2",
         k=10,
-        mode="exhaustive",
+        mode="deep",
         budget_tokens=8192,
         haystack_len=42,
         golden_sha="deadbeef",
@@ -277,7 +277,7 @@ def test_recall_fetches_trace_and_returns_exact_reranker_facts(gr, monkeypatch):
     ticks = iter((1_000_000, 4_100_000, 6_100_000))
     monkeypatch.setattr(gr.time, "perf_counter_ns", lambda: next(ticks))
     bodies, trace_id, facts, post_ms, trace_read_ms, recall_e2e_ms = gr.recall(
-        client, "question", 10, 8192, "exhaustive", cross_rerank=True,
+        client, "question", 10, 8192, "deep", cross_rerank=True,
         expected_rerank_config={
             "candidate_limit": 32, "max_length": 512, "batch_size": 8,
         },
@@ -341,7 +341,7 @@ def test_cross_rerank_recall_fails_closed_on_missing_or_malformed_trace_facts(
 
     with pytest.raises(RuntimeError, match=match):
         gr.recall(
-            client, "question", 10, 8192, "exhaustive", cross_rerank=True,
+            client, "question", 10, 8192, "deep", cross_rerank=True,
             expected_rerank_config={
                 "candidate_limit": 32, "max_length": 512, "batch_size": 8,
             },
@@ -357,7 +357,7 @@ def test_cross_rerank_recall_fails_closed_on_reranker_failure(gr, failure):
 
     with pytest.raises(RuntimeError, match="reranker failure"):
         gr.recall(
-            client, "question", 10, 8192, "exhaustive", cross_rerank=True,
+            client, "question", 10, 8192, "deep", cross_rerank=True,
             expected_rerank_config={
                 "candidate_limit": 32, "max_length": 512, "batch_size": 8,
             },
@@ -372,7 +372,7 @@ def test_recall_fails_closed_when_response_is_degraded(gr):
 
     with pytest.raises(RuntimeError, match="degraded"):
         gr.recall(
-            client, "question", 10, 8192, "exhaustive", cross_rerank=True,
+            client, "question", 10, 8192, "deep", cross_rerank=True,
             expected_rerank_config={
                 "candidate_limit": 32, "max_length": 512, "batch_size": 8,
             },
@@ -387,7 +387,7 @@ def test_rerank_off_allows_absent_optional_facts_but_still_requires_trace(gr):
     )
 
     bodies, actual_trace_id, facts, post_ms, trace_read_ms, recall_e2e_ms = gr.recall(
-        client, "question", 10, 8192, "exhaustive", cross_rerank=False
+        client, "question", 10, 8192, "deep", cross_rerank=False
     )
 
     assert bodies == ["answer"]
@@ -410,7 +410,7 @@ def test_cross_rerank_rejects_zero_candidates_and_requested_config_mismatch(gr):
         )
         with pytest.raises(RuntimeError, match=match):
             gr.recall(
-                client, "question", 10, 8192, "exhaustive", cross_rerank=True,
+                client, "question", 10, 8192, "deep", cross_rerank=True,
                 expected_rerank_config={
                     "candidate_limit": 32, "max_length": 512, "batch_size": 8,
                 },
@@ -470,7 +470,7 @@ def test_provenance_report_aggregates_reranker_facts_and_fingerprints_config(gr)
         golden_path=Path("benchmarks/data/syndai_docs_golden.jsonl"),
         database_url="postgres://memphant:memphant@localhost:5432/scratch",
         k=10,
-        mode="exhaustive",
+        mode="deep",
         budget_tokens=8192,
         haystack_len=4870,
         golden_sha="deadbeef",
@@ -497,7 +497,7 @@ def test_provenance_report_aggregates_reranker_facts_and_fingerprints_config(gr)
             **static,
         },
         "k": 10,
-        "recall_mode": "exhaustive",
+        "recall_mode": "deep",
             "budget_tokens": 8192,
             "retrieval_budget_tokens": 1_000_000,
             "evidence_packer": gr.gc.EVIDENCE_PACKER_CONFIG,
@@ -566,7 +566,7 @@ def test_provenance_report_rejects_inconsistent_static_reranker_config(gr):
             golden_path=Path("golden.jsonl"),
             database_url="postgres://x/scratch",
             k=10,
-            mode="exhaustive",
+            mode="deep",
             budget_tokens=8192,
             haystack_len=4870,
             golden_sha="deadbeef",
@@ -593,7 +593,7 @@ def test_provenance_report_rejects_nonzero_or_missing_gate_health_facts(gr):
             golden_path=Path("golden.jsonl"),
             database_url="postgres://x/scratch",
             k=10,
-            mode="exhaustive",
+            mode="deep",
             budget_tokens=8192,
             haystack_len=1,
             golden_sha="deadbeef",
@@ -624,7 +624,7 @@ def test_provenance_report_requires_complete_nonnegative_e2e_latency(gr, value):
             golden_path=Path("golden.jsonl"),
             database_url="postgres://x/scratch",
             k=10,
-            mode="exhaustive",
+            mode="deep",
             budget_tokens=8192,
             haystack_len=4870,
             golden_sha="deadbeef",

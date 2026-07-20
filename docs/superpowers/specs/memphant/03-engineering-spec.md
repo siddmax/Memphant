@@ -2,7 +2,7 @@
 
 ## 0. Engineering Posture
 
-Build the smallest Rust core that preserves the hard seams, but implement every SOTA-critical memory lever as a traceable mode from the first public architecture. The hot path is cheap; the benchmark/exhaustive path proves the ceiling.
+Build the smallest Rust core that preserves the hard seams, but implement every SOTA-critical memory lever as a traceable mode from the first public architecture. The hot path is cheap; the benchmark/Deep path proves the ceiling.
 
 ### 0.1 What Rust actually buys (honest rationale)
 
@@ -127,7 +127,7 @@ memphant-core/
   retrieval/
     stages/    # one module per read stage (exact|lexical|vector|temporal|fusion|rerank|assemble)
     fusion.rs  # deterministic weighted RRF (05 §1.2), no provider call
-    rerank.rs  # Reranker trait: deterministic default in-core; provider impls behind balanced/exhaustive
+    rerank.rs  # Reranker trait: deterministic default in-core; provider impls behind balanced/deep
   decay/       # thin wrapper over fsrs-rs: DSR fields <-> MemoryState; never reimplements the curve (04 §8)
   trace/       # RetrievalTrace builder; every stage appends, never the caller
   subject_key/ # the post-LLM canonicalizer (04 §3.3) — one code path for write and probe
@@ -337,7 +337,7 @@ recall(query, scope, constraints, mode) -> RecallResult:
   # Stage 5 — RRF fusion across channels (deterministic)
   fused = rrf(exact, lex, vec, edges, weights = mode.weights)
 
-  # Stage 6 — bounded rerank (deterministic default; ML only in balanced/exhaustive)
+  # Stage 6 — bounded rerank (deterministic default; ML only in balanced/deep)
   ranked = rerank(fused[:rerank_cap], mode.reranker)
 
   # Stage 7 — context assembly (budgeted; citeable units first; warnings)
@@ -350,7 +350,7 @@ recall(query, scope, constraints, mode) -> RecallResult:
   return pack
 ```
 
-The live default path runs **no generative LLM** — Stage 6's default reranker is deterministic; provider rerankers are `balanced`/`exhaustive`-only and trace-labeled.
+The live default path runs **no generative LLM** — Stage 6's default reranker is deterministic; provider rerankers are `balanced`/`deep`-only and trace-labeled.
 
 ## 6. Test Gates
 
@@ -428,7 +428,7 @@ Each lane maps to an invariant and runs at a defined cadence. Naming them makes 
 The default read path must be **bit-reproducible** given (corpus, query, `config_hash`) — what makes the `05` §9 ablations meaningful. The three nondeterminism sources and their pins:
 
 - **Fusion** is integer-rank RRF; ties break on `unit_id` (UUIDv7 total order), never on float score or hash-map iteration order. Snapshot-tested.
-- **Rerank** default is a pure scoring function; provider rerankers (balanced/exhaustive) are excluded from the deterministic snapshot lane (asserted only "ran + labeled").
+- **Rerank** default is a pure scoring function; provider rerankers (balanced/deep) are excluded from the deterministic snapshot lane (asserted only "ran + labeled").
 - **Decay** is `fsrs-rs` with a pinned weight vector and elapsed time passed in via a `Clock` seam (never `now()` inside the kernel), so a replay at fixed `t` reproduces.
 
 **Property tests (proptest) for the two unforgeable invariants** (generative, not example-based): `memphant-tenant-isolation`/`-scope-inheritance` generate a random multi-tenant corpus + recall and assert no returned `unit_id` belongs to a non-admitted tenant/scope, for all inputs; `memphant-citation-forgery` generates a recall + a random cited-ID set and asserts any ID outside the candidate whitelist is rejected.
@@ -456,7 +456,7 @@ Optimize in this order:
 5. Rust hot loop optimization.
 6. New backend.
 
-External graph DBs and cache clusters come after traces show they are the bottleneck. L4 exhaustive recall ships as an explicit benchmark/exhaustive mode, never the default path.
+External graph DBs and cache clusters come after traces show they are the bottleneck. L4 deliberate recall ships as an explicit benchmark/Deep mode, never the default path.
 
 ## 9. Generated vs Handwritten Clients
 

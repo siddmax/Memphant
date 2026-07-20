@@ -36,7 +36,7 @@ class MemphantMemoryAgent(StateBenchAgent):
             "query": query,
             "limit": 3,
             "budget_tokens": 4096,
-            "mode": "exhaustive",
+            "mode": "deep",
         }
         request = urllib.request.Request(
             config["base_url"].rstrip("/") + "/v1/recall",

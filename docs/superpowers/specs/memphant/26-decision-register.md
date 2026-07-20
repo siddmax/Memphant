@@ -61,10 +61,10 @@ This file records final launch-critical decisions. If another doc conflicts with
 | Rerank | bounded rerank in v1; learned/cross-encoder rerank may be provider-pluggable |
 | Temporal recall | validity/recency windows in v1 |
 | Edge expansion | relational 1-hop expansion in v1 |
-| Query decomposition | enabled in benchmark/exhaustive mode in v1 |
+| Query decomposition | enabled in benchmark/Deep mode in v1 |
 | Contextual chunks | generated during extraction in v1 |
 | HyDE | rejected for v1 because hallucinated pseudo-docs blur evidence provenance |
-| L4 deliberate recall | shipped as explicit exhaustive/benchmark mode, never default hot path |
+| L4 deliberate recall | shipped as explicit Deep/benchmark mode, never default hot path |
 | Procedure recall | shipped with validation status; no skill compiler required |
 | Decay | DSR fields and fixed-prior update rule in v1; learned fitter data-gated |
 

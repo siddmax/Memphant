@@ -2359,10 +2359,10 @@ impl MemoryStore for PgStore {
         .bind(agent_ids)
         .bind(context.subject_generation as i64)
         // The caller's `limit` is authoritative — no silent store-side cap. The
-        // `usize::MAX` sentinel (Exhaustive recall wants the whole scope) can't
+        // `usize::MAX` sentinel (Deep recall wants the whole scope) can't
         // become a bound i64 (it wraps to -1, an invalid LIMIT), so it saturates
         // to i64::MAX = effectively LIMIT ALL. Both stores now honor the limit,
-        // so Exhaustive recall is not silently truncated on Postgres.
+        // so Deep recall is not silently truncated on Postgres.
         .bind(i64::try_from(limit).unwrap_or(i64::MAX))
         .fetch_all(&mut *tx)
         .await

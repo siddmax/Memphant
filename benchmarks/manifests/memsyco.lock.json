@@ -70,7 +70,7 @@
     "adapter": "official BaselineContext builder over packaged MemPhant REST",
     "top_k": 10,
     "budget_tokens": 8192,
-    "mode": "exhaustive",
+    "mode": "deep",
     "workers": 1,
     "current_date": "2025-06-01",
     "controls": {

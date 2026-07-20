@@ -1384,9 +1384,9 @@ pub async fn semantic_update_supersedes_unit_aged_past_recall_window<H: StoreHar
 }
 
 /// `fetch_episodes_for_scope` honors the caller's `limit` — no silent store-side
-/// cap. Guards the Exhaustive-recall divergence: PgStore used to clamp this read
+/// cap. Guards the Deep-recall divergence: PgStore used to clamp this read
 /// at 1000 rows while InMemoryStore returned everything, so `RecallMode::
-/// Exhaustive` (which passes `usize::MAX` and re-ranks the FULL episode set)
+/// Deep` (which passes `usize::MAX` and re-ranks the FULL episode set)
 /// silently dropped relevant-but-old episodes on Postgres only. Seeds past the
 /// old cap and asserts both stores return the whole scope.
 pub async fn fetch_episodes_honors_large_limit<H: StoreHarness>(h: &H) {

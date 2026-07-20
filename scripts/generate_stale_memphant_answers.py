@@ -48,7 +48,7 @@ REASONING_EFFORT = "high"
 EMBED_MODEL = "small"
 RECALL_LIMIT = 10
 EVIDENCE_BUDGET_TOKENS = 8192
-RECALL_MODE = "exhaustive"
+RECALL_MODE = "deep"
 NO_ABSTAIN_INSTRUCTION = (
     " Never set abstain=true. If evidence is insufficient, state that explicitly "
     "in the answer field."

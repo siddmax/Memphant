@@ -4,7 +4,7 @@
 Ingests the pinned coding-events corpus into MemPhant as raw EPISODES (real
 runtime path: packaged ``memphant-server`` + ``memphant-worker`` +
 ``memphant-cli`` against Postgres), then calls ``/v1/recall`` (k=10,
-mode=exhaustive, budget_tokens=8192) per golden question and emits an
+mode=deep, budget_tokens=8192) per golden question and emits an
 evidence JSONL in the ``run_reader.py``-consumable shape plus a provenance
 report (span-level hit@5/hit@10 via ``gate_common.provenance_hit`` — the
 SAME grading function the docs-lane runner uses).
@@ -276,7 +276,7 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=39413)
     parser.add_argument("--k", type=int, default=10)
     parser.add_argument("--budget-tokens", type=int, default=8192)
-    parser.add_argument("--mode", default="exhaustive", choices=("fast", "balanced", "exhaustive"))
+    parser.add_argument("--mode", default="deep", choices=("fast", "balanced", "deep"))
     parser.add_argument(
         "--limit-attempts", type=int, default=0,
         help="0 = full corpus; otherwise a smoke cap that always keeps every gold-referenced attempt",

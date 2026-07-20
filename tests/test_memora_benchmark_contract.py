@@ -407,7 +407,7 @@ def test_generation_lock_freezes_accuracy_first_reader_and_retrieval() -> None:
         "cross_rerank": False,
         "embed_model": "small",
         "limit": 10,
-        "mode": "exhaustive",
+        "mode": "deep",
     }
     assert lock["temporal_contract"] == {
         "evaluation_snapshot": "final state after full period/persona ingest and reflection drain",

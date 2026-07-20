@@ -152,7 +152,7 @@ V1 ships:
 - TypeScript SDK backed by HTTP: client contract frozen against the v1 OpenAPI surface; built at its activation gate, not in the first public build (`29-implementation-plan.md` owns the cut line).
 - Golden eval pack, sampled benchmark runner, and release scorecard runner.
 - Trust/provenance/poisoning controls.
-- Temporal/edge expansion, bounded rerank, query decomposition, contextual chunks, DSR decay fields, and L4 exhaustive recall mode: interfaces frozen in v1 (schema, trace fields, explicit flags); each behavior is built at its `27` §2 ladder rung, not in the first public build. The capability claims stand — only the build timing follows the ladder.
+- Temporal/edge expansion, bounded rerank, query decomposition, contextual chunks, DSR decay fields, and L4 Deep recall mode: interfaces frozen in v1 (schema, trace fields, explicit flags); each behavior is built at its `27` §2 ladder rung, not in the first public build. The capability claims stand — only the build timing follows the ladder.
 
 Out of core by decision:
 

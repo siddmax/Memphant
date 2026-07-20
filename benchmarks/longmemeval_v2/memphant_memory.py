@@ -153,7 +153,7 @@ def _validate_memory_params(memory_params: dict[str, object]) -> dict[str, objec
         and memory_params["budget_tokens"] == 32768,
         "LongMemEval-V2 budget_tokens must remain fixed at 32768",
     )
-    _require(memory_params["mode"] == "exhaustive", "recall mode must remain exhaustive")
+    _require(memory_params["mode"] == "deep", "recall mode must remain deep")
     _require(memory_params["source_trust"] == "trusted_system", "source trust contract drift")
     return dict(memory_params)
 

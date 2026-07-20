@@ -39,10 +39,10 @@ Schema/interface hooks to include early:
 |---|---|
 | DSR parameter fitting | fields/events/fixed priors ship now; learned fitting activates only with enough MemPhant reinforcement traces |
 | graph DB traversal | rejected; relational edge expansion ships now |
-| query decomposition | ships in balanced/exhaustive and benchmark modes |
+| query decomposition | ships in balanced/deep and benchmark modes |
 | HyDE | rejected for v1 because it creates synthetic evidence with weak provenance |
-| cross-encoder rerank | bounded rerank interface ships now; provider-backed rerank runs only in balanced/exhaustive/benchmark modes |
-| L4 sandbox recall | ships as exhaustive/benchmark mode |
+| cross-encoder rerank | bounded rerank interface ships now; provider-backed rerank runs only in balanced/deep/benchmark modes |
+| L4 sandbox recall | ships as Deep/benchmark mode |
 | procedure compiler | rejected; validated procedural memory ships without compiler |
 | adaptive memory budgets | ships as deterministic budget policy plus trace fields; learned budgets require eval evidence |
 

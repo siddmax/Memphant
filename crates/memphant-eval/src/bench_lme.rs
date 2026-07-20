@@ -1086,7 +1086,7 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
         mode: match options.mode {
             RecallMode::Fast => "fast",
             RecallMode::Balanced => "balanced",
-            RecallMode::Exhaustive => "exhaustive",
+            RecallMode::Deep => "deep",
         }
         .to_string(),
         disabled: options.disable.clone(),

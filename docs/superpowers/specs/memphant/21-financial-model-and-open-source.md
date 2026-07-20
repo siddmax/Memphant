@@ -46,7 +46,7 @@ Primary COGS levers:
 - skip rerank unless ambiguous
 - background batch embedding
 - trace retention tiers
-- L4 deliberate recall only on paid/exhaustive modes
+- L4 deliberate recall only on paid/Deep modes
 
 ## 2a. COGS Realism (the locked deployment model's cost axes)
 
@@ -115,7 +115,7 @@ The hosted business should sell convenience, scale, compliance, and managed oper
 
 ## 5. Margin Rule
 
-Hosted plans must pair accuracy with cost. If a feature only improves benchmark score by spending unbounded LLM/sandbox time, it belongs behind explicit exhaustive mode or not at all.
+Hosted plans must pair accuracy with cost. If a feature only improves benchmark score by spending unbounded LLM/sandbox time, it belongs behind explicit Deep mode or not at all.
 
 ## 6. Cost Attribution
 

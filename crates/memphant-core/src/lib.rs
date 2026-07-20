@@ -311,7 +311,7 @@ pub const VECTOR_CANDIDATE_LIMIT: usize = 32;
 /// knob every internal channel/fusion limit in the recall path now derives
 /// from INSTEAD of `k`: the vector-channel KNN fetch
 /// ([`crate::service::MemoryService::with_recall_pool_depth`]), the
-/// Fast/Balanced packing scan window and the Exhaustive scan multiplier
+/// Fast/Balanced packing scan window and the Deep scan multiplier
 /// (`recall_pack_scan_limit`), and the rerank rescoring cap
 /// (`rerank_input_cap`). Returned items still stop at exactly `k`
 /// (`PackCtx::output_limit`) — only the CONSIDERATION window widens/narrows
@@ -5492,7 +5492,7 @@ fn artifact_bundle(units: &[StoredMemoryUnit], request: &RecallRequest) -> Optio
 /// ONE knob every internal channel/fusion limit in the recall path derives
 /// from (R1.5-T0 — see the pool-mapping note on [`DEFAULT_RECALL_POOL_DEPTH`]):
 /// the vector-channel KNN fan-out, the Fast/Balanced packing scan window and
-/// Exhaustive scan multiplier, and the rerank rescoring cap. `k` never gates
+/// Deep scan multiplier, and the rerank rescoring cap. `k` never gates
 /// any of these — only the final `PackCtx::output_limit` truncation to `k`
 /// items. The construction-time [`crate::service::MemoryService`] recall-pool
 /// option threads its value here; the plain [`recall`] above delegates with
@@ -6663,13 +6663,13 @@ fn rerank_candidates(
 /// R1.5-T0: the deterministic-rerank rescoring cap derives from
 /// `recall_pool_depth`, NOT from `k * 10` (the old formula) — a caller
 /// requesting a larger `k` no longer widens how many fused candidates get
-/// rescored. `mode_cap` (100 Fast / 200 Balanced+Exhaustive) is an
+/// rescored. `mode_cap` (100 Fast / 200 Balanced+Deep) is an
 /// independent, non-`k`-derived per-mode ceiling, unchanged by this task.
 /// Floored at `k` so the rerank always covers at least the final output size.
 fn rerank_input_cap(request: &RecallRequest, recall_pool_depth: usize) -> usize {
     let mode_cap = match request.mode {
         RecallMode::Fast => 100,
-        RecallMode::Balanced | RecallMode::Exhaustive => 200,
+        RecallMode::Balanced | RecallMode::Deep => 200,
     };
     recall_pool_depth.min(mode_cap).max(request.k.max(1))
 }
@@ -7225,7 +7225,7 @@ fn admit_or_drop(
         // formula governs the order would silently override the caller's
         // opted-into rerank/decomposition decision. Skip the contest (just
         // drop) in that case; otherwise (no rank signal in play — the
-        // historical case this mechanism was exercised for, via Exhaustive
+        // historical case this mechanism was exercised for, via Deep
         // mode / the session-diversity quota) keep today's behavior
         // unconditionally. The BUDGET-driven replacement below is a separate,
         // unaffected mechanism — a legitimate substitution when a candidate
@@ -7410,7 +7410,7 @@ fn recall_pack_scan_limit(
     let output_limit = request.k.max(1);
     let pool_floor = recall_pool_depth.max(output_limit);
     let scan_limit = match request.mode {
-        RecallMode::Exhaustive => candidate_count
+        RecallMode::Deep => candidate_count
             .min(pool_floor.saturating_mul(25).max(25))
             .max(output_limit),
         RecallMode::Fast | RecallMode::Balanced => pool_floor.min(candidate_count).max(1),
