@@ -34,6 +34,18 @@ fn mcp_error_hides_backend_detail_but_surfaces_caller_errors() {
 }
 
 #[test]
+fn deep_provider_errors_have_stable_safe_mcp_codes() {
+    assert_eq!(
+        mcp_error(ServiceError::Core(CoreError::DeepUnavailable)),
+        "deep_unavailable: deep recall is unavailable"
+    );
+    assert_eq!(
+        mcp_error(ServiceError::Core(CoreError::DeepProviderInvalidOutput)),
+        "deep_provider_invalid_output: deep recall provider returned invalid output"
+    );
+}
+
+#[test]
 fn http_auth_requires_matching_bearer_outside_dev() {
     // Dev mode: auth explicitly disabled — everything allowed.
     assert!(mcp_http_authorized(true, None, None));

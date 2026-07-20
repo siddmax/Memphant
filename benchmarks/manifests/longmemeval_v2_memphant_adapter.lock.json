@@ -3,7 +3,7 @@
   "adapter": "MemPhant packaged REST",
   "schema_version": 2,
   "upstream_release_lock_sha256": "846c73224c456a981c7812741c33ee948dbdcd8de84a220240e534558fa8cbab",
-  "openapi_sha256": "33bd190fc276db044e438dd32c63d8ec6f18f35e92091b9a6842bbb7dda01816",
+  "openapi_sha256": "bf168984eaee41f0f165219c811c6b4869a9625b4b67d87c50a2f861565af113",
   "files": {
     "benchmarks/longmemeval_v2/memphant_memory.py": "0bb2930c76577ef74041f16be5ad115fc178b670faa3d31dbaa9711276b10fd1",
     "benchmarks/longmemeval_v2/harness_bootstrap.py": "97b17ebc7091ffd624859ff62b509ab4c7e96586448c7904f208c31ddd8ac8e6",

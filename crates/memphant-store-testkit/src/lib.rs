@@ -1558,6 +1558,12 @@ pub async fn review_marks_credit_synthetic_sources_and_stay_trace_bound<H: Store
         decay_model_id: "none".to_string(),
         l4_sandbox_id: None,
         l4_gathered_evidence_ids: Vec::new(),
+        deep: None,
+        l4_provider: None,
+        l4_model: None,
+        l4_prompt_hash: None,
+        l4_config_hash: None,
+        l4_workspace_manifest_sha256: None,
         recall_time: RecallTime {
             evaluated_at: CLOCK.0.to_string(),
             transaction_as_of: CLOCK.0.to_string(),

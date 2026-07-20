@@ -486,7 +486,7 @@ async fn deep_mode_does_not_expand_raw_episode_without_selected_child_anchor() {
             .any(|stage| { stage.stage == "l4_exhaustive" && stage.detail == "disabled" })
     );
 
-    let deep = recall(
+    let deep_error = recall(
         &store,
         RecallRequest {
             context: memphant_store_testkit::resolved_context(tenant_id, scope_id, actor_id),
@@ -511,28 +511,9 @@ async fn deep_mode_does_not_expand_raw_episode_without_selected_child_anchor() {
         &CLOCK,
     )
     .await
-    .expect("deep recall succeeds");
-
-    assert_eq!(deep.candidate_whitelist, vec![decoy_id]);
-
-    let trace = store
-        .trace_by_id_any_tenant(deep.trace_id)
-        .expect("trace recorded for deep recall");
-    assert_eq!(trace.mode_requested, RecallMode::Deep);
-    assert_eq!(trace.mode_executed, RecallMode::Deep);
-    assert_eq!(trace.escalation_reason, "none");
-    assert!(
-        !trace
-            .feature_flags
-            .iter()
-            .any(|flag| flag == "l4_exhaustive_enabled")
-    );
-    assert!(trace.iterative_scan_depth.unwrap_or_default() > 1);
-    assert_eq!(trace.l4_sandbox_id, None);
-    assert!(trace.l4_gathered_evidence_ids.is_empty());
-    assert!(trace.candidates.iter().all(|candidate| {
-        candidate.unit_id != answer_id || candidate.channel != RecallChannel::Deep
-    }));
+    .expect_err("Deep without a provider must never degrade to Balanced");
+    assert!(matches!(deep_error, CoreError::DeepUnavailable));
+    assert_eq!(store.retrieval_traces(tenant_id).len(), 1);
 }
 
 #[tokio::test]

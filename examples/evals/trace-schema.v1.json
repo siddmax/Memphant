@@ -81,6 +81,108 @@
       ],
       "type": "object"
     },
+    "DeepRecallLimits": {
+      "properties": {
+        "max_context_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_spend_micros": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_tool_iterations": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "wall_time_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "wall_time_ms",
+        "max_tool_iterations",
+        "max_context_tokens",
+        "max_spend_micros"
+      ],
+      "type": "object"
+    },
+    "DeepRecallStatus": {
+      "enum": [
+        "completed",
+        "capped"
+      ],
+      "type": "string"
+    },
+    "DeepRecallStopReason": {
+      "enum": [
+        "completed",
+        "wall_time",
+        "tool_iterations",
+        "context_tokens",
+        "spend"
+      ],
+      "type": "string"
+    },
+    "DeepRecallSummary": {
+      "properties": {
+        "limits": {
+          "$ref": "#/$defs/DeepRecallLimits"
+        },
+        "status": {
+          "$ref": "#/$defs/DeepRecallStatus"
+        },
+        "stop_reason": {
+          "$ref": "#/$defs/DeepRecallStopReason"
+        },
+        "usage": {
+          "$ref": "#/$defs/DeepRecallUsage"
+        }
+      },
+      "required": [
+        "status",
+        "stop_reason",
+        "limits",
+        "usage"
+      ],
+      "type": "object"
+    },
+    "DeepRecallUsage": {
+      "properties": {
+        "context_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "spend_micros": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tool_iterations": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "wall_time_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "wall_time_ms",
+        "tool_iterations",
+        "context_tokens",
+        "spend_micros"
+      ],
+      "type": "object"
+    },
     "DegradedRecallTraceItem": {
       "additionalProperties": false,
       "properties": {
@@ -628,6 +730,16 @@
     "decomposition_reason": {
       "type": "string"
     },
+    "deep": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DeepRecallSummary"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "degradation": {
       "anyOf": [
         {
@@ -675,6 +787,12 @@
         "null"
       ]
     },
+    "l4_config_hash": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "l4_gathered_evidence_ids": {
       "default": [],
       "items": {
@@ -682,8 +800,32 @@
       },
       "type": "array"
     },
+    "l4_model": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "l4_prompt_hash": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "l4_provider": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "l4_sandbox_id": {
       "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "l4_workspace_manifest_sha256": {
       "type": [
         "string",
         "null"

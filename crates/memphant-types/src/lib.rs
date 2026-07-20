@@ -660,6 +660,55 @@ pub struct RecallDegradationDiagnostic {
     pub items: Vec<DegradedRecallTraceItem>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DeepRecallLimits {
+    pub wall_time_ms: u64,
+    pub max_tool_iterations: u32,
+    pub max_context_tokens: u64,
+    pub max_spend_micros: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DeepRecallUsage {
+    pub wall_time_ms: u64,
+    pub tool_iterations: u32,
+    pub context_tokens: u64,
+    pub spend_micros: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DeepRecallStatus {
+    Completed,
+    Capped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DeepRecallStopReason {
+    Completed,
+    WallTime,
+    ToolIterations,
+    ContextTokens,
+    Spend,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DeepProviderIdentity {
+    pub provider: String,
+    pub model: String,
+    pub prompt_hash: String,
+    pub config_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DeepRecallSummary {
+    pub status: DeepRecallStatus,
+    pub stop_reason: DeepRecallStopReason,
+    pub limits: DeepRecallLimits,
+    pub usage: DeepRecallUsage,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RetrievalTrace {
     pub id: TraceId,
@@ -730,6 +779,18 @@ pub struct RetrievalTrace {
     pub l4_sandbox_id: Option<String>,
     #[serde(default)]
     pub l4_gathered_evidence_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deep: Option<DeepRecallSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub l4_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub l4_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub l4_prompt_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub l4_config_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub l4_workspace_manifest_sha256: Option<String>,
     pub recall_time: RecallTime,
 }
 
@@ -753,6 +814,8 @@ pub struct RecallResponse {
     #[serde(default)]
     pub consolidation_lag_ms: u64,
     pub suppression_labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deep: Option<DeepRecallSummary>,
     pub recall_time: RecallTime,
 }
 

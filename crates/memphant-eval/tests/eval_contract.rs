@@ -313,7 +313,7 @@ fn rung11_memorystress_style_suite_proves_dsr_decay_delta() {
 }
 
 #[test]
-#[ignore = "dormant until P1-T6 agentic deep mode: the engine l4_exhaustive stage is unimplemented (recall_stage_facts hardcodes it disabled; l4_exhaustive_enabled flag never emitted)"]
+#[ignore = "requires Task 5 real file-agent provider"]
 fn rung12_l4_exhaustive_suite_proves_raw_episode_delta() {
     let suite = repo_root().join("benchmarks/rung12-l4-exhaustive-sampled.yaml");
     let with_l4 = run_eval_file(&suite, EvalRunOptions::default()).expect("with l4 exhaustive");
@@ -335,6 +335,28 @@ fn rung12_l4_exhaustive_suite_proves_raw_episode_delta() {
             .iter()
             .all(|case| !case.missing_units.is_empty())
     );
+}
+
+#[test]
+fn rung12_disabled_arm_is_explicitly_unavailable_not_balanced() {
+    let suite = repo_root().join("benchmarks/rung12-l4-exhaustive-sampled.yaml");
+    let control = run_eval_file(
+        &suite,
+        EvalRunOptions {
+            l4_exhaustive_enabled: false,
+            ..EvalRunOptions::default()
+        },
+    )
+    .expect("no-provider control completes as an eval result");
+
+    assert_eq!(control.passed_cases, 0);
+    let error = control.case_results[0]
+        .error
+        .as_deref()
+        .expect("Deep no-provider arm records a typed error");
+    assert!(error.contains("deep recall is unavailable"), "{error}");
+    assert!(control.case_results[0].trace_id.is_none());
+    assert!(control.case_results[0].missing_units.is_empty());
 }
 
 #[test]

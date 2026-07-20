@@ -558,7 +558,6 @@ struct GoldenRunControls {
     query_decomposition_enabled: bool,
     procedure_recall_enabled: bool,
     decay_enabled: bool,
-    l4_exhaustive_enabled: bool,
     filesystem_control_enabled: bool,
 }
 
@@ -574,7 +573,6 @@ impl Default for GoldenRunControls {
             query_decomposition_enabled: true,
             procedure_recall_enabled: true,
             decay_enabled: true,
-            l4_exhaustive_enabled: true,
             filesystem_control_enabled: false,
         }
     }
@@ -592,7 +590,6 @@ impl From<&EvalRunOptions> for GoldenRunControls {
             query_decomposition_enabled: options.query_decomposition_enabled,
             procedure_recall_enabled: options.procedure_recall_enabled,
             decay_enabled: options.decay_enabled,
-            l4_exhaustive_enabled: options.l4_exhaustive_enabled,
             filesystem_control_enabled: options.filesystem_control_enabled,
         }
     }
@@ -1911,12 +1908,7 @@ async fn run_golden_case_inner(
     .await?;
     let recall_edge_expansion_enabled =
         controls.edge_expansion_enabled && !controls.filesystem_control_enabled;
-    let requested_mode = case.mode.unwrap_or(RecallMode::Fast);
-    let mode = if requested_mode == RecallMode::Deep && !controls.l4_exhaustive_enabled {
-        RecallMode::Balanced
-    } else {
-        requested_mode
-    };
+    let mode = case.mode.unwrap_or(RecallMode::Fast);
     let recall_started_at = Instant::now();
     let response = recall(
         &context.store,
@@ -2552,6 +2544,12 @@ fn seeded_review_trace(
         decay_model_id: "none".to_string(),
         l4_sandbox_id: None,
         l4_gathered_evidence_ids: Vec::new(),
+        deep: None,
+        l4_provider: None,
+        l4_model: None,
+        l4_prompt_hash: None,
+        l4_config_hash: None,
+        l4_workspace_manifest_sha256: None,
         recall_time: RecallTime {
             evaluated_at: EVAL_CLOCK.0.to_string(),
             transaction_as_of: EVAL_CLOCK.0.to_string(),

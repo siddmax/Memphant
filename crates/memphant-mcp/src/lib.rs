@@ -53,6 +53,12 @@ pub fn mcp_error(error: ServiceError) -> String {
         ServiceError::Core(CoreError::Store(StoreError::PolicyDenied(_))) => {
             "scope_denied: request is outside the resolved memory policy".to_string()
         }
+        ServiceError::Core(CoreError::DeepUnavailable) => {
+            "deep_unavailable: deep recall is unavailable".to_string()
+        }
+        ServiceError::Core(CoreError::DeepProviderInvalidOutput) => {
+            "deep_provider_invalid_output: deep recall provider returned invalid output".to_string()
+        }
         ServiceError::Core(CoreError::Store(_)) => "backend unavailable".to_string(),
         other => other.to_string(),
     }

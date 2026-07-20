@@ -103,6 +103,36 @@ fn recall_request(
     }
 }
 
+#[tokio::test]
+async fn explicit_deep_without_provider_returns_stable_503() {
+    let tenant_id = tenant(41_000);
+    let app = dev_app(tenant_id);
+    let binding = bind_context(&app, "deep-unavailable").await;
+    let mut request = bind_recall_request(
+        recall_request(
+            tenant_id,
+            binding.scope_id,
+            binding.actor_id,
+            "search deeply",
+        ),
+        &binding,
+    );
+    request.mode = Some(memphant_types::RecallMode::Deep);
+
+    let http_request = Request::builder()
+        .method("POST")
+        .uri("/v1/recall")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&request).unwrap()))
+        .unwrap();
+    let response = app.clone().oneshot(http_request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["error"]["code"], "deep_unavailable");
+    assert_eq!(body["error"]["message"], "deep recall is unavailable");
+}
+
 async fn bind_context(app: &axum::Router, client_ref: &str) -> ContextBindingResponse {
     json_request(
         app,

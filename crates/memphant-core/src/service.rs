@@ -23,6 +23,7 @@ use memphant_types::{
     UnitId,
 };
 
+use crate::deep_recall::DeepRecallProvider;
 use crate::{
     ClaimMutationOutcome, Clock, CoreError, CorrectionWrite, CrossRerankCandidateSelection,
     CrossReranker, DEFAULT_RECALL_POOL_DEPTH, EmbeddingProvider, ForgetWrite, JobFilter,
@@ -30,7 +31,7 @@ use crate::{
     MutationVerb, PackLevers, PreparedCompiledWrite, ReflectJobRow, ScopePage, StoreError,
     StructuredStateProvider, StructuredStateRequest, VectorQuery, canonical_mutation_request_hash,
     derive_episode_dedup_key, embedding_profile_for, normalize_component, parse_content_date,
-    prepare_compiled_write, project_structured_state, recall_with_pool_and_selection,
+    prepare_compiled_write, project_structured_state, recall_with_pool_and_selection_and_deep,
     reflect_recorded_claimed, structured_compiler_identity, tokenize, validate_valid_interval,
 };
 
@@ -847,6 +848,7 @@ pub struct MemoryService<S: MemoryStore> {
     cross_rerank_candidate_selection: CrossRerankCandidateSelection,
     structured_state_provider: Option<Arc<dyn StructuredStateProvider>>,
     structured_state_prefetch_concurrency: usize,
+    deep_recall_provider: Option<Arc<dyn DeepRecallProvider>>,
 }
 
 impl<S: MemoryStore> Clone for MemoryService<S> {
@@ -865,6 +867,7 @@ impl<S: MemoryStore> Clone for MemoryService<S> {
             cross_rerank_candidate_selection: self.cross_rerank_candidate_selection,
             structured_state_provider: self.structured_state_provider.clone(),
             structured_state_prefetch_concurrency: self.structured_state_prefetch_concurrency,
+            deep_recall_provider: self.deep_recall_provider.clone(),
         }
     }
 }
@@ -885,6 +888,7 @@ impl<S: MemoryStore> MemoryService<S> {
             cross_rerank_candidate_selection: CrossRerankCandidateSelection::FusedHead,
             structured_state_provider: None,
             structured_state_prefetch_concurrency: DEFAULT_STRUCTURED_STATE_PREFETCH_CONCURRENCY,
+            deep_recall_provider: None,
         }
     }
 
@@ -997,6 +1001,11 @@ impl<S: MemoryStore> MemoryService<S> {
     pub fn with_structured_state_prefetch_concurrency(mut self, concurrency: usize) -> Self {
         self.structured_state_prefetch_concurrency =
             concurrency.clamp(1, MAX_STRUCTURED_STATE_PREFETCH_CONCURRENCY);
+        self
+    }
+
+    pub fn with_deep_recall_provider(mut self, provider: Arc<dyn DeepRecallProvider>) -> Self {
+        self.deep_recall_provider = Some(provider);
         self
     }
 
@@ -1371,6 +1380,22 @@ impl<S: MemoryStore> MemoryService<S> {
         let context = request.context.clone();
         let query = request.query.clone();
         let k = request.k;
+        if request.mode == RecallMode::Deep && self.deep_recall_provider.is_none() {
+            return recall_with_pool_and_selection_and_deep(
+                self.store.as_ref(),
+                request,
+                None,
+                self.clock.as_ref(),
+                self.recall_pool_depth,
+                self.pack_levers,
+                self.temporal_grounding_enabled,
+                self.cross_reranker.as_deref(),
+                self.cross_rerank_candidate_selection,
+                None,
+            )
+            .await
+            .map_err(ServiceError::from);
+        }
         // Real embedding provider → embed the query and run the vector
         // channel; the Noop provider keeps the channel honestly disabled.
         let query_vec = if self.embedder.dimensions() > 0 {
@@ -1393,7 +1418,7 @@ impl<S: MemoryStore> MemoryService<S> {
             vec,
             profile_id: embedding_profile_for(self.embedder()).id,
         });
-        let response = recall_with_pool_and_selection(
+        let response = recall_with_pool_and_selection_and_deep(
             self.store.as_ref(),
             request.clone(),
             vector_query,
@@ -1403,10 +1428,12 @@ impl<S: MemoryStore> MemoryService<S> {
             self.temporal_grounding_enabled,
             self.cross_reranker.as_deref(),
             self.cross_rerank_candidate_selection,
+            self.deep_recall_provider.as_deref(),
         )
         .await?;
 
         if !response.items.is_empty()
+            || request.mode == RecallMode::Deep
             || request.transaction_as_of.is_some()
             || request.valid_at.is_some()
         {

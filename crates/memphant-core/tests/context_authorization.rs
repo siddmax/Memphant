@@ -88,7 +88,7 @@ fn recall_request(context: ResolvedMemoryContext, query: &str) -> RecallRequest 
         query: query.to_string(),
         k: 8,
         budget_tokens: 256,
-        mode: RecallMode::Deep,
+        mode: RecallMode::Balanced,
         include_beliefs: false,
         edge_expansion_enabled: false,
         context_packing_abstention_enabled: false,

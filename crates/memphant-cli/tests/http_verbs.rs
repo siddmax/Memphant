@@ -78,6 +78,41 @@ fn cli(url: &str, args: &[&str]) -> (Value, bool) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_deep_without_provider_surfaces_stable_error() {
+    let (url, binding, _) = spawn_server().await;
+    let subject = binding.subject_id.as_uuid().to_string();
+    let scope = binding.scope_id.as_uuid().to_string();
+    let actor = binding.actor_id.as_uuid().to_string();
+    let agent = binding.agent_node_id.as_uuid().to_string();
+    let generation = binding.subject_generation.to_string();
+
+    let (body, ok) = cli(
+        &url,
+        &[
+            "recall",
+            "--subject-id",
+            &subject,
+            "--scope",
+            &scope,
+            "--actor",
+            &actor,
+            "--agent-node",
+            &agent,
+            "--subject-generation",
+            &generation,
+            "--query",
+            "search deeply",
+            "--mode",
+            "deep",
+        ],
+    );
+
+    assert!(!ok);
+    assert_eq!(body["error"]["code"], "deep_unavailable");
+    assert_eq!(body["error"]["message"], "deep recall is unavailable");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retain_reflect_recall_then_forget_round_trips_over_http() {
     let (url, binding, state) = spawn_server().await;
     let subject = binding.subject_id.as_uuid().to_string();

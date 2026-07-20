@@ -155,6 +155,12 @@ fn trace(context: &ResolvedMemoryContext) -> RetrievalTrace {
         decay_model_id: "none".to_string(),
         l4_sandbox_id: None,
         l4_gathered_evidence_ids: Vec::new(),
+        deep: None,
+        l4_provider: None,
+        l4_model: None,
+        l4_prompt_hash: None,
+        l4_config_hash: None,
+        l4_workspace_manifest_sha256: None,
         recall_time: RecallTime {
             evaluated_at: NOW.to_string(),
             transaction_as_of: NOW.to_string(),

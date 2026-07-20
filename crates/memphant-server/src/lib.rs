@@ -1050,6 +1050,16 @@ impl From<CoreError> for ApiError {
                 code: "scope_denied",
                 message: error.to_string(),
             },
+            CoreError::DeepUnavailable => Self {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                code: "deep_unavailable",
+                message: error.to_string(),
+            },
+            CoreError::DeepProviderInvalidOutput => Self {
+                status: StatusCode::BAD_GATEWAY,
+                code: "deep_provider_invalid_output",
+                message: error.to_string(),
+            },
             CoreError::Store(store) => store.into(),
             CoreError::ProviderUnavailable(_) | CoreError::ProviderInvalid(_) => {
                 Self::backend_unavailable()
@@ -1119,5 +1129,16 @@ mod error_mapping_tests {
         let wrapped = ApiError::from(CoreError::Store(StoreError::SubjectErased));
         assert_eq!(wrapped.status, StatusCode::GONE);
         assert_eq!(wrapped.code, "subject_erased");
+    }
+
+    #[test]
+    fn deep_provider_errors_have_stable_public_status_and_code() {
+        let unavailable = ApiError::from(CoreError::DeepUnavailable);
+        assert_eq!(unavailable.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(unavailable.code, "deep_unavailable");
+
+        let invalid = ApiError::from(CoreError::DeepProviderInvalidOutput);
+        assert_eq!(invalid.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(invalid.code, "deep_provider_invalid_output");
     }
 }

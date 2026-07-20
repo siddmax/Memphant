@@ -1,5 +1,6 @@
 #![allow(async_fn_in_trait)]
 
+pub mod deep_recall;
 mod mutation_contract;
 pub mod service;
 mod structured_state;
@@ -24,22 +25,28 @@ use memphant_types::{
     ActorId, AdmissionAction, AgentNodeId, AggregationWindow, CitationSource,
     ContextBindingAccessPolicy, ContextBindingRequest, ContextBindingResponse, ContextualChunk,
     CorrectRequest, CorrectResult, CorrectSelector, CorrectionPayload, CrossRerankFailure,
-    CrossRerankTrace, DedupOutcome, DeepSnapshotEntry, DeepSnapshotSourceKind, DeepWorkspace,
-    DeepWorkspaceFile, EdgeId, EpisodeId, ForgetRequest, ForgetResult, ForgetTarget, JobId,
-    LearnedRerankProfile, LineageRelation, MarkOutcome, MarkRequest, MarkResult, MemoryCitation,
-    MemoryEdgeKind, MemoryKind, MemoryLineage, MemoryRecord, NewEpisode, NewMemoryEdge,
-    NewMemoryUnit, ProcedureTraceFact, QueuedReflectJob, RecallCandidateTrace, RecallChannel,
-    RecallCitation, RecallContextItem, RecallDropReason, RecallDroppedItem, RecallMode,
-    RecallPolicyFilter, RecallRequest, RecallResponse, RecallTime, RecordMaterial, ReflectInput,
-    ReflectJob, ReflectJobKind, ReflectStageFact, ReflectTrace, ResolvedMemorySource, RetainInput,
-    RetainOutcome, RetainRequest, RetainResourceOutcome, RetainResourceRequest, RetainResult,
-    RetrievalTrace, ReviewEvent, ScopeId, StoredCitation, StoredEpisode, StoredMemoryEdge,
-    StoredMemoryUnit, StoredResource, SubjectId, TenantId, TraceId, TrustLevel, UnitId, UnitState,
-    agent_level_allows_memory_kind,
+    CrossRerankTrace, DedupOutcome, DeepProviderIdentity, DeepRecallLimits, DeepRecallStatus,
+    DeepRecallStopReason, DeepRecallSummary, DeepSnapshotEntry, DeepSnapshotSourceKind,
+    DeepWorkspace, DeepWorkspaceFile, EdgeId, EpisodeId, ForgetRequest, ForgetResult, ForgetTarget,
+    JobId, LearnedRerankProfile, LineageRelation, MarkOutcome, MarkRequest, MarkResult,
+    MemoryCitation, MemoryEdgeKind, MemoryKind, MemoryLineage, MemoryRecord, NewEpisode,
+    NewMemoryEdge, NewMemoryUnit, ProcedureTraceFact, QueuedReflectJob, RecallCandidateTrace,
+    RecallChannel, RecallCitation, RecallContextItem, RecallDropReason, RecallDroppedItem,
+    RecallMode, RecallPolicyFilter, RecallRequest, RecallResponse, RecallTime, RecordMaterial,
+    ReflectInput, ReflectJob, ReflectJobKind, ReflectStageFact, ReflectTrace, ResolvedMemorySource,
+    RetainInput, RetainOutcome, RetainRequest, RetainResourceOutcome, RetainResourceRequest,
+    RetainResult, RetrievalTrace, ReviewEvent, ScopeId, StoredCitation, StoredEpisode,
+    StoredMemoryEdge, StoredMemoryUnit, StoredResource, SubjectId, TenantId, TraceId, TrustLevel,
+    UnitId, UnitState, agent_level_allows_memory_kind,
 };
 use memphant_types::{NewResource, ResourceAcl, ResourceExtractorState, ResourceId};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+
+use crate::deep_recall::{
+    DeepRecallProvider, DeepRecallProviderError, DeepRecallProviderRequest,
+    DeepRecallProviderResult,
+};
 
 const DECAY_MODEL_ID: &str = "fixed-prior-dsr-v1";
 const DEFAULT_STABILITY_DAYS: f32 = 7.0;
@@ -934,6 +941,10 @@ pub enum CoreError {
     ProviderUnavailable(String),
     #[error("structured-state provider returned terminal invalid output: {0}")]
     ProviderInvalid(String),
+    #[error("deep recall is unavailable")]
+    DeepUnavailable,
+    #[error("deep recall provider returned invalid output")]
+    DeepProviderInvalidOutput,
     #[error(transparent)]
     Store(#[from] StoreError),
 }
@@ -1343,6 +1354,8 @@ pub struct InMemoryStore {
     mutation_locks: Arc<Mutex<HashMap<MutationLockKey, Weak<AsyncMutex<()>>>>>,
     #[cfg(test)]
     fail_next_mutation_response: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(test)]
+    deep_snapshot_reads: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 type MutationLockKey = (TenantId, MutationVerb, [u8; 32]);
@@ -2133,6 +2146,12 @@ impl InMemoryStore {
     pub(crate) fn fail_next_mutation_response(&self) {
         self.fail_next_mutation_response
             .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    fn deep_snapshot_read_count(&self) -> usize {
+        self.deep_snapshot_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Test seam: register a context binding that exactly matches a hand-built
@@ -3177,6 +3196,9 @@ impl MemoryStore for InMemoryStore {
         context: &ResolvedMemoryContext,
         time: &RecallTime,
     ) -> Result<Vec<DeepSnapshotEntry>, StoreError> {
+        #[cfg(test)]
+        self.deep_snapshot_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
         state.validate_context(context)?;
 
@@ -5798,8 +5820,100 @@ where
         temporal_grounding_enabled,
         cross_reranker,
         cross_rerank_candidate_selection,
+        None,
     )
     .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn recall_with_pool_and_selection_and_deep<S>(
+    store: &S,
+    request: RecallRequest,
+    vector_query: Option<VectorQuery<'_>>,
+    clock: &dyn Clock,
+    recall_pool_depth: usize,
+    pack_levers: PackLevers,
+    temporal_grounding_enabled: bool,
+    cross_reranker: Option<&dyn CrossReranker>,
+    cross_rerank_candidate_selection: CrossRerankCandidateSelection,
+    deep_provider: Option<&dyn DeepRecallProvider>,
+) -> Result<RecallResponse, CoreError>
+where
+    S: MemoryStore,
+{
+    recall_with_pool_and_selection_impl(
+        store,
+        request,
+        vector_query,
+        clock,
+        recall_pool_depth,
+        pack_levers,
+        temporal_grounding_enabled,
+        cross_reranker,
+        cross_rerank_candidate_selection,
+        deep_provider,
+    )
+    .await
+}
+
+struct DeepRunFacts {
+    summary: DeepRecallSummary,
+    identity: DeepProviderIdentity,
+    observed_provider: String,
+    observed_model: String,
+    workspace_manifest_sha256: String,
+    workspace_sha256: String,
+    source_ids: Vec<Uuid>,
+    ranked_units: Vec<StoredMemoryUnit>,
+}
+
+fn validate_deep_provider_result(
+    result: &DeepRecallProviderResult,
+    limits: DeepRecallLimits,
+    identity: &DeepProviderIdentity,
+    entries: &[DeepSnapshotEntry],
+) -> Result<Vec<StoredMemoryUnit>, CoreError> {
+    let status_matches = matches!(
+        (result.status, result.stop_reason),
+        (DeepRecallStatus::Completed, DeepRecallStopReason::Completed)
+            | (
+                DeepRecallStatus::Capped,
+                DeepRecallStopReason::WallTime
+                    | DeepRecallStopReason::ToolIterations
+                    | DeepRecallStopReason::ContextTokens
+                    | DeepRecallStopReason::Spend
+            )
+    );
+    let usage_fits = result.usage.wall_time_ms <= limits.wall_time_ms
+        && result.usage.tool_iterations <= limits.max_tool_iterations
+        && result.usage.context_tokens <= limits.max_context_tokens
+        && result.usage.spend_micros <= limits.max_spend_micros;
+    if !status_matches
+        || !usage_fits
+        || result.observed_provider.trim().is_empty()
+        || result.observed_model != identity.model
+    {
+        return Err(CoreError::DeepProviderInvalidOutput);
+    }
+
+    let mut seen = HashSet::new();
+    let mut ranked_units = Vec::new();
+    for source_id in &result.source_ids {
+        if !seen.insert(*source_id) {
+            return Err(CoreError::DeepProviderInvalidOutput);
+        }
+        let mut matches = entries.iter().filter(|entry| entry.source_id == *source_id);
+        let Some(entry) = matches.next() else {
+            return Err(CoreError::DeepProviderInvalidOutput);
+        };
+        if matches.next().is_some() || entry.bound_units.is_empty() {
+            return Err(CoreError::DeepProviderInvalidOutput);
+        }
+        let mut units = entry.bound_units.clone();
+        units.sort_unstable_by_key(|unit| unit.id.as_uuid());
+        ranked_units.extend(units);
+    }
+    Ok(ranked_units)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5813,6 +5927,7 @@ async fn recall_with_pool_and_selection_impl<S>(
     temporal_grounding_enabled: bool,
     cross_reranker: Option<&dyn CrossReranker>,
     cross_rerank_candidate_selection: CrossRerankCandidateSelection,
+    deep_provider: Option<&dyn DeepRecallProvider>,
 ) -> Result<RecallResponse, CoreError>
 where
     S: MemoryStore,
@@ -5853,7 +5968,7 @@ where
             policy_revision: request.context.policy_revision.clone(),
             query_hash: hash_query(&request.query),
             engine_version: request.engine_version.clone(),
-            feature_flags: recall_feature_flags(&request, false),
+            feature_flags: recall_feature_flags(&request, false, false),
             channel_runs: vec![ReflectStageFact {
                 stage: "stage0_policy".to_string(),
                 detail: "denied_scope".to_string(),
@@ -5892,11 +6007,75 @@ where
             decay_model_id: decay_model_id(&request).to_string(),
             l4_sandbox_id: None,
             l4_gathered_evidence_ids: Vec::new(),
+            deep: None,
+            l4_provider: None,
+            l4_model: None,
+            l4_prompt_hash: None,
+            l4_config_hash: None,
+            l4_workspace_manifest_sha256: None,
             recall_time: recall_time.clone(),
         };
         store.store_trace(&request.context, trace).await?;
         return Err(CoreError::PolicyDenied("scope".to_string()));
     }
+
+    if request.mode == RecallMode::Deep && deep_provider.is_none() {
+        return Err(CoreError::DeepUnavailable);
+    }
+
+    let deep_run = if request.mode == RecallMode::Deep {
+        let provider = deep_provider.ok_or(CoreError::DeepUnavailable)?;
+        let mut entries = store
+            .fetch_deep_snapshot(&request.context, &recall_time)
+            .await?;
+        entries.retain(|entry| {
+            !entry.bound_units.is_empty()
+                && entry.bound_units.iter().all(|unit| {
+                    request
+                        .context
+                        .allows(unit.kind, unit.scope_id, unit.agent_node_id)
+                        && recallable(
+                            unit,
+                            request.include_beliefs,
+                            request.procedure_recall_enabled,
+                            &request.query,
+                            &recall_time,
+                        )
+                        && high_risk_recall_drop_reason(unit, &request).is_none()
+                })
+        });
+        let workspace = build_deep_workspace(&entries);
+        let limits = provider.limits();
+        let identity = provider.identity().clone();
+        let result = provider
+            .gather(DeepRecallProviderRequest {
+                query: request.query.clone(),
+                workspace: workspace.clone(),
+            })
+            .await
+            .map_err(|error| match error {
+                DeepRecallProviderError::Unavailable => CoreError::DeepUnavailable,
+                DeepRecallProviderError::InvalidOutput => CoreError::DeepProviderInvalidOutput,
+            })?;
+        let ranked_units = validate_deep_provider_result(&result, limits, &identity, &entries)?;
+        Some(DeepRunFacts {
+            summary: DeepRecallSummary {
+                status: result.status,
+                stop_reason: result.stop_reason,
+                limits,
+                usage: result.usage,
+            },
+            identity,
+            observed_provider: result.observed_provider,
+            observed_model: result.observed_model,
+            workspace_manifest_sha256: workspace.manifest_sha256,
+            workspace_sha256: workspace.workspace_sha256,
+            source_ids: result.source_ids,
+            ranked_units,
+        })
+    } else {
+        None
+    };
 
     let query_tokens = tokenize(&request.query);
     let vector_query = vector_query.filter(|query| !query.vec.is_empty());
@@ -5965,6 +6144,17 @@ where
         synthetic_sources.insert(bundle.unit.id, bundle.source_unit_ids);
         tenant_units.push(bundle.unit);
     }
+    if let Some(deep) = &deep_run {
+        let mut seen = tenant_units
+            .iter()
+            .map(|unit| unit.id)
+            .collect::<HashSet<_>>();
+        for unit in &deep.ranked_units {
+            if seen.insert(unit.id) {
+                tenant_units.push(unit.clone());
+            }
+        }
+    }
     let unit_ids: Vec<UnitId> = tenant_units.iter().map(|unit| unit.id).collect();
     let tenant_edges = store
         .fetch_edges(&request.context, &unit_ids, &recall_time)
@@ -6029,6 +6219,7 @@ where
                 .or_insert_with(|| CandidateAccumulator {
                     unit: unit.clone(),
                     fused_score: contribution,
+                    deep_rank: None,
                     rerank_rank: None,
                     rerank_score: 0.0,
                     cross_rerank_rank: None,
@@ -6043,6 +6234,56 @@ where
                 channel_rank,
                 channel_score: score,
                 derived_by: derived_by_for_unit(&unit).to_string(),
+                fused_rank: None,
+                fused_score: None,
+                rerank_rank: None,
+                rerank_score: 0.0,
+                subquery_ids: Vec::new(),
+                decay_retrievability: decay.retrievability,
+                dsr_stability_days: decay.stability_days,
+                dsr_difficulty: decay.difficulty,
+                dsr_reinforcement_count: decay.reinforcement_count,
+                trust_level: unit.trust_level,
+                state: unit.state,
+                discard_reason: None,
+                valid_from: unit.valid_from.clone(),
+                valid_to: unit.valid_to.clone(),
+                transaction_from: unit.transaction_from.clone(),
+                transaction_to: unit.transaction_to.clone(),
+            });
+        }
+    }
+
+    if let Some(deep) = &deep_run {
+        for (rank, unit) in deep.ranked_units.iter().enumerate() {
+            let channel_rank = rank + 1;
+            let decay = decay_score_for(unit, &tenant_review_events, request.decay_enabled);
+            candidates_by_unit
+                .entry(unit.id)
+                .and_modify(|candidate| {
+                    candidate.deep_rank = Some(channel_rank);
+                    candidate
+                        .channels
+                        .push((RecallChannel::Deep, channel_rank, 1.0));
+                })
+                .or_insert_with(|| CandidateAccumulator {
+                    unit: unit.clone(),
+                    fused_score: 0.0,
+                    deep_rank: Some(channel_rank),
+                    rerank_rank: None,
+                    rerank_score: 0.0,
+                    cross_rerank_rank: None,
+                    decay,
+                    subquery_ids: Vec::new(),
+                    decomposition_rank: None,
+                    channels: vec![(RecallChannel::Deep, channel_rank, 1.0)],
+                });
+            candidate_traces.push(RecallCandidateTrace {
+                unit_id: unit.id,
+                channel: RecallChannel::Deep,
+                channel_rank,
+                channel_score: 1.0,
+                derived_by: derived_by_for_unit(unit).to_string(),
                 fused_rank: None,
                 fused_score: None,
                 rerank_rank: None,
@@ -6118,6 +6359,7 @@ where
                         .or_insert_with(|| CandidateAccumulator {
                             unit: unit.clone(),
                             fused_score: contribution,
+                            deep_rank: None,
                             rerank_rank: None,
                             rerank_score: 0.0,
                             cross_rerank_rank: None,
@@ -6160,11 +6402,16 @@ where
         }
     }
 
-    let l4_gathered_evidence_ids = Vec::new();
+    let l4_gathered_evidence_ids = deep_run
+        .as_ref()
+        .map(|deep| deep.source_ids.iter().map(Uuid::to_string).collect())
+        .unwrap_or_default();
 
     let mut fused: Vec<_> = candidates_by_unit.into_values().collect();
     if decomposition.active() {
-        fused.retain(|candidate| !candidate.subquery_ids.is_empty());
+        fused.retain(|candidate| {
+            candidate.deep_rank.is_some() || !candidate.subquery_ids.is_empty()
+        });
     }
     fused.sort_by(|left, right| {
         right
@@ -6288,7 +6535,8 @@ where
         .collect::<Vec<_>>();
     let procedure_validation_states = procedure_trace_facts(&tenant_units, &request);
     let trace_id = TraceId::new();
-    let mut feature_flags = recall_feature_flags(&request, vector_scores.is_some());
+    let mut feature_flags =
+        recall_feature_flags(&request, vector_scores.is_some(), deep_run.is_some());
     if candidate_traces
         .iter()
         .any(|candidate| candidate.derived_by == "composition")
@@ -6317,7 +6565,7 @@ where
         query_hash: hash_query(&request.query),
         engine_version: request.engine_version.clone(),
         feature_flags,
-        channel_runs: recall_stage_facts(vector_scores.is_some()),
+        channel_runs: recall_stage_facts(vector_scores.is_some(), deep_run.as_ref()),
         candidates: candidate_traces,
         policy_filters: Vec::new(),
         context_items: items.clone(),
@@ -6347,12 +6595,28 @@ where
         procedure_ids,
         procedure_validation_states,
         abstention_signal: abstention,
-        latency_ms: 0,
+        latency_ms: deep_run
+            .as_ref()
+            .map_or(0, |deep| deep.summary.usage.wall_time_ms),
         token_estimate,
-        cost_micros: 0,
+        cost_micros: deep_run
+            .as_ref()
+            .map_or(0, |deep| deep.summary.usage.spend_micros),
         decay_model_id: decay_model_id(&request).to_string(),
-        l4_sandbox_id: None,
+        l4_sandbox_id: deep_run.as_ref().map(|deep| deep.workspace_sha256.clone()),
         l4_gathered_evidence_ids,
+        deep: deep_run.as_ref().map(|deep| deep.summary.clone()),
+        l4_provider: deep_run.as_ref().map(|deep| deep.observed_provider.clone()),
+        l4_model: deep_run.as_ref().map(|deep| deep.observed_model.clone()),
+        l4_prompt_hash: deep_run
+            .as_ref()
+            .map(|deep| deep.identity.prompt_hash.clone()),
+        l4_config_hash: deep_run
+            .as_ref()
+            .map(|deep| deep.identity.config_hash.clone()),
+        l4_workspace_manifest_sha256: deep_run
+            .as_ref()
+            .map(|deep| deep.workspace_manifest_sha256.clone()),
         recall_time: recall_time.clone(),
     };
     store.store_trace(&request.context, trace).await?;
@@ -6366,6 +6630,7 @@ where
         degraded: false,
         consolidation_lag_ms: 0,
         suppression_labels,
+        deep: deep_run.map(|deep| deep.summary),
         recall_time,
     })
 }
@@ -6967,6 +7232,10 @@ fn is_rerank_intent_token(token: &str) -> bool {
 struct CandidateAccumulator {
     unit: StoredMemoryUnit,
     fused_score: f32,
+    /// Provider source order followed by bound-unit UUID order. Unlike a
+    /// fusion score, this rank is deliberate external evidence selection and
+    /// therefore governs packing directly.
+    deep_rank: Option<usize>,
     rerank_rank: Option<usize>,
     rerank_score: f32,
     /// W8 cross-encoder rank (0-based): `Some` only for candidates the
@@ -7222,14 +7491,20 @@ fn pack_recall_context(
     // the comment on the "output already full" branch there for why that
     // matters).
     let rank_based_ordering_active = fused.iter().any(|candidate| {
-        candidate.cross_rerank_rank.is_some()
+        candidate.deep_rank.is_some()
+            || candidate.cross_rerank_rank.is_some()
             || (request.query_decomposition_enabled && candidate.decomposition_rank.is_some())
             || (request.rerank_enabled && candidate.rerank_rank.is_some())
     });
 
     if request.context_packing_abstention_enabled {
         fused.sort_by(|left, right| {
-            if left.cross_rerank_rank.is_some() || right.cross_rerank_rank.is_some() {
+            if left.deep_rank.is_some() || right.deep_rank.is_some() {
+                left.deep_rank
+                    .unwrap_or(usize::MAX)
+                    .cmp(&right.deep_rank.unwrap_or(usize::MAX))
+                    .then_with(|| left.unit.id.as_uuid().cmp(&right.unit.id.as_uuid()))
+            } else if left.cross_rerank_rank.is_some() || right.cross_rerank_rank.is_some() {
                 // W8: the cross-encoder ordering governs when it ran. The scored
                 // head (0-based `cross_rerank_rank`) leads in cross-encoder order;
                 // the unscored tail (`None` → `usize::MAX`) follows in fusion
@@ -7293,12 +7568,14 @@ fn pack_recall_context(
     // units must not be buried by ordinary corpus fusion. Stable partitioning
     // preserves the selected lane ordering everywhere else.
     fused.sort_by_key(|candidate| {
-        if is_authoritative_projection(&candidate.unit) {
+        if candidate.deep_rank.is_some() {
             0
-        } else if Some(candidate.unit.id) == goal_companion_id {
+        } else if is_authoritative_projection(&candidate.unit) {
             1
-        } else {
+        } else if Some(candidate.unit.id) == goal_companion_id {
             2
+        } else {
+            3
         }
     });
 
@@ -8973,7 +9250,7 @@ fn review_grade_adjustment(review_events: &[ReviewEvent], unit_id: UnitId) -> f3
     adjustment.clamp(0.2, 1.15)
 }
 
-fn recall_stage_facts(vector_enabled: bool) -> Vec<ReflectStageFact> {
+fn recall_stage_facts(vector_enabled: bool, deep: Option<&DeepRunFacts>) -> Vec<ReflectStageFact> {
     [
         "stage0_policy",
         "query_decomposition",
@@ -8994,8 +9271,14 @@ fn recall_stage_facts(vector_enabled: bool) -> Vec<ReflectStageFact> {
         stage: stage.to_string(),
         // The vector channel only reports scores when a real embedding
         // provider is configured; the default runtime traces it as disabled.
-        detail: if (stage == "vector" && !vector_enabled) || stage == "l4_exhaustive" {
+        detail: if stage == "vector" && !vector_enabled {
             "disabled".to_string()
+        } else if stage == "l4_exhaustive" {
+            match deep.map(|run| run.summary.stop_reason) {
+                None => "disabled".to_string(),
+                Some(DeepRecallStopReason::Completed) => "completed".to_string(),
+                Some(reason) => format!("capped_{}", deep_stop_reason_name(reason)),
+            }
         } else {
             "completed".to_string()
         },
@@ -9003,7 +9286,21 @@ fn recall_stage_facts(vector_enabled: bool) -> Vec<ReflectStageFact> {
     .collect()
 }
 
-fn recall_feature_flags(request: &RecallRequest, vector_enabled: bool) -> Vec<String> {
+fn deep_stop_reason_name(reason: DeepRecallStopReason) -> &'static str {
+    match reason {
+        DeepRecallStopReason::Completed => "completed",
+        DeepRecallStopReason::WallTime => "wall_time",
+        DeepRecallStopReason::ToolIterations => "tool_iterations",
+        DeepRecallStopReason::ContextTokens => "context_tokens",
+        DeepRecallStopReason::Spend => "spend",
+    }
+}
+
+fn recall_feature_flags(
+    request: &RecallRequest,
+    vector_enabled: bool,
+    deep_enabled: bool,
+) -> Vec<String> {
     let mut flags = vec![
         "entity_exact_enabled".to_string(),
         "fts_enabled".to_string(),
@@ -9035,6 +9332,9 @@ fn recall_feature_flags(request: &RecallRequest, vector_enabled: bool) -> Vec<St
     }
     if request.decay_enabled {
         flags.push("decay_enabled".to_string());
+    }
+    if deep_enabled {
+        flags.push("l4_exhaustive_enabled".to_string());
     }
     if request.transaction_as_of.is_some() {
         flags.push("transaction_snapshot_requested".to_string());
@@ -11190,6 +11490,7 @@ mod pack_cost_tests {
         CandidateAccumulator {
             unit,
             fused_score,
+            deep_rank: None,
             rerank_rank: None,
             rerank_score: 0.0,
             cross_rerank_rank: None,
@@ -12167,5 +12468,97 @@ mod pack_cost_tests {
             "flag off ⇒ no item is date-prefixed: {:?}",
             off.items.iter().map(|i| i.body.clone()).collect::<Vec<_>>()
         );
+    }
+}
+
+#[cfg(test)]
+mod deep_call_routing_tests {
+    use super::*;
+    use std::pin::Pin;
+
+    struct PanicProvider {
+        identity: DeepProviderIdentity,
+    }
+
+    impl DeepRecallProvider for PanicProvider {
+        fn identity(&self) -> &DeepProviderIdentity {
+            &self.identity
+        }
+
+        fn limits(&self) -> DeepRecallLimits {
+            DeepRecallLimits {
+                wall_time_ms: 1,
+                max_tool_iterations: 1,
+                max_context_tokens: 1,
+                max_spend_micros: 1,
+            }
+        }
+
+        fn gather<'a>(
+            &'a self,
+            _: DeepRecallProviderRequest,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<DeepRecallProviderResult, DeepRecallProviderError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            panic!("Fast/Balanced must not invoke Deep provider")
+        }
+    }
+
+    #[tokio::test]
+    async fn fast_and_balanced_do_not_fetch_deep_snapshot_with_provider_installed() {
+        let store = InMemoryStore::default();
+        let context = memphant_store_testkit::resolved_context(
+            TenantId::from_u128(91_000),
+            ScopeId::from_u128(91_001),
+            ActorId::from_u128(91_002),
+        );
+        store.seed_context_binding(&context);
+        let provider = PanicProvider {
+            identity: DeepProviderIdentity {
+                provider: "test".to_string(),
+                model: "test/deep".to_string(),
+                prompt_hash: "prompt".to_string(),
+                config_hash: "config".to_string(),
+            },
+        };
+        for mode in [RecallMode::Fast, RecallMode::Balanced] {
+            recall_with_pool_and_selection_and_deep(
+                &store,
+                RecallRequest {
+                    context: context.clone(),
+                    query: "buried".to_string(),
+                    k: 1,
+                    budget_tokens: 32,
+                    mode,
+                    include_beliefs: false,
+                    edge_expansion_enabled: false,
+                    context_packing_abstention_enabled: true,
+                    rerank_enabled: false,
+                    learned_rerank_profile: None,
+                    query_decomposition_enabled: false,
+                    procedure_recall_enabled: true,
+                    decay_enabled: false,
+                    engine_version: "test".to_string(),
+                    transaction_as_of: None,
+                    valid_at: None,
+                    aggregation_window: None,
+                },
+                None,
+                &FixedClock("2026-07-20T00:00:00Z"),
+                DEFAULT_RECALL_POOL_DEPTH,
+                PackLevers::default(),
+                false,
+                None,
+                CrossRerankCandidateSelection::FusedHead,
+                Some(&provider),
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(store.deep_snapshot_read_count(), 0);
     }
 }
