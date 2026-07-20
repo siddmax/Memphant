@@ -1429,40 +1429,6 @@ mod tests {
 
     struct PanicTransport;
 
-    static PROXY_ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    struct ScopedEnv {
-        saved: Vec<(&'static str, Option<String>)>,
-    }
-
-    impl ScopedEnv {
-        fn set(variables: &[(&'static str, String)]) -> Self {
-            let saved = variables
-                .iter()
-                .map(|(name, _)| (*name, std::env::var(name).ok()))
-                .collect::<Vec<_>>();
-            unsafe {
-                for (name, value) in variables {
-                    std::env::set_var(name, value);
-                }
-            }
-            Self { saved }
-        }
-    }
-
-    impl Drop for ScopedEnv {
-        fn drop(&mut self) {
-            unsafe {
-                for (name, value) in self.saved.drain(..) {
-                    match value {
-                        Some(value) => std::env::set_var(name, value),
-                        None => std::env::remove_var(name),
-                    }
-                }
-            }
-        }
-    }
-
     fn bounded_http_server(
         listener: TcpListener,
         response: Option<String>,
@@ -2589,6 +2555,18 @@ mod tests {
 
     #[tokio::test]
     async fn reqwest_transport_ignores_ambient_proxy_configuration() {
+        const CHILD_ORIGIN: &str = "MEMPHANT_DEEP_PROXY_TEST_CHILD_ORIGIN";
+        if let Ok(origin) = std::env::var(CHILD_ORIGIN) {
+            let config = config().with_openrouter_base_url(&origin).unwrap();
+            let transport = ReqwestTransport::new(&config).unwrap();
+            let response = transport
+                .post(&json!({"sensitive": "authorized source body"}))
+                .await
+                .unwrap();
+            assert_eq!(response.status, 400);
+            return;
+        }
+
         let origin_listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let origin_address = origin_listener.local_addr().unwrap();
         let (origin_calls, origin_server) = bounded_http_server(
@@ -2616,24 +2594,27 @@ mod tests {
             ("NO_PROXY", String::new()),
             ("no_proxy", String::new()),
         ];
-        let config = config()
-            .with_openrouter_base_url(&format!("http://{origin_address}/api/v1"))
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "deep_recall_openrouter::tests::reqwest_transport_ignores_ambient_proxy_configuration",
+                "--nocapture",
+            ])
+            .env(
+                CHILD_ORIGIN,
+                format!("http://{origin_address}/api/v1"),
+            )
+            .envs(variables)
+            .output()
             .unwrap();
-        let transport = {
-            let _env_lock = PROXY_ENV_LOCK
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            let _env = ScopedEnv::set(&variables);
-            ReqwestTransport::new(&config).unwrap()
-        };
-
-        let response = transport
-            .post(&json!({"sensitive": "authorized source body"}))
-            .await
-            .unwrap();
-        assert_eq!(response.status, 400);
         origin_server.join().unwrap();
         proxy_server.join().unwrap();
+        assert!(
+            output.status.success(),
+            "proxy child failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         assert_eq!(origin_calls.load(Ordering::SeqCst), 1);
         assert_eq!(proxy_calls.load(Ordering::SeqCst), 0);
     }
