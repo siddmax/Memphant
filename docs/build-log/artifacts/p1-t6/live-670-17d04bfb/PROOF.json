@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "classification": "no_model_live_worker_authorization",
+  "completed_at": "2026-07-20",
+  "git_commit": "17d04bfb131c869d969330cc54baab2d38022285",
+  "question_id": "19367bc7",
+  "trajectory_count": 500,
+  "resource_count": 670,
+  "worker": {
+    "completed_sources": 670,
+    "failure_lines": 0,
+    "stdout_sha256": "720b6b1beea31178667088c42bd99331ee62b3592aa672be128eb763e9de6a29",
+    "stderr_sha256": "4285243e4f7b1be38e8c1bdf7b2b51d21c87ca7b1342a477a533b1e18df56e8d"
+  },
+  "binaries": {
+    "cli": {
+      "bytes": 14033408,
+      "sha256": "bf9cad23daf7cd823000e783faadbacc4b21fa3ce6e25ab03a2e6750d12e9042"
+    },
+    "server": {
+      "bytes": 68411392,
+      "sha256": "17ff2913810ef08d13299b676100a7144ec4c154d37fb88936e60aa568834ad3"
+    },
+    "worker": {
+      "bytes": 56864400,
+      "sha256": "4e8731c27abaf835bdfa03d5823273562e158f3bbd434d38258db2136429db48"
+    }
+  },
+  "post_drain": {
+    "pending_jobs": 0,
+    "dead_jobs": 0
+  },
+  "external_dispatch": {
+    "reader_endpoint_configured": false,
+    "judge_endpoint_configured": false,
+    "reader_key_configured": false,
+    "judge_key_configured": false
+  },
+  "scratch_database": {
+    "name": "memphant_scratch_8598_1784555083",
+    "dropped_after_wrapper_exit": true
+  },
+  "wrapper_exit_code": 0,
+  "intermediate_proof_sha256": "46d90c6aa37e2ae0375859b2a5fcccd2d91e5cf4b633d7bcd46f40b91007d12c",
+  "fresh_paid_root_authorized": true
+}
