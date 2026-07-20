@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "classification": "no_model_release_fast_authorization",
+  "completed_at": "2026-07-20",
+  "git_commit": "c56ea9d7446eec4fa02eb8965e6e840a4b331164",
+  "binary_profile": "release",
+  "question_id": "19367bc7",
+  "trajectory_count": 500,
+  "resource_count": 670,
+  "timing_ms": {
+    "insert": 26160,
+    "worker_and_query": 1439150,
+    "recall": 28916,
+    "recall_ceiling": 90000,
+    "recall_ceiling_passed": true
+  },
+  "result": {
+    "context_items": 2,
+    "degraded": false,
+    "trace_id_present": true
+  },
+  "worker": {
+    "completed_sources": 670,
+    "failure_lines": 0,
+    "stdout_sha256": "720b6b1beea31178667088c42bd99331ee62b3592aa672be128eb763e9de6a29",
+    "stderr_sha256": "4285243e4f7b1be38e8c1bdf7b2b51d21c87ca7b1342a477a533b1e18df56e8d"
+  },
+  "post_recall": {
+    "pending_jobs": 0,
+    "dead_jobs": 0
+  },
+  "binaries": {
+    "cli": {
+      "bytes": 5705024,
+      "sha256": "a8da5a706613654cfe743a55ea93b5c99702962067052503985c1c6dd1af3c0d"
+    },
+    "server": {
+      "bytes": 40224832,
+      "sha256": "a45fe6ed02e9c817244c11b3edcfd11e323640241409a52f2456bc7d9da25d19"
+    },
+    "worker": {
+      "bytes": 35967376,
+      "sha256": "5165fea5d4cb44841980becb72b1c4d0ea66485bd637831439507878dfaf70b8"
+    }
+  },
+  "artifacts": {
+    "memory_proof_sha256": "933ffea3a777d38741e33c0d5f01894fb3389c6b058c506f4c08ad7e4f2b8495",
+    "server_stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca49544868722722ef65d2a3a",
+    "server_stderr_sha256": "618c298cc982fbaf4142f5dae68b67499e9d29a4b49544868722722ef65d2a3a"
+  },
+  "external_dispatch": {
+    "reader_endpoint_configured": false,
+    "judge_endpoint_configured": false,
+    "reader_key_configured": false,
+    "judge_key_configured": false,
+    "deep_enabled": false
+  },
+  "scratch_database": {
+    "name": "memphant_scratch_32452_1784561839",
+    "dropped_after_wrapper_exit": true
+  },
+  "fresh_paid_root_authorized": true
+}
