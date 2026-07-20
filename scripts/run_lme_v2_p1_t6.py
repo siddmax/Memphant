@@ -952,6 +952,20 @@ def _direct_opener():
     return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
 
 
+def _reader_route_probe_request() -> dict[str, object]:
+    """Return the smallest useful request that exercises the frozen reader route."""
+    return {
+        "model": "Qwen/Qwen3.5-9B",
+        "messages": [{
+            "role": "user",
+            "content": "Reply with exactly ROUTE_OK after reasoning internally.",
+        }],
+        "max_tokens": 64,
+        "reasoning": {"enabled": True},
+        "temperature": 0,
+    }
+
+
 def _reader_proxy(api_key: str, audit_path: Path, manifest: dict) -> tuple[ThreadingHTTPServer, str]:
     contract = manifest["protocol"]["reader"]
     policy = contract["provider_policy"]
@@ -1597,6 +1611,107 @@ def _run_logged_harness(
             stderr=stderr,
             check=False,
         )
+
+
+def run_reader_route_preflight(output: Path, manifest: dict) -> dict[str, object]:
+    """Exercise one tiny paid reader dispatch and settle it without replay."""
+    output = output.resolve()
+    api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    require(api_key, "reader route preflight requires OPENROUTER_API_KEY")
+    require(not os.environ.get("OPENAI_API_KEY"),
+            "reader route preflight forbids the judge credential")
+    require(not output.exists(), "reader route preflight output must be new")
+    endpoint_proof = verify_endpoint_inventory(manifest)["reader"]
+    output.mkdir(parents=True)
+    audit_path = output / "reader-route.json"
+    proxy, base_url = _reader_proxy(api_key, audit_path, manifest)
+    request = _reader_route_probe_request()
+    response_body = b""
+    response_status: int | None = None
+    transport_error: str | None = None
+    started = time.perf_counter()
+    try:
+        parsed_url = urllib.parse.urlparse(base_url)
+        connection = http.client.HTTPConnection(
+            parsed_url.hostname,
+            parsed_url.port,
+            timeout=manifest["protocol"]["reader"]["upstream_timeout_seconds"] + 15,
+        )
+        try:
+            connection.request(
+                "POST",
+                "/chat/completions",
+                body=canonical_bytes(request),
+                headers={"content-type": "application/json"},
+            )
+            response = connection.getresponse()
+            response_status = response.status
+            response_body = response.read()
+        finally:
+            connection.close()
+    except Exception as error:
+        transport_error = type(error).__name__
+    finally:
+        proxy.shutdown()
+        proxy.server_close()
+    response_elapsed_ms = int(round((time.perf_counter() - started) * 1000))
+    if audit_path.is_file():
+        audit = _reconcile_reader_receipt(api_key, audit_path, manifest)
+    else:
+        audit = {
+            "audit_status": "invalid",
+            "audit_error": "reader_proxy_emitted_no_audit",
+            "dispatch_count": 0,
+        }
+        atomic_write_json(audit_path, audit)
+    successful = response_status == 200 and audit.get("audit_status") == "settled"
+    proof = {
+        "schema_version": 1,
+        "classification": (
+            "tiny_reader_route_authorization"
+            if successful else "tiny_reader_route_failure"
+        ),
+        "git_commit": subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT,
+            capture_output=True, text=True, check=True,
+        ).stdout.strip(),
+        "request": {
+            "request_sha256": canonical_sha256(request),
+            "max_completion_tokens": request["max_tokens"],
+            "reasoning_enabled": True,
+            "dispatch_count": audit.get("dispatch_count"),
+            "max_liability_micros": audit.get("max_liability_micros"),
+        },
+        "response": {
+            "status": response_status,
+            "sha256": hashlib.sha256(response_body).hexdigest(),
+            "elapsed_ms": response_elapsed_ms,
+            "transport_error_type": transport_error,
+        },
+        "settlement": {
+            key: audit.get(key)
+            for key in (
+                "audit_status", "generation_id", "provider_name", "model",
+                "tokens_prompt", "tokens_completion", "total_cost", "receipt_attempts",
+            )
+        },
+        "settled_cost_micros": (
+            usd_to_micros(audit["total_cost"])
+            if audit.get("total_cost") is not None else None
+        ),
+        "endpoint_contract": endpoint_proof,
+        "reader_route_sha256": sha256_file(audit_path),
+        "paid_calls": 1 if audit.get("dispatch_count") == 1 else 0,
+        "same_request_retry_authorized": False,
+    }
+    atomic_write_json(output / "PROOF.json", proof)
+    _redact_secrets(output, [api_key])
+    require(successful, "reader route preflight did not settle successfully")
+    require(audit.get("provider_name") == "DeepInfra", "reader route preflight provider drift")
+    require(str(audit.get("model", "")).lower() in {
+        model.lower() for model in manifest["protocol"]["reader"]["settlement_models"]
+    }, "reader route preflight model drift")
+    return proof
 
 
 def run_context_preflight(
@@ -2313,7 +2428,7 @@ def main() -> int:
         "command",
         choices=(
             "verify-selection", "acquire", "materialize", "preflight", "run",
-            "aggregate", "_context-preflight", "_run-row",
+            "aggregate", "_context-preflight", "_reader-route-preflight", "_run-row",
         ),
     )
     parser.add_argument("--directory", type=Path)
@@ -2337,6 +2452,9 @@ def main() -> int:
         audit = run_context_preflight(
             args.directory, args.materialized, args.output, manifest
         )
+    elif args.command == "_reader-route-preflight":
+        require(args.output is not None, "_reader-route-preflight requires output")
+        audit = run_reader_route_preflight(args.output, manifest)
     elif args.command == "_run-row":
         require(args.directory and args.output and args.materialized and args.row_id,
                 "_run-row requires directory, output, materialized, and row-id")
@@ -2368,6 +2486,8 @@ def main() -> int:
         "_context-preflight",
     }:
         envelope["paid_calls"] = 0
+    elif args.command == "_reader-route-preflight":
+        envelope["paid_calls"] = audit["paid_calls"]
     print(json.dumps(envelope, sort_keys=True))
     return 0
 

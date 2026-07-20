@@ -238,6 +238,21 @@ def test_context_preflight_contract_rejects_empty_or_exact_token_overflow() -> N
     }
 
 
+def test_reader_route_probe_request_is_tiny_reasoning_enabled_and_pinned() -> None:
+    campaign = _load()
+    request = campaign._reader_route_probe_request()
+    assert request == {
+        "model": "Qwen/Qwen3.5-9B",
+        "messages": [{
+            "role": "user",
+            "content": "Reply with exactly ROUTE_OK after reasoning internally.",
+        }],
+        "max_tokens": 64,
+        "reasoning": {"enabled": True},
+        "temperature": 0,
+    }
+
+
 def test_context_preflight_streams_only_selected_trajectories(tmp_path: Path) -> None:
     campaign = _load()
     source = tmp_path / "trajectories.jsonl"
