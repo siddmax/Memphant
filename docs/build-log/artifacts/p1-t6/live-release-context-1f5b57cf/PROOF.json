@@ -1,0 +1,72 @@
+{
+  "artifacts": {
+    "memory_proof_sha256": "3856cace7ab8e796459a64af844e623ec92bda82764027bc26baa5b3c8088203",
+    "server_stderr_sha256": "618c298cc982fbaf4142f5dae68b67499e9d29a4b49544868722722ef65d2a3a",
+    "server_stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "binaries": {
+    "cli": {
+      "bytes": 5705024,
+      "path": "/Users/sidsharma/.codex/worktrees/Memphant/p1-deep-mode/target/release/memphant-cli",
+      "sha256": "a8da5a706613654cfe743a55ea93b5c99702962067052503985c1c6dd1af3c0d"
+    },
+    "server": {
+      "bytes": 40225520,
+      "path": "/Users/sidsharma/.codex/worktrees/Memphant/p1-deep-mode/target/release/memphant-server",
+      "sha256": "d2ffff601c7e4b7514aef25dbb1e461bfd655999c1ee54986f7634813c9bcf4c"
+    },
+    "worker": {
+      "bytes": 35968368,
+      "path": "/Users/sidsharma/.codex/worktrees/Memphant/p1-deep-mode/target/release/memphant-worker",
+      "sha256": "522828f1b5bf4e83bb946b6f27be6391921abe4a7e3c772edb04ae1979df7ef4"
+    }
+  },
+  "binary_profile": "release",
+  "classification": "no_model_release_exact_context_authorization",
+  "context_contract": {
+    "budget_tokens": 32768,
+    "context_items": 1,
+    "exact_reader_tokens": 23564,
+    "nonempty": true,
+    "runtime_token_estimate": 32757,
+    "untruncated": true
+  },
+  "external_dispatch": {
+    "deep_enabled": false,
+    "judge_endpoint_configured": false,
+    "judge_key_configured": false,
+    "reader_endpoint_configured": false,
+    "reader_key_configured": false
+  },
+  "git_commit": "1f5b57cf36c10da6458cbf18dd860c28fd5147a5",
+  "post_recall": {
+    "dead_jobs": 0,
+    "pending_jobs": 0
+  },
+  "query_metadata": {
+    "context_sha256": "f5bc63b4e68759956cba28fc99ca6c01875365ded84cc050c009ab050dd4be3a",
+    "native_query_hash": "c441b4d650e01257",
+    "proof_path": "/Users/sidsharma/.codex/worktrees/Memphant/p1-deep-mode/docs/build-log/artifacts/p1-t6/live-release-context-1f5b57cf/memory-proofs/19367bc7.1663e945c00f4a8093e76a127721c27f.json",
+    "query_image_present": false,
+    "query_sha256": "a44fe8a4b1e5e24011cfaffa47806346860feb9226bd786480cf8064906f001c",
+    "question_id": "19367bc7",
+    "recall_duration_ms": 42480,
+    "recall_request_sha256": "ef9395a7fef40a9d485a0f1f5501840e0cdebe2f433ee39daf404e125f51aaeb",
+    "recall_response_sha256": "02a145de1ae69a7c4aaa7ea5ef5b31921aa7cbcd0986ec233878f7490041059c",
+    "trace_id": "019f80fb-736e-7843-b465-ec33286fcd84",
+    "trace_sha256": "67eb3096562e4db8e502a5268b194c9b83c28ba6ce96bc8ad9834eb9f6044847"
+  },
+  "question_id": "19367bc7",
+  "resource_count": 670,
+  "schema_version": 1,
+  "timing_ms": {
+    "insert": 36100,
+    "worker_and_recall": 4151155
+  },
+  "trajectory_count": 500,
+  "worker": {
+    "completed_sources": 670,
+    "stderr_sha256": "4285243e4f7b1be38e8c1bdf7b2b51d21c87ca7b1342a477a533b1e18df56e8d",
+    "stdout_sha256": "720b6b1beea31178667088c42bd99331ee62b3592aa672be128eb763e9de6a29"
+  }
+}
