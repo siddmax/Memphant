@@ -4,6 +4,7 @@ import importlib.util
 import http.client
 import json
 from pathlib import Path
+import subprocess
 import sys
 import types
 
@@ -358,7 +359,12 @@ def test_python_harness_preflight_fails_closed_under_clean_environment(
         if command[2:4] == ["pip", "check"]:
             return campaign.subprocess.CompletedProcess(command, 0, "No broken requirements found.\n", "")
         if command[2:5] == ["pip", "freeze", "--all"]:
-            return campaign.subprocess.CompletedProcess(command, 0, "openai-agents==0.18.3\n", "")
+            return campaign.subprocess.CompletedProcess(
+                command,
+                0,
+                "openai-agents==0.18.3\ntorch==2.13.0\ntorchvision==0.28.0\n",
+                "",
+            )
         return campaign.subprocess.CompletedProcess(
             command, 1, "", "ModuleNotFoundError: No module named 'agents'\n"
         )
@@ -389,7 +395,11 @@ def test_python_harness_preflight_freezes_interpreter_and_packages(
             return campaign.subprocess.CompletedProcess(command, 0, "No broken requirements found.\n", "")
         if command[2:5] == ["pip", "freeze", "--all"]:
             return campaign.subprocess.CompletedProcess(
-                command, 0, "openai==2.46.0\nopenai-agents==0.18.3\n", ""
+                command,
+                0,
+                "openai==2.46.0\nopenai-agents==0.18.3\n"
+                "torch==2.13.0\ntorchvision==0.28.0\n",
+                "",
             )
         return campaign.subprocess.CompletedProcess(command, 0, "usage: harness\n", "warning\n")
 
@@ -398,9 +408,122 @@ def test_python_harness_preflight_freezes_interpreter_and_packages(
     assert proof["requirements_sha256"] == campaign.sha256_file(
         official / "requirements.txt"
     )
-    assert proof["packages"] == ["openai-agents==0.18.3", "openai==2.46.0"]
+    assert proof["packages"] == [
+        "openai-agents==0.18.3",
+        "openai==2.46.0",
+        "torch==2.13.0",
+        "torchvision==0.28.0",
+    ]
     assert proof["packages_sha256"] == campaign.canonical_sha256(proof["packages"])
     assert proof["bootstrap_import_verified"] is True
+
+
+def test_python_harness_preflight_executes_real_qwen_processor_path(
+    tmp_path: Path, monkeypatch
+) -> None:
+    campaign = _load()
+    official = tmp_path / "official"
+    official.mkdir()
+    (official / "requirements.txt").write_text("transformers\n")
+    campaign_requirements = tmp_path / "requirements-p1-t6.txt"
+    campaign_requirements.write_text("torch==2.13.0\ntorchvision==0.28.0\n")
+    processor_preflight = tmp_path / "processor_preflight.py"
+    processor_preflight.write_text("raise SystemExit(0)\n")
+    monkeypatch.setattr(campaign, "CAMPAIGN_PYTHON_REQUIREMENTS", campaign_requirements)
+    monkeypatch.setattr(campaign, "PROCESSOR_PREFLIGHT", processor_preflight)
+    monkeypatch.setattr(
+        campaign,
+        "_fingerprint",
+        lambda path: {"path": str(path), "bytes": 1, "sha256": "f" * 64},
+    )
+    calls = []
+
+    def run(command, **_kwargs):
+        calls.append(command)
+        if command[2:4] == ["pip", "check"]:
+            return campaign.subprocess.CompletedProcess(command, 0, "No broken requirements found.\n", "")
+        if command[2:5] == ["pip", "freeze", "--all"]:
+            return campaign.subprocess.CompletedProcess(
+                command,
+                0,
+                "torch==2.13.0\ntorchvision==0.28.0\ntransformers==5.14.1\n",
+                "",
+            )
+        return campaign.subprocess.CompletedProcess(command, 0, "processor-ready\n", "")
+
+    monkeypatch.setattr(campaign.subprocess, "run", run)
+    proof = campaign.verify_python_harness(tmp_path)
+    assert [
+        campaign.sys.executable,
+        str(processor_preflight),
+        "--official-dir",
+        str(official),
+    ] in calls
+    assert proof["campaign_requirements_sha256"] == campaign.sha256_file(
+        campaign_requirements
+    )
+    assert proof["processor_preflight_verified"] is True
+
+
+def test_python_harness_preflight_rejects_missing_campaign_dependency(
+    tmp_path: Path, monkeypatch
+) -> None:
+    campaign = _load()
+    official = tmp_path / "official"
+    official.mkdir()
+    (official / "requirements.txt").write_text("transformers\n")
+    campaign_requirements = tmp_path / "requirements-p1-t6.txt"
+    campaign_requirements.write_text("torch==2.13.0\ntorchvision==0.28.0\n")
+    monkeypatch.setattr(campaign, "CAMPAIGN_PYTHON_REQUIREMENTS", campaign_requirements)
+    monkeypatch.setattr(
+        campaign,
+        "_fingerprint",
+        lambda path: {"path": str(path), "bytes": 1, "sha256": "f" * 64},
+    )
+
+    def run(command, **_kwargs):
+        if command[2:4] == ["pip", "check"]:
+            return campaign.subprocess.CompletedProcess(command, 0, "", "")
+        if command[2:5] == ["pip", "freeze", "--all"]:
+            return campaign.subprocess.CompletedProcess(command, 0, "transformers==5.14.1\n", "")
+        return campaign.subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(campaign.subprocess, "run", run)
+    with pytest.raises(
+        RuntimeError,
+        match="campaign Python dependency missing or drifted: torch==2.13.0",
+    ):
+        campaign.verify_python_harness(tmp_path)
+
+
+def test_processor_preflight_executes_official_token_counter(tmp_path: Path) -> None:
+    official = tmp_path / "official"
+    evaluation = official / "evaluation"
+    evaluation.mkdir(parents=True)
+    (evaluation / "__init__.py").write_text("")
+    (evaluation / "harness.py").write_text(
+        "def count_memory_context_tokens(memory_context, loaded_images):\n"
+        "    assert memory_context == "
+        "[{'type': 'text', 'value': 'MemPhant processor preflight'}]\n"
+        "    assert loaded_images == [None]\n"
+        "    return 7\n"
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "benchmarks/longmemeval_v2/processor_preflight.py"),
+            "--official-dir",
+            str(official),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "memory_context_tokens": 7,
+        "processor_preflight": "passed",
+    }
 
 
 def test_secret_redaction_covers_nested_text_and_binary_artifacts(tmp_path: Path) -> None:

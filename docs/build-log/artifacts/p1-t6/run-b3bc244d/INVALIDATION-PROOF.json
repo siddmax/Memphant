@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "attempt": "run-b3bc244d",
+  "classification": "official_processor_runtime_dependency_failure_before_generation",
+  "invalidated_at": "2026-07-20",
+  "measured_commit": "b3bc244d008e57837dcc316f77516169dc9ed899",
+  "observed_failure": {
+    "exception": "ImportError: Qwen3VLVideoProcessor requires the PyTorch and Torchvision libraries",
+    "stage": "official_memory_context_token_count_after_successful_fast_recall",
+    "cause": "The pinned official requirements omit PyTorch and Torchvision even though the official harness instantiates Qwen/Qwen3.5-9B AutoProcessor for memory-context token counting. Campaign preflight exercised only the harness help path, so it did not validate that runtime dependency boundary."
+  },
+  "preserved_evidence": {
+    "pre_invalidation_inventory_files": 22,
+    "pre_invalidation_inventory_sha256": "313d70ce21caad2b09ec8cbca7a6f7504c029738bef12f7e7db838cb897ea247",
+    "pre_execution_proof_sha256": "be20298318b0b58ba7eed4ae252e30216c49250df19d2c3ae40be92a35562867",
+    "frozen_run_order_sha256": "89917f248be4aff9a49fdb2ecbeb9f6d8e1d8efb869c90ebba1075619768a792",
+    "official_stderr_sha256": "61ffd80b8c7de4ac24aeade2e0d6877002e59693b9ffe93a928d801ce20f18fd",
+    "finalized_failure_rows": [
+      "0001-19367bc7-fast"
+    ],
+    "interrupted_staging_rows": [
+      ".staging-0002-19367bc7-sonnet"
+    ]
+  },
+  "successful_memphant_boundary": {
+    "trajectory_count": 500,
+    "resource_count": 670,
+    "worker_completed_sources": 670,
+    "recall_duration_ms": 26556,
+    "degraded": false,
+    "memory_proof_sha256": "ae8851b9c170a82d3beacdf355035b7557570ab58c89c4597bd140a61c931364"
+  },
+  "external_dispatch_audit": {
+    "reader_route_files": 0,
+    "judge_route_files": 0,
+    "deep_generation_receipt_files": 0,
+    "official_score_files": 0,
+    "settled_micros": 0,
+    "unsettled_upper_bound_micros": 0,
+    "conclusion": "The Fast row failed during local official prompt construction after MemPhant recall and before the reader proxy. The interrupted Sonnet row had not completed memory construction. No reader, judge, or Deep generation was accepted or billed."
+  },
+  "cleanup_audit": {
+    "campaign_processes_remaining": 0,
+    "scratch_databases_remaining": 0
+  },
+  "retry_decision": {
+    "same_output_root_replay_authorized": false,
+    "fresh_output_root_authorized_after_dependency_and_processor_preflight": true
+  }
+}

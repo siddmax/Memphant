@@ -35,6 +35,10 @@ MEMORY_CONFIG = ROOT / "benchmarks/longmemeval_v2/memphant.memory.json"
 MATERIALIZER = ROOT / "scripts/materialize_longmemeval_v2_runtime.py"
 SCRATCH_HELPER = ROOT / "scripts/with_scratch_db.sh"
 MEMPHANT_BOOTSTRAP = ROOT / "benchmarks/longmemeval_v2/harness_bootstrap.py"
+PROCESSOR_PREFLIGHT = ROOT / "benchmarks/longmemeval_v2/processor_preflight.py"
+CAMPAIGN_PYTHON_REQUIREMENTS = (
+    ROOT / "benchmarks/longmemeval_v2/requirements-p1-t6.txt"
+)
 MATERIALIZATION_SUMMARY = ROOT / "docs/build-log/artifacts/p1-t6/MATERIALIZATION-SUMMARY.json"
 PAIRING_PROOFS = ROOT / "docs/build-log/artifacts/p1-t6/PAIRING-PROOFS.json"
 SELECTION_SHA256 = "d7762dbaffff7acfe779162d4993c8c09ef0440e3c1a25e0d3408127d73e25fa"
@@ -133,10 +137,24 @@ def _resolve_execution_paths(
 
 
 def verify_python_harness(directory: Path) -> dict[str, object]:
-    """Prove the exact sanitized interpreter can import the official harness."""
+    """Prove the sanitized interpreter can execute the official processor path."""
     official = directory / "official"
     requirements = official / "requirements.txt"
     require(requirements.is_file(), "official Python requirements are missing")
+    require(
+        CAMPAIGN_PYTHON_REQUIREMENTS.is_file(),
+        "campaign Python requirements are missing",
+    )
+    required_packages = [
+        line.strip()
+        for line in CAMPAIGN_PYTHON_REQUIREMENTS.read_text().splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    require(required_packages, "campaign Python requirements are empty")
+    require(
+        all("==" in package for package in required_packages),
+        "campaign Python requirements must use exact pins",
+    )
     environment = _clean_environment()
     interpreter = Path(sys.executable).resolve()
 
@@ -164,6 +182,11 @@ def verify_python_harness(directory: Path) -> dict[str, object]:
     require(frozen.returncode == 0, "could not freeze official Python environment")
     packages = sorted(line.strip() for line in frozen.stdout.splitlines() if line.strip())
     require(packages, "official Python package inventory is empty")
+    for package in required_packages:
+        require(
+            package in packages,
+            f"campaign Python dependency missing or drifted: {package}",
+        )
 
     bootstrapped = subprocess.run(
         [
@@ -184,15 +207,41 @@ def verify_python_harness(directory: Path) -> dict[str, object]:
         "official harness bootstrap import failed: "
         + (bootstrapped.stderr or bootstrapped.stdout).strip()[-500:],
     )
+    processor = subprocess.run(
+        [
+            sys.executable,
+            str(PROCESSOR_PREFLIGHT),
+            "--official-dir",
+            str(official),
+        ],
+        cwd=official,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    require(
+        processor.returncode == 0,
+        "official Qwen processor preflight failed: "
+        + (processor.stderr or processor.stdout).strip()[-500:],
+    )
     return {
         "interpreter": _fingerprint(interpreter),
         "python_version": sys.version,
         "requirements_sha256": sha256_file(requirements),
+        "campaign_requirements_sha256": sha256_file(CAMPAIGN_PYTHON_REQUIREMENTS),
         "packages": packages,
         "packages_sha256": canonical_sha256(packages),
         "bootstrap_import_verified": True,
         "bootstrap_stdout_sha256": hashlib.sha256(bootstrapped.stdout.encode()).hexdigest(),
         "bootstrap_stderr_sha256": hashlib.sha256(bootstrapped.stderr.encode()).hexdigest(),
+        "processor_preflight_verified": True,
+        "processor_preflight_stdout_sha256": hashlib.sha256(
+            processor.stdout.encode()
+        ).hexdigest(),
+        "processor_preflight_stderr_sha256": hashlib.sha256(
+            processor.stderr.encode()
+        ).hexdigest(),
     }
 
 
