@@ -1,13 +1,13 @@
 {
   "benchmark": "LongMemEval-V2",
   "adapter": "MemPhant packaged REST",
-  "schema_version": 2,
+  "schema_version": 3,
   "upstream_release_lock_sha256": "846c73224c456a981c7812741c33ee948dbdcd8de84a220240e534558fa8cbab",
   "openapi_sha256": "a5bac765d7c4c862a342d95b49049c27d3af57aea9f80af6d3a0a489ac055271",
   "files": {
-    "benchmarks/longmemeval_v2/memphant_memory.py": "0bb2930c76577ef74041f16be5ad115fc178b670faa3d31dbaa9711276b10fd1",
+    "benchmarks/longmemeval_v2/memphant_memory.py": "6efa3353dc2832faeea6f5bbef98cf0d950787d4ff2e56fb63f0c6d0a599d4e0",
     "benchmarks/longmemeval_v2/harness_bootstrap.py": "97b17ebc7091ffd624859ff62b509ab4c7e96586448c7904f208c31ddd8ac8e6",
-    "benchmarks/longmemeval_v2/memphant.memory.json": "71784dc46d3d218695620f7c65336f619f1f41e9197fbed62adf16059d516d08",
+    "benchmarks/longmemeval_v2/memphant.memory.json": "a2fbdbf36101d9e863006121ef84860e496f9d7d11967de96322e58479b0fe29",
     "scripts/materialize_longmemeval_v2_runtime.py": "1af300126f98860db36bccc96d112f8b218d4249c15be354b172cf7faa869344",
     "scripts/run_longmemeval_v2.py": "351209c99e8658541c169cfbedc5da391ffb9b7849fb0728c98f66578519f4c4"
   },
@@ -19,7 +19,7 @@
   "isolation": {
     "unit": "one official question per harness invocation",
     "tenant": "fresh packaged-CLI tenant per Memory instance",
-    "scope": "fresh UUID per Memory instance, enforced by the tenant-admin REST principal and request scope",
+    "scope": "fresh server-bound subject, scope, actor, and agent node per Memory instance",
     "database": "ephemeral migrated scratch database required",
     "shared_haystack_reuse": "rejected by the adapter's single-question invariant"
   },
@@ -35,7 +35,14 @@
     "query_image_content_consumed": false
   },
   "proof": {
-    "per_retain": ["request_sha256", "response_sha256", "episode_id"],
+    "per_retain": [
+      "trajectory_sha256",
+      "canonical_body_sha256",
+      "fragment_resource_id",
+      "fragment_request_sha256",
+      "fragment_response_sha256",
+      "fragment_serialized_request_bytes"
+    ],
     "per_query": [
       "query_sha256",
       "native_query_hash",
@@ -45,8 +52,13 @@
       "trace_sha256",
       "context_sha256"
     ],
-    "per_run": ["server_binary_sha256", "cli_binary_sha256"],
-    "pairing": "query fails unless synchronous reflect consumes every retained state and trace tenant/scope/actor/context/citations exactly match recall"
+    "per_run": [
+      "server_binary_sha256",
+      "cli_binary_sha256",
+      "worker_binary_sha256",
+      "worker_completed_source_count"
+    ],
+    "pairing": "query fails unless the packaged worker compiles every retained resource, trace tenant/scope/actor/context/citations exactly match public recall, and the only schema mutation during recall is one retrieval_trace audit row"
   },
   "execution_matrix": {
     "domains": ["web", "enterprise"],
@@ -58,7 +70,7 @@
   },
   "paid_models_run": false,
   "packaged_fixture_dry_run": {
-    "command": "MEMPHANT_LME_PACKAGED_INTEGRATION=1 MEMPHANT_SCRATCH_ACTIVE=1 bash scripts/with_scratch_db.sh postgres://memphant:memphant@localhost:5432/memphant MEMPHANT_TEST_DATABASE_URL python3 -m pytest tests/test_public_benchmark_adapters.py::test_memphant_memory_tiny_packaged_rest_dry_run -q",
+    "command": "cargo build -p memphant-server -p memphant-cli -p memphant-worker && MEMPHANT_LME_PACKAGED_INTEGRATION=1 MEMPHANT_SCRATCH_ACTIVE=1 bash scripts/with_scratch_db.sh postgres://memphant:memphant@localhost:5432/memphant MEMPHANT_TEST_DATABASE_URL python3 -m pytest tests/test_public_benchmark_adapters.py::test_memphant_memory_tiny_packaged_rest_dry_run -q",
     "result": "1 passed",
     "database_persisted": false
   }

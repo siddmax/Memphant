@@ -161,10 +161,13 @@ def test_memphant_memory_uses_isolated_rest_scope_and_emits_trace_proof(
     monkeypatch.setenv("MEMPHANT_LME_PROOF_DIR", str(tmp_path / "proof"))
     cli_bin = tmp_path / "memphant-cli"
     server_bin = tmp_path / "memphant-server"
+    worker_bin = tmp_path / "memphant-worker"
     cli_bin.write_bytes(b"fixture-cli")
     server_bin.write_bytes(b"fixture-server")
+    worker_bin.write_bytes(b"fixture-worker")
     monkeypatch.setenv("MEMPHANT_CLI_BIN", str(cli_bin))
     monkeypatch.setenv("MEMPHANT_LME_SERVER_BIN", str(server_bin))
+    monkeypatch.setenv("MEMPHANT_LME_WORKER_BIN", str(worker_bin))
     monkeypatch.setenv("MEMPHANT_LME_RUN_ID", "fixture-run")
 
     class Completed:
@@ -184,20 +187,22 @@ def test_memphant_memory_uses_isolated_rest_scope_and_emits_trace_proof(
 
     monkeypatch.setattr(adapter.subprocess, "run", fake_run)
     requests = []
-    episode_count = 0
+    resource_count = 0
 
     def fake_request(method, path, payload=None):
-        nonlocal episode_count
+        nonlocal resource_count
         requests.append((method, path, payload))
-        if path == "/v1/episodes":
-            episode_count += 1
-            return {"episode_id": f"episode-{episode_count}", "enqueued": ["reflect"]}
-        if path == "/v1/reflect":
+        if path.startswith("/v1/context-bindings/"):
             return {
-                "reflect_id": "reflect-1",
-                "episodes_consumed": episode_count,
-                "candidates_created": episode_count,
+                "subject_id": "00000000-0000-0000-0000-000000000201",
+                "scope_id": "00000000-0000-0000-0000-000000000202",
+                "actor_id": "00000000-0000-0000-0000-000000000203",
+                "agent_node_id": "00000000-0000-0000-0000-000000000204",
+                "subject_generation": 0,
             }
+        if path == "/v1/episodes":
+            resource_count += 1
+            return {"resource_id": f"resource-{resource_count}", "enqueued": ["compile"]}
         if path == "/v1/recall":
             return {
                 "trace_id": "00000000-0000-0000-0000-000000000404",
@@ -211,7 +216,7 @@ def test_memphant_memory_uses_isolated_rest_scope_and_emits_trace_proof(
                         "suppression_labels": [],
                     }
                 ],
-                "citations": [{"unit_id": "unit-1", "episode_id": "episode-1"}],
+                "citations": [{"unit_id": "unit-1", "resource_id": "resource-1"}],
                 "candidate_whitelist": ["unit-1"],
                 "abstention": False,
                 "degraded": False,
@@ -234,10 +239,31 @@ def test_memphant_memory_uses_isolated_rest_scope_and_emits_trace_proof(
                     "suppression_labels": [],
                 }
             ],
-            "citations": [{"unit_id": "unit-1", "episode_id": "episode-1"}],
+            "citations": [{"unit_id": "unit-1", "resource_id": "resource-1"}],
         }
 
     monkeypatch.setattr(adapter._JsonClient, "request", lambda self, *a, **k: fake_request(*a, **k))
+    monkeypatch.setattr(
+        adapter,
+        "_drain_worker",
+        lambda worker_bin, database_url, expected: {
+            "completed_sources": expected,
+            "stdout_sha256": "a" * 64,
+        },
+    )
+    schema_snapshots = iter(
+        [
+            {
+                "resource": {"rows": 1, "content_md5": "resource-stable"},
+                "retrieval_trace": {"rows": 0, "content_md5": "trace-before"},
+            },
+            {
+                "resource": {"rows": 1, "content_md5": "resource-stable"},
+                "retrieval_trace": {"rows": 1, "content_md5": "trace-after"},
+            },
+        ]
+    )
+    monkeypatch.setattr(adapter, "_schema_snapshot", lambda database_url: next(schema_snapshots))
     config = json.loads(MEMPHANT_CONFIG.read_text())["memory_params"]
     memory = registry["memphant"](config)
     memory.insert(
@@ -275,9 +301,11 @@ def test_memphant_memory_uses_isolated_rest_scope_and_emits_trace_proof(
 
     assert context == [{"type": "text", "value": "The retained answer evidence."}]
     retain_payloads = [payload for _, path, payload in requests if path == "/v1/episodes"]
-    assert len(retain_payloads) == 2
-    assert all(payload["tenant_id"] == memory.tenant_id for payload in retain_payloads)
-    assert all(payload["scope_id"] == memory.scope_id for payload in retain_payloads)
+    assert len(retain_payloads) == 1
+    assert retain_payloads[0]["scope_id"] == memory.scope_id
+    assert retain_payloads[0]["subject_id"] == memory.context["subject_id"]
+    assert retain_payloads[0]["payload"]["resource"]["kind"] == "document"
+    assert "tenant_id" not in retain_payloads[0]
     assert "GOLD MUST NOT LEAK" not in json.dumps(requests)
     recall = next(payload for _, path, payload in requests if path == "/v1/recall")
     assert recall["limit"] == 20
@@ -287,24 +315,31 @@ def test_memphant_memory_uses_isolated_rest_scope_and_emits_trace_proof(
     assert len(metadata["trace_sha256"]) == len(metadata["context_sha256"]) == 64
     proof = json.loads(next((tmp_path / "proof").glob("*.json")).read_text())
     assert proof["pairing"]["trajectory_count"] == 1
-    assert proof["pairing"]["episode_count"] == 2
+    assert proof["pairing"]["resource_count"] == 1
+    assert proof["pairing"]["worker"]["completed_sources"] == 1
+    assert proof["pairing"]["retains"][0]["fragments"][0]["resource_id"] == "resource-1"
     assert proof["query"]["question_id"] == "question-1"
     assert proof["query"]["trace_sha256"] == metadata["trace_sha256"]
-    assert set(proof["contract"]["binaries"]) == {"server", "cli"}
+    assert proof["recall_mutation_proof"]["changed_tables"] == ["retrieval_trace"]
+    assert proof["public"]["recall_response"]["trace_id"] == metadata["trace_id"]
+    assert proof["public"]["trace"]["id"] == metadata["trace_id"]
+    assert set(proof["contract"]["binaries"]) == {"server", "cli", "worker"}
     assert proof["contract"]["binaries"]["server"]["sha256"] == hashlib.sha256(
         b"fixture-server"
     ).hexdigest()
     assert any("create-tenant" in call for call in cli_calls)
 
 
-def test_memphant_memory_fails_closed_when_reflection_pairing_is_incomplete(
+def test_memphant_memory_fails_closed_when_worker_pairing_is_incomplete(
     monkeypatch, tmp_path
 ):
     adapter, registry = load_memphant_adapter(monkeypatch)
     cli_bin = tmp_path / "cli"
     server_bin = tmp_path / "server"
+    worker_bin = tmp_path / "worker"
     cli_bin.write_bytes(b"fixture-cli")
     server_bin.write_bytes(b"fixture-server")
+    worker_bin.write_bytes(b"fixture-worker")
     for key, value in {
         "MEMPHANT_SCRATCH_ACTIVE": "1",
         "MEMPHANT_TEST_DATABASE_URL": "postgres://fixture",
@@ -312,6 +347,7 @@ def test_memphant_memory_fails_closed_when_reflection_pairing_is_incomplete(
         "MEMPHANT_LME_PROOF_DIR": str(tmp_path),
         "MEMPHANT_CLI_BIN": str(cli_bin),
         "MEMPHANT_LME_SERVER_BIN": str(server_bin),
+        "MEMPHANT_LME_WORKER_BIN": str(worker_bin),
         "MEMPHANT_LME_RUN_ID": "fixture",
     }.items():
         monkeypatch.setenv(key, value)
@@ -320,14 +356,28 @@ def test_memphant_memory_fails_closed_when_reflection_pairing_is_incomplete(
         "_provision_tenant",
         lambda **kwargs: ("00000000-0000-0000-0000-000000000111", "mk_key"),
     )
+    monkeypatch.setattr(
+        adapter,
+        "_provision_context",
+        lambda client, instance_id: {
+            "subject_id": "00000000-0000-0000-0000-000000000201",
+            "scope_id": "00000000-0000-0000-0000-000000000202",
+            "actor_id": "00000000-0000-0000-0000-000000000203",
+            "agent_node_id": "00000000-0000-0000-0000-000000000204",
+            "subject_generation": 0,
+        },
+    )
     memory = registry["memphant"](json.loads(MEMPHANT_CONFIG.read_text())["memory_params"])
     monkeypatch.setattr(
         memory.client,
         "request",
-        lambda method, path, payload=None: (
-            {"episode_id": "episode", "enqueued": ["reflect"]}
-            if path == "/v1/episodes"
-            else {"reflect_id": "reflect", "episodes_consumed": 0, "candidates_created": 0}
+        lambda method, path, payload=None: {"resource_id": "resource", "enqueued": ["compile"]},
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_drain_worker",
+        lambda worker_bin, database_url, expected: (_ for _ in ()).throw(
+            RuntimeError("worker compiled 0 sources, expected 1")
         ),
     )
     memory.insert(
@@ -349,7 +399,7 @@ def test_memphant_memory_fails_closed_when_reflection_pairing_is_incomplete(
     )
     memory.set_query_context(question_id="q", question_item={"answer": "secret"})
 
-    with pytest.raises(RuntimeError, match="reflection pairing incomplete"):
+    with pytest.raises(RuntimeError, match="worker compiled 0 sources, expected 1"):
         memory.query("query")
 
 
@@ -549,6 +599,9 @@ def test_memphant_memory_tiny_packaged_rest_dry_run(monkeypatch, tmp_path):
         monkeypatch.setenv("MEMPHANT_CLI_BIN", str(ROOT / "target/debug/memphant-cli"))
         monkeypatch.setenv(
             "MEMPHANT_LME_SERVER_BIN", str(ROOT / "target/debug/memphant-server")
+        )
+        monkeypatch.setenv(
+            "MEMPHANT_LME_WORKER_BIN", str(ROOT / "target/debug/memphant-worker")
         )
         monkeypatch.setenv("MEMPHANT_LME_RUN_ID", "packaged-dry-run")
         memory = registry["memphant"](

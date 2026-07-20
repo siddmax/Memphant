@@ -574,7 +574,9 @@ impl OpenRouterDeepRecall {
                     ));
                 }
             };
-            if state.observe_route(&turn, &self.config.providers).is_err()
+            if state
+                .observe_route(&turn, &self.config.providers, &self.config.model)
+                .is_err()
                 || state.settle(turn.prompt_tokens, turn.cost_micros).is_err()
             {
                 return Ok(state.result(
@@ -776,11 +778,15 @@ impl LoopState {
         &mut self,
         turn: &ParsedTurn,
         allowed_providers: &[String],
+        expected_model: &str,
     ) -> Result<(), DeepRecallProviderError> {
         if !allowed_providers
             .iter()
             .any(|allowed| normalize_provider(&turn.provider) == normalize_provider(allowed))
         {
+            return Err(DeepRecallProviderError::InvalidOutput);
+        }
+        if turn.model != expected_model {
             return Err(DeepRecallProviderError::InvalidOutput);
         }
         if self
@@ -2077,6 +2083,35 @@ mod tests {
         assert_eq!(result.status, DeepRecallStatus::Partial);
         assert_eq!(result.stop_reason, DeepRecallStopReason::InvalidOutput);
         assert!(result.generation_ids.is_empty());
+        assert!(result.usage.unsettled_spend_micros_upper_bound > 0);
+    }
+
+    #[tokio::test]
+    async fn routed_model_mismatch_is_partial_and_keeps_paid_reservation_unsettled() {
+        let (workspace, _, _) = workspace();
+        let response = sse_response(
+            "gen-wrong-model",
+            vec![json!({
+                "model":"anthropic/claude-opus-5","provider":"Azure",
+                "choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call","function":{"name":"finish","arguments":"{\"source_ids\":[]}"}}]}}],
+                "usage":{"prompt_tokens":10,"completion_tokens":1,"cost":0.00001}
+            })],
+        );
+        let provider = OpenRouterDeepRecall::with_transport(
+            config(),
+            Arc::new(ScriptTransport::new(vec![response])),
+        );
+        let result = provider
+            .gather(DeepRecallProviderRequest {
+                query: "q".into(),
+                workspace,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, DeepRecallStatus::Partial);
+        assert_eq!(result.stop_reason, DeepRecallStopReason::InvalidOutput);
+        assert_eq!(result.generation_ids, vec!["gen-wrong-model"]);
         assert!(result.usage.unsettled_spend_micros_upper_bound > 0);
     }
 

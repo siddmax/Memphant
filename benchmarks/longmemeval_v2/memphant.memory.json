@@ -6,6 +6,7 @@
     "database_url_env": "MEMPHANT_TEST_DATABASE_URL",
     "cli_bin_env": "MEMPHANT_CLI_BIN",
     "server_bin_env": "MEMPHANT_LME_SERVER_BIN",
+    "worker_bin_env": "MEMPHANT_LME_WORKER_BIN",
     "proof_dir_env": "MEMPHANT_LME_PROOF_DIR",
     "run_id_env": "MEMPHANT_LME_RUN_ID",
     "top_k": 20,

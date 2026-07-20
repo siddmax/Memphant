@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "campaign": "p1-t6-exposed-feasibility-n12",
+  "claim_boundary": "A pass authorizes only a separately preregistered exposed confirmation; it is not a leaderboard, SOTA, product-default, ledger, merge, push, or P3-spend claim.",
+  "upstream": {
+    "code_commit": "be15ea6e995462f3391c1a610892df3f67dfa7bd",
+    "dataset_revision": "f152293e235517d504809563c833d7190b8c713b",
+    "questions_sha256": "0a3ae5ebea938c24d7800e1e0b0828e08ae1646f939a53853b2b8cdc08e292b7",
+    "medium_haystack_sha256": "4756d5126347f0d18f045bb6c47b08cb3b23e9db24386cc48a9b2879e7969b59",
+    "tier": "medium"
+  },
+  "selection": {
+    "selector_version": "p1-t6-feasibility-v1",
+    "planning_base_commit": "f2f9d772b5dabbe0d93202d6d5480069c209bbcb",
+    "seed_sha256": "1d5ce2760cf354b45c102bab25c3a31bbff6f96f8a36425480da54473348e4dd",
+    "canonicalization": "UTF-8 json.dumps(selected_rows, sort_keys=True, ensure_ascii=True, separators=(\",\",\":\")); rows sorted (domain, ability, id) with exactly domain, ability, question_type, id",
+    "sha256": "d7762dbaffff7acfe779162d4993c8c09ef0440e3c1a25e0d3408127d73e25fa",
+    "supersedes_underdefined_sha256": "ffe151038e3dc54c8132b58a2d39575db9ee37d0ead8f873afda67a6e35c2bea",
+    "outputs_observed_before_amendment": false,
+    "cases": [
+      {"domain":"enterprise","ability":"dynamic_state","question_type":"dynamic-environment","id":"658fa827"},
+      {"domain":"enterprise","ability":"environment_gotchas","question_type":"errors-gotchas","id":"8e21c6e5"},
+      {"domain":"enterprise","ability":"premise_awareness","question_type":"static-environment-abs","id":"6fdda2fc"},
+      {"domain":"enterprise","ability":"static_state","question_type":"static-environment","id":"19367bc7"},
+      {"domain":"enterprise","ability":"static_state","question_type":"static-environment","id":"aedd338d"},
+      {"domain":"enterprise","ability":"workflow_knowledge","question_type":"procedure","id":"52dd33bb"},
+      {"domain":"web","ability":"dynamic_state","question_type":"dynamic-environment","id":"dae9f7e9"},
+      {"domain":"web","ability":"environment_gotchas","question_type":"errors-gotchas","id":"f2b221fd"},
+      {"domain":"web","ability":"premise_awareness","question_type":"static-environment-abs","id":"21f3228c"},
+      {"domain":"web","ability":"premise_awareness","question_type":"static-environment-abs","id":"b05cf470"},
+      {"domain":"web","ability":"static_state","question_type":"static-environment","id":"2c45ecbb"},
+      {"domain":"web","ability":"workflow_knowledge","question_type":"procedure","id":"86fa86eb"}
+    ]
+  },
+  "acquisition": {
+    "method": "pinned Hugging Face resolve URLs plus pinned GitHub code archive",
+    "files": {
+      "checksums.sha256": "b17a18daa52873f915808502217c3c5fab39d20638544f986401155c9e8d67a6",
+      "questions.jsonl": "0a3ae5ebea938c24d7800e1e0b0828e08ae1646f939a53853b2b8cdc08e292b7",
+      "trajectories.jsonl": "363cec9a8e87aa8d9101ce4e600aadbf7031d674056ebe4f969e8424abc5f3c6",
+      "haystacks/lme_v2_medium.json": "4756d5126347f0d18f045bb6c47b08cb3b23e9db24386cc48a9b2879e7969b59",
+      "question_screenshots/8e21c6e5.png": "abaec4759d3b7d463419012bdec1c91daed23268fb9cd0fa77435380b7c69a86",
+      "question_screenshots/f2b221fd.png": "be85e8d2b5352961620ce63d20a96ab71d495b9a9da73c04a60e6bca644810f4"
+    },
+    "excluded": ["trajectory_screenshots/enterprise_screenshots_base.tar.gz", "trajectory_screenshots/web_screenshots.tar.gz"]
+  },
+  "protocol": {
+    "memory_context_max_tokens": 32768,
+    "accepted_truncations": 0,
+    "reader": {
+      "official_argument": "Qwen/Qwen3.5-9B",
+      "canonical_model": "qwen/qwen3.5-9b-20260310",
+      "provider": "deepinfra",
+      "quantization": "bf16",
+      "provider_policy": {"allow_fallbacks":false,"data_collection":"deny","only":["deepinfra"],"require_parameters":true,"zdr":true},
+      "endpoint_inventory_sha256": "315d9b4a728538f3289e3c464f0deabbc310566900e08180680aea2f5fff4e41",
+      "selected_endpoint_sha256": "d38ef0b2f83fd862ae08cee90ecc435072ae2a4beea7326693cc40dbfcb9c423",
+      "prompt_price_micros_per_million": 100000,
+      "completion_price_micros_per_million": 150000
+    },
+    "judge": {"official_alias":"gpt-5.2","model":"gpt-5.2-2025-12-11","reasoning_effort":"medium","max_completion_tokens":4096,"input_price_micros_per_million":1750000,"cached_input_price_micros_per_million":175000,"output_price_micros_per_million":14000000,"pricing_source":"https://developers.openai.com/api/docs/models/gpt-5.2"},
+    "deep_limits": {"wall_time_ms":120000,"max_tool_iterations":24,"max_context_tokens":96000,"max_spend_micros":300000,"max_completion_tokens":4096},
+    "deep_candidates": {
+      "sonnet": {"requested_alias":"anthropic/claude-sonnet-5","model":"anthropic/claude-sonnet-5-20260630","providers":["azure"],"input_price_micros_per_million":2000000,"output_price_micros_per_million":10000000,"endpoint_metadata_sha256":"6d1c824aa794384092d0994cfc2d5dea99d5e813ae149e25372e4c62993fd05d"},
+      "luna": {"requested_alias":"openai/gpt-5.6-luna","model":"openai/gpt-5.6-luna-20260709","providers":["azure"],"input_price_micros_per_million":1100000,"output_price_micros_per_million":6600000,"endpoint_metadata_sha256":"f8e49de17015db8d57dc5f70fffa1c4ce525f5c13c9816bfdb85047633f2d475"},
+      "sol": {"requested_alias":"openai/gpt-5.6-sol","model":"openai/gpt-5.6-sol-20260709","providers":["azure"],"input_price_micros_per_million":5500000,"output_price_micros_per_million":33000000,"endpoint_metadata_sha256":"e635f8faaed1a67ba7a7c9700135a23704451f5a16157ee896b517e338405fd9"}
+    }
+  },
+  "run_order": {
+    "frozen_before_scoring": true,
+    "outputs_observed": false,
+    "case_order": ["19367bc7","21f3228c","2c45ecbb","52dd33bb","658fa827","6fdda2fc","86fa86eb","8e21c6e5","aedd338d","b05cf470","dae9f7e9","f2b221fd"],
+    "arm_order_per_case": ["fast","sonnet","luna","sol"],
+    "expansion": "case-major Cartesian product; one-based monotonically increasing sequence"
+  },
+  "failure_treatment": "Any unavailable, provider-error, invalid-output, capped, partial, missing/unsettled/unaccounted proof, truncation, security/write failure, or missing pair scores zero and is operationally infeasible; completed billable rows are immutable.",
+  "campaign_spend": {"hard_ceiling_usd":15.0,"deep_max_liability_usd":10.8,"reader_and_judge_reserve_usd":4.2,"reader_and_judge_max_liability_micros_per_row":87500,"stop_before_dispatch_if_remaining_liability_exceeds_reserve":true},
+  "feasibility_predicates": {"complete_pairs":12,"mean_score_delta":"strictly_positive","wins":"greater_than_losses","latency_ms":{"p50_max":45000,"p95_max":90000,"max":90000,"hard_cap_not_reached":true},"settled_cost_usd":{"mean_max":0.10,"p95_max":0.20,"max":0.20,"hidden_or_unsettled":false},"memory_context_truncations":0}
+}

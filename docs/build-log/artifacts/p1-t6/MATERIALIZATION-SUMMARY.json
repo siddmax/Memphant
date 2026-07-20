@@ -1,0 +1,20 @@
+{
+  "canonical_body_bytes": {
+    "max": 12940555,
+    "p95": 2342518
+  },
+  "cases": 12,
+  "fragment_counts": {
+    "max": 14,
+    "total": 7934
+  },
+  "gold_fields_copied_to_memory": [],
+  "materialization_sha256": "35a696fef3a2efc217ed4a3c02eb87f50b8edc6c3439fb649f7c32c07a1f2b59",
+  "serialized_retain_bytes": {
+    "axum_effective_default_limit": 2097152,
+    "campaign_safety_limit": 1572864,
+    "max": 1266859,
+    "p95": 1199104
+  },
+  "unique_trajectories": 1338
+}

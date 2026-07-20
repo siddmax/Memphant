@@ -15,6 +15,7 @@ import re
 import subprocess
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -29,6 +30,7 @@ EXPECTED_PARAMS = {
     "database_url_env",
     "cli_bin_env",
     "server_bin_env",
+    "worker_bin_env",
     "proof_dir_env",
     "run_id_env",
     "top_k",
@@ -40,6 +42,8 @@ EXPECTED_PARAMS = {
 }
 FORBIDDEN_EVALUATION_KEYS = {"answer", "answer_gold", "eval_function", "gold", "reference"}
 TENANT_PATTERN = re.compile(r"tenant_created id=([0-9a-fA-F-]{36})")
+RESOURCE_FRAGMENT_BYTES = 1024 * 1024
+MAX_SERIALIZED_RETAIN_BYTES = 1536 * 1024
 
 
 def _require(condition: bool, message: str) -> None:
@@ -88,10 +92,13 @@ class _JsonClient:
 
     def request(self, method: str, path: str, payload: dict | None = None) -> dict:
         body = None if payload is None else _canonical_json(payload)
+        headers = dict(self.headers)
+        if method != "GET":
+            headers["Idempotency-Key"] = _idempotency_key(method, path, payload)
         request = urllib.request.Request(
             self.base_url + path,
             data=body,
-            headers=self.headers,
+            headers=headers,
             method=method,
         )
         try:
@@ -112,6 +119,13 @@ class _JsonClient:
 
 def _run_cli(command: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, capture_output=True, text=True, check=False)
+
+
+def _idempotency_key(method: str, path: str, payload: object) -> str:
+    digest = hashlib.sha256(
+        method.encode() + b"\0" + path.encode() + b"\0" + _canonical_json(payload)
+    ).hexdigest()
+    return f"lme-v2-{digest}"
 
 
 def _provision_tenant(*, cli_bin: str, database_url: str, name: str) -> tuple[str, str]:
@@ -141,6 +155,22 @@ def _provision_tenant(*, cli_bin: str, database_url: str, name: str) -> tuple[st
     return tenant_id, api_key
 
 
+def _provision_context(client: _JsonClient, instance_id: str) -> dict[str, object]:
+    bound = client.request(
+        "PUT",
+        f"/v1/context-bindings/lme-v2-{instance_id}",
+        {
+            "subject": {"external_ref": f"subject:lme-v2:{instance_id}", "kind": "user"},
+            "actor": {"external_ref": f"actor:lme-v2:{instance_id}", "kind": "system"},
+            "scope": {"external_ref": f"scope:lme-v2:{instance_id}", "kind": "user_root"},
+            "agent_node": {"external_ref": f"agent:lme-v2:{instance_id}"},
+        },
+    )
+    required = {"subject_id", "scope_id", "actor_id", "agent_node_id", "subject_generation"}
+    _require(required <= set(bound), "context binding response is incomplete")
+    return {key: bound[key] for key in sorted(required)}
+
+
 def _validate_memory_params(memory_params: dict[str, object]) -> dict[str, object]:
     _require(set(memory_params) == EXPECTED_PARAMS, "memphant memory_params contract drift")
     _require(memory_params["schema_version"] == 2, "unsupported memphant adapter schema")
@@ -153,7 +183,7 @@ def _validate_memory_params(memory_params: dict[str, object]) -> dict[str, objec
         and memory_params["budget_tokens"] == 32768,
         "LongMemEval-V2 budget_tokens must remain fixed at 32768",
     )
-    _require(memory_params["mode"] == "deep", "recall mode must remain deep")
+    _require(memory_params["mode"] in {"fast", "deep"}, "recall mode must be fast or deep")
     _require(memory_params["source_trust"] == "trusted_system", "source trust contract drift")
     return dict(memory_params)
 
@@ -188,6 +218,121 @@ def _state_body(trajectory: dict[str, object], state: dict[str, object], index: 
     return "\n".join(lines)
 
 
+def _trajectory_body(trajectory: dict[str, object]) -> str:
+    states = trajectory["states"]
+    _require(isinstance(states, list) and states, "trajectory states are missing")
+    return "\n\n---\n\n".join(
+        _state_body(trajectory, state, index)
+        for index, state in enumerate(states)
+        if isinstance(state, dict)
+    )
+
+
+def _pack_lines(value: str, max_bytes: int) -> list[str]:
+    packed: list[str] = []
+    current = ""
+    for line in value.splitlines(keepends=True):
+        _require(len(line.encode()) <= max_bytes, "single trajectory line exceeds fragment limit")
+        if current and len((current + line).encode()) > max_bytes:
+            packed.append(current)
+            current = ""
+        current += line
+    if current:
+        packed.append(current)
+    return packed
+
+
+def _trajectory_fragments(
+    trajectory: dict[str, object], max_bytes: int = RESOURCE_FRAGMENT_BYTES
+) -> list[str]:
+    states = trajectory["states"]
+    _require(isinstance(states, list) and states, "trajectory states are missing")
+    blocks = [_state_body(trajectory, state, index) for index, state in enumerate(states)]
+    fragments: list[str] = []
+    current = ""
+    for block in blocks:
+        if len(block.encode()) > max_bytes:
+            if current:
+                fragments.append(current)
+                current = ""
+            fragments.extend(_pack_lines(block, max_bytes))
+            continue
+        candidate = block if not current else current + "\n\n---\n\n" + block
+        if current and len(candidate.encode()) > max_bytes:
+            fragments.append(current)
+            current = block
+        else:
+            current = candidate
+    if current:
+        fragments.append(current)
+    return fragments
+
+
+def _drain_worker(worker_bin: str, database_url: str, expected: int) -> dict[str, object]:
+    environment = dict(os.environ)
+    environment.pop("DATABASE_URL", None)
+    environment.update(
+        {
+            "MEMPHANT_WORKER_DATABASE_URL": database_url,
+            "MEMPHANT_WORKER_DRAIN": "1",
+            "MEMPHANT_RESOURCE_CHUNKS": "on",
+            "MEMPHANT_STRUCTURED_STATE": "off",
+        }
+    )
+    completed = subprocess.run(
+        [worker_bin], env=environment, capture_output=True, text=True, check=False
+    )
+    _require(completed.returncode == 0, f"worker drain failed: {completed.stderr.strip()}")
+    match = re.search(r"drain completed=(\d+)", completed.stdout)
+    _require(match is not None, "worker drain omitted completed count")
+    count = int(match.group(1))
+    _require(count == expected, f"worker compiled {count} sources, expected {expected}")
+    return {"completed_sources": count, "stdout_sha256": hashlib.sha256(completed.stdout.encode()).hexdigest()}
+
+
+def _schema_snapshot(database_url: str) -> dict[str, dict[str, object]]:
+    tables = subprocess.run(
+        [
+            "psql", database_url, "-At", "-c",
+            "select tablename from pg_tables where schemaname='memphant' order by tablename",
+        ],
+        capture_output=True, text=True, check=True,
+    ).stdout.splitlines()
+    snapshot: dict[str, dict[str, object]] = {}
+    for table in tables:
+        _require(re.fullmatch(r"[a-z0-9_]+", table) is not None, "unsafe table name")
+        statement = (
+            f'SELECT count(*), coalesce(md5(string_agg(md5(row_to_json(t)::text), \'\' '
+            f'ORDER BY md5(row_to_json(t)::text))), md5(\'\')) FROM memphant."{table}" t'
+        )
+        result = subprocess.run(
+            ["psql", database_url, "-At", "-F", "\t", "-c", statement],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip().split("\t")
+        _require(len(result) == 2, f"schema snapshot failed for {table}")
+        snapshot[table] = {"rows": int(result[0]), "content_md5": result[1]}
+    return snapshot
+
+
+def _prove_recall_mutations(
+    before: dict[str, dict[str, object]], after: dict[str, dict[str, object]]
+) -> dict[str, object]:
+    _require(set(before) == set(after), "memphant schema table set changed during recall")
+    changed = sorted(table for table in before if before[table] != after[table])
+    _require(changed == ["retrieval_trace"], f"recall mutated non-audit tables: {changed}")
+    _require(
+        after["retrieval_trace"]["rows"] == before["retrieval_trace"]["rows"] + 1,
+        "recall did not add exactly one audit trace",
+    )
+    return {
+        "before": before,
+        "after": after,
+        "changed_tables": changed,
+        "allowed_audit_rows_added": 1,
+        "corpus_policy_job_tables_unchanged": True,
+    }
+
+
 def _atomic_write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
@@ -214,9 +359,11 @@ class MemphantMemory(Memory):
         database_url = _required_env(self.params["database_url_env"])
         cli_bin = _required_env(self.params["cli_bin_env"])
         server_bin = _required_env(self.params["server_bin_env"])
+        worker_bin = _required_env(self.params["worker_bin_env"])
         self.binaries = {
             "server": _binary_fingerprint(server_bin),
             "cli": _binary_fingerprint(cli_bin),
+            "worker": _binary_fingerprint(worker_bin),
         }
         self.proof_dir = Path(_required_env(self.params["proof_dir_env"])).resolve()
         run_id = _required_env(self.params["run_id_env"])
@@ -226,13 +373,17 @@ class MemphantMemory(Memory):
             database_url=database_url,
             name=f"lme-v2-{run_id[:32]}-{instance_id[:12]}",
         )
-        self.scope_id = str(uuid.uuid4())
-        self.actor_id = str(uuid.uuid4())
         self.client = _JsonClient(server_url, api_key)
+        self.context = _provision_context(self.client, instance_id)
+        self.scope_id = self.context["scope_id"]
+        self.actor_id = self.context["actor_id"]
+        self.worker_bin = worker_bin
+        self.database_url = database_url
         self.instance_id = instance_id
         self.inserted_trajectory_ids: list[str] = []
         self.retain_proofs: list[dict[str, object]] = []
-        self.episode_count = 0
+        self.worker_proof: dict[str, object] | None = None
+        self.resource_count = 0
         self._queried_question_id: str | None = None
         self._last_query_proof: dict[str, object] | None = None
 
@@ -250,37 +401,61 @@ class MemphantMemory(Memory):
         _require(isinstance(states, list) and states, f"trajectory states are missing: {trajectory_id}")
         _require(outcome is None or isinstance(outcome, str), "trajectory outcome is invalid")
 
-        state_proofs: list[dict[str, str]] = []
-        for index, state in enumerate(states):
-            _require(isinstance(state, dict), f"trajectory state {index} must be an object")
-            body = _state_body(trajectory, state, index)
+        _require(all(isinstance(state, dict) for state in states), "trajectory states are invalid")
+        body = _trajectory_body(trajectory)
+        fragments = _trajectory_fragments(trajectory)
+        fragment_proofs: list[dict[str, object]] = []
+        for fragment_index, fragment in enumerate(fragments, 1):
+            fragment_body = (
+                f"Trajectory fragment {fragment_index}/{len(fragments)}\n\n{fragment}"
+            )
             payload = {
-                "tenant_id": self.tenant_id,
-                "scope_id": self.scope_id,
-                "actor_id": self.actor_id,
-                "source_kind": self.params["source_kind"],
-                "source_trust": self.params["source_trust"],
-                "subject_hint": f"trajectory {trajectory_id} step {index:04d}",
-                "body": body,
-                "compiler_version": self.params["compiler_version"],
+                **self.context,
+                "source_ref": f"lme-v2:trajectory:{trajectory_id}:{fragment_index:04d}",
+                "observed_at": "2026-05-17T00:00:00Z",
+                "payload": {
+                    "resource": {
+                        "uri": f"lme-v2://trajectory/{trajectory_id}/{fragment_index:04d}",
+                        "mime_type": "text/markdown",
+                        "content_hash": "sha256:" + hashlib.sha256(fragment_body.encode()).hexdigest(),
+                        "kind": "document",
+                        "revision": trajectory_id,
+                        "body": fragment_body,
+                    }
+                },
             }
+            serialized_bytes = len(_canonical_json(payload))
+            _require(
+                serialized_bytes <= MAX_SERIALIZED_RETAIN_BYTES,
+                f"serialized retain exceeds safe Axum body budget: {trajectory_id}",
+            )
             response = self.client.request("POST", "/v1/episodes", payload)
-            episode_id = response.get("episode_id")
-            _require(isinstance(episode_id, str) and episode_id, "retain omitted episode_id")
-            state_proofs.append(
+            resource_id = response.get("resource_id")
+            _require(isinstance(resource_id, str) and resource_id, "retain omitted resource_id")
+            fragment_proofs.append(
                 {
-                    "episode_id": episode_id,
+                    "fragment_index": fragment_index,
+                    "resource_id": resource_id,
+                    "body_bytes": len(fragment_body.encode()),
+                    "serialized_request_bytes": serialized_bytes,
+                    "resource_body_sha256": hashlib.sha256(fragment_body.encode()).hexdigest(),
                     "request_sha256": _sha256_json(payload),
+                    "idempotency_key_sha256": hashlib.sha256(
+                        _idempotency_key("POST", "/v1/episodes", payload).encode()
+                    ).hexdigest(),
                     "response_sha256": _sha256_json(response),
                 }
             )
-            self.episode_count += 1
+            self.resource_count += 1
         self.inserted_trajectory_ids.append(trajectory_id)
         self.retain_proofs.append(
             {
                 "trajectory_id": trajectory_id,
                 "trajectory_sha256": _sha256_json(trajectory),
-                "states": state_proofs,
+                "state_count": len(states),
+                "canonical_body_bytes": len(body.encode()),
+                "canonical_body_sha256": hashlib.sha256(body.encode()).hexdigest(),
+                "fragments": fragment_proofs,
             }
         )
 
@@ -293,21 +468,12 @@ class MemphantMemory(Memory):
         _require(self._queried_question_id is None, "MemPhant instance cannot serve multiple questions")
         self._queried_question_id = question_id
 
-        reflect_payload = {
-            "tenant_id": self.tenant_id,
-            "scope_id": self.scope_id,
-            "actor_id": self.actor_id,
-            "compiler_version": self.params["compiler_version"],
-        }
-        reflected = self.client.request("POST", "/v1/reflect", reflect_payload)
-        _require(
-            reflected.get("episodes_consumed") == self.episode_count,
-            "reflection pairing incomplete: not every retained state was consumed",
+        self.worker_proof = _drain_worker(
+            self.worker_bin, self.database_url, self.resource_count
         )
+        before_recall = _schema_snapshot(self.database_url)
         recall_payload = {
-            "tenant_id": self.tenant_id,
-            "scope_id": self.scope_id,
-            "actor_id": self.actor_id,
+            **self.context,
             "query": query,
             "limit": self.params["top_k"],
             "budget_tokens": self.params["budget_tokens"],
@@ -324,7 +490,11 @@ class MemphantMemory(Memory):
             all(isinstance(item, dict) and isinstance(item.get("body"), str) for item in items),
             "recall returned malformed context items",
         )
-        trace = self.client.request("GET", f"/v1/traces/{trace_id}")
+        trace_query = urllib.parse.urlencode(self.context)
+        trace = self.client.request("GET", f"/v1/traces/{trace_id}?{trace_query}")
+        mutation_proof = _prove_recall_mutations(
+            before_recall, _schema_snapshot(self.database_url)
+        )
         _require(trace.get("id") == trace_id, "trace id pairing mismatch")
         _require(trace.get("tenant_id") == self.tenant_id, "trace tenant pairing mismatch")
         _require(trace.get("scope_id") == self.scope_id, "trace scope pairing mismatch")
@@ -364,11 +534,12 @@ class MemphantMemory(Memory):
             },
             "pairing": {
                 "trajectory_count": len(self.inserted_trajectory_ids),
-                "episode_count": self.episode_count,
-                "reflect_request_sha256": _sha256_json(reflect_payload),
-                "reflect_response_sha256": _sha256_json(reflected),
+                "resource_count": self.resource_count,
+                "worker": self.worker_proof,
                 "retains": self.retain_proofs,
             },
+            "recall_mutation_proof": mutation_proof,
+            "public": {"recall_response": recalled, "trace": trace},
             "query": query_proof,
         }
         proof_path = self.proof_dir / f"{question_id}.{self.instance_id}.json"
