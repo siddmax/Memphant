@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from decimal import Decimal, ROUND_CEILING
 import hashlib
+import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 import json
@@ -128,6 +130,21 @@ def _clean_environment(extra: dict[str, str] | None = None) -> dict[str, str]:
     }
     clean.update(extra or {})
     return clean
+
+
+@contextmanager
+def _temporary_environment(values: dict[str, str]):
+    """Apply adapter-only settings and restore the caller environment exactly."""
+    previous = {key: os.environ.get(key) for key in values}
+    os.environ.update(values)
+    try:
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def _resolve_execution_paths(
@@ -438,6 +455,11 @@ def verify_campaign_manifest(manifest: dict) -> dict[str, int]:
     require(manifest["protocol"]["deep_prompt_sha256"]
             == sha256_file(ROOT / "config/deep-recall-v1.txt"), "Deep prompt lock drift")
     reader = manifest["protocol"]["reader"]
+    require(reader["upstream_timeout_seconds"] == 600,
+            "reader upstream timeout drift")
+    require(reader["receipt_reconciliation_attempts"] == 60
+            and reader["receipt_reconciliation_delay_seconds"] == 1,
+            "reader receipt reconciliation drift")
     require(reader["provider_policy"] == {
         "only": ["deepinfra"], "allow_fallbacks": False,
         "require_parameters": True, "data_collection": "deny", "zdr": True,
@@ -460,6 +482,57 @@ def write_memory_config(base: dict, mode: str, path: Path) -> dict:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return value
+
+
+def _context_contract_audit(
+    memory_context: list[dict], public: dict, exact_reader_tokens: int, budget_tokens: int
+) -> dict[str, object]:
+    require(bool(memory_context), "context preflight requires non-empty memory context")
+    require(exact_reader_tokens > 0, "context preflight requires positive reader tokens")
+    require(
+        exact_reader_tokens <= budget_tokens,
+        "context preflight exceeded the exact reader token budget",
+    )
+    runtime_estimate = (public.get("trace") or {}).get("token_estimate")
+    require(isinstance(runtime_estimate, int) and runtime_estimate > 0,
+            "context preflight lacks positive runtime token estimate")
+    require(runtime_estimate <= budget_tokens,
+            "runtime token estimate exceeded the request budget")
+    return {
+        "context_items": len(memory_context),
+        "runtime_token_estimate": runtime_estimate,
+        "exact_reader_tokens": exact_reader_tokens,
+        "budget_tokens": budget_tokens,
+        "nonempty": True,
+        "untruncated": True,
+    }
+
+
+def _load_selected_trajectories(path: Path, selected_ids: list[str]) -> dict[str, dict]:
+    """Load only the locked case from the 1+ GiB upstream JSONL corpus."""
+    wanted = set(selected_ids)
+    require(len(wanted) == len(selected_ids), "context preflight haystack contains duplicates")
+    trajectories: dict[str, dict] = {}
+    prefix = b'{"id":"'
+    with path.open("rb") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            require(line.startswith(prefix), "trajectory JSONL id is not the first field")
+            id_end = line.find(b'"', len(prefix))
+            require(id_end > len(prefix), "trajectory JSONL id is malformed")
+            trajectory_id = line[len(prefix):id_end].decode("utf-8")
+            if trajectory_id not in wanted:
+                continue
+            require(trajectory_id not in trajectories,
+                    f"duplicate selected trajectory: {trajectory_id}")
+            trajectory = json.loads(line)
+            require(trajectory.get("id") == trajectory_id,
+                    "trajectory prefix and decoded id disagree")
+            trajectories[trajectory_id] = trajectory
+    require(set(trajectories) == wanted,
+            "context preflight selected trajectories are incomplete")
+    return trajectories
 
 
 def require_new_row_dir(path: Path) -> None:
@@ -930,45 +1003,68 @@ def _reader_proxy(api_key: str, audit_path: Path, manifest: dict) -> tuple[Threa
                     method="POST",
                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                 )
-                with _direct_opener().open(upstream_request, timeout=300) as response:
-                    response_body = response.read()
-                    status = response.status
-                parsed = json.loads(response_body)
-                require(parsed.get("model") in contract["settlement_models"],
-                        "reader response model drift")
-                generation_id = parsed.get("id")
-                audit.update({"generation_id": generation_id,
-                              "response_sha256": hashlib.sha256(response_body).hexdigest()})
                 try:
-                    require(isinstance(generation_id, str) and generation_id, "reader omitted generation id")
-                    settlement = None
-                    for _ in range(5):
-                        try:
-                            settlement = _json_url(
-                                "https://openrouter.ai/api/v1/generation?id="
-                                + urllib.parse.quote(generation_id), api_key,
-                            )["data"]
-                            break
-                        except Exception:
-                            time.sleep(1)
-                    require(isinstance(settlement, dict), "reader settlement unresolved")
-                    require(settlement.get("provider_name") == "DeepInfra", "reader route drift")
-                    model = str(settlement.get("model", "")).lower()
-                    require(model in {item.lower() for item in contract["settlement_models"]},
-                            "reader settled model drift")
-                    require(all(settlement.get(field) is not None for field in ("tokens_prompt", "tokens_completion", "total_cost")),
-                            "reader settlement incomplete")
+                    with _direct_opener().open(
+                        upstream_request, timeout=contract["upstream_timeout_seconds"]
+                    ) as response:
+                        response_body = response.read()
+                        status = response.status
+                except urllib.error.HTTPError as error:
+                    response_body = error.read()
+                    status = error.code
+                    try:
+                        parsed_error = json.loads(response_body)
+                    except (TypeError, ValueError):
+                        parsed_error = None
                     audit.update({
-                        "audit_status": "settled", "provider_name": settlement["provider_name"],
-                        "model": settlement.get("model"), "tokens_prompt": settlement["tokens_prompt"],
-                        "tokens_completion": settlement["tokens_completion"], "total_cost": settlement["total_cost"],
+                        "audit_status": "rejected",
+                        "upstream_status": status,
+                        "upstream_error": (
+                            parsed_error.get("error")
+                            if isinstance(parsed_error, dict)
+                            else {"type": "non_json_upstream_rejection"}
+                        ),
+                        "response_sha256": hashlib.sha256(response_body).hexdigest(),
                     })
-                except Exception as error:
+                    atomic_write_json(audit_path, audit)
+                except (
+                    TimeoutError,
+                    urllib.error.URLError,
+                    ConnectionError,
+                    http.client.HTTPException,
+                ):
+                    status = 504
+                    response_body = canonical_bytes({"error": {
+                        "message": "reader upstream transport outcome is unresolved",
+                        "type": "reader_route_transport",
+                    }})
                     audit.update({
-                        "audit_status": "invalid",
-                        "audit_error": "reader_generation_receipt_invalid",
+                        "audit_status": "transport_unknown",
+                        "audit_error": "reader_upstream_transport_failure",
+                        "response_sha256": hashlib.sha256(response_body).hexdigest(),
                     })
-                atomic_write_json(audit_path, audit)
+                    atomic_write_json(audit_path, audit)
+                else:
+                    try:
+                        parsed = json.loads(response_body)
+                        require(parsed.get("model") in contract["settlement_models"],
+                                "reader response model drift")
+                        generation_id = parsed.get("id")
+                        require(isinstance(generation_id, str) and generation_id,
+                                "reader omitted generation id")
+                    except Exception:
+                        audit.update({
+                            "audit_status": "invalid",
+                            "audit_error": "reader_response_contract_invalid",
+                            "response_sha256": hashlib.sha256(response_body).hexdigest(),
+                        })
+                    else:
+                        audit.update({
+                            "audit_status": "receipt_pending",
+                            "generation_id": generation_id,
+                            "response_sha256": hashlib.sha256(response_body).hexdigest(),
+                        })
+                    atomic_write_json(audit_path, audit)
             except Exception:
                 if response_body is None:
                     response_body = canonical_bytes({"error": {
@@ -984,6 +1080,86 @@ def _reader_proxy(api_key: str, audit_path: Path, manifest: dict) -> tuple[Threa
     server = ThreadingHTTPServer(("127.0.0.1", _free_port()), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, f"http://127.0.0.1:{server.server_port}"
+
+
+def _reconcile_reader_receipt(
+    api_key: str,
+    audit_path: Path,
+    manifest: dict,
+    *,
+    attempts: int | None = None,
+    delay_seconds: int | None = None,
+) -> dict:
+    audit = json.loads(audit_path.read_text())
+    if audit.get("audit_status") != "receipt_pending":
+        return audit
+    generation_id = audit.get("generation_id")
+    require(isinstance(generation_id, str) and generation_id,
+            "pending reader receipt lacks generation id")
+    contract = manifest["protocol"]["reader"]
+    attempt_limit = (
+        attempts if attempts is not None else int(contract["receipt_reconciliation_attempts"])
+    )
+    delay = delay_seconds if delay_seconds is not None else int(
+        contract["receipt_reconciliation_delay_seconds"]
+    )
+    require(attempt_limit > 0 and delay >= 0, "invalid reader reconciliation bounds")
+    allowed_models = {item.lower() for item in contract["settlement_models"]}
+    for attempt in range(1, attempt_limit + 1):
+        settlement = None
+        try:
+            candidate = _json_url(
+                "https://openrouter.ai/api/v1/generation?id="
+                + urllib.parse.quote(generation_id),
+                api_key,
+            ).get("data")
+            if isinstance(candidate, dict):
+                settlement = candidate
+        except Exception:
+            pass
+        if settlement is not None:
+            provider = settlement.get("provider_name")
+            model = str(settlement.get("model", "")).lower()
+            if provider is not None and provider != "DeepInfra":
+                audit.update({
+                    "audit_status": "invalid",
+                    "audit_error": "reader_settled_provider_drift",
+                    "receipt_attempts": attempt,
+                })
+                atomic_write_json(audit_path, audit)
+                return audit
+            if model and model not in allowed_models:
+                audit.update({
+                    "audit_status": "invalid",
+                    "audit_error": "reader_settled_model_drift",
+                    "receipt_attempts": attempt,
+                })
+                atomic_write_json(audit_path, audit)
+                return audit
+            fields = ("tokens_prompt", "tokens_completion", "total_cost")
+            if provider == "DeepInfra" and model and all(
+                settlement.get(field) is not None for field in fields
+            ):
+                audit.update({
+                    "audit_status": "settled",
+                    "provider_name": settlement["provider_name"],
+                    "model": settlement["model"],
+                    "tokens_prompt": settlement["tokens_prompt"],
+                    "tokens_completion": settlement["tokens_completion"],
+                    "total_cost": settlement["total_cost"],
+                    "receipt_attempts": attempt,
+                })
+                atomic_write_json(audit_path, audit)
+                return audit
+        if attempt < attempt_limit:
+            time.sleep(delay)
+    audit.update({
+        "audit_status": "unresolved",
+        "audit_error": "reader_generation_receipt_unresolved",
+        "receipt_attempts": attempt_limit,
+    })
+    atomic_write_json(audit_path, audit)
+    return audit
 
 
 def _judge_proxy(api_key: str, audit_dir: Path, manifest: dict) -> tuple[ThreadingHTTPServer, str]:
@@ -1423,6 +1599,165 @@ def _run_logged_harness(
         )
 
 
+def run_context_preflight(
+    directory: Path, materialized: Path, output: Path, manifest: dict
+) -> dict[str, object]:
+    directory, materialized, output = _resolve_execution_paths(
+        directory, materialized, output
+    )
+    require(os.environ.get("MEMPHANT_SCRATCH_ACTIVE") == "1",
+            "context preflight requires scratch database")
+    database_url = os.environ.get("MEMPHANT_TEST_DATABASE_URL", "")
+    require(database_url, "context preflight scratch database URL missing")
+    require(not os.environ.get("OPENROUTER_API_KEY") and not os.environ.get("OPENAI_API_KEY"),
+            "context preflight forbids external model credentials")
+    require(not output.exists(), "context preflight output must be new")
+    output.mkdir(parents=True)
+    proof_dir = output / "memory-proofs"
+    proof_dir.mkdir()
+    first_case_id = manifest["run_order"]["case_order"][0]
+    require(first_case_id == "19367bc7", "context preflight first case drift")
+    case_dir = materialized / first_case_id
+    questions = json.loads((case_dir / "questions.json").read_text())
+    haystacks = json.loads((case_dir / "haystack.json").read_text())
+    require(isinstance(questions, list) and len(questions) == 1,
+            "context preflight requires one question")
+    question = questions[0]
+    require(question.get("id") == first_case_id, "context preflight question drift")
+    question_text = question.get("question")
+    require(isinstance(question_text, str) and question_text,
+            "context preflight question text missing")
+    selected_ids = haystacks.get(first_case_id)
+    require(isinstance(selected_ids, list) and len(selected_ids) == 500,
+            "context preflight haystack drift")
+    trajectories = _load_selected_trajectories(
+        directory / "data/trajectories.jsonl", selected_ids
+    )
+
+    binaries = {name: _binary_path(name) for name in ("server", "worker", "cli")}
+    server_port = _free_port()
+    server_url = f"http://127.0.0.1:{server_port}"
+    server_env = _clean_environment({
+        "MEMPHANT_APP_DATABASE_URL": database_url,
+        "MEMPHANT_AUTHN_DATABASE_URL": database_url,
+        "MEMPHANT_BIND": f"127.0.0.1:{server_port}",
+        "MEMPHANT_RESOURCE_CHUNKS": "on",
+        "MEMPHANT_STRUCTURED_STATE": "off",
+        "MEMPHANT_DEEP": "off",
+    })
+    server_stdout = (output / "server.stdout").open("wb")
+    server_stderr = (output / "server.stderr").open("wb")
+    server = subprocess.Popen(
+        [str(binaries["server"])],
+        env=server_env,
+        stdout=server_stdout,
+        stderr=server_stderr,
+    )
+    server_stdout.close()
+    server_stderr.close()
+    server_stopped = False
+    try:
+        _wait_health(server_url, server)
+        adapter_environment = {
+            "MEMPHANT_LME_SERVER_URL": server_url,
+            "MEMPHANT_CLI_BIN": str(binaries["cli"]),
+            "MEMPHANT_LME_SERVER_BIN": str(binaries["server"]),
+            "MEMPHANT_LME_WORKER_BIN": str(binaries["worker"]),
+            "MEMPHANT_LME_PROOF_DIR": str(proof_dir),
+            "MEMPHANT_LME_RUN_ID": "p1-t6-context-preflight",
+            "HF_HUB_OFFLINE": "1",
+            "TRANSFORMERS_OFFLINE": "1",
+        }
+        official_path = str(directory / "official")
+        adapter_path = str(ROOT / "benchmarks/longmemeval_v2")
+        for path in (adapter_path, official_path):
+            if path not in sys.path:
+                sys.path.insert(0, path)
+        import memphant_memory
+        from evaluation.harness import count_memory_context_tokens
+
+        with _temporary_environment(adapter_environment):
+            memory_config = json.loads((case_dir / "memory.fast.json").read_text())
+            memory = memphant_memory.MemphantMemory(memory_config["memory_params"])
+            insert_started = time.perf_counter()
+            for trajectory_id in selected_ids:
+                memory.insert(trajectories[trajectory_id])
+            insert_ms = int(round((time.perf_counter() - insert_started) * 1000))
+            memory.set_query_context(question_id=first_case_id)
+            query_started = time.perf_counter()
+            memory_context = memory.query(question_text)
+            query_ms = int(round((time.perf_counter() - query_started) * 1000))
+            metadata = memory.post_query_hook(
+                query=question_text,
+                query_image=None,
+                memory_context=memory_context,
+            )
+            require(all(item.get("type") == "text" for item in memory_context),
+                    "context preflight unexpectedly returned image context")
+            exact_tokens = count_memory_context_tokens(
+                memory_context, [None] * len(memory_context)
+            )
+        require(isinstance(metadata, dict), "context preflight query metadata missing")
+        memory_paths = list(proof_dir.glob("*.json"))
+        require(len(memory_paths) == 1, "context preflight requires one memory proof")
+        memory_proof = json.loads(memory_paths[0].read_text())
+        contract_audit = _context_contract_audit(
+            memory_context,
+            memory_proof["public"],
+            exact_tokens,
+            int(memory_config["memory_params"]["budget_tokens"]),
+        )
+        queue = subprocess.run(
+            [
+                "psql", database_url, "-At", "-F", "\t", "-c",
+                "select count(*) filter (where state in ('queued','running')), "
+                "count(*) filter (where state = 'dead') from memphant.job_state",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip().split("\t")
+        require(queue == ["0", "0"], "context preflight left pending or dead jobs")
+        _terminate_and_reap(server)
+        server_stopped = True
+        proof = {
+            "schema_version": 1,
+            "classification": "no_model_release_exact_context_authorization",
+            "git_commit": subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=ROOT,
+                capture_output=True, text=True, check=True,
+            ).stdout.strip(),
+            "binary_profile": PRODUCTION_BINARY_PROFILE,
+            "question_id": first_case_id,
+            "trajectory_count": len(selected_ids),
+            "resource_count": memory.resource_count,
+            "timing_ms": {"insert": insert_ms, "worker_and_recall": query_ms},
+            "context_contract": contract_audit,
+            "worker": memory.worker_proof,
+            "post_recall": {"pending_jobs": 0, "dead_jobs": 0},
+            "binaries": memory.binaries,
+            "artifacts": {
+                "memory_proof_sha256": sha256_file(memory_paths[0]),
+                "server_stdout_sha256": sha256_file(output / "server.stdout"),
+                "server_stderr_sha256": sha256_file(output / "server.stderr"),
+            },
+            "external_dispatch": {
+                "reader_endpoint_configured": False,
+                "judge_endpoint_configured": False,
+                "reader_key_configured": False,
+                "judge_key_configured": False,
+                "deep_enabled": False,
+            },
+            "query_metadata": metadata,
+        }
+        atomic_write_json(output / "PROOF.json", proof)
+        return proof
+    finally:
+        if not server_stopped:
+            _terminate_and_reap(server)
+        _redact_secrets(output, [database_url])
+
+
 def run_row(directory: Path, materialized: Path, output: Path, row: dict, manifest: dict) -> dict:
     directory, materialized, output = _resolve_execution_paths(
         directory, materialized, output
@@ -1531,6 +1866,11 @@ def run_row(directory: Path, materialized: Path, output: Path, row: dict, manife
         _redact_secrets(
             row_dir,
             _row_secret_values(openrouter_key, openai_key, database_url),
+        )
+    reader_audit_path = row_dir / "reader-route.json"
+    if reader_audit_path.is_file():
+        _reconcile_reader_receipt(
+            openrouter_key, reader_audit_path, manifest
         )
     _archive_deep_generation_receipts(row_dir, row, manifest, openrouter_key)
     _redact_secrets(
@@ -1969,7 +2309,13 @@ def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("verify-selection", "acquire", "materialize", "preflight", "run", "aggregate", "_run-row"))
+    parser.add_argument(
+        "command",
+        choices=(
+            "verify-selection", "acquire", "materialize", "preflight", "run",
+            "aggregate", "_context-preflight", "_run-row",
+        ),
+    )
     parser.add_argument("--directory", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--questions", type=Path)
@@ -1985,6 +2331,12 @@ def main() -> int:
                     "questions source hash drift")
             require(select_cases(rows) == manifest["selection"]["cases"], "live selection drift")
         audit: object = verify_campaign_manifest(manifest)
+    elif args.command == "_context-preflight":
+        require(args.directory and args.output and args.materialized,
+                "_context-preflight requires directory, output, and materialized")
+        audit = run_context_preflight(
+            args.directory, args.materialized, args.output, manifest
+        )
     elif args.command == "_run-row":
         require(args.directory and args.output and args.materialized and args.row_id,
                 "_run-row requires directory, output, materialized, and row-id")
@@ -2011,7 +2363,10 @@ def main() -> int:
             require(args.output is not None, "preflight requires --output")
             audit = preflight(args.directory, args.output, manifest)
     envelope = {"verified": True, "audit": audit}
-    if args.command in {"verify-selection", "acquire", "materialize", "preflight"}:
+    if args.command in {
+        "verify-selection", "acquire", "materialize", "preflight",
+        "_context-preflight",
+    }:
         envelope["paid_calls"] = 0
     print(json.dumps(envelope, sort_keys=True))
     return 0

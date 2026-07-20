@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import http.client
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -218,6 +219,59 @@ def test_percentiles_use_preregistered_nearest_rank_for_n12() -> None:
     assert campaign._percentile(values, 0.95) == 12
 
 
+def test_context_preflight_contract_rejects_empty_or_exact_token_overflow() -> None:
+    campaign = _load()
+    public = {"trace": {"token_estimate": 30_000}}
+    with pytest.raises(RuntimeError, match="non-empty memory context"):
+        campaign._context_contract_audit([], public, 0, 32_768)
+    context = [{"type": "text", "value": "bounded evidence"}]
+    with pytest.raises(RuntimeError, match="exact reader token budget"):
+        campaign._context_contract_audit(context, public, 32_769, 32_768)
+    audit = campaign._context_contract_audit(context, public, 31_000, 32_768)
+    assert audit == {
+        "context_items": 1,
+        "runtime_token_estimate": 30_000,
+        "exact_reader_tokens": 31_000,
+        "budget_tokens": 32_768,
+        "nonempty": True,
+        "untruncated": True,
+    }
+
+
+def test_context_preflight_streams_only_selected_trajectories(tmp_path: Path) -> None:
+    campaign = _load()
+    source = tmp_path / "trajectories.jsonl"
+    source.write_text(
+        '\n'.join(json.dumps({"id": value, "payload": value * 10}, separators=(",", ":"))
+                  for value in ("ignored", "wanted-b", "wanted-a")) + '\n'
+    )
+    selected = campaign._load_selected_trajectories(
+        source, ["wanted-a", "wanted-b"]
+    )
+    assert set(selected) == {"wanted-a", "wanted-b"}
+    assert selected["wanted-a"]["payload"] == "wanted-a" * 10
+    with pytest.raises(RuntimeError, match="contains duplicates"):
+        campaign._load_selected_trajectories(source, ["wanted-a", "wanted-a"])
+    with pytest.raises(RuntimeError, match="are incomplete"):
+        campaign._load_selected_trajectories(source, ["missing"])
+
+
+def test_temporary_adapter_environment_restores_existing_and_missing_values(
+    monkeypatch,
+) -> None:
+    campaign = _load()
+    monkeypatch.setenv("MEMPHANT_TEST_EXISTING", "before")
+    monkeypatch.delenv("MEMPHANT_TEST_MISSING", raising=False)
+    with campaign._temporary_environment({
+        "MEMPHANT_TEST_EXISTING": "during",
+        "MEMPHANT_TEST_MISSING": "temporary",
+    }):
+        assert campaign.os.environ["MEMPHANT_TEST_EXISTING"] == "during"
+        assert campaign.os.environ["MEMPHANT_TEST_MISSING"] == "temporary"
+    assert campaign.os.environ["MEMPHANT_TEST_EXISTING"] == "before"
+    assert "MEMPHANT_TEST_MISSING" not in campaign.os.environ
+
+
 def test_trajectory_fragmentation_preserves_semantic_state_boundaries(monkeypatch) -> None:
     adapter = _load_memory_adapter(monkeypatch)
     trajectory = {
@@ -231,6 +285,19 @@ def test_trajectory_fragmentation_preserves_semantic_state_boundaries(monkeypatc
     fragments = adapter._trajectory_fragments(trajectory, max(len(block.encode()) for block in blocks) + 1)
     assert fragments == blocks
     assert "\n\n---\n\n".join(fragments) == adapter._trajectory_body(trajectory)
+
+
+def test_trajectory_fragmentation_losslessly_bounds_oversized_single_lines(monkeypatch) -> None:
+    adapter = _load_memory_adapter(monkeypatch)
+    trajectory = {
+        "id": "t-long", "goal": "find outlook", "outcome": None,
+        "states": [{"url": "https://one", "text": "Outlook," * 200}],
+    }
+    body = adapter._state_body(trajectory, trajectory["states"][0], 0)
+    fragments = adapter._trajectory_fragments(trajectory, 128)
+    assert len(fragments) > 1
+    assert all(len(fragment.encode()) <= 128 for fragment in fragments)
+    assert "".join(fragments) == body
 
 
 def test_mutation_idempotency_keys_are_deterministic_and_domain_separated(monkeypatch) -> None:
@@ -864,7 +931,7 @@ class _FakeResponse:
         return self.body
 
 
-def test_reader_post_acceptance_audit_failure_never_replays_or_changes_2xx(
+def test_reader_returns_accepted_generation_before_async_receipt_reconciliation(
     tmp_path: Path, monkeypatch
 ) -> None:
     campaign = _load()
@@ -877,8 +944,11 @@ def test_reader_post_acceptance_audit_failure_never_replays_or_changes_2xx(
             return _FakeResponse(original)
 
     monkeypatch.setattr(campaign.urllib.request, "build_opener", lambda *_args: Opener())
-    monkeypatch.setattr(campaign, "_json_url", lambda *_args: (_ for _ in ()).throw(RuntimeError("late audit failure")))
-    monkeypatch.setattr(campaign.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        campaign,
+        "_json_url",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("receipt lookup ran on response path")),
+    )
     manifest = campaign.load_campaign_manifest()
     server, base = campaign._reader_proxy("secret", tmp_path / "reader.json", manifest)
     try:
@@ -904,8 +974,125 @@ def test_reader_post_acceptance_audit_failure_never_replays_or_changes_2xx(
         server.shutdown()
         server.server_close()
     assert len(calls) == 1
+    assert calls[0][0] == 600
     assert calls[0][1]["provider"] == manifest["protocol"]["reader"]["provider_policy"]
-    assert json.loads((tmp_path / "reader.json").read_text())["audit_status"] == "invalid"
+    assert json.loads((tmp_path / "reader.json").read_text())["audit_status"] == "receipt_pending"
+
+
+def test_reader_receipt_reconciliation_waits_for_complete_async_stats(
+    tmp_path: Path, monkeypatch
+) -> None:
+    campaign = _load()
+    manifest = campaign.load_campaign_manifest()
+    audit_path = tmp_path / "reader.json"
+    campaign.atomic_write_json(audit_path, {
+        "audit_status": "receipt_pending",
+        "dispatch_count": 1,
+        "generation_id": "gen-1",
+        "max_liability_micros": 3084,
+    })
+    receipts = iter([
+        {"data": {
+            "provider_name": "DeepInfra", "model": "qwen/qwen3.5-9b-20260310",
+            "tokens_prompt": None, "tokens_completion": None, "total_cost": None,
+        }},
+        {"data": {
+            "provider_name": "DeepInfra", "model": "qwen/qwen3.5-9b-20260310",
+            "tokens_prompt": 181, "tokens_completion": 5533, "total_cost": 0.000816,
+        }},
+    ])
+    sleeps = []
+    monkeypatch.setattr(campaign, "_json_url", lambda *_args: next(receipts))
+    monkeypatch.setattr(campaign.time, "sleep", sleeps.append)
+    reconciled = campaign._reconcile_reader_receipt(
+        "secret", audit_path, manifest, attempts=3, delay_seconds=2
+    )
+    assert reconciled["audit_status"] == "settled"
+    assert reconciled["provider_name"] == "DeepInfra"
+    assert reconciled["model"] == "qwen/qwen3.5-9b-20260310"
+    assert reconciled["tokens_prompt"] == 181
+    assert reconciled["tokens_completion"] == 5533
+    assert reconciled["total_cost"] == 0.000816
+    assert sleeps == [2]
+    assert json.loads(audit_path.read_text()) == reconciled
+
+
+def test_reader_proxy_archives_upstream_rejection_without_hiding_status(
+    tmp_path: Path, monkeypatch
+) -> None:
+    campaign = _load()
+    rejected = b'{"error":{"message":"No endpoints satisfy the request policy","code":404}}'
+
+    class Opener:
+        def open(self, request, timeout=None):
+            raise campaign.urllib.error.HTTPError(
+                request.full_url,
+                404,
+                "Not Found",
+                {},
+                io.BytesIO(rejected),
+            )
+
+    monkeypatch.setattr(campaign.urllib.request, "build_opener", lambda *_args: Opener())
+    manifest = campaign.load_campaign_manifest()
+    server, base = campaign._reader_proxy("secret", tmp_path / "reader.json", manifest)
+    try:
+        connection = http.client.HTTPConnection(base.removeprefix("http://"))
+        connection.request(
+            "POST",
+            "/chat/completions",
+            body=json.dumps({"model": "Qwen/Qwen3.5-9B", "messages": []}),
+            headers={"content-type": "application/json"},
+        )
+        response = connection.getresponse()
+        assert response.status == 404
+        assert response.read() == rejected
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+    audit = json.loads((tmp_path / "reader.json").read_text())
+    assert audit["audit_status"] == "rejected"
+    assert audit["upstream_status"] == 404
+    assert audit["upstream_error"] == {
+        "message": "No endpoints satisfy the request policy",
+        "code": 404,
+    }
+    assert audit["response_sha256"] == campaign.hashlib.sha256(rejected).hexdigest()
+
+
+def test_reader_proxy_archives_transport_unknown_without_replay(
+    tmp_path: Path, monkeypatch
+) -> None:
+    campaign = _load()
+
+    class Opener:
+        def open(self, _request, timeout=None):
+            assert timeout == 600
+            raise TimeoutError("provider exceeded local transport deadline")
+
+    monkeypatch.setattr(campaign.urllib.request, "build_opener", lambda *_args: Opener())
+    server, base = campaign._reader_proxy(
+        "secret", tmp_path / "reader.json", campaign.load_campaign_manifest()
+    )
+    try:
+        connection = http.client.HTTPConnection(base.removeprefix("http://"))
+        connection.request(
+            "POST", "/chat/completions",
+            body=json.dumps({"model": "Qwen/Qwen3.5-9B", "messages": []}),
+            headers={"content-type": "application/json"},
+        )
+        response = connection.getresponse()
+        assert response.status == 504
+        assert b"outcome is unresolved" in response.read()
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+    audit = json.loads((tmp_path / "reader.json").read_text())
+    assert audit["dispatch_count"] == 1
+    assert audit["audit_status"] == "transport_unknown"
+    assert audit["audit_error"] == "reader_upstream_transport_failure"
 
 
 def test_judge_post_acceptance_audit_failure_never_replays_or_changes_2xx(

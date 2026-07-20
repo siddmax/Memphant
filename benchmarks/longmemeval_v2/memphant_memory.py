@@ -43,6 +43,10 @@ EXPECTED_PARAMS = {
 }
 FORBIDDEN_EVALUATION_KEYS = {"answer", "answer_gold", "eval_function", "gold", "reference"}
 TENANT_PATTERN = re.compile(r"tenant_created id=([0-9a-fA-F-]{36})")
+# Keep each retain safely below the server request-body ceiling while preserving
+# state boundaries. The runtime compiler owns bounded, complete chunk evidence;
+# reducing this to chunk size would turn one large trajectory into thousands of
+# resources and multiply writes/embeddings without improving source fidelity.
 RESOURCE_FRAGMENT_BYTES = 1024 * 1024
 MAX_SERIALIZED_RETAIN_BYTES = 1536 * 1024
 
@@ -229,17 +233,39 @@ def _trajectory_body(trajectory: dict[str, object]) -> str:
     )
 
 
+def _split_utf8_bytes(value: str, max_bytes: int) -> list[str]:
+    _require(max_bytes >= 4, "fragment limit must fit one UTF-8 scalar")
+    pieces: list[str] = []
+    current: list[str] = []
+    current_bytes = 0
+    for character in value:
+        encoded_bytes = len(character.encode())
+        if current and current_bytes + encoded_bytes > max_bytes:
+            pieces.append("".join(current))
+            current = []
+            current_bytes = 0
+        current.append(character)
+        current_bytes += encoded_bytes
+    if current:
+        pieces.append("".join(current))
+    return pieces
+
+
 def _pack_lines(value: str, max_bytes: int) -> list[str]:
     packed: list[str] = []
-    current = ""
+    current: list[str] = []
+    current_bytes = 0
     for line in value.splitlines(keepends=True):
-        _require(len(line.encode()) <= max_bytes, "single trajectory line exceeds fragment limit")
-        if current and len((current + line).encode()) > max_bytes:
-            packed.append(current)
-            current = ""
-        current += line
+        for piece in _split_utf8_bytes(line, max_bytes):
+            piece_bytes = len(piece.encode())
+            if current and current_bytes + piece_bytes > max_bytes:
+                packed.append("".join(current))
+                current = []
+                current_bytes = 0
+            current.append(piece)
+            current_bytes += piece_bytes
     if current:
-        packed.append(current)
+        packed.append("".join(current))
     return packed
 
 
@@ -250,22 +276,29 @@ def _trajectory_fragments(
     _require(isinstance(states, list) and states, "trajectory states are missing")
     blocks = [_state_body(trajectory, state, index) for index, state in enumerate(states)]
     fragments: list[str] = []
-    current = ""
+    current: list[str] = []
+    current_bytes = 0
+    separator = "\n\n---\n\n"
+    separator_bytes = len(separator.encode())
     for block in blocks:
-        if len(block.encode()) > max_bytes:
+        block_bytes = len(block.encode())
+        if block_bytes > max_bytes:
             if current:
-                fragments.append(current)
-                current = ""
+                fragments.append(separator.join(current))
+                current = []
+                current_bytes = 0
             fragments.extend(_pack_lines(block, max_bytes))
             continue
-        candidate = block if not current else current + "\n\n---\n\n" + block
-        if current and len(candidate.encode()) > max_bytes:
-            fragments.append(current)
-            current = block
+        candidate_bytes = block_bytes if not current else current_bytes + separator_bytes + block_bytes
+        if current and candidate_bytes > max_bytes:
+            fragments.append(separator.join(current))
+            current = [block]
+            current_bytes = block_bytes
         else:
-            current = candidate
+            current.append(block)
+            current_bytes = candidate_bytes
     if current:
-        fragments.append(current)
+        fragments.append(separator.join(current))
     return fragments
 
 

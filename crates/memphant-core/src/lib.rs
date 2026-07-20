@@ -7808,7 +7808,8 @@ fn admit_or_drop(
         }
     }
 
-    let (rendered_body, unit_tokens, chunk_mask) = packed_render(&candidate.unit, ctx.query_tokens);
+    let (rendered_body, unit_tokens, chunk_mask) =
+        packed_render(&candidate.unit, ctx.query_tokens, request.budget_tokens);
     let candidate_id = candidate.unit.id;
     // The projection and its exact goal are authoritative packet structure.
     // Protect only those items; ordinary candidates must keep competing.
@@ -8052,7 +8053,7 @@ fn recall_pack_scan_limit(
 }
 
 fn packing_density_score(candidate: &CandidateAccumulator) -> f32 {
-    candidate.fused_score / candidate.unit.body.split_whitespace().count().max(1) as f32
+    candidate.fused_score / conservative_token_estimate(&candidate.unit.body).max(1) as f32
 }
 
 fn packing_relevance_score(candidate: &CandidateAccumulator, query_tokens: &[String]) -> f32 {
@@ -8091,12 +8092,11 @@ fn replacement_index(
 /// Chunk-aware pack rendering: when the unit carries contextual chunks and the
 /// query matched at least one, the item's text is rendered from its chunks
 /// (matched-first + neighbour expansion, header-prefixed, document order),
-/// bounded by the SAME budget share the whole body would have consumed
-/// (`unit.body` whitespace-token count). The item is then charged that RENDERED
-/// text's whitespace-token count — strictly `<=` the whole-body count — so the
-/// reclaimed difference frees budget for finer-grained items to fit.
+/// bounded by both the whole body estimate and the caller's model-facing
+/// request budget. The item is then charged a conservative byte-aware estimate
+/// of the rendered text so dense tool output cannot overrun the reader.
 /// `None` (no chunks, or no chunk matched) keeps today's byte-identical
-/// whole-body rendering and charges the exact whole-body count.
+/// whole-body rendering and charges its conservative whole-body estimate.
 ///
 /// Now a thin `packed_render` wrapper retained for the cost-accounting tests;
 /// the production path calls `packed_render` directly for the sibling mask.
@@ -8105,7 +8105,7 @@ fn packed_body_and_cost(
     unit: &StoredMemoryUnit,
     query_tokens: &[String],
 ) -> (Option<String>, usize) {
-    let (rendered_body, charged_tokens, _mask) = packed_render(unit, query_tokens);
+    let (rendered_body, charged_tokens, _mask) = packed_render(unit, query_tokens, usize::MAX);
     (rendered_body, charged_tokens)
 }
 
@@ -8116,12 +8116,14 @@ fn packed_body_and_cost(
 fn packed_render(
     unit: &StoredMemoryUnit,
     query_tokens: &[String],
+    request_budget_tokens: usize,
 ) -> (Option<String>, usize, Option<Vec<bool>>) {
-    let whole_body_tokens = unit.body.split_whitespace().count();
-    match select_chunk_mask(&unit.contextual_chunks, query_tokens, whole_body_tokens) {
+    let whole_body_tokens = conservative_token_estimate(&unit.body);
+    let render_budget = whole_body_tokens.min(request_budget_tokens);
+    match select_chunk_mask(&unit.contextual_chunks, query_tokens, render_budget) {
         Some(selected) => {
             let rendered = emit_selected_chunks(&unit.contextual_chunks, &selected);
-            let charged_tokens = rendered.split_whitespace().count();
+            let charged_tokens = selected_chunk_cost(&unit.contextual_chunks, &selected);
             (Some(rendered), charged_tokens, Some(selected))
         }
         None => (None, whole_body_tokens, None),
@@ -8173,9 +8175,9 @@ fn context_item_for(
 ///
 /// Selection: matched chunks first (per-chunk lexical score vs the query, desc),
 /// then expansion to adjacent siblings (window index ±1, then ±2, …) around the
-/// matched anchors, each step gated by `budget_tokens` — the whitespace-token
-/// count the whole body would have consumed, so a chunk-rendered item never uses
-/// more budget than before. Emission is document order (chunk vector index ==
+/// matched anchors, each step gated by the conservative token budget the whole
+/// body would have consumed, so a chunk-rendered item never uses more budget
+/// than before. Emission is document order (chunk vector index ==
 /// window index), each chunk prefixed by its provenance header so the reader
 /// sees positional gaps. No chunk is emitted twice.
 ///
@@ -8305,12 +8307,32 @@ fn chunk_block(chunk: &ContextualChunk) -> String {
     format!("{}\n{}", chunk.header, chunk.body)
 }
 
-/// Whitespace-token cost of a rendered chunk block. The header/body newline and
-/// the inter-block separator are whitespace, so summing this over the selected
-/// chunks equals `rendered.join(...).split_whitespace().count()` — the same
-/// counter the packing budget uses on whole bodies.
+/// Conservative reader-token cost of a rendered chunk block. One extra token
+/// covers the blank-line separator between blocks. Charging it on the first
+/// block too keeps the cost additive and can only underfill, never overrun.
 fn chunk_block_token_cost(chunk: &ContextualChunk) -> usize {
-    chunk.header.split_whitespace().count() + chunk.body.split_whitespace().count()
+    conservative_token_estimate(&chunk_block(chunk)).saturating_add(1)
+}
+
+fn selected_chunk_cost(chunks: &[ContextualChunk], selected: &[bool]) -> usize {
+    chunks
+        .iter()
+        .zip(selected)
+        .filter(|(_, picked)| **picked)
+        .map(|(chunk, _)| chunk_block_token_cost(chunk))
+        .sum()
+}
+
+/// Model-agnostic, UTF-8-safe estimate for a reader-facing context budget.
+/// Whitespace words alone undercount compact JSON, DOM trees, identifiers, CJK,
+/// and punctuation-heavy tool output. One token per three source bytes is a
+/// conservative operating estimate for the pinned Qwen reader while the word
+/// floor preserves behavior for unusually long whitespace-token sequences.
+fn conservative_token_estimate(text: &str) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    text.split_whitespace().count().max(text.len().div_ceil(3))
 }
 
 fn has_contradiction_with_any(
@@ -11383,8 +11405,8 @@ mod fusion_weight_tests {
 mod chunk_render_tests {
     use super::*;
 
-    /// Header is a constant 6 whitespace tokens (`[episode ep] [kind user]
-    /// [turns X-Y]`), so a block's budget cost is `6 + body_word_count`.
+    /// Uses the production provenance-header shape so the conservative byte
+    /// estimator sees realistic punctuation and identifiers.
     fn chunk(turns: &str, body: &str) -> ContextualChunk {
         ContextualChunk {
             id: format!("chunk-ep-{turns}"),
@@ -11477,8 +11499,9 @@ mod chunk_render_tests {
             chunk("5-8", "green mango tart glaze"),
             chunk("9-12", "blue plum jam toast"),
         ];
-        // Each block costs 6 + 4 = 10 tokens; budget admits exactly two.
-        let rendered = render_chunked_item_body(&chunks, &tokenize("mango"), 20)
+        let two_block_budget =
+            chunk_block_token_cost(&chunks[0]) + chunk_block_token_cost(&chunks[1]);
+        let rendered = render_chunked_item_body(&chunks, &tokenize("mango"), two_block_budget)
             .expect("matched chunk renders");
 
         assert!(
@@ -11504,8 +11527,8 @@ mod chunk_render_tests {
             chunk("1-4", "green mango plum here"), // matches "mango" only
             chunk("5-8", "green mango tart here"), // matches "mango" AND "tart"
         ];
-        // Each block costs 10; budget admits exactly one.
-        let rendered = render_chunked_item_body(&chunks, &tokenize("mango tart"), 10)
+        let one_block_budget = chunk_block_token_cost(&chunks[1]);
+        let rendered = render_chunked_item_body(&chunks, &tokenize("mango tart"), one_block_budget)
             .expect("matched chunk renders");
 
         assert!(
@@ -11541,13 +11564,9 @@ mod chunk_render_tests {
         }
     }
 
-    /// Pins the whitespace-separator invariant the budget accounting relies on:
-    /// a block's declared token cost equals the rendered block string's actual
-    /// whitespace-token count. A future non-whitespace header/body separator
-    /// would desync `chunk_block_token_cost` from the charged text and must fail
-    /// here.
+    /// Pins the additive safety margin the budget accounting relies on.
     #[test]
-    fn chunk_block_cost_equals_block_whitespace_tokens() {
+    fn chunk_block_cost_has_one_additive_separator_allowance() {
         for c in [
             chunk("1-4", "red apple pie crust"),
             chunk("5-8", "single"),
@@ -11555,11 +11574,33 @@ mod chunk_render_tests {
         ] {
             assert_eq!(
                 chunk_block_token_cost(&c),
-                chunk_block(&c).split_whitespace().count(),
-                "block cost == actual whitespace-token count for {}",
+                conservative_token_estimate(&chunk_block(&c)) + 1,
+                "block cost includes exactly one separator allowance for {}",
                 c.header
             );
         }
+    }
+
+    #[test]
+    fn punctuation_dense_context_is_not_charged_as_one_token() {
+        let text = "Outlook,calendar,portal,".repeat(100);
+        assert_eq!(text.split_whitespace().count(), 1);
+        assert!(
+            conservative_token_estimate(&text) >= text.len().div_ceil(3),
+            "model-facing budget must account for dense non-whitespace text"
+        );
+    }
+
+    #[test]
+    fn matched_chunk_render_respects_model_facing_budget() {
+        let chunks = [
+            chunk("1-4", &"Outlook,".repeat(20)),
+            chunk("5-8", &"Outlook,".repeat(20)),
+        ];
+        let rendered = render_chunked_item_body(&chunks, &tokenize("Outlook"), 70)
+            .expect("one bounded evidence chunk renders");
+        assert!(conservative_token_estimate(&rendered) <= 70);
+        assert_eq!(rendered.matches("[episode ep]").count(), 1);
     }
 }
 
@@ -11567,8 +11608,7 @@ mod chunk_render_tests {
 mod pack_cost_tests {
     use super::*;
 
-    /// A chunk with the same 6-token header shape used elsewhere; a block's
-    /// budget cost is `6 + body_word_count`.
+    /// A chunk with the same provenance-header shape used elsewhere.
     fn chunk(turns: &str, body: &str) -> ContextualChunk {
         ContextualChunk {
             id: format!("chunk-ep-{turns}"),
@@ -11797,9 +11837,10 @@ mod pack_cost_tests {
         }
     }
 
-    /// `n` whitespace-separated filler words → an `n`-token whole body.
+    /// `n` one-byte whitespace-separated words → an `n`-token conservative
+    /// estimate (the whitespace floor dominates the byte heuristic).
     fn body_of(n: usize) -> String {
-        vec!["filler"; n].join(" ")
+        vec!["x"; n].join(" ")
     }
 
     /// Budget reclaim: charging a chunk-rendered item its RENDERED token count
@@ -11809,17 +11850,18 @@ mod pack_cost_tests {
     #[test]
     fn rendered_cost_reclaim_admits_second_item() {
         let query_tokens = tokenize("quantum");
-        let budget = 31;
         // Item A: a plain 15-token item, packed first in both scenarios.
         let plain = || candidate(unit(1, &body_of(15), Vec::new()), 5.0);
-        // Item B: a 40-token whole body. As chunks its matched render is two
-        // 8-token blocks (6-token header + 2-token body) = 16 tokens.
+        // Item B: a 40-token whole body. Its matched chunk render is cheaper
+        // under the same conservative estimator.
         let chunks = || {
             vec![
                 chunk("1-4", "quantum harmonica"), // matches the query
                 chunk("5-8", "berlin note"),       // neighbour, pulled by expansion
             ]
         };
+        let rendered_cost: usize = chunks().iter().map(chunk_block_token_cost).sum();
+        let budget = 15 + rendered_cost;
 
         // Whole-body charging (B has no chunks): B costs 40, does not fit → drop.
         let whole = pack_recall_context(
@@ -11840,7 +11882,7 @@ mod pack_cost_tests {
         assert_eq!(whole.items[0].unit_id, UnitId::from_u128(1));
         assert_eq!(whole.token_estimate, 15);
 
-        // Rendered charging (B chunked): B costs 16 → reclaimed budget admits it.
+        // Rendered charging reclaims enough budget to admit B.
         let rendered = pack_recall_context(
             vec![plain(), candidate(unit(2, &body_of(40), chunks()), 4.0)],
             &request(budget),
@@ -11861,10 +11903,7 @@ mod pack_cost_tests {
             UnitId::from_u128(2),
             "the reclaimed second item is B"
         );
-        assert_eq!(
-            rendered.token_estimate, 31,
-            "token_estimate == plain 15 + rendered 16 (actual charged costs)"
-        );
+        assert_eq!(rendered.token_estimate, budget);
         let b_body = &rendered.items[1].body;
         assert!(
             b_body.contains("[turns 1-4]") && b_body.contains("quantum harmonica"),
@@ -11880,11 +11919,8 @@ mod pack_cost_tests {
         );
     }
 
-    /// Property (review M1/M2): for a chunk-rendered item the charged cost equals
-    /// the rendered text's whitespace-token count (so `token_estimate` is honest)
-    /// AND never exceeds the old whole-body count (reclaim can only free budget,
-    /// never overspend); an un-rendered item is charged exactly its whole-body
-    /// count.
+    /// Property: a chunk-rendered item's charged cost conservatively covers the
+    /// rendered text estimate and never exceeds the whole-body estimate.
     #[test]
     fn charged_cost_matches_rendered_tokens_and_never_exceeds_whole_body() {
         let query_tokens = tokenize("quantum tart");
@@ -11928,14 +11964,13 @@ mod pack_cost_tests {
         ];
         for (body_words, chunks) in cases {
             let u = unit(1, &body_of(body_words), chunks);
-            let whole_body_tokens = u.body.split_whitespace().count();
+            let whole_body_tokens = conservative_token_estimate(&u.body);
             let (rendered_body, charged) = packed_body_and_cost(&u, &query_tokens);
             match &rendered_body {
                 Some(text) => {
-                    assert_eq!(
-                        charged,
-                        text.split_whitespace().count(),
-                        "charged cost == rendered token count (token_estimate honest)"
+                    assert!(
+                        charged >= conservative_token_estimate(text),
+                        "charged cost covers the rendered model-token estimate"
                     );
                     assert!(
                         charged <= whole_body_tokens,
@@ -12053,16 +12088,13 @@ mod pack_cost_tests {
 
     /// §5 sibling-gather: after the greedy fill, an already chunk-rendered item
     /// spends the pack's leftover budget on its OWN unselected sibling chunks.
-    /// At admission the per-item cap (the 20-token whole-body count) admits the
-    /// matched chunk plus one neighbour; the trailing sibling is left out until
+    /// At admission the per-item whole-body cap admits the matched chunk plus
+    /// one neighbour; the trailing sibling is left out until
     /// the post-pass pulls it in. It must never evict the co-packed plain item
     /// nor push token_estimate past the budget.
     #[test]
     fn sibling_gather_expands_item_without_eviction_or_overbudget() {
         let query_tokens = tokenize("quantum");
-        // Three 8-token blocks (6-token header + 2-token body). Whole body is 20
-        // tokens, so admission fits chunk[0] (matched, 8) + chunk[1] (neighbour,
-        // 8) = 16; chunk[2] (24 > 20) is deferred to the sibling pass.
         let chunks = || {
             vec![
                 chunk("1-2", "quantum alpha"), // matches the query
@@ -12070,9 +12102,15 @@ mod pack_cost_tests {
                 chunk("5-6", "delta epsilon"), // trailing sibling, gathered later
             ]
         };
+        let chunk_costs = chunks()
+            .iter()
+            .map(chunk_block_token_cost)
+            .collect::<Vec<_>>();
+        let admission_cost = chunk_costs[0] + chunk_costs[1];
+        let expanded_cost: usize = chunk_costs.iter().sum();
         let candidates = || {
             vec![
-                candidate(unit(1, &body_of(20), chunks()), 5.0),
+                candidate(unit(1, &body_of(admission_cost), chunks()), 5.0),
                 candidate(unit(2, &body_of(5), Vec::new()), 4.0),
             ]
         };
@@ -12090,7 +12128,7 @@ mod pack_cost_tests {
             false,
         );
         assert_eq!(off.items.len(), 2, "both items packed");
-        assert_eq!(off.token_estimate, 16 + 5, "A charged 16, B charged 5");
+        assert_eq!(off.token_estimate, admission_cost + 5);
         assert!(
             !off.items[0].body.contains("delta epsilon"),
             "trailing sibling absent without the lever: {}",
@@ -12133,11 +12171,7 @@ mod pack_cost_tests {
             "the admission chunks are preserved in document order: {}",
             on.items[0].body
         );
-        assert_eq!(
-            on.token_estimate,
-            24 + 5,
-            "A now charged 24 (three 8-token blocks) + B 5"
-        );
+        assert_eq!(on.token_estimate, expanded_cost + 5);
         assert!(on.token_estimate <= budget, "never exceeds budget");
     }
 
@@ -12442,6 +12476,13 @@ mod pack_cost_tests {
     #[test]
     fn levers_off_pack_is_byte_identical() {
         let query_tokens = tokenize("quantum");
+        let chunk_render_cost: usize = [
+            chunk("1-4", "quantum harmonica"),
+            chunk("5-8", "berlin note"),
+        ]
+        .iter()
+        .map(chunk_block_token_cost)
+        .sum();
         let scenario = || {
             vec![
                 candidate(unit_ep(1, 1, &body_of(10), Vec::new()), 5.0),
@@ -12460,7 +12501,7 @@ mod pack_cost_tests {
                 candidate(unit_ep(3, 2, &body_of(10), Vec::new()), 3.0),
             ]
         };
-        let budget = 30;
+        let budget = 10 + chunk_render_cost;
         let reference = pack_recall_context(
             scenario(),
             &request(budget),
@@ -12508,8 +12549,8 @@ mod pack_cost_tests {
                 .collect::<Vec<_>>(),
             "drops identical across default runs",
         );
-        // Hand-computed golden of today's packer: A (whole body, 10) then B (chunk
-        // render, 16) fit budget 30; C (10) overflows and drops for budget.
+        // Golden of the conservative packer: A (whole body, 10) then B's exact
+        // additive chunk charge fill the budget; C overflows.
         assert_eq!(
             reference
                 .items
@@ -12518,10 +12559,7 @@ mod pack_cost_tests {
                 .collect::<Vec<_>>(),
             vec![UnitId::from_u128(1), UnitId::from_u128(2)],
         );
-        assert_eq!(
-            reference.token_estimate, 26,
-            "10 (plain) + 16 (chunk render)"
-        );
+        assert_eq!(reference.token_estimate, budget);
         assert!(
             reference
                 .dropped_items

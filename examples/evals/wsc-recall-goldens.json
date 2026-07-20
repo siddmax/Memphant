@@ -258,7 +258,7 @@
   {
     "id": "budgeted_packing_keeps_answer",
     "query": "What is required before a prod deploy?",
-    "budget_tokens": 6,
+    "budget_tokens": 16,
     "expected_weight_vector_id": "default",
     "expected_stage_names": [
       "stage0_policy",

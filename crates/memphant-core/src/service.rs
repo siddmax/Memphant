@@ -2488,6 +2488,45 @@ fn segment_resource_paragraphs(body: &str) -> Vec<(usize, usize)> {
         paras.push(span);
     }
     paras
+        .into_iter()
+        .flat_map(|(start, end)| split_oversized_resource_span(body, start, end))
+        .collect()
+}
+
+/// Preserves a paragraph as one semantic segment when it fits the hard cap.
+/// Pathological DOM/accessibility-tree lines and oversized fenced blocks are
+/// split losslessly: prefer a whitespace boundary near the target size, then
+/// fall back to an exact UTF-8 character boundary at the hard cap. Source byte
+/// spans remain gapless inside the original paragraph.
+fn split_oversized_resource_span(body: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut cursor = start;
+    while cursor < end {
+        let remaining = &body[cursor..end];
+        let Some((hard_offset, _)) = remaining.char_indices().nth(RESOURCE_CHUNK_HARD_MAX_CHARS)
+        else {
+            spans.push((cursor, end));
+            break;
+        };
+        let hard_end = cursor + hard_offset;
+        let target_end = remaining
+            .char_indices()
+            .nth(RESOURCE_CHUNK_TARGET_MAX_CHARS)
+            .map_or(hard_end, |(offset, _)| cursor + offset);
+        let preferred = body[cursor..target_end]
+            .char_indices()
+            .enumerate()
+            .filter_map(|(character_index, (offset, character))| {
+                (character_index >= RESOURCE_CHUNK_TARGET_MIN_CHARS && character.is_whitespace())
+                    .then_some(cursor + offset + character.len_utf8())
+            })
+            .last();
+        let split = preferred.unwrap_or(hard_end);
+        debug_assert!(split > cursor && split <= end && body.is_char_boundary(split));
+        spans.push((cursor, split));
+        cursor = split;
+    }
+    spans
 }
 
 /// Groups paragraph spans into non-overlapping char-budget windows (inclusive
@@ -2573,9 +2612,11 @@ fn resource_chunk_header(body: &str, uri: &str) -> String {
 /// windows and mints one `ContextualChunk` per window, each tied back to its
 /// parent resource — the docs-domain twin of `episode_contextual_chunks`. Emits
 /// nothing when the body fits a single window (a lone chunk would just duplicate
-/// the unit body) and never emits empty-body chunks. The `take(MAX_CONTEXTUAL_
-/// CHUNKS)` is a defensive backstop shared with the episode chunker: real corpus
-/// sections (≤~3.2k chars) produce 1–4 windows, far under the cap.
+/// the unit body) and never emits empty-body chunks. Unlike bounded
+/// conversational episodes, document resources are not capped at 32 windows:
+/// silently dropping a large document's tail is a correctness and citation
+/// failure. Ingestion adapters should still split large documents into
+/// resource-sized units so retrieval fan-out stays bounded.
 fn resource_contextual_chunks(
     resource_id: ResourceId,
     uri: &str,
@@ -2589,7 +2630,6 @@ fn resource_contextual_chunks(
     let header = resource_chunk_header(body, uri);
     windows
         .into_iter()
-        .take(MAX_CONTEXTUAL_CHUNKS)
         .enumerate()
         .filter_map(|(window_index, (first_para, last_para))| {
             let start = paras[first_para].0;
@@ -3765,6 +3805,49 @@ Trailing prose after the fence.\n";
             body[..start].chars().count(),
             "a later window's byte offset must diverge from its char offset (multi-byte proof)"
         );
+    }
+
+    #[test]
+    fn oversized_single_paragraph_is_split_without_utf8_or_span_loss() {
+        let body = "Outlook🙂calendar,".repeat(400);
+        let chunks =
+            resource_contextual_chunks(ResourceId::from_u128(RESOURCE_ID), "portal.txt", &body);
+        assert!(
+            chunks.len() > 1,
+            "one oversized paragraph must become bounded evidence"
+        );
+        let mut previous_end = 0;
+        for chunk in &chunks {
+            let (start, end) = span_of(chunk);
+            assert_eq!(start, previous_end, "hard splits are gapless");
+            assert_eq!(&body[start..end], chunk.body, "span stays byte exact");
+            assert!(
+                chunk.body.chars().count() <= RESOURCE_CHUNK_HARD_MAX_CHARS,
+                "every oversized-paragraph slice respects the hard cap"
+            );
+            previous_end = end;
+        }
+        assert_eq!(
+            previous_end,
+            body.len(),
+            "the final chunk reaches the source tail"
+        );
+    }
+
+    #[test]
+    fn resource_chunking_never_drops_tail_after_thirty_two_windows() {
+        let body = (0..40)
+            .map(|index| format!("paragraph-{index} {}", "x".repeat(1580)))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let chunks =
+            resource_contextual_chunks(ResourceId::from_u128(RESOURCE_ID), "large.md", &body);
+        assert!(
+            chunks.len() > MAX_CONTEXTUAL_CHUNKS,
+            "resource coverage is not episode-capped"
+        );
+        let (_, end) = span_of(chunks.last().expect("tail chunk"));
+        assert_eq!(end, body.len(), "the source tail is represented");
     }
 
     #[test]

@@ -2,7 +2,7 @@ id: packing_abstention_buried_deploy
 second_author_confirmed: true
 query: "What is required before prod deploy?"
 k: 8
-budget_tokens: 14
+budget_tokens: 24
 seed:
   units:
     - name: mem_deploy_decoy_1

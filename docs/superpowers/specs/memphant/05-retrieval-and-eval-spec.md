@@ -169,6 +169,21 @@ engine version
 
 This trace is the debugging tool and the eval artifact.
 
+**The context budget is model-facing, not a whitespace-word budget.** Stage 7
+charges each whole body and rendered contextual chunk with the greater of its
+whitespace-word count and `ceil(UTF-8 bytes / 3)`, plus one additive separator
+allowance per rendered chunk. This is intentionally conservative for compact
+JSON, DOM/accessibility trees, identifiers, punctuation-heavy tool output, and
+CJK; `token_estimate` records that charge. Chunk rendering is bounded by both
+the whole-body estimate and the request budget, so one returned item cannot
+exceed `budget_tokens`. Benchmark adapters still verify with the pinned
+reader's exact tokenizer and fail closed on any truncation. Resource extraction
+must hard-split an oversized paragraph or fenced block on a UTF-8 boundary,
+preserve byte-exact source spans, and cover the complete resource; the episode
+fan-out cap must never silently truncate a document tail. Large-document
+adapters split sources into bounded resource units before reflect so complete
+coverage does not turn one recall candidate into unbounded hot-path work.
+
 ### 3.1 Trace Schema
 
 ```text

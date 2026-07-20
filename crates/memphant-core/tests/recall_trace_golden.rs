@@ -1324,7 +1324,7 @@ async fn packing_collapses_duplicate_decoys_and_preserves_answer_under_budget() 
             context: memphant_store_testkit::resolved_context(tenant_id, scope_id, actor_id),
             query: "What is required before prod deploy?".to_string(),
             k: 8,
-            budget_tokens: 14,
+            budget_tokens: 24,
             mode: RecallMode::Fast,
             include_beliefs: false,
             edge_expansion_enabled: true,
