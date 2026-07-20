@@ -283,12 +283,20 @@ def _drain_worker(worker_bin: str, database_url: str, expected: int) -> dict[str
     completed = subprocess.run(
         [worker_bin], env=environment, capture_output=True, text=True, check=False
     )
+    proof_dir = Path(_required_env("MEMPHANT_LME_PROOF_DIR"))
+    proof_dir.mkdir(parents=True, exist_ok=True)
+    (proof_dir / "worker.stdout").write_text(completed.stdout, encoding="utf-8")
+    (proof_dir / "worker.stderr").write_text(completed.stderr, encoding="utf-8")
     _require(completed.returncode == 0, f"worker drain failed: {completed.stderr.strip()}")
     match = re.search(r"drain completed=(\d+)", completed.stdout)
     _require(match is not None, "worker drain omitted completed count")
     count = int(match.group(1))
     _require(count == expected, f"worker compiled {count} sources, expected {expected}")
-    return {"completed_sources": count, "stdout_sha256": hashlib.sha256(completed.stdout.encode()).hexdigest()}
+    return {
+        "completed_sources": count,
+        "stdout_sha256": hashlib.sha256(completed.stdout.encode()).hexdigest(),
+        "stderr_sha256": hashlib.sha256(completed.stderr.encode()).hexdigest(),
+    }
 
 
 def _schema_snapshot(database_url: str) -> dict[str, dict[str, object]]:

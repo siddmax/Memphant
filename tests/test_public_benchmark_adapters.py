@@ -151,6 +151,27 @@ def load_memphant_adapter(monkeypatch):
     return module, registry
 
 
+def test_worker_drain_archives_stdout_and_stderr_before_count_validation(
+    monkeypatch, tmp_path
+):
+    adapter, _registry = load_memphant_adapter(monkeypatch)
+    proof_dir = tmp_path / "proof"
+    monkeypatch.setenv("MEMPHANT_LME_PROOF_DIR", str(proof_dir))
+    completed = adapter.subprocess.CompletedProcess(
+        ["worker"],
+        0,
+        "memphant-worker: drain completed=139\n",
+        "memphant-worker: job fixture failed: root cause\n",
+    )
+    monkeypatch.setattr(adapter.subprocess, "run", lambda *_args, **_kwargs: completed)
+
+    with pytest.raises(RuntimeError, match="worker compiled 139 sources, expected 670"):
+        adapter._drain_worker("worker", "postgres://fixture", 670)
+
+    assert (proof_dir / "worker.stdout").read_text() == completed.stdout
+    assert (proof_dir / "worker.stderr").read_text() == completed.stderr
+
+
 def test_memphant_memory_uses_isolated_rest_scope_and_emits_trace_proof(
     monkeypatch, tmp_path
 ):

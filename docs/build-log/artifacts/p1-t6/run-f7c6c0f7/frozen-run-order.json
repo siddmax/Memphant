@@ -1,0 +1,290 @@
+[
+  {
+    "arm": "fast",
+    "question_id": "19367bc7",
+    "row_id": "0001-19367bc7-fast",
+    "sequence": 1
+  },
+  {
+    "arm": "sonnet",
+    "question_id": "19367bc7",
+    "row_id": "0002-19367bc7-sonnet",
+    "sequence": 2
+  },
+  {
+    "arm": "luna",
+    "question_id": "19367bc7",
+    "row_id": "0003-19367bc7-luna",
+    "sequence": 3
+  },
+  {
+    "arm": "sol",
+    "question_id": "19367bc7",
+    "row_id": "0004-19367bc7-sol",
+    "sequence": 4
+  },
+  {
+    "arm": "fast",
+    "question_id": "21f3228c",
+    "row_id": "0005-21f3228c-fast",
+    "sequence": 5
+  },
+  {
+    "arm": "sonnet",
+    "question_id": "21f3228c",
+    "row_id": "0006-21f3228c-sonnet",
+    "sequence": 6
+  },
+  {
+    "arm": "luna",
+    "question_id": "21f3228c",
+    "row_id": "0007-21f3228c-luna",
+    "sequence": 7
+  },
+  {
+    "arm": "sol",
+    "question_id": "21f3228c",
+    "row_id": "0008-21f3228c-sol",
+    "sequence": 8
+  },
+  {
+    "arm": "fast",
+    "question_id": "2c45ecbb",
+    "row_id": "0009-2c45ecbb-fast",
+    "sequence": 9
+  },
+  {
+    "arm": "sonnet",
+    "question_id": "2c45ecbb",
+    "row_id": "0010-2c45ecbb-sonnet",
+    "sequence": 10
+  },
+  {
+    "arm": "luna",
+    "question_id": "2c45ecbb",
+    "row_id": "0011-2c45ecbb-luna",
+    "sequence": 11
+  },
+  {
+    "arm": "sol",
+    "question_id": "2c45ecbb",
+    "row_id": "0012-2c45ecbb-sol",
+    "sequence": 12
+  },
+  {
+    "arm": "fast",
+    "question_id": "52dd33bb",
+    "row_id": "0013-52dd33bb-fast",
+    "sequence": 13
+  },
+  {
+    "arm": "sonnet",
+    "question_id": "52dd33bb",
+    "row_id": "0014-52dd33bb-sonnet",
+    "sequence": 14
+  },
+  {
+    "arm": "luna",
+    "question_id": "52dd33bb",
+    "row_id": "0015-52dd33bb-luna",
+    "sequence": 15
+  },
+  {
+    "arm": "sol",
+    "question_id": "52dd33bb",
+    "row_id": "0016-52dd33bb-sol",
+    "sequence": 16
+  },
+  {
+    "arm": "fast",
+    "question_id": "658fa827",
+    "row_id": "0017-658fa827-fast",
+    "sequence": 17
+  },
+  {
+    "arm": "sonnet",
+    "question_id": "658fa827",
+    "row_id": "0018-658fa827-sonnet",
+    "sequence": 18
+  },
+  {
+    "arm": "luna",
+    "question_id": "658fa827",
+    "row_id": "0019-658fa827-luna",
+    "sequence": 19
+  },
+  {
+    "arm": "sol",
+    "question_id": "658fa827",
+    "row_id": "0020-658fa827-sol",
+    "sequence": 20
+  },
+  {
+    "arm": "fast",
+    "question_id": "6fdda2fc",
+    "row_id": "0021-6fdda2fc-fast",
+    "sequence": 21
+  },
+  {
+    "arm": "sonnet",
+    "question_id": "6fdda2fc",
+    "row_id": "0022-6fdda2fc-sonnet",
+    "sequence": 22
+  },
+  {
+    "arm": "luna",
+    "question_id": "6fdda2fc",
+    "row_id": "0023-6fdda2fc-luna",
+    "sequence": 23
+  },
+  {
+    "arm": "sol",
+    "question_id": "6fdda2fc",
+    "row_id": "0024-6fdda2fc-sol",
+    "sequence": 24
+  },
+  {
+    "arm": "fast",
+    "question_id": "86fa86eb",
+    "row_id": "0025-86fa86eb-fast",
+    "sequence": 25
+  },
+  {
+    "arm": "sonnet",
+    "question_id": "86fa86eb",
+    "row_id": "0026-86fa86eb-sonnet",
+    "sequence": 26
+  },
+  {
+    "arm": "luna",
+    "question_id": "86fa86eb",
+    "row_id": "0027-86fa86eb-luna",
+    "sequence": 27
+  },
+  {
+    "arm": "sol",
+    "question_id": "86fa86eb",
+    "row_id": "0028-86fa86eb-sol",
+    "sequence": 28
+  },
+  {
+    "arm": "fast",
+    "question_id": "8e21c6e5",
+    "row_id": "0029-8e21c6e5-fast",
+    "sequence": 29
+  },
+  {
+    "arm": "sonnet",
+    "question_id": "8e21c6e5",
+    "row_id": "0030-8e21c6e5-sonnet",
+    "sequence": 30
+  },
+  {
+    "arm": "luna",
+    "question_id": "8e21c6e5",
+    "row_id": "0031-8e21c6e5-luna",
+    "sequence": 31
+  },
+  {
+    "arm": "sol",
+    "question_id": "8e21c6e5",
+    "row_id": "0032-8e21c6e5-sol",
+    "sequence": 32
+  },
+  {
+    "arm": "fast",
+    "question_id": "aedd338d",
+    "row_id": "0033-aedd338d-fast",
+    "sequence": 33
+  },
+  {
+    "arm": "sonnet",
+    "question_id": "aedd338d",
+    "row_id": "0034-aedd338d-sonnet",
+    "sequence": 34
+  },
+  {
+    "arm": "luna",
+    "question_id": "aedd338d",
+    "row_id": "0035-aedd338d-luna",
+    "sequence": 35
+  },
+  {
+    "arm": "sol",
+    "question_id": "aedd338d",
+    "row_id": "0036-aedd338d-sol",
+    "sequence": 36
+  },
+  {
+    "arm": "fast",
+    "question_id": "b05cf470",
+    "row_id": "0037-b05cf470-fast",
+    "sequence": 37
+  },
+  {
+    "arm": "sonnet",
+    "question_id": "b05cf470",
+    "row_id": "0038-b05cf470-sonnet",
+    "sequence": 38
+  },
+  {
+    "arm": "luna",
+    "question_id": "b05cf470",
+    "row_id": "0039-b05cf470-luna",
+    "sequence": 39
+  },
+  {
+    "arm": "sol",
+    "question_id": "b05cf470",
+    "row_id": "0040-b05cf470-sol",
+    "sequence": 40
+  },
+  {
+    "arm": "fast",
+    "question_id": "dae9f7e9",
+    "row_id": "0041-dae9f7e9-fast",
+    "sequence": 41
+  },
+  {
+    "arm": "sonnet",
+    "question_id": "dae9f7e9",
+    "row_id": "0042-dae9f7e9-sonnet",
+    "sequence": 42
+  },
+  {
+    "arm": "luna",
+    "question_id": "dae9f7e9",
+    "row_id": "0043-dae9f7e9-luna",
+    "sequence": 43
+  },
+  {
+    "arm": "sol",
+    "question_id": "dae9f7e9",
+    "row_id": "0044-dae9f7e9-sol",
+    "sequence": 44
+  },
+  {
+    "arm": "fast",
+    "question_id": "f2b221fd",
+    "row_id": "0045-f2b221fd-fast",
+    "sequence": 45
+  },
+  {
+    "arm": "sonnet",
+    "question_id": "f2b221fd",
+    "row_id": "0046-f2b221fd-sonnet",
+    "sequence": 46
+  },
+  {
+    "arm": "luna",
+    "question_id": "f2b221fd",
+    "row_id": "0047-f2b221fd-luna",
+    "sequence": 47
+  },
+  {
+    "arm": "sol",
+    "question_id": "f2b221fd",
+    "row_id": "0048-f2b221fd-sol",
+    "sequence": 48
+  }
+]
