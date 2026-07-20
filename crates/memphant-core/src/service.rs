@@ -1790,6 +1790,18 @@ impl<S: MemoryStore> MemoryService<S> {
             .await
     }
 
+    /// Queue-wide pending count for fleet-worker drain orchestration. Unlike
+    /// `pending_job_count`, this is intentionally unscoped and must never be
+    /// exposed through a tenant request surface.
+    pub async fn pending_worker_job_count(&self) -> Result<usize, ServiceError> {
+        Ok(self.store.pending_worker_job_count().await?)
+    }
+
+    /// Queue-wide dead-letter count for worker health/drain exit checks.
+    pub async fn worker_dead_letter_count(&self) -> Result<u64, ServiceError> {
+        Ok(self.store.dead_letter_count().await?)
+    }
+
     /// A worker tick restricted to `filter`'s tenant/scope lanes. The unscoped
     /// tick claims across every tenant, which is right for a fleet worker but
     /// wrong for callers that must not drain lanes they do not own (per-tenant
@@ -2385,8 +2397,8 @@ fn episode_contextual_chunks(
         .filter_map(|(window_index, window)| {
             let start = window.first()?.0;
             let end = window.last()?.1;
-            let text = body.get(start..end)?.trim();
-            if text.is_empty() {
+            let text = body.get(start..end)?;
+            if text.trim().is_empty() {
                 return None;
             }
             let first = window_index * window_size + 1;
@@ -2582,8 +2594,8 @@ fn resource_contextual_chunks(
         .filter_map(|(window_index, (first_para, last_para))| {
             let start = paras[first_para].0;
             let end = paras[last_para].1;
-            let text = body.get(start..end)?.trim();
-            if text.is_empty() {
+            let text = body.get(start..end)?;
+            if text.trim().is_empty() {
                 return None;
             }
             Some(ContextualChunk {
@@ -3341,6 +3353,34 @@ Line five about kiwis.\n";
         assert!(chunks[0].body.starts_with("Line one about apples."));
     }
 
+    #[test]
+    fn episode_chunk_span_preserves_edge_whitespace_verbatim() {
+        let episode_id = EpisodeId::new();
+        let body = "  Line one keeps leading spaces.\n\
+Line two.\n\
+Line three.\n\
+Line four keeps trailing spaces.   \n\
+Line five.\n";
+        let chunks = episode_contextual_chunks(episode_id, "doc", body, None);
+        assert_eq!(chunks.len(), 2);
+        for chunk in &chunks {
+            let (start, end) = chunk
+                .source_span
+                .as_deref()
+                .and_then(|span| span.split_once('-'))
+                .map(|(start, end)| {
+                    (
+                        start.parse::<usize>().unwrap(),
+                        end.parse::<usize>().unwrap(),
+                    )
+                })
+                .unwrap();
+            assert_eq!(&body[start..end], chunk.body);
+        }
+        assert!(chunks[0].body.starts_with("  Line one"));
+        assert!(chunks[0].body.ends_with("spaces.   "));
+    }
+
     /// A body that fits a single window would only duplicate the unit body:
     /// emit nothing (bloat guard).
     #[test]
@@ -3725,6 +3765,25 @@ Trailing prose after the fence.\n";
             body[..start].chars().count(),
             "a later window's byte offset must diverge from its char offset (multi-byte proof)"
         );
+    }
+
+    #[test]
+    fn resource_chunk_span_preserves_edge_whitespace_verbatim() {
+        let body = [
+            format!("  {}", para("first", 800)),
+            format!("{}   ", para("second", 800)),
+            para("third", 800),
+        ]
+        .join("\n\n");
+        let chunks =
+            resource_contextual_chunks(ResourceId::from_u128(RESOURCE_ID), "doc.md", &body);
+        assert!(chunks.len() >= 2);
+        for chunk in &chunks {
+            let (start, end) = span_of(chunk);
+            assert_eq!(&body[start..end], chunk.body);
+        }
+        assert!(chunks[0].body.starts_with("  first:"));
+        assert!(chunks.iter().any(|chunk| chunk.body.ends_with("   ")));
     }
 
     #[test]

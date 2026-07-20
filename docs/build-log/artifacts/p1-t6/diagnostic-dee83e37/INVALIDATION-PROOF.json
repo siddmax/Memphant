@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "attempt": "diagnostic-dee83e37",
+  "classification": "no_generation_root_cause_diagnostic",
+  "invalidated_at": "2026-07-20",
+  "measured_commit": "dee83e37972c0d1ea65008291d21daa433a02e1d",
+  "preserved_evidence": {
+    "pre_append_inventory_files": 17,
+    "pre_append_inventory_sha256": "dcc220ba368c3e194ea5483e19ddba4dfefa3beb0cf06902fa8e7b52596ec0c6",
+    "pre_execution_proof_sha256": "590cd2e638f48f7c5a4580acc82e2f7640d82bc6ea7f9c58a4b2603149935660",
+    "finalized_failure_rows": [
+      "0001-19367bc7-fast"
+    ],
+    "interrupted_staging_rows": [
+      ".staging-0002-19367bc7-sonnet"
+    ]
+  },
+  "worker_diagnostic": {
+    "completed_sources": 139,
+    "expected_sources": 670,
+    "first_failure": "conflict: contextual chunk span does not match its source body",
+    "worker_stderr_sha256": "90c2f9e59f1a567bebdef0cf4338eb234206328e185f99b3f53438e70512ef30",
+    "worker_stdout_sha256": "c2eac5a14b88d7613905745d1af8860aa2a7aea74d5235f97f558437dbda0a05",
+    "log_recovery": "The failed relative proof path placed these logs under the pinned official checkout. Exact copies are appended under DIAGNOSTIC-WORKER-LOGS before that temporary path is discarded."
+  },
+  "root_causes": [
+    "Both contextual chunkers trimmed the stored chunk body while retaining the untrimmed source byte span, violating exact citation reconstruction for sources with edge whitespace.",
+    "Worker drain treated a zero-completion tick as an empty queue even when failed jobs were delayed and queued for retry.",
+    "Relative campaign output paths were interpreted from the official harness working directory, misplacing official and worker proof artifacts."
+  ],
+  "external_dispatch_audit": {
+    "reader_route_files": 0,
+    "judge_route_files": 0,
+    "deep_generation_receipt_files": 0,
+    "official_score_files": 0,
+    "settled_micros": 0,
+    "unsettled_upper_bound_micros": 0
+  },
+  "retry_decision": {
+    "same_output_root_replay_authorized": false,
+    "fresh_output_root_authorized_after_regression_and_live_670_source_proof": true
+  }
+}

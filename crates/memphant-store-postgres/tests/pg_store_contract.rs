@@ -627,6 +627,24 @@ async fn resource_acl_unknown_shape_fails_closed() {
         .await
         .expect_err("unknown ACL data must fail closed");
     assert!(matches!(error, memphant_core::StoreError::Backend(_)));
+
+    // This suite shares one ephemeral database so process-level worker smoke
+    // tests can exercise the rows produced by the store contracts. Restore the
+    // adversarial fixture after proving the fail-closed read; otherwise this
+    // intentionally malformed resource poisons the later fleet drain.
+    let mut tx = pool.begin().await.expect("begin cleanup transaction");
+    sqlx::query("select memphant.bind_tenant($1)")
+        .bind(tenant.as_uuid())
+        .execute(&mut *tx)
+        .await
+        .expect("bind cleanup tenant");
+    sqlx::query("update memphant.resource set acl = '{}'::jsonb where tenant_id = $1 and id = $2")
+        .bind(tenant.as_uuid())
+        .bind(retained.resource_id.as_uuid())
+        .execute(&mut *tx)
+        .await
+        .expect("restore valid ACL fixture");
+    tx.commit().await.expect("commit ACL cleanup");
 }
 
 #[tokio::test]

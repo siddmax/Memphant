@@ -167,6 +167,20 @@ def test_completed_rows_are_never_overwritten(tmp_path: Path) -> None:
         campaign.require_new_row_dir(row_dir)
 
 
+def test_execution_paths_are_absolute_before_official_cwd_changes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    campaign = _load()
+    monkeypatch.chdir(tmp_path)
+    directory, materialized, output = campaign._resolve_execution_paths(
+        Path("official"), Path("materialized"), Path("artifacts")
+    )
+    assert directory == tmp_path / "official"
+    assert materialized == tmp_path / "materialized"
+    assert output == tmp_path / "artifacts"
+    assert all(path.is_absolute() for path in (directory, materialized, output))
+
+
 def test_fast_and_deep_configs_differ_only_by_mode(tmp_path: Path) -> None:
     campaign = _load()
     base = json.loads(

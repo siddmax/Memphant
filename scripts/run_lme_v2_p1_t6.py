@@ -113,6 +113,12 @@ def _clean_environment(extra: dict[str, str] | None = None) -> dict[str, str]:
     return clean
 
 
+def _resolve_execution_paths(
+    directory: Path, materialized: Path, output: Path
+) -> tuple[Path, Path, Path]:
+    return directory.resolve(), materialized.resolve(), output.resolve()
+
+
 def verify_python_harness(directory: Path) -> dict[str, object]:
     """Prove the exact sanitized interpreter can import the official harness."""
     official = directory / "official"
@@ -1355,6 +1361,9 @@ def _run_logged_harness(
 
 
 def run_row(directory: Path, materialized: Path, output: Path, row: dict, manifest: dict) -> dict:
+    directory, materialized, output = _resolve_execution_paths(
+        directory, materialized, output
+    )
     require(os.environ.get("MEMPHANT_SCRATCH_ACTIVE") == "1", "row requires scratch database")
     database_url = os.environ.get("MEMPHANT_TEST_DATABASE_URL", "")
     require(database_url, "scratch database URL missing")
@@ -1526,6 +1535,9 @@ def run_row(directory: Path, materialized: Path, output: Path, row: dict, manife
 
 
 def run_campaign(directory: Path, materialized: Path, output: Path, base_database_url: str, manifest: dict) -> dict:
+    directory, materialized, output = _resolve_execution_paths(
+        directory, materialized, output
+    )
     require(os.environ.get("OPENROUTER_API_KEY") and os.environ.get("OPENAI_API_KEY"),
             "OPENROUTER_API_KEY and OPENAI_API_KEY are required")
     preflight_proof = preflight(directory, materialized, manifest)

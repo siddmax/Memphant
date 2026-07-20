@@ -2608,6 +2608,16 @@ impl MemoryStore for PgStore {
         Ok(count as usize)
     }
 
+    async fn pending_worker_job_count(&self) -> Result<usize, StoreError> {
+        let count: i64 = sqlx::query_scalar(
+            "select count(*) from memphant.job_state where state in ('queued', 'running')",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(backend)?;
+        Ok(count as usize)
+    }
+
     async fn fetch_episode(
         &self,
         context: &ResolvedMemoryContext,

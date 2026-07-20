@@ -295,6 +295,14 @@ pub async fn retain_resource_registers_and_enqueues<H: StoreHarness>(h: &H) {
     assert!(resource.acl.is_deep_eligible());
     assert_eq!(resource.extractor_state, ResourceExtractorState::Registered);
     assert_eq!(store.pending_job_count(&context).await.expect("count"), 1);
+    assert!(
+        store
+            .pending_worker_job_count()
+            .await
+            .expect("worker queue count")
+            >= 1,
+        "the fleet-worker queue count includes the tenant-scoped resource job"
+    );
 }
 
 /// Resource ACLs are persisted exactly by both stores. Public retain above

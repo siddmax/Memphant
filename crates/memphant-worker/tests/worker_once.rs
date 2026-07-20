@@ -6,24 +6,59 @@
 //! automated coverage of any kind — only manual exercise via
 //! `scripts/e2e_probe.sh`.
 //!
-//! Gated exactly like `pg_store_contract.rs`: `#[ignore]`, reads
+//! Gated exactly like `pg_store_contract.rs`: `#[ignore]`, reads a scratch-only
 //! `MEMPHANT_TEST_DATABASE_URL` (the test translates that into the
 //! `MEMPHANT_WORKER_DATABASE_URL` the worker binary reads). Run with:
-//!   MEMPHANT_TEST_DATABASE_URL=postgres://memphant:memphant@localhost:5432/memphant \
+//!   bash scripts/with_scratch_db.sh postgres://memphant:memphant@localhost:5432/memphant \
+//!     MEMPHANT_TEST_DATABASE_URL \
 //!     cargo test -p memphant-worker -- --ignored --test-threads=1
 
 use std::process::Command;
 
-fn db_url() -> String {
-    std::env::var("MEMPHANT_TEST_DATABASE_URL")
-        .expect("MEMPHANT_TEST_DATABASE_URL must point at a migrated Postgres")
+fn scratch_db_url() -> String {
+    let url = std::env::var("MEMPHANT_TEST_DATABASE_URL")
+        .expect("MEMPHANT_TEST_DATABASE_URL must point at a migrated scratch Postgres");
+    let database = url
+        .rsplit('/')
+        .next()
+        .and_then(|suffix| suffix.split('?').next())
+        .unwrap_or_default();
+    assert!(
+        database.starts_with("memphant_scratch_"),
+        "worker process tests require with_scratch_db.sh; refusing database {database:?}"
+    );
+    url
+}
+
+fn clear_pending_worker_jobs(url: &str) {
+    // The combined live gate runs store contracts first in the same ephemeral
+    // database. Several contracts intentionally leave claimed, delayed, or
+    // malformed jobs behind. Those fixtures test the store, but are not valid
+    // input to this binary's independent drain smoke test.
+    let output = Command::new("psql")
+        .arg(url)
+        .args([
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-q",
+            "-c",
+            "delete from memphant.job_state where state in ('queued', 'running')",
+        ])
+        .output()
+        .expect("psql clears pending scratch jobs");
+    assert!(
+        output.status.success(),
+        "pending scratch-job cleanup failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
 #[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
 fn worker_once_tick_exits_zero_and_prints_completed_line() {
+    let database_url = scratch_db_url();
     let output = Command::new(env!("CARGO_BIN_EXE_memphant-worker"))
-        .env("MEMPHANT_WORKER_DATABASE_URL", db_url())
+        .env("MEMPHANT_WORKER_DATABASE_URL", database_url)
         .env_remove("DATABASE_URL")
         .env("MEMPHANT_WORKER_ONCE", "1")
         .output()
@@ -45,8 +80,10 @@ fn worker_once_tick_exits_zero_and_prints_completed_line() {
 #[test]
 #[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
 fn worker_drain_exits_zero_and_prints_exactly_one_summary_line() {
+    let database_url = scratch_db_url();
+    clear_pending_worker_jobs(&database_url);
     let output = Command::new(env!("CARGO_BIN_EXE_memphant-worker"))
-        .env("MEMPHANT_WORKER_DATABASE_URL", db_url())
+        .env("MEMPHANT_WORKER_DATABASE_URL", database_url)
         .env_remove("DATABASE_URL")
         .env("MEMPHANT_EMBEDDINGS", "off")
         .env("MEMPHANT_WORKER_DRAIN", "1")

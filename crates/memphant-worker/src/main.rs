@@ -15,6 +15,17 @@ enum WorkerMode {
     Drain,
 }
 
+fn drain_finished(
+    pending: usize,
+    dead_letters_before: u64,
+    dead_letters_after: u64,
+) -> Result<bool, &'static str> {
+    if dead_letters_after > dead_letters_before {
+        return Err("drain produced dead-lettered jobs");
+    }
+    Ok(pending == 0)
+}
+
 fn worker_mode(once: bool, drain: bool) -> Result<WorkerMode, &'static str> {
     match (once, drain) {
         (false, false) => Ok(WorkerMode::Daemon),
@@ -49,15 +60,32 @@ async fn main() {
     }
     if mode == WorkerMode::Drain {
         let mut total = 0;
+        let dead_letters_before = service
+            .worker_dead_letter_count()
+            .await
+            .expect("memphant-worker: dead-letter baseline failed");
         loop {
             let completed = service
                 .run_worker_tick(BATCH)
                 .await
                 .expect("memphant-worker: drain tick failed");
-            if completed == 0 {
+            total += completed;
+            let pending = service
+                .pending_worker_job_count()
+                .await
+                .expect("memphant-worker: pending-job count failed");
+            let dead_letters_after = service
+                .worker_dead_letter_count()
+                .await
+                .expect("memphant-worker: dead-letter count failed");
+            if drain_finished(pending, dead_letters_before, dead_letters_after)
+                .unwrap_or_else(|error| panic!("memphant-worker: {error}"))
+            {
                 break;
             }
-            total += completed;
+            if completed == 0 {
+                tokio::time::sleep(TICK).await;
+            }
         }
         println!("memphant-worker: drain completed={total}");
         return;
@@ -88,7 +116,7 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{WorkerMode, worker_mode};
+    use super::{WorkerMode, drain_finished, worker_mode};
 
     #[test]
     fn worker_modes_are_distinct_and_conflicts_fail() {
@@ -96,5 +124,15 @@ mod tests {
         assert_eq!(worker_mode(true, false).unwrap(), WorkerMode::Once);
         assert_eq!(worker_mode(false, true).unwrap(), WorkerMode::Drain);
         assert!(worker_mode(true, true).is_err());
+    }
+
+    #[test]
+    fn drain_waits_for_delayed_retries_and_rejects_new_dead_letters() {
+        assert!(!drain_finished(1, 0, 0).unwrap());
+        assert!(drain_finished(0, 0, 0).unwrap());
+        assert_eq!(
+            drain_finished(0, 2, 3).unwrap_err(),
+            "drain produced dead-lettered jobs"
+        );
     }
 }

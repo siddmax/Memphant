@@ -714,6 +714,10 @@ impl MemoryStore for AnyStore {
         delegate!(self, store => store.pending_job_count(context).await)
     }
 
+    async fn pending_worker_job_count(&self) -> Result<usize, StoreError> {
+        delegate!(self, store => store.pending_worker_job_count().await)
+    }
+
     async fn fetch_episode(
         &self,
         context: &ResolvedMemoryContext,

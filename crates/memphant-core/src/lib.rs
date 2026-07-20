@@ -1149,6 +1149,10 @@ pub trait MemoryStore: Send + Sync {
         &self,
         context: &ResolvedMemoryContext,
     ) -> impl Future<Output = Result<usize, StoreError>> + Send;
+    /// Count every queued or running reflect job visible to an unscoped fleet
+    /// worker. Drain mode uses this to distinguish an empty queue from delayed
+    /// retries that are temporarily ineligible for claiming.
+    fn pending_worker_job_count(&self) -> impl Future<Output = Result<usize, StoreError>> + Send;
     fn fetch_episode(
         &self,
         context: &ResolvedMemoryContext,
@@ -3667,6 +3671,26 @@ impl MemoryStore for InMemoryStore {
                     .count()
             })
             .unwrap_or(0))
+    }
+
+    async fn pending_worker_job_count(&self) -> Result<usize, StoreError> {
+        let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+        Ok(state
+            .reflect_jobs
+            .values()
+            .flatten()
+            .filter(|job| {
+                state
+                    .job_meta
+                    .get(&job.id)
+                    .map(|meta| {
+                        !meta.completed
+                            && !meta.terminal
+                            && meta.attempts < JOB_DEAD_LETTER_ATTEMPTS
+                    })
+                    .unwrap_or(true)
+            })
+            .count())
     }
 
     async fn fetch_episode(
