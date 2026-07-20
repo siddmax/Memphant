@@ -41,8 +41,9 @@ impl RecordingProvider {
                 stop_reason: DeepRecallStopReason::Completed,
                 source_ids,
                 usage: DeepRecallUsage::default(),
-                observed_provider: "test".to_string(),
-                observed_model: "test/deep".to_string(),
+                generation_ids: Vec::new(),
+                observed_provider: Some("test".to_string()),
+                observed_model: Some("test/deep".to_string()),
             }),
             calls: AtomicUsize::new(0),
             workspaces: Mutex::new(Vec::new()),
@@ -423,8 +424,9 @@ async fn observed_routing_is_distinct_from_configured_identity() {
         stop_reason: DeepRecallStopReason::Completed,
         source_ids: vec![source_id],
         usage: DeepRecallUsage::default(),
-        observed_provider: "routed-provider".to_string(),
-        observed_model: "routed/model-v2".to_string(),
+        generation_ids: Vec::new(),
+        observed_provider: Some("routed-provider".to_string()),
+        observed_model: Some("routed/model-v2".to_string()),
     });
     let service = MemoryService::new(
         Arc::new(store.clone()),
@@ -508,8 +510,9 @@ async fn every_cap_returns_a_machine_readable_partial_result() {
             stop_reason,
             source_ids: vec![source_id],
             usage,
-            observed_provider: "test-route".to_string(),
-            observed_model: "test/deep".to_string(),
+            generation_ids: Vec::new(),
+            observed_provider: Some("test-route".to_string()),
+            observed_model: Some("test/deep".to_string()),
         }));
         let service = MemoryService::new(
             Arc::new(store.clone()),
@@ -530,6 +533,87 @@ async fn every_cap_returns_a_machine_readable_partial_result() {
         let trace = store.trace_by_id_any_tenant(response.trace_id).unwrap();
         assert_eq!(trace.deep.unwrap(), summary);
         assert_eq!(trace.cost_micros, usage.spend_micros);
+    }
+}
+
+#[tokio::test]
+async fn paid_invalid_output_returns_checkpoint_and_truthful_outstanding_usage() {
+    let (store, context, answer_id, source_id) = seeded_service().await;
+    let usage = DeepRecallUsage {
+        context_tokens: 100,
+        spend_micros: 200,
+        unsettled_context_tokens_upper_bound: 300,
+        unsettled_spend_micros_upper_bound: 400,
+        ..DeepRecallUsage::default()
+    };
+    let provider = Arc::new(RecordingProvider::with_result(DeepRecallProviderResult {
+        status: DeepRecallStatus::Partial,
+        stop_reason: DeepRecallStopReason::InvalidOutput,
+        source_ids: vec![source_id],
+        usage,
+        generation_ids: vec!["gen-1".to_string(), "gen-2".to_string()],
+        observed_provider: Some("Azure".to_string()),
+        observed_model: Some("test/deep-routed".to_string()),
+    }));
+    let service = MemoryService::new(
+        Arc::new(store.clone()),
+        Arc::new(CLOCK),
+        Arc::new(NoopEmbedding),
+    )
+    .with_deep_recall_provider(provider);
+
+    let response = service
+        .recall_internal(request(context, RecallMode::Deep))
+        .await
+        .unwrap();
+    assert_eq!(response.candidate_whitelist, vec![answer_id]);
+    let summary = response.deep.unwrap();
+    assert_eq!(summary.status, DeepRecallStatus::Partial);
+    assert_eq!(summary.stop_reason, DeepRecallStopReason::InvalidOutput);
+    assert_eq!(summary.generation_ids, vec!["gen-1", "gen-2"]);
+    assert_eq!(summary.usage, usage);
+    let trace = store.trace_by_id_any_tenant(response.trace_id).unwrap();
+    assert_eq!(trace.cost_micros, 200);
+    assert_eq!(trace.deep.unwrap(), summary);
+}
+
+#[tokio::test]
+async fn settled_plus_outstanding_caps_use_checked_arithmetic() {
+    for usage in [
+        DeepRecallUsage {
+            context_tokens: limits().max_context_tokens,
+            unsettled_context_tokens_upper_bound: 1,
+            ..DeepRecallUsage::default()
+        },
+        DeepRecallUsage {
+            spend_micros: limits().max_spend_micros,
+            unsettled_spend_micros_upper_bound: 1,
+            ..DeepRecallUsage::default()
+        },
+        DeepRecallUsage {
+            context_tokens: u64::MAX,
+            unsettled_context_tokens_upper_bound: 1,
+            ..DeepRecallUsage::default()
+        },
+    ] {
+        let (store, context, _, _) = seeded_service().await;
+        let provider = Arc::new(RecordingProvider::with_result(DeepRecallProviderResult {
+            status: DeepRecallStatus::Partial,
+            stop_reason: DeepRecallStopReason::ProviderError,
+            source_ids: Vec::new(),
+            usage,
+            generation_ids: vec!["gen-paid".to_string()],
+            observed_provider: Some("Azure".to_string()),
+            observed_model: Some("test/deep".to_string()),
+        }));
+        let service = MemoryService::new(Arc::new(store), Arc::new(CLOCK), Arc::new(NoopEmbedding))
+            .with_deep_recall_provider(provider);
+        assert!(matches!(
+            service
+                .recall_internal(request(context, RecallMode::Deep))
+                .await,
+            Err(ServiceError::Core(CoreError::DeepProviderInvalidOutput))
+        ));
     }
 }
 
@@ -559,8 +643,9 @@ async fn capped_zero_evidence_returns_an_ordinary_abstention() {
             tool_iterations: limits().max_tool_iterations,
             ..DeepRecallUsage::default()
         },
-        observed_provider: "test".to_string(),
-        observed_model: "test/deep".to_string(),
+        generation_ids: Vec::new(),
+        observed_provider: Some("test".to_string()),
+        observed_model: Some("test/deep".to_string()),
     }));
     let service = MemoryService::new(Arc::new(store), Arc::new(CLOCK), Arc::new(NoopEmbedding))
         .with_deep_recall_provider(provider);
@@ -617,16 +702,18 @@ async fn invalid_provider_results_fail_closed_without_a_success_trace() {
             stop_reason: DeepRecallStopReason::Completed,
             source_ids: vec![uuid::Uuid::from_u128(404)],
             usage: DeepRecallUsage::default(),
-            observed_provider: "test".to_string(),
-            observed_model: "test/deep".to_string(),
+            generation_ids: Vec::new(),
+            observed_provider: Some("test".to_string()),
+            observed_model: Some("test/deep".to_string()),
         },
         DeepRecallProviderResult {
             status: DeepRecallStatus::Completed,
             stop_reason: DeepRecallStopReason::WallTime,
             source_ids: Vec::new(),
             usage: DeepRecallUsage::default(),
-            observed_provider: "test".to_string(),
-            observed_model: "test/deep".to_string(),
+            generation_ids: Vec::new(),
+            observed_provider: Some("test".to_string()),
+            observed_model: Some("test/deep".to_string()),
         },
         DeepRecallProviderResult {
             status: DeepRecallStatus::Completed,
@@ -636,16 +723,27 @@ async fn invalid_provider_results_fail_closed_without_a_success_trace() {
                 spend_micros: limits().max_spend_micros + 1,
                 ..DeepRecallUsage::default()
             },
-            observed_provider: "test".to_string(),
-            observed_model: "test/deep".to_string(),
+            generation_ids: Vec::new(),
+            observed_provider: Some("test".to_string()),
+            observed_model: Some("test/deep".to_string()),
         },
         DeepRecallProviderResult {
             status: DeepRecallStatus::Completed,
             stop_reason: DeepRecallStopReason::Completed,
             source_ids: Vec::new(),
             usage: DeepRecallUsage::default(),
-            observed_provider: "test".to_string(),
-            observed_model: " ".to_string(),
+            generation_ids: Vec::new(),
+            observed_provider: Some("test".to_string()),
+            observed_model: Some(" ".to_string()),
+        },
+        DeepRecallProviderResult {
+            status: DeepRecallStatus::Partial,
+            stop_reason: DeepRecallStopReason::ProviderError,
+            source_ids: Vec::new(),
+            usage: DeepRecallUsage::default(),
+            generation_ids: vec!["generation".to_string()],
+            observed_provider: Some("test".to_string()),
+            observed_model: None,
         },
     ];
 
@@ -682,8 +780,9 @@ async fn invalid_provider_results_fail_closed_without_a_success_trace() {
         stop_reason: DeepRecallStopReason::Completed,
         source_ids: vec![source_id, source_id],
         usage: DeepRecallUsage::default(),
-        observed_provider: "test".to_string(),
-        observed_model: "test/deep".to_string(),
+        generation_ids: Vec::new(),
+        observed_provider: Some("test".to_string()),
+        observed_model: Some("test/deep".to_string()),
     };
     let service = MemoryService::new(Arc::new(store), Arc::new(CLOCK), Arc::new(NoopEmbedding))
         .with_deep_recall_provider(Arc::new(RecordingProvider::with_result(duplicate)));

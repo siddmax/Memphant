@@ -674,6 +674,14 @@ pub struct DeepRecallUsage {
     pub tool_iterations: u32,
     pub context_tokens: u64,
     pub spend_micros: u64,
+    /// Conservative tokens that may have been accepted by a provider but
+    /// could not be settled to provider-native usage before cancellation.
+    #[serde(default)]
+    pub unsettled_context_tokens_upper_bound: u64,
+    /// Conservative micro-USD that may have been billed but could not be
+    /// settled before cancellation. This is never included in trace cost.
+    #[serde(default)]
+    pub unsettled_spend_micros_upper_bound: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -681,6 +689,7 @@ pub struct DeepRecallUsage {
 pub enum DeepRecallStatus {
     Completed,
     Capped,
+    Partial,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -691,6 +700,8 @@ pub enum DeepRecallStopReason {
     ToolIterations,
     ContextTokens,
     Spend,
+    ProviderError,
+    InvalidOutput,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -707,6 +718,9 @@ pub struct DeepRecallSummary {
     pub stop_reason: DeepRecallStopReason,
     pub limits: DeepRecallLimits,
     pub usage: DeepRecallUsage,
+    /// Ordered provider generation IDs for every accepted model turn.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generation_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

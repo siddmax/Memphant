@@ -313,10 +313,17 @@ fn rung11_memorystress_style_suite_proves_dsr_decay_delta() {
 }
 
 #[test]
-#[ignore = "requires Task 5 real file-agent provider"]
+#[ignore = "paid network rung; requires configured MEMPHANT_DEEP=on environment"]
 fn rung12_l4_exhaustive_suite_proves_raw_episode_delta() {
     let suite = repo_root().join("benchmarks/rung12-l4-exhaustive-sampled.yaml");
-    let with_l4 = run_eval_file(&suite, EvalRunOptions::default()).expect("with l4 exhaustive");
+    let with_l4 = run_eval_file(
+        &suite,
+        EvalRunOptions {
+            l4_runtime_provider: true,
+            ..EvalRunOptions::default()
+        },
+    )
+    .expect("with runtime Deep provider");
     assert_eq!(with_l4.passed_cases, with_l4.total_cases);
 
     let without_l4 = run_eval_file(
@@ -329,12 +336,14 @@ fn rung12_l4_exhaustive_suite_proves_raw_episode_delta() {
     .expect("without l4 exhaustive");
     assert_eq!(without_l4.total_cases, with_l4.total_cases);
     assert_eq!(without_l4.passed_cases, 0);
-    assert!(
-        without_l4
-            .case_results
-            .iter()
-            .all(|case| !case.missing_units.is_empty())
-    );
+    assert!(without_l4.case_results.iter().all(|case| {
+        case.missing_units.is_empty()
+            && case.trace_id.is_none()
+            && case
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("deep recall is unavailable"))
+    }));
 }
 
 #[test]

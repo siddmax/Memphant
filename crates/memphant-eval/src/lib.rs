@@ -107,8 +107,9 @@ impl DeepRecallProvider for EvalDeepProvider {
                     tool_iterations: 1,
                     ..DeepRecallUsage::default()
                 },
-                observed_provider: "memphant-eval-local".to_string(),
-                observed_model: "deterministic-manifest-search-v1".to_string(),
+                generation_ids: Vec::new(),
+                observed_provider: Some("memphant-eval-local".to_string()),
+                observed_model: Some("deterministic-manifest-search-v1".to_string()),
             })
         })
     }
@@ -171,6 +172,9 @@ pub struct EvalRunOptions {
     pub procedure_recall_enabled: bool,
     pub decay_enabled: bool,
     pub l4_exhaustive_enabled: bool,
+    /// Use the opt-in runtime OpenRouter provider instead of the deterministic
+    /// local Deep provider. Paid/network runs must set this explicitly.
+    pub l4_runtime_provider: bool,
     pub filesystem_control_enabled: bool,
 }
 
@@ -189,6 +193,7 @@ impl Default for EvalRunOptions {
             procedure_recall_enabled: true,
             decay_enabled: true,
             l4_exhaustive_enabled: true,
+            l4_runtime_provider: false,
             filesystem_control_enabled: false,
         }
     }
@@ -666,6 +671,7 @@ struct GoldenRunControls {
     procedure_recall_enabled: bool,
     decay_enabled: bool,
     l4_exhaustive_enabled: bool,
+    l4_runtime_provider: bool,
     filesystem_control_enabled: bool,
 }
 
@@ -682,6 +688,7 @@ impl Default for GoldenRunControls {
             procedure_recall_enabled: true,
             decay_enabled: true,
             l4_exhaustive_enabled: true,
+            l4_runtime_provider: false,
             filesystem_control_enabled: false,
         }
     }
@@ -700,6 +707,7 @@ impl From<&EvalRunOptions> for GoldenRunControls {
             procedure_recall_enabled: options.procedure_recall_enabled,
             decay_enabled: options.decay_enabled,
             l4_exhaustive_enabled: options.l4_exhaustive_enabled,
+            l4_runtime_provider: options.l4_runtime_provider,
             filesystem_control_enabled: options.filesystem_control_enabled,
         }
     }
@@ -2020,8 +2028,13 @@ async fn run_golden_case_inner(
         controls.edge_expansion_enabled && !controls.filesystem_control_enabled;
     let mode = case.mode.unwrap_or(RecallMode::Fast);
     let recall_started_at = Instant::now();
-    let deep_provider = controls
-        .l4_exhaustive_enabled
+    let runtime_deep_provider = if controls.l4_exhaustive_enabled && controls.l4_runtime_provider {
+        memphant_runtime::deep_recall_openrouter::build_deep_recall_provider()
+            .map_err(EvalError::Failed)?
+    } else {
+        None
+    };
+    let local_deep_provider = (controls.l4_exhaustive_enabled && !controls.l4_runtime_provider)
         .then(EvalDeepProvider::default);
     let response = recall_with_pool_and_selection_and_deep(
         &context.store,
@@ -2054,9 +2067,14 @@ async fn run_golden_case_inner(
         false,
         None,
         CrossRerankCandidateSelection::FusedHead,
-        deep_provider
+        runtime_deep_provider
             .as_ref()
-            .map(|provider| provider as &dyn DeepRecallProvider),
+            .map(|provider| provider.as_ref())
+            .or_else(|| {
+                local_deep_provider
+                    .as_ref()
+                    .map(|provider| provider as &dyn DeepRecallProvider)
+            }),
     )
     .await
     .map_err(|error| EvalError::Core(error.to_string()))?;

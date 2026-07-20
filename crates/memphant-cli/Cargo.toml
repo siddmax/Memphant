@@ -20,4 +20,5 @@ uuid.workspace = true
 [dev-dependencies]
 axum.workspace = true
 memphant-server = { path = "../memphant-server" }
+memphant-runtime = { path = "../memphant-runtime" }
 tempfile.workspace = true

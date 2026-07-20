@@ -28,4 +28,6 @@ tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+memphant-store-testkit.workspace = true
 rmcp = { version = "2.2", features = ["client"] }
+tempfile.workspace = true

@@ -1,0 +1,2319 @@
+use std::collections::{BTreeMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
+
+use eventsource_stream::Eventsource;
+use futures::{Stream, StreamExt};
+use memphant_core::deep_recall::{
+    DeepRecallProvider, DeepRecallProviderError, DeepRecallProviderRequest,
+    DeepRecallProviderResult,
+};
+use memphant_types::{
+    DeepProviderIdentity, DeepRecallLimits, DeepRecallStatus, DeepRecallStopReason,
+    DeepRecallUsage, DeepWorkspace,
+};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
+
+const MAX_LIST_RESULTS: usize = 256;
+const MAX_QUERY_CHARS: usize = 256;
+const MAX_SEARCH_HITS: usize = 128;
+const MAX_TOOL_OUTPUT_BYTES: usize = 64 * 1024;
+const MAX_EVIDENCE_IDS: usize = 256;
+const MAX_READ_LINES: usize = 512;
+const DEFAULT_MAX_COMPLETION_TOKENS: u64 = 4_096;
+const DEFAULT_WALL_TIME_MS: u64 = 120_000;
+const DEFAULT_MAX_TOOL_ITERATIONS: u32 = 24;
+const DEFAULT_MAX_CONTEXT_TOKENS: u64 = 96_000;
+const DEFAULT_MAX_SPEND_MICROS: u64 = 300_000;
+const DEFAULT_OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
+
+#[derive(Debug, Clone)]
+pub struct DeepConfig {
+    api_key: String,
+    model: String,
+    prompt: String,
+    providers: Vec<String>,
+    input_price_micros_per_million: u64,
+    output_price_micros_per_million: u64,
+    limits: DeepRecallLimits,
+    max_completion_tokens: u64,
+    completion_url: String,
+    generation_url: String,
+    connect_timeout_ms: u64,
+    settlement_reserve_ms: u64,
+    max_retries: u8,
+    retry_base_ms: u64,
+    malformed_response_limit: u8,
+}
+
+impl DeepConfig {
+    pub fn new(
+        api_key: String,
+        model: String,
+        prompt: String,
+        providers: Vec<String>,
+        input_price_micros_per_million: u64,
+        output_price_micros_per_million: u64,
+    ) -> Result<Self, String> {
+        if api_key.trim().is_empty() || prompt.trim().is_empty() || model.trim().is_empty() {
+            return Err("Deep API key, model, and prompt must not be empty".to_string());
+        }
+        if model.to_ascii_lowercase().contains("latest") || model.contains('*') {
+            return Err("MEMPHANT_DEEP_MODEL must be an exact non-floating model id".to_string());
+        }
+        if providers.as_slice() != ["azure"] {
+            return Err("MEMPHANT_DEEP_PROVIDERS must be exactly azure".to_string());
+        }
+        if input_price_micros_per_million == 0 || output_price_micros_per_million == 0 {
+            return Err("Deep input and output price ceilings must be positive".to_string());
+        }
+        Ok(Self {
+            api_key,
+            model,
+            prompt,
+            providers,
+            input_price_micros_per_million,
+            output_price_micros_per_million,
+            limits: DeepRecallLimits {
+                wall_time_ms: DEFAULT_WALL_TIME_MS,
+                max_tool_iterations: DEFAULT_MAX_TOOL_ITERATIONS,
+                max_context_tokens: DEFAULT_MAX_CONTEXT_TOKENS,
+                max_spend_micros: DEFAULT_MAX_SPEND_MICROS,
+            },
+            max_completion_tokens: DEFAULT_MAX_COMPLETION_TOKENS,
+            completion_url: format!("{DEFAULT_OPENROUTER_BASE_URL}/chat/completions"),
+            generation_url: format!("{DEFAULT_OPENROUTER_BASE_URL}/generation"),
+            connect_timeout_ms: 10_000,
+            settlement_reserve_ms: 5_000,
+            max_retries: 2,
+            retry_base_ms: 250,
+            malformed_response_limit: 1,
+        })
+    }
+
+    pub fn with_openrouter_base_url(mut self, base_url: &str) -> Result<Self, String> {
+        let parsed = reqwest::Url::parse(base_url)
+            .map_err(|error| format!("invalid OpenRouter base URL: {error}"))?;
+        if !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(
+                "OpenRouter base URL must not contain credentials, query, or fragment".into(),
+            );
+        }
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| "OpenRouter base URL requires a host".to_string())?;
+        let loopback = host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback());
+        if parsed.scheme() != "https" && !(parsed.scheme() == "http" && loopback) {
+            return Err(
+                "OpenRouter base URL requires HTTPS; HTTP is allowed only on loopback".into(),
+            );
+        }
+        let base = parsed.as_str().trim_end_matches('/');
+        self.completion_url = format!("{base}/chat/completions");
+        self.generation_url = format!("{base}/generation");
+        Ok(self)
+    }
+
+    #[cfg(test)]
+    fn with_test_timing(mut self, wall_time_ms: u64, settlement_reserve_ms: u64) -> Self {
+        self.limits.wall_time_ms = wall_time_ms;
+        self.settlement_reserve_ms = settlement_reserve_ms;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_test_retry(mut self, retry_base_ms: u64) -> Self {
+        self.retry_base_ms = retry_base_ms;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_test_caps(mut self, iterations: u32, context_tokens: u64, spend_micros: u64) -> Self {
+        self.limits.max_tool_iterations = iterations;
+        self.limits.max_context_tokens = context_tokens;
+        self.limits.max_spend_micros = spend_micros;
+        self
+    }
+}
+
+type ByteStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>, TransportError>> + Send>>;
+
+struct TransportResponse {
+    status: u16,
+    generation_id: Option<String>,
+    retry_after: Option<Duration>,
+    content_type: Option<String>,
+    body: ByteStream,
+}
+
+#[derive(Debug)]
+struct TransportError;
+
+impl std::fmt::Display for TransportError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("OpenRouter transport failed")
+    }
+}
+
+impl std::error::Error for TransportError {}
+
+trait Transport: Send + Sync {
+    fn post<'a>(
+        &'a self,
+        body: &'a Value,
+    ) -> Pin<Box<dyn Future<Output = Result<TransportResponse, TransportError>> + Send + 'a>>;
+    fn generation<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<GenerationUsage, TransportError>> + Send + 'a>>;
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GenerationUsage {
+    prompt_tokens: u64,
+    cost_micros: u64,
+}
+
+struct ReqwestTransport {
+    client: reqwest::Client,
+    api_key: String,
+    completion_url: String,
+    generation_url: String,
+}
+
+impl ReqwestTransport {
+    fn new(config: &DeepConfig) -> Result<Self, String> {
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_millis(config.connect_timeout_ms))
+            .user_agent("memphant/0.1 deep-recall")
+            .build()
+            .map_err(|error| format!("failed to build Deep HTTP client: {error}"))?;
+        Ok(Self {
+            client,
+            api_key: config.api_key.clone(),
+            completion_url: config.completion_url.clone(),
+            generation_url: config.generation_url.clone(),
+        })
+    }
+}
+
+impl Transport for ReqwestTransport {
+    fn post<'a>(
+        &'a self,
+        body: &'a Value,
+    ) -> Pin<Box<dyn Future<Output = Result<TransportResponse, TransportError>> + Send + 'a>> {
+        Box::pin(async move {
+            let response = self
+                .client
+                .post(&self.completion_url)
+                .bearer_auth(&self.api_key)
+                .header("HTTP-Referer", "https://github.com/siddmax/memphant")
+                .header("X-OpenRouter-Title", "MemPhant Deep Recall")
+                .json(body)
+                .send()
+                .await
+                .map_err(|_| TransportError)?;
+            let status = response.status().as_u16();
+            let generation_id = response
+                .headers()
+                .get("x-generation-id")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(Duration::from_secs);
+            let content_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            let body = response.bytes_stream().map(|chunk| {
+                chunk
+                    .map(|bytes| bytes.to_vec())
+                    .map_err(|_| TransportError)
+            });
+            Ok(TransportResponse {
+                status,
+                generation_id,
+                retry_after,
+                content_type,
+                body: Box::pin(body),
+            })
+        })
+    }
+
+    fn generation<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<GenerationUsage, TransportError>> + Send + 'a>> {
+        Box::pin(async move {
+            let response = self
+                .client
+                .get(&self.generation_url)
+                .bearer_auth(&self.api_key)
+                .query(&[("id", id)])
+                .send()
+                .await
+                .map_err(|_| TransportError)?;
+            if !response.status().is_success() {
+                return Err(TransportError);
+            }
+            let value: Value = response.json().await.map_err(|_| TransportError)?;
+            let data = value.get("data").unwrap_or(&value);
+            let prompt_tokens = data
+                .get("tokens_prompt")
+                .or_else(|| data.pointer("/usage/prompt_tokens"))
+                .and_then(Value::as_u64)
+                .ok_or(TransportError)?;
+            let cost_micros = data
+                .get("total_cost")
+                .or_else(|| data.get("cost"))
+                .or_else(|| data.pointer("/usage/cost"))
+                .and_then(cost_value_micros)
+                .ok_or(TransportError)?;
+            Ok(GenerationUsage {
+                prompt_tokens,
+                cost_micros,
+            })
+        })
+    }
+}
+
+pub struct OpenRouterDeepRecall {
+    config: DeepConfig,
+    identity: DeepProviderIdentity,
+    transport: Arc<dyn Transport>,
+}
+
+impl OpenRouterDeepRecall {
+    pub fn new(config: DeepConfig) -> Result<Self, String> {
+        let transport = Arc::new(ReqwestTransport::new(&config)?);
+        Ok(Self::with_transport(config, transport))
+    }
+
+    fn with_transport(config: DeepConfig, transport: Arc<dyn Transport>) -> Self {
+        let prompt_hash = sha256(config.prompt.as_bytes());
+        let config_hash = sha256(
+            serde_json::to_vec(&json!({
+                "model": config.model,
+                "providers": config.providers,
+                "input_price_micros_per_million": config.input_price_micros_per_million,
+                "output_price_micros_per_million": config.output_price_micros_per_million,
+                "limits": config.limits,
+                "max_completion_tokens": config.max_completion_tokens,
+                "completion_url": config.completion_url,
+                "generation_url": config.generation_url,
+                "connect_timeout_ms": config.connect_timeout_ms,
+                "settlement_reserve_ms": config.settlement_reserve_ms,
+                "max_retries": config.max_retries,
+                "retry_base_ms": config.retry_base_ms,
+                "tool_limits": {
+                    "list_results": MAX_LIST_RESULTS,
+                    "query_chars": MAX_QUERY_CHARS,
+                    "search_hits": MAX_SEARCH_HITS,
+                    "output_bytes": MAX_TOOL_OUTPUT_BYTES,
+                    "read_lines": MAX_READ_LINES,
+                    "evidence_ids": MAX_EVIDENCE_IDS,
+                    "malformed_responses": config.malformed_response_limit,
+                }
+            }))
+            .expect("Deep config serializes")
+            .as_slice(),
+        );
+        Self {
+            identity: DeepProviderIdentity {
+                provider: config.providers.join(","),
+                model: config.model.clone(),
+                prompt_hash,
+                config_hash,
+            },
+            config,
+            transport,
+        }
+    }
+
+    fn request_body(&self, messages: &[Value]) -> Value {
+        json!({
+            "model": self.config.model,
+            "messages": messages,
+            "max_completion_tokens": self.config.max_completion_tokens,
+            "stream": true,
+            "parallel_tool_calls": false,
+            "tool_choice": "required",
+            "tools": tool_definitions(),
+            "provider": {
+                "only": self.config.providers,
+                "allow_fallbacks": true,
+                "require_parameters": true,
+                "data_collection": "deny",
+                "zdr": true,
+                "max_price": {
+                    "prompt": dollars_per_million(self.config.input_price_micros_per_million),
+                    "completion": dollars_per_million(self.config.output_price_micros_per_million),
+                }
+            }
+        })
+    }
+
+    async fn gather_inner(
+        &self,
+        request: DeepRecallProviderRequest,
+    ) -> Result<DeepRecallProviderResult, DeepRecallProviderError> {
+        let started = std::time::Instant::now();
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_millis(self.config.limits.wall_time_ms);
+        let loop_deadline = deadline
+            .checked_sub(Duration::from_millis(self.config.settlement_reserve_ms))
+            .unwrap_or(deadline);
+        let mut state = LoopState::new(request, &self.config)?;
+        let outcome =
+            tokio::time::timeout_at(loop_deadline, self.run_loop(&mut state, loop_deadline)).await;
+        let mut result = match outcome {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => return Err(error),
+            Err(_) => {
+                self.settle_outstanding(&mut state, deadline).await;
+                state.result(
+                    DeepRecallStatus::Capped,
+                    DeepRecallStopReason::WallTime,
+                    None,
+                )
+            }
+        };
+        if state.outstanding.is_some() && !state.generation_ids.is_empty() {
+            self.settle_outstanding(&mut state, deadline).await;
+            result = state.result(result.status, result.stop_reason, Some(result.source_ids));
+        }
+        result.usage.wall_time_ms = elapsed_millis(started.elapsed());
+        Ok(result)
+    }
+
+    async fn run_loop(
+        &self,
+        state: &mut LoopState,
+        deadline: tokio::time::Instant,
+    ) -> Result<DeepRecallProviderResult, DeepRecallProviderError> {
+        loop {
+            if let Some(reason) = state.stop_reason(&self.config.limits) {
+                return Ok(state.result(DeepRecallStatus::Capped, reason, None));
+            }
+            let body = self.request_body(&state.messages);
+            let reservation = match reservation_for(&body, &self.config) {
+                Some(reservation) => reservation,
+                None => {
+                    return Ok(state.result(
+                        DeepRecallStatus::Capped,
+                        DeepRecallStopReason::Spend,
+                        None,
+                    ));
+                }
+            };
+            if state
+                .usage
+                .spend_micros
+                .checked_add(reservation.spend_micros)
+                .is_none_or(|value| value > self.config.limits.max_spend_micros)
+            {
+                return Ok(state.result(
+                    DeepRecallStatus::Capped,
+                    DeepRecallStopReason::Spend,
+                    None,
+                ));
+            }
+            if state
+                .usage
+                .context_tokens
+                .checked_add(reservation.context_tokens)
+                .is_none_or(|value| value > self.config.limits.max_context_tokens)
+            {
+                return Ok(state.result(
+                    DeepRecallStatus::Capped,
+                    DeepRecallStopReason::ContextTokens,
+                    None,
+                ));
+            }
+
+            let mut attempts = 0usize;
+            let response = loop {
+                attempts += 1;
+                state.outstanding = Some(reservation);
+                let response =
+                    match tokio::time::timeout_at(deadline, self.transport.post(&body)).await {
+                        Ok(Ok(response)) => response,
+                        Ok(Err(_)) => {
+                            return Ok(state.result(
+                                DeepRecallStatus::Partial,
+                                DeepRecallStopReason::ProviderError,
+                                None,
+                            ));
+                        }
+                        Err(_) => {
+                            return Ok(state.result(
+                                DeepRecallStatus::Capped,
+                                DeepRecallStopReason::WallTime,
+                                None,
+                            ));
+                        }
+                    };
+                if (response.status == 429 || response.status >= 500)
+                    && response.generation_id.is_none()
+                    && attempts <= usize::from(self.config.max_retries)
+                {
+                    state.outstanding = None;
+                    let delay = response
+                        .retry_after
+                        .unwrap_or(Duration::from_millis(self.config.retry_base_ms));
+                    if tokio::time::timeout_at(deadline, tokio::time::sleep(delay))
+                        .await
+                        .is_err()
+                    {
+                        return Ok(state.result(
+                            DeepRecallStatus::Capped,
+                            DeepRecallStopReason::WallTime,
+                            None,
+                        ));
+                    }
+                    continue;
+                }
+                break response;
+            };
+
+            if !(200..300).contains(&response.status) {
+                if response.generation_id.is_none() {
+                    state.outstanding = None;
+                    return Err(DeepRecallProviderError::Unavailable);
+                }
+                if state
+                    .push_generation(response.generation_id.as_deref())
+                    .is_err()
+                {
+                    return Ok(state.result(
+                        DeepRecallStatus::Partial,
+                        DeepRecallStopReason::InvalidOutput,
+                        None,
+                    ));
+                }
+                return Ok(state.result(
+                    DeepRecallStatus::Partial,
+                    DeepRecallStopReason::ProviderError,
+                    None,
+                ));
+            }
+            if response
+                .generation_id
+                .as_deref()
+                .is_none_or(|id| id.trim().is_empty())
+            {
+                return Ok(state.result(
+                    DeepRecallStatus::Partial,
+                    DeepRecallStopReason::InvalidOutput,
+                    None,
+                ));
+            }
+            if state
+                .push_generation(response.generation_id.as_deref())
+                .is_err()
+            {
+                return Ok(state.result(
+                    DeepRecallStatus::Partial,
+                    DeepRecallStopReason::InvalidOutput,
+                    None,
+                ));
+            }
+            if !response.content_type.as_deref().is_some_and(|value| {
+                value.split(';').next().is_some_and(|media_type| {
+                    media_type.trim().eq_ignore_ascii_case("text/event-stream")
+                })
+            }) {
+                return Ok(state.result(
+                    DeepRecallStatus::Partial,
+                    DeepRecallStopReason::InvalidOutput,
+                    None,
+                ));
+            }
+            let turn = match tokio::time::timeout_at(deadline, parse_turn(response.body)).await {
+                Ok(Ok(turn)) => turn,
+                Ok(Err(reason)) => {
+                    return Ok(state.result(DeepRecallStatus::Partial, reason, None));
+                }
+                Err(_) => {
+                    return Ok(state.result(
+                        DeepRecallStatus::Capped,
+                        DeepRecallStopReason::WallTime,
+                        None,
+                    ));
+                }
+            };
+            if state.observe_route(&turn, &self.config.providers).is_err()
+                || state.settle(turn.prompt_tokens, turn.cost_micros).is_err()
+            {
+                return Ok(state.result(
+                    DeepRecallStatus::Partial,
+                    DeepRecallStopReason::InvalidOutput,
+                    None,
+                ));
+            }
+            state.usage.tool_iterations = state
+                .usage
+                .tool_iterations
+                .checked_add(1)
+                .ok_or(DeepRecallProviderError::InvalidOutput)?;
+
+            let args = match serde_json::from_str::<Value>(&turn.arguments) {
+                Ok(args) => args,
+                Err(_) => json!(null),
+            };
+            let tool = state.tools.call(&turn.tool_name, args);
+            let malformed = tool.content.get("error").is_some();
+            if malformed {
+                state.malformed_responses += 1;
+                if state.malformed_responses > self.config.malformed_response_limit {
+                    return Ok(state.result(
+                        DeepRecallStatus::Partial,
+                        DeepRecallStopReason::InvalidOutput,
+                        None,
+                    ));
+                }
+            }
+            state.messages.push(json!({
+                "role": "assistant",
+                "reasoning_details": turn.reasoning_details,
+                "tool_calls": [{
+                    "id": turn.call_id,
+                    "type": "function",
+                    "function": {"name": turn.tool_name, "arguments": turn.arguments}
+                }]
+            }));
+            state.messages.push(json!({
+                "role": "tool",
+                "tool_call_id": turn.call_id,
+                "content": tool.content.to_string()
+            }));
+            if let Some(source_ids) = tool.finish {
+                return Ok(state.result(
+                    DeepRecallStatus::Completed,
+                    DeepRecallStopReason::Completed,
+                    Some(source_ids),
+                ));
+            }
+        }
+    }
+
+    async fn settle_outstanding(&self, state: &mut LoopState, deadline: tokio::time::Instant) {
+        let Some(id) = state.generation_ids.last().cloned() else {
+            return;
+        };
+        let settlement_deadline = deadline.min(
+            tokio::time::Instant::now() + Duration::from_millis(self.config.settlement_reserve_ms),
+        );
+        if let Ok(Ok(usage)) =
+            tokio::time::timeout_at(settlement_deadline, self.transport.generation(&id)).await
+        {
+            let _ = state.settle(usage.prompt_tokens, usage.cost_micros);
+        }
+    }
+}
+
+impl DeepRecallProvider for OpenRouterDeepRecall {
+    fn identity(&self) -> &DeepProviderIdentity {
+        &self.identity
+    }
+
+    fn limits(&self) -> DeepRecallLimits {
+        self.config.limits
+    }
+
+    fn gather<'a>(
+        &'a self,
+        request: DeepRecallProviderRequest,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<DeepRecallProviderResult, DeepRecallProviderError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(self.gather_inner(request))
+    }
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn dollars_per_million(micros: u64) -> Value {
+    if micros.is_multiple_of(1_000_000) {
+        return json!(micros / 1_000_000);
+    }
+    serde_json::Number::from_f64(micros as f64 / 1_000_000.0)
+        .map(Value::Number)
+        .expect("finite configured price")
+}
+
+fn tool_definitions() -> Value {
+    json!([
+        {"type":"function","function":{"name":"list_files","description":"List visible workspace files","parameters":{"type":"object","properties":{"prefix":{"type":["string","null"]}},"additionalProperties":false}}},
+        {"type":"function","function":{"name":"search_files","description":"Literal case-insensitive source search","parameters":{"type":"object","properties":{"query":{"type":"string"},"path_prefix":{"type":["string","null"]}},"required":["query"],"additionalProperties":false}}},
+        {"type":"function","function":{"name":"read_file","description":"Read an inclusive line range","parameters":{"type":"object","properties":{"path":{"type":"string"},"start_line":{"type":"integer"},"end_line":{"type":"integer"}},"required":["path","start_line","end_line"],"additionalProperties":false}}},
+        {"type":"function","function":{"name":"record_evidence","description":"Checkpoint source UUIDs","parameters":{"type":"object","properties":{"source_ids":{"type":"array","items":{"type":"string"}}},"required":["source_ids"],"additionalProperties":false}}},
+        {"type":"function","function":{"name":"finish","description":"Finish with ordered source UUIDs","parameters":{"type":"object","properties":{"source_ids":{"type":"array","items":{"type":"string"}}},"required":["source_ids"],"additionalProperties":false}}}
+    ])
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Reservation {
+    context_tokens: u64,
+    spend_micros: u64,
+}
+
+struct LoopState {
+    messages: Vec<Value>,
+    tools: WorkspaceTools,
+    usage: DeepRecallUsage,
+    outstanding: Option<Reservation>,
+    generation_ids: Vec<String>,
+    observed_provider: Option<String>,
+    observed_model: Option<String>,
+    malformed_responses: u8,
+}
+
+impl LoopState {
+    fn new(
+        request: DeepRecallProviderRequest,
+        config: &DeepConfig,
+    ) -> Result<Self, DeepRecallProviderError> {
+        let DeepRecallProviderRequest { query, workspace } = request;
+        let tools =
+            WorkspaceTools::new(workspace).map_err(|_| DeepRecallProviderError::InvalidOutput)?;
+        Ok(Self {
+            messages: vec![
+                json!({"role":"system","content":config.prompt}),
+                json!({"role":"user","content":query}),
+            ],
+            tools,
+            usage: DeepRecallUsage::default(),
+            outstanding: None,
+            generation_ids: Vec::new(),
+            observed_provider: None,
+            observed_model: None,
+            malformed_responses: 0,
+        })
+    }
+
+    fn push_generation(&mut self, id: Option<&str>) -> Result<(), DeepRecallProviderError> {
+        let Some(id) = id.filter(|id| !id.trim().is_empty()) else {
+            return Ok(());
+        };
+        if self.generation_ids.iter().any(|existing| existing == id) {
+            return Err(DeepRecallProviderError::InvalidOutput);
+        }
+        self.generation_ids.push(id.to_string());
+        Ok(())
+    }
+
+    fn observe_route(
+        &mut self,
+        turn: &ParsedTurn,
+        allowed_providers: &[String],
+    ) -> Result<(), DeepRecallProviderError> {
+        if !allowed_providers
+            .iter()
+            .any(|allowed| normalize_provider(&turn.provider) == normalize_provider(allowed))
+        {
+            return Err(DeepRecallProviderError::InvalidOutput);
+        }
+        if self
+            .observed_provider
+            .as_ref()
+            .is_some_and(|provider| provider != &turn.provider)
+            || self
+                .observed_model
+                .as_ref()
+                .is_some_and(|model| model != &turn.model)
+        {
+            return Err(DeepRecallProviderError::InvalidOutput);
+        }
+        self.observed_provider = Some(turn.provider.clone());
+        self.observed_model = Some(turn.model.clone());
+        Ok(())
+    }
+
+    fn settle(
+        &mut self,
+        prompt_tokens: u64,
+        cost_micros: u64,
+    ) -> Result<(), DeepRecallProviderError> {
+        let context_tokens = self
+            .usage
+            .context_tokens
+            .checked_add(prompt_tokens)
+            .ok_or(DeepRecallProviderError::InvalidOutput)?;
+        let spend_micros = self
+            .usage
+            .spend_micros
+            .checked_add(cost_micros)
+            .ok_or(DeepRecallProviderError::InvalidOutput)?;
+        self.usage.context_tokens = context_tokens;
+        self.usage.spend_micros = spend_micros;
+        self.outstanding = None;
+        Ok(())
+    }
+
+    fn stop_reason(&self, limits: &DeepRecallLimits) -> Option<DeepRecallStopReason> {
+        if self.usage.spend_micros >= limits.max_spend_micros {
+            Some(DeepRecallStopReason::Spend)
+        } else if self.usage.context_tokens >= limits.max_context_tokens {
+            Some(DeepRecallStopReason::ContextTokens)
+        } else if self.usage.tool_iterations >= limits.max_tool_iterations {
+            Some(DeepRecallStopReason::ToolIterations)
+        } else {
+            None
+        }
+    }
+
+    fn result(
+        &self,
+        status: DeepRecallStatus,
+        stop_reason: DeepRecallStopReason,
+        source_ids: Option<Vec<Uuid>>,
+    ) -> DeepRecallProviderResult {
+        let outstanding = self.outstanding.unwrap_or(Reservation {
+            context_tokens: 0,
+            spend_micros: 0,
+        });
+        let mut usage = self.usage;
+        usage.unsettled_context_tokens_upper_bound = outstanding.context_tokens;
+        usage.unsettled_spend_micros_upper_bound = outstanding.spend_micros;
+        DeepRecallProviderResult {
+            status,
+            stop_reason,
+            source_ids: source_ids.unwrap_or_else(|| self.tools.checkpoint.clone()),
+            usage,
+            generation_ids: self.generation_ids.clone(),
+            observed_provider: self.observed_provider.clone(),
+            observed_model: self.observed_model.clone(),
+        }
+    }
+}
+
+struct ParsedTurn {
+    call_id: String,
+    tool_name: String,
+    arguments: String,
+    reasoning_details: Vec<Value>,
+    provider: String,
+    model: String,
+    prompt_tokens: u64,
+    cost_micros: u64,
+}
+
+async fn parse_turn(body: ByteStream) -> Result<ParsedTurn, DeepRecallStopReason> {
+    let mut events = body.eventsource();
+    let mut done = false;
+    let mut call_id = String::new();
+    let mut tool_name = String::new();
+    let mut arguments = String::new();
+    let mut reasoning_details = Vec::new();
+    let mut provider: Option<String> = None;
+    let mut model: Option<String> = None;
+    let mut usage: Option<(u64, u64)> = None;
+
+    while let Some(event) = events.next().await {
+        let event = event.map_err(|_| DeepRecallStopReason::ProviderError)?;
+        if event.data == "[DONE]" {
+            done = true;
+            break;
+        }
+        let value: Value =
+            serde_json::from_str(&event.data).map_err(|_| DeepRecallStopReason::InvalidOutput)?;
+        if value.get("error").is_some() {
+            return Err(DeepRecallStopReason::ProviderError);
+        }
+        if let Some(route) = value.get("provider").and_then(Value::as_str) {
+            if provider.as_deref().is_some_and(|seen| seen != route) {
+                return Err(DeepRecallStopReason::InvalidOutput);
+            }
+            provider = Some(route.to_string());
+        }
+        if let Some(route) = value.get("model").and_then(Value::as_str) {
+            if model.as_deref().is_some_and(|seen| seen != route) {
+                return Err(DeepRecallStopReason::InvalidOutput);
+            }
+            model = Some(route.to_string());
+        }
+        if let Some(raw_usage) = value.get("usage") {
+            let prompt_tokens = raw_usage
+                .get("prompt_tokens")
+                .and_then(Value::as_u64)
+                .ok_or(DeepRecallStopReason::InvalidOutput)?;
+            let cost_micros = raw_usage
+                .get("cost")
+                .and_then(cost_value_micros)
+                .ok_or(DeepRecallStopReason::InvalidOutput)?;
+            if usage.replace((prompt_tokens, cost_micros)).is_some() {
+                return Err(DeepRecallStopReason::InvalidOutput);
+            }
+        }
+        let Some(choices) = value.get("choices").and_then(Value::as_array) else {
+            if value.get("usage").is_some() {
+                continue;
+            }
+            return Err(DeepRecallStopReason::InvalidOutput);
+        };
+        if choices.is_empty() && value.get("usage").is_some() {
+            continue;
+        }
+        if choices.len() != 1 || choices[0].get("index").and_then(Value::as_u64) != Some(0) {
+            return Err(DeepRecallStopReason::InvalidOutput);
+        }
+        let delta = choices[0]
+            .get("delta")
+            .and_then(Value::as_object)
+            .ok_or(DeepRecallStopReason::InvalidOutput)?;
+        if let Some(details) = delta.get("reasoning_details").and_then(Value::as_array) {
+            reasoning_details.extend(details.iter().cloned());
+        }
+        if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
+            if calls.len() != 1 || calls[0].get("index").and_then(Value::as_u64) != Some(0) {
+                return Err(DeepRecallStopReason::InvalidOutput);
+            }
+            let call = &calls[0];
+            if let Some(id) = call.get("id").and_then(Value::as_str) {
+                if !call_id.is_empty() && call_id != id {
+                    return Err(DeepRecallStopReason::InvalidOutput);
+                }
+                call_id = id.to_string();
+            }
+            if let Some(name) = call.pointer("/function/name").and_then(Value::as_str) {
+                if !tool_name.is_empty() && tool_name != name {
+                    return Err(DeepRecallStopReason::InvalidOutput);
+                }
+                tool_name = name.to_string();
+            }
+            if let Some(fragment) = call.pointer("/function/arguments").and_then(Value::as_str) {
+                arguments.push_str(fragment);
+            }
+        }
+    }
+    let (prompt_tokens, cost_micros) = usage.ok_or(DeepRecallStopReason::InvalidOutput)?;
+    if !done || call_id.trim().is_empty() || tool_name.trim().is_empty() || arguments.is_empty() {
+        return Err(DeepRecallStopReason::InvalidOutput);
+    }
+    Ok(ParsedTurn {
+        call_id,
+        tool_name,
+        arguments,
+        reasoning_details,
+        provider: provider
+            .filter(|value| !value.trim().is_empty())
+            .ok_or(DeepRecallStopReason::InvalidOutput)?,
+        model: model
+            .filter(|value| !value.trim().is_empty())
+            .ok_or(DeepRecallStopReason::InvalidOutput)?,
+        prompt_tokens,
+        cost_micros,
+    })
+}
+
+fn reservation_for(body: &Value, config: &DeepConfig) -> Option<Reservation> {
+    let request_tokens = u64::try_from(serde_json::to_vec(body).ok()?.len()).ok()?;
+    let context_tokens = request_tokens.checked_add(config.max_completion_tokens)?;
+    let input = reserve_micros(request_tokens, config.input_price_micros_per_million)?;
+    let output = reserve_micros(
+        config.max_completion_tokens,
+        config.output_price_micros_per_million,
+    )?;
+    Some(Reservation {
+        context_tokens,
+        spend_micros: input.checked_add(output)?,
+    })
+}
+
+fn reserve_micros(tokens: u64, price_micros_per_million: u64) -> Option<u64> {
+    tokens
+        .checked_mul(price_micros_per_million)?
+        .checked_add(999_999)?
+        .checked_div(1_000_000)
+}
+
+fn cost_value_micros(value: &Value) -> Option<u64> {
+    let text = value.as_number()?.to_string();
+    decimal_dollars_to_micros_ceil(&text)
+}
+
+fn decimal_dollars_to_micros_ceil(text: &str) -> Option<u64> {
+    if text.starts_with('-') {
+        return None;
+    }
+    let mut exponent_parts = text.split(['e', 'E']);
+    let mantissa = exponent_parts.next()?;
+    let exponent = exponent_parts
+        .next()
+        .map_or(Some(0), |value| value.parse::<i64>().ok())?;
+    if exponent_parts.next().is_some() {
+        return None;
+    }
+    let mut mantissa_parts = mantissa.split('.');
+    let whole = mantissa_parts.next()?;
+    let fraction = mantissa_parts.next().unwrap_or("");
+    if mantissa_parts.next().is_some()
+        || whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let digits = format!("{whole}{fraction}");
+    let significant = digits.trim_start_matches('0');
+    if significant.is_empty() {
+        return Some(0);
+    }
+    let fraction_len = i64::try_from(fraction.len()).ok()?;
+    let scale = exponent.checked_add(6)?.checked_sub(fraction_len)?;
+    if scale >= 0 {
+        let value = significant.parse::<u64>().ok()?;
+        let power = u32::try_from(scale).ok()?;
+        return value.checked_mul(10_u64.checked_pow(power)?);
+    }
+    let discarded = usize::try_from(scale.checked_neg()?).ok()?;
+    if discarded >= significant.len() {
+        return Some(1);
+    }
+    let split = significant.len() - discarded;
+    let integral = significant[..split].parse::<u64>().ok()?;
+    let round_up = significant[split..].bytes().any(|byte| byte != b'0') as u64;
+    integral.checked_add(round_up)
+}
+
+fn normalize_provider(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn elapsed_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+pub fn build_deep_recall_provider_from_config(
+    config: DeepConfig,
+) -> Result<Arc<dyn DeepRecallProvider>, String> {
+    Ok(Arc::new(OpenRouterDeepRecall::new(config)?))
+}
+
+pub fn build_deep_recall_provider() -> Result<Option<Arc<dyn DeepRecallProvider>>, String> {
+    match deep_mode_from_value(std::env::var("MEMPHANT_DEEP").ok().as_deref())? {
+        false => Ok(None),
+        true => {
+            let required = |name: &str| {
+                std::env::var(name)
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| format!("{name} is required when MEMPHANT_DEEP=on"))
+            };
+            let api_key = required("OPENROUTER_API_KEY")?;
+            let model = required("MEMPHANT_DEEP_MODEL")?;
+            let providers = required("MEMPHANT_DEEP_PROVIDERS")?
+                .split(',')
+                .map(str::to_string)
+                .collect();
+            let prompt_path = required("MEMPHANT_DEEP_PROMPT_PATH")?;
+            let prompt = std::fs::read_to_string(&prompt_path).map_err(|error| {
+                format!("failed to read MEMPHANT_DEEP_PROMPT_PATH={prompt_path}: {error}")
+            })?;
+            let input_price = parse_price_env("MEMPHANT_DEEP_INPUT_PRICE_MICROS_PER_MILLION")?;
+            let output_price = parse_price_env("MEMPHANT_DEEP_OUTPUT_PRICE_MICROS_PER_MILLION")?;
+            let config = DeepConfig::new(
+                api_key,
+                model,
+                prompt.trim_end_matches(['\r', '\n']).to_string(),
+                providers,
+                input_price,
+                output_price,
+            )?;
+            let config = match std::env::var("MEMPHANT_DEEP_OPENROUTER_BASE_URL") {
+                Ok(base_url) => config.with_openrouter_base_url(&base_url)?,
+                Err(std::env::VarError::NotPresent) => config,
+                Err(error) => {
+                    return Err(format!(
+                        "MEMPHANT_DEEP_OPENROUTER_BASE_URL is not valid UTF-8: {error}"
+                    ));
+                }
+            };
+            Ok(Some(build_deep_recall_provider_from_config(config)?))
+        }
+    }
+}
+
+fn deep_mode_from_value(value: Option<&str>) -> Result<bool, String> {
+    match value {
+        None | Some("off") => Ok(false),
+        Some("on") => Ok(true),
+        Some(value) => Err(format!(
+            "MEMPHANT_DEEP must be exactly `on` or `off`, got {value:?}"
+        )),
+    }
+}
+
+fn parse_price_env(name: &str) -> Result<u64, String> {
+    let value =
+        std::env::var(name).map_err(|_| format!("{name} is required when MEMPHANT_DEEP=on"))?;
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| format!("{name} must be a positive integer"))
+}
+
+struct ToolOutcome {
+    content: Value,
+    finish: Option<Vec<Uuid>>,
+}
+
+struct WorkspaceTools {
+    files: BTreeMap<String, String>,
+    source_ids: HashSet<Uuid>,
+    checkpoint: Vec<Uuid>,
+}
+
+impl WorkspaceTools {
+    fn new(workspace: DeepWorkspace) -> Result<Self, String> {
+        let mut files = BTreeMap::new();
+        for file in workspace.files {
+            if files.insert(file.path, file.body).is_some() {
+                return Err("duplicate workspace path".to_string());
+            }
+        }
+        let manifest = files
+            .get("manifest.jsonl")
+            .ok_or_else(|| "missing manifest.jsonl".to_string())?;
+        let mut source_ids = HashSet::new();
+        for line in manifest.lines() {
+            let value: Value =
+                serde_json::from_str(line).map_err(|_| "invalid manifest.jsonl".to_string())?;
+            let id = value
+                .get("source_id")
+                .and_then(Value::as_str)
+                .and_then(|id| Uuid::parse_str(id).ok())
+                .ok_or_else(|| "invalid manifest source_id".to_string())?;
+            if !source_ids.insert(id) {
+                return Err("duplicate manifest source_id".to_string());
+            }
+        }
+        Ok(Self {
+            files,
+            source_ids,
+            checkpoint: Vec::new(),
+        })
+    }
+
+    fn call(&mut self, name: &str, args: Value) -> ToolOutcome {
+        match name {
+            "list_files" => self.list_files(args),
+            "search_files" => self.search_files(args),
+            "read_file" => self.read_file(args),
+            "record_evidence" => self.record_evidence(args, false),
+            "finish" => self.record_evidence(args, true),
+            _ => tool_error("unknown_tool"),
+        }
+    }
+
+    fn list_files(&self, args: Value) -> ToolOutcome {
+        let Some(object) = args.as_object() else {
+            return tool_error("invalid_arguments");
+        };
+        let prefix = match object.get("prefix") {
+            None | Some(Value::Null) => "",
+            Some(Value::String(prefix)) if prefix.len() <= MAX_QUERY_CHARS => prefix,
+            _ => return tool_error("invalid_arguments"),
+        };
+        let mut files = self
+            .files
+            .iter()
+            .filter(|(path, _)| path.starts_with(prefix))
+            .take(MAX_LIST_RESULTS + 1)
+            .map(|(path, body)| {
+                json!({
+                    "path": path,
+                    "bytes": body.len(),
+                    "lines": body.lines().count(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut truncated = files.len() > MAX_LIST_RESULTS;
+        files.truncate(MAX_LIST_RESULTS);
+        while json!({"files": &files, "truncated": truncated})
+            .to_string()
+            .len()
+            > MAX_TOOL_OUTPUT_BYTES
+        {
+            files.pop();
+            truncated = true;
+        }
+        ToolOutcome {
+            content: json!({"files": files, "truncated": truncated}),
+            finish: None,
+        }
+    }
+
+    fn search_files(&self, args: Value) -> ToolOutcome {
+        let Some(object) = args.as_object() else {
+            return tool_error("invalid_arguments");
+        };
+        let Some(query) = object.get("query").and_then(Value::as_str) else {
+            return tool_error("invalid_arguments");
+        };
+        if query.is_empty() || query.chars().count() > MAX_QUERY_CHARS {
+            return tool_error("invalid_arguments");
+        }
+        let prefix = match object.get("path_prefix") {
+            None | Some(Value::Null) => "",
+            Some(Value::String(prefix)) if prefix.len() <= MAX_QUERY_CHARS => prefix,
+            _ => return tool_error("invalid_arguments"),
+        };
+        let needle = query.to_lowercase();
+        let mut hits = Vec::new();
+        let mut truncated = false;
+        'files: for (path, body) in self
+            .files
+            .iter()
+            .filter(|(path, _)| path.starts_with(prefix))
+        {
+            for (line_index, line) in body.lines().enumerate() {
+                if line.to_lowercase().contains(&needle) {
+                    if hits.len() == MAX_SEARCH_HITS {
+                        truncated = true;
+                        break 'files;
+                    }
+                    let mut text = truncate_utf8(line, MAX_TOOL_OUTPUT_BYTES).to_string();
+                    let line_was_truncated = text.len() < line.len();
+                    loop {
+                        let hit = json!({"path": path, "line": line_index + 1, "text": &text});
+                        let mut candidate = hits.clone();
+                        candidate.push(hit.clone());
+                        if json!({"hits": &candidate, "truncated": truncated || line_was_truncated})
+                            .to_string()
+                            .len()
+                            <= MAX_TOOL_OUTPUT_BYTES
+                        {
+                            hits.push(hit);
+                            truncated |= line_was_truncated;
+                            break;
+                        }
+                        if text.is_empty() {
+                            truncated = true;
+                            break 'files;
+                        }
+                        let excess = json!({"hits": &candidate, "truncated": true})
+                            .to_string()
+                            .len()
+                            .saturating_sub(MAX_TOOL_OUTPUT_BYTES)
+                            .max(1);
+                        let target = text.len().saturating_sub(excess);
+                        text.truncate(previous_char_boundary(&text, target));
+                        truncated = true;
+                    }
+                }
+            }
+        }
+        ToolOutcome {
+            content: json!({"hits": hits, "truncated": truncated}),
+            finish: None,
+        }
+    }
+
+    fn read_file(&self, args: Value) -> ToolOutcome {
+        let Some(object) = args.as_object() else {
+            return tool_error("invalid_arguments");
+        };
+        let Some(path) = object.get("path").and_then(Value::as_str) else {
+            return tool_error("invalid_arguments");
+        };
+        let Some(body) = self.files.get(path) else {
+            return tool_error("unknown_path");
+        };
+        let Some(start) = object.get("start_line").and_then(Value::as_u64) else {
+            return tool_error("invalid_arguments");
+        };
+        let Some(end) = object.get("end_line").and_then(Value::as_u64) else {
+            return tool_error("invalid_arguments");
+        };
+        let Ok(start) = usize::try_from(start) else {
+            return tool_error("invalid_range");
+        };
+        let Ok(end) = usize::try_from(end) else {
+            return tool_error("invalid_range");
+        };
+        if start == 0 || end < start || end - start + 1 > MAX_READ_LINES {
+            return tool_error("invalid_range");
+        }
+        let lines = body.lines().collect::<Vec<_>>();
+        if start > lines.len() || end > lines.len() {
+            return tool_error("invalid_range");
+        }
+        let requested_text = lines[start - 1..end].join("\n");
+        let mut text = truncate_utf8(&requested_text, MAX_TOOL_OUTPUT_BYTES).to_string();
+        let mut truncated = text.len() < requested_text.len();
+        while json!({"path": path, "start_line": start, "end_line": end, "text": text, "truncated": truncated})
+            .to_string()
+            .len()
+            > MAX_TOOL_OUTPUT_BYTES
+        {
+            let content_len = json!({"path": path, "start_line": start, "end_line": end, "text": text, "truncated": true})
+                .to_string()
+                .len();
+            let target = text
+                .len()
+                .saturating_sub(content_len.saturating_sub(MAX_TOOL_OUTPUT_BYTES).max(1));
+            text.truncate(previous_char_boundary(&text, target));
+            truncated = true;
+        }
+        ToolOutcome {
+            content: json!({"path": path, "start_line": start, "end_line": end, "text": text, "truncated": truncated}),
+            finish: None,
+        }
+    }
+
+    fn record_evidence(&mut self, args: Value, finish: bool) -> ToolOutcome {
+        let Some(raw_ids) = args.get("source_ids").and_then(Value::as_array) else {
+            return tool_error("invalid_arguments");
+        };
+        if raw_ids.len() > MAX_EVIDENCE_IDS {
+            return tool_error("invalid_arguments");
+        }
+        let mut ids = Vec::new();
+        let mut seen = HashSet::new();
+        for value in raw_ids {
+            let Some(id) = value.as_str().and_then(|id| Uuid::parse_str(id).ok()) else {
+                return tool_error("invalid_arguments");
+            };
+            if !self.source_ids.contains(&id) {
+                return tool_error("unknown_source_id");
+            }
+            if seen.insert(id) {
+                ids.push(id);
+            }
+        }
+        if !finish {
+            if self
+                .checkpoint
+                .iter()
+                .chain(&ids)
+                .copied()
+                .collect::<HashSet<_>>()
+                .len()
+                > MAX_EVIDENCE_IDS
+            {
+                return tool_error("invalid_arguments");
+            }
+            for id in &ids {
+                if !self.checkpoint.contains(id) {
+                    self.checkpoint.push(*id);
+                }
+            }
+        }
+        ToolOutcome {
+            content: json!({"source_ids": if finish { &ids } else { &self.checkpoint }}),
+            finish: finish.then_some(ids),
+        }
+    }
+}
+
+fn previous_char_boundary(value: &str, mut boundary: usize) -> usize {
+    boundary = boundary.min(value.len());
+    while !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    boundary
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
+    &value[..previous_char_boundary(value, max_bytes)]
+}
+
+fn tool_error(code: &str) -> ToolOutcome {
+    ToolOutcome {
+        content: json!({"error": code}),
+        finish: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use memphant_types::{DeepWorkspace, DeepWorkspaceFile};
+    use serde_json::json;
+    use std::collections::VecDeque;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::task::{Context, Poll};
+    use uuid::Uuid;
+
+    struct PanicTransport;
+
+    impl Transport for PanicTransport {
+        fn post<'a>(
+            &'a self,
+            _: &'a Value,
+        ) -> Pin<Box<dyn Future<Output = Result<TransportResponse, TransportError>> + Send + 'a>>
+        {
+            Box::pin(async { panic!("request was not expected") })
+        }
+
+        fn generation<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<GenerationUsage, TransportError>> + Send + 'a>>
+        {
+            Box::pin(async { panic!("settlement was not expected") })
+        }
+    }
+
+    struct ScriptTransport {
+        responses: Mutex<VecDeque<TransportResponse>>,
+        requests: Mutex<Vec<Value>>,
+    }
+
+    impl ScriptTransport {
+        fn new(responses: Vec<TransportResponse>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into()),
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl Transport for ScriptTransport {
+        fn post<'a>(
+            &'a self,
+            body: &'a Value,
+        ) -> Pin<Box<dyn Future<Output = Result<TransportResponse, TransportError>> + Send + 'a>>
+        {
+            self.requests.lock().unwrap().push(body.clone());
+            let response = self.responses.lock().unwrap().pop_front().unwrap();
+            Box::pin(async move { Ok(response) })
+        }
+
+        fn generation<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<GenerationUsage, TransportError>> + Send + 'a>>
+        {
+            Box::pin(async { Err(TransportError) })
+        }
+    }
+
+    fn sse_response(id: &str, events: Vec<Value>) -> TransportResponse {
+        let mut bytes = Vec::new();
+        for event in events {
+            bytes.extend_from_slice(format!("data: {event}\n\n").as_bytes());
+        }
+        bytes.extend_from_slice(b": keepalive\n\ndata: [DONE]\n\n");
+        let split = bytes.len() / 2;
+        let chunks = vec![bytes[..split].to_vec(), bytes[split..].to_vec()];
+        TransportResponse {
+            status: 200,
+            generation_id: Some(id.to_string()),
+            retry_after: None,
+            content_type: Some("text/event-stream; charset=utf-8".into()),
+            body: Box::pin(futures::stream::iter(chunks.into_iter().map(Ok))),
+        }
+    }
+
+    struct DropSignal(Arc<AtomicBool>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    struct PendingPostTransport(Arc<AtomicBool>);
+
+    impl Transport for PendingPostTransport {
+        fn post<'a>(
+            &'a self,
+            _: &'a Value,
+        ) -> Pin<Box<dyn Future<Output = Result<TransportResponse, TransportError>> + Send + 'a>>
+        {
+            let dropped = self.0.clone();
+            Box::pin(async move {
+                let _guard = DropSignal(dropped);
+                futures::future::pending().await
+            })
+        }
+
+        fn generation<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<GenerationUsage, TransportError>> + Send + 'a>>
+        {
+            Box::pin(async { Err(TransportError) })
+        }
+    }
+
+    struct PendingStream {
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl Stream for PendingStream {
+        type Item = Result<Vec<u8>, TransportError>;
+
+        fn poll_next(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Poll::Pending
+        }
+    }
+
+    impl Drop for PendingStream {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    struct PendingBodyTransport(Arc<AtomicBool>);
+
+    impl Transport for PendingBodyTransport {
+        fn post<'a>(
+            &'a self,
+            _: &'a Value,
+        ) -> Pin<Box<dyn Future<Output = Result<TransportResponse, TransportError>> + Send + 'a>>
+        {
+            let dropped = self.0.clone();
+            Box::pin(async move {
+                Ok(TransportResponse {
+                    status: 200,
+                    generation_id: Some("gen-pending".into()),
+                    retry_after: None,
+                    content_type: Some("text/event-stream".into()),
+                    body: Box::pin(PendingStream { dropped }),
+                })
+            })
+        }
+
+        fn generation<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<GenerationUsage, TransportError>> + Send + 'a>>
+        {
+            Box::pin(async { Err(TransportError) })
+        }
+    }
+
+    struct PendingSettlementTransport;
+
+    impl Transport for PendingSettlementTransport {
+        fn post<'a>(
+            &'a self,
+            _: &'a Value,
+        ) -> Pin<Box<dyn Future<Output = Result<TransportResponse, TransportError>> + Send + 'a>>
+        {
+            Box::pin(async {
+                Ok(TransportResponse {
+                    status: 502,
+                    generation_id: Some("gen-early-failure".into()),
+                    retry_after: None,
+                    content_type: Some("application/json".into()),
+                    body: Box::pin(futures::stream::empty()),
+                })
+            })
+        }
+
+        fn generation<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<GenerationUsage, TransportError>> + Send + 'a>>
+        {
+            Box::pin(futures::future::pending())
+        }
+    }
+
+    struct CountingErrorTransport(AtomicUsize);
+
+    impl Transport for CountingErrorTransport {
+        fn post<'a>(
+            &'a self,
+            _: &'a Value,
+        ) -> Pin<Box<dyn Future<Output = Result<TransportResponse, TransportError>> + Send + 'a>>
+        {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Err(TransportError) })
+        }
+
+        fn generation<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<GenerationUsage, TransportError>> + Send + 'a>>
+        {
+            Box::pin(async { Err(TransportError) })
+        }
+    }
+
+    struct SettledFailureTransport;
+
+    impl Transport for SettledFailureTransport {
+        fn post<'a>(
+            &'a self,
+            _: &'a Value,
+        ) -> Pin<Box<dyn Future<Output = Result<TransportResponse, TransportError>> + Send + 'a>>
+        {
+            Box::pin(async {
+                Ok(TransportResponse {
+                    status: 502,
+                    generation_id: Some("gen-settled".into()),
+                    retry_after: None,
+                    content_type: Some("application/json".into()),
+                    body: Box::pin(futures::stream::empty()),
+                })
+            })
+        }
+
+        fn generation<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<GenerationUsage, TransportError>> + Send + 'a>>
+        {
+            Box::pin(async {
+                Ok(GenerationUsage {
+                    prompt_tokens: 77,
+                    cost_micros: 88,
+                })
+            })
+        }
+    }
+
+    fn workspace() -> (DeepWorkspace, Uuid, Uuid) {
+        let a = Uuid::from_u128(1);
+        let b = Uuid::from_u128(2);
+        let manifest = format!("{{\"source_id\":\"{a}\"}}\n{{\"source_id\":\"{b}\"}}\n");
+        (
+            DeepWorkspace {
+                files: vec![
+                    DeepWorkspaceFile {
+                        path: "manifest.jsonl".into(),
+                        body: manifest,
+                    },
+                    DeepWorkspaceFile {
+                        path: format!("episodes/{a}.md"),
+                        body: "Alpha βeta\nsecond ALPHA line\n".into(),
+                    },
+                    DeepWorkspaceFile {
+                        path: format!("resources/{b}.md"),
+                        body: "zeta\n".into(),
+                    },
+                ],
+                manifest_sha256: "manifest".into(),
+                workspace_sha256: "workspace".into(),
+            },
+            a,
+            b,
+        )
+    }
+
+    #[test]
+    fn in_memory_tools_are_bounded_literal_and_finish_ordered() {
+        let (workspace, a, b) = workspace();
+        let mut tools = WorkspaceTools::new(workspace).unwrap();
+
+        let listed = tools.call("list_files", json!({"prefix": "episodes/"}));
+        assert_eq!(
+            listed.content["files"][0]["path"],
+            format!("episodes/{a}.md")
+        );
+        assert_eq!(
+            listed.content["files"][0]["bytes"],
+            "Alpha βeta\nsecond ALPHA line\n".len()
+        );
+        assert_eq!(listed.content["files"][0]["lines"], 2);
+        let searched = tools.call("search_files", json!({"query": "alpha"}));
+        assert_eq!(searched.content["hits"][0]["line"], 1);
+        assert_eq!(searched.content["hits"][1]["line"], 2);
+        let read = tools.call(
+            "read_file",
+            json!({"path": format!("episodes/{a}.md"), "start_line": 1, "end_line": 1}),
+        );
+        assert_eq!(read.content["text"], "Alpha βeta");
+        assert_eq!(
+            tools
+                .call("record_evidence", json!({"source_ids": [a, a, b]}))
+                .content["source_ids"],
+            json!([a, b])
+        );
+        let finished = tools.call("finish", json!({"source_ids": [b, a, b]}));
+        assert_eq!(finished.finish, Some(vec![b, a]));
+    }
+
+    #[test]
+    fn advertised_tools_are_exact_and_unique() {
+        let definitions = tool_definitions();
+        let names = definitions
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|definition| definition["function"]["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                "list_files",
+                "search_files",
+                "read_file",
+                "record_evidence",
+                "finish"
+            ]
+        );
+        assert_eq!(
+            names.iter().copied().collect::<HashSet<_>>().len(),
+            names.len()
+        );
+    }
+
+    #[test]
+    fn workspace_rejects_duplicate_paths_while_consuming_owned_files() {
+        let (mut workspace, _, _) = workspace();
+        workspace.files.push(DeepWorkspaceFile {
+            path: workspace.files[0].path.clone(),
+            body: "shadow copy".into(),
+        });
+        assert_eq!(
+            WorkspaceTools::new(workspace).err().unwrap(),
+            "duplicate workspace path"
+        );
+    }
+
+    #[test]
+    fn serialized_tool_content_never_exceeds_cap() {
+        let source_id = Uuid::from_u128(77);
+        let huge_line = format!("needle {}", "🦀\"".repeat(MAX_TOOL_OUTPUT_BYTES));
+        let huge_path = format!("episodes/{}.md", "p".repeat(MAX_TOOL_OUTPUT_BYTES * 2));
+        let workspace = DeepWorkspace {
+            files: vec![
+                DeepWorkspaceFile {
+                    path: "manifest.jsonl".into(),
+                    body: format!("{{\"source_id\":\"{source_id}\"}}\n"),
+                },
+                DeepWorkspaceFile {
+                    path: "episodes/huge.md".into(),
+                    body: huge_line,
+                },
+                DeepWorkspaceFile {
+                    path: huge_path,
+                    body: "needle".into(),
+                },
+            ],
+            manifest_sha256: "manifest".into(),
+            workspace_sha256: "workspace".into(),
+        };
+        let mut tools = WorkspaceTools::new(workspace).unwrap();
+        for outcome in [
+            tools.call("list_files", json!({"prefix": "episodes/"})),
+            tools.call("search_files", json!({"query": "needle"})),
+            tools.call(
+                "read_file",
+                json!({"path": "episodes/huge.md", "start_line": 1, "end_line": 1}),
+            ),
+        ] {
+            assert!(outcome.content.to_string().len() <= MAX_TOOL_OUTPUT_BYTES);
+        }
+    }
+
+    #[test]
+    fn provider_decimal_cost_is_rounded_up_without_floating_point() {
+        assert_eq!(decimal_dollars_to_micros_ceil("0.0000100"), Some(10));
+        assert_eq!(decimal_dollars_to_micros_ceil("0.0000101"), Some(11));
+        assert_eq!(decimal_dollars_to_micros_ceil("1.01e-5"), Some(11));
+        assert_eq!(decimal_dollars_to_micros_ceil("1e-100"), Some(1));
+        assert_eq!(
+            decimal_dollars_to_micros_ceil("18446744073709.551615"),
+            Some(u64::MAX)
+        );
+        assert_eq!(
+            decimal_dollars_to_micros_ceil("18446744073709.551616"),
+            None
+        );
+        assert_eq!(decimal_dollars_to_micros_ceil("1e20"), None);
+        assert_eq!(decimal_dollars_to_micros_ceil("-0.1"), None);
+    }
+
+    #[test]
+    fn tools_fail_closed_with_stable_codes() {
+        let (workspace, _, _) = workspace();
+        let mut tools = WorkspaceTools::new(workspace).unwrap();
+        assert_eq!(
+            tools.call("shell", json!({})).content["error"],
+            "unknown_tool"
+        );
+        assert_eq!(
+            tools
+                .call("search_files", json!({"query": "[a-z]+".repeat(100)}))
+                .content["error"],
+            "invalid_arguments"
+        );
+        assert_eq!(
+            tools
+                .call(
+                    "read_file",
+                    json!({"path": "../secret", "start_line": 1, "end_line": 1})
+                )
+                .content["error"],
+            "unknown_path"
+        );
+        assert_eq!(
+            tools
+                .call("finish", json!({"source_ids": [Uuid::from_u128(99)]}))
+                .content["error"],
+            "unknown_source_id"
+        );
+    }
+
+    fn config() -> DeepConfig {
+        DeepConfig::new(
+            "secret".into(),
+            "anthropic/claude-sonnet-5".into(),
+            "Use tools only.".into(),
+            vec!["azure".into()],
+            2_000_000,
+            10_000_000,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn request_is_exact_model_private_azure_and_locally_price_bounded() {
+        let provider = OpenRouterDeepRecall::with_transport(config(), Arc::new(PanicTransport));
+        let body = provider.request_body(&[json!({"role": "user", "content": "q"})]);
+        assert_eq!(body["model"], "anthropic/claude-sonnet-5");
+        assert!(body.get("models").is_none());
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["tool_choice"], "required");
+        assert_eq!(body["parallel_tool_calls"], false);
+        assert_eq!(body["max_completion_tokens"], 4096);
+        assert_eq!(body["provider"]["only"], json!(["azure"]));
+        assert_eq!(body["provider"]["zdr"], true);
+        assert_eq!(body["provider"]["data_collection"], "deny");
+        assert_eq!(body["provider"]["require_parameters"], true);
+        assert_eq!(body["provider"]["max_price"]["prompt"], 2);
+        assert_eq!(body["provider"]["max_price"]["completion"], 10);
+        assert!(body.get("usage").is_none());
+        assert!(body.get("stream_options").is_none());
+    }
+
+    #[test]
+    fn config_rejects_non_azure_or_floating_model() {
+        assert!(
+            DeepConfig::new(
+                "key".into(),
+                "openai/gpt-latest".into(),
+                "prompt".into(),
+                vec!["azure".into()],
+                1,
+                1,
+            )
+            .is_err()
+        );
+        assert!(
+            DeepConfig::new(
+                "key".into(),
+                "openai/gpt-5.6-sol".into(),
+                "prompt".into(),
+                vec!["bedrock".into()],
+                1,
+                1,
+            )
+            .is_err()
+        );
+        assert!(
+            config()
+                .with_openrouter_base_url("http://example.com/api/v1")
+                .is_err()
+        );
+        assert!(
+            config()
+                .with_openrouter_base_url("https://user:secret@example.com/api/v1")
+                .is_err()
+        );
+        assert!(
+            config()
+                .with_openrouter_base_url("http://127.0.0.1:9999/api/v1")
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn scripted_agent_preserves_reasoning_usage_generation_ids_and_finish_order() {
+        let (workspace, a, b) = workspace();
+        let responses = vec![
+            sse_response(
+                "gen-1",
+                vec![json!({
+                    "model":"anthropic/claude-sonnet-5",
+                    "provider":"Azure",
+                    "choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"list_files","arguments":"{}"}}]},"finish_reason":"tool_calls"}],
+                    "usage":{"prompt_tokens":10,"completion_tokens":2,"cost":0.0001}
+                })],
+            ),
+            sse_response(
+                "gen-2",
+                vec![json!({
+                    "model":"anthropic/claude-sonnet-5",
+                    "provider":"Azure",
+                    "choices":[{"index":0,"delta":{"reasoning_details":[{"type":"reasoning.text","text":"keep this exact"}],"tool_calls":[{"index":0,"id":"call-2","type":"function","function":{"name":"record_evidence","arguments":format!("{{\"source_ids\":[\"{a}\"]}}")}}]},"finish_reason":"tool_calls"}],
+                    "usage":{"prompt_tokens":20,"completion_tokens":3,"cost":0.0002}
+                })],
+            ),
+            sse_response(
+                "gen-3",
+                vec![json!({
+                    "model":"anthropic/claude-sonnet-5",
+                    "provider":"Azure",
+                    "choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-3","type":"function","function":{"name":"finish","arguments":format!("{{\"source_ids\":[\"{b}\",\"{a}\"]}}")}}]},"finish_reason":"tool_calls"}],
+                    "usage":{"prompt_tokens":30,"completion_tokens":4,"cost":0.0003}
+                })],
+            ),
+        ];
+        let transport = Arc::new(ScriptTransport::new(responses));
+        let provider = OpenRouterDeepRecall::with_transport(config(), transport.clone());
+        let result = provider
+            .gather(DeepRecallProviderRequest {
+                query: "find it".into(),
+                workspace,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, DeepRecallStatus::Completed);
+        assert_eq!(result.source_ids, vec![b, a]);
+        assert_eq!(result.generation_ids, vec!["gen-1", "gen-2", "gen-3"]);
+        assert_eq!(result.observed_provider.as_deref(), Some("Azure"));
+        assert_eq!(result.usage.tool_iterations, 3);
+        assert_eq!(result.usage.context_tokens, 60);
+        assert_eq!(result.usage.spend_micros, 600);
+        assert_eq!(result.usage.unsettled_context_tokens_upper_bound, 0);
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(
+            requests[2]["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|message| {
+                    message
+                        .get("reasoning_details")
+                        .and_then(Value::as_array)
+                        .is_some_and(|details| !details.is_empty())
+                })
+                .unwrap()["reasoning_details"],
+            json!([{"type":"reasoning.text","text":"keep this exact"}])
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_stream_without_generation_id_is_partial_and_unsettled() {
+        let (workspace, _, _) = workspace();
+        let mut response = sse_response(
+            "ignored",
+            vec![json!({
+                "model":"anthropic/claude-sonnet-5","provider":"Azure",
+                "choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call","function":{"name":"finish","arguments":"{\"source_ids\":[]}"}}]}}],
+                "usage":{"prompt_tokens":1,"completion_tokens":1,"cost":0.000001}
+            })],
+        );
+        response.generation_id = None;
+        let provider = OpenRouterDeepRecall::with_transport(
+            config(),
+            Arc::new(ScriptTransport::new(vec![response])),
+        );
+        let result = provider
+            .gather(DeepRecallProviderRequest {
+                query: "q".into(),
+                workspace,
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.status, DeepRecallStatus::Partial);
+        assert_eq!(result.stop_reason, DeepRecallStopReason::InvalidOutput);
+        assert!(result.generation_ids.is_empty());
+        assert!(result.usage.unsettled_spend_micros_upper_bound > 0);
+    }
+
+    #[tokio::test]
+    async fn accepted_generation_with_wrong_content_type_is_partial_and_unsettled() {
+        let (workspace, _, _) = workspace();
+        let mut response = sse_response(
+            "gen-wrong-content-type",
+            vec![json!({
+                "model":"anthropic/claude-sonnet-5","provider":"Azure",
+                "choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call","function":{"name":"finish","arguments":"{\"source_ids\":[]}"}}]}}],
+                "usage":{"prompt_tokens":1,"completion_tokens":1,"cost":0.000001}
+            })],
+        );
+        response.content_type = Some("application/json".into());
+        let provider = OpenRouterDeepRecall::with_transport(
+            config(),
+            Arc::new(ScriptTransport::new(vec![response])),
+        );
+        let result = provider
+            .gather(DeepRecallProviderRequest {
+                query: "q".into(),
+                workspace,
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.status, DeepRecallStatus::Partial);
+        assert_eq!(result.stop_reason, DeepRecallStopReason::InvalidOutput);
+        assert_eq!(result.generation_ids, vec!["gen-wrong-content-type"]);
+        assert!(result.usage.unsettled_spend_micros_upper_bound > 0);
+    }
+
+    #[tokio::test]
+    async fn caller_drop_cancels_pending_post_future() {
+        let (workspace, _, _) = workspace();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let provider = Arc::new(OpenRouterDeepRecall::with_transport(
+            config(),
+            Arc::new(PendingPostTransport(dropped.clone())),
+        ));
+        let task = tokio::spawn(async move {
+            provider
+                .gather(DeepRecallProviderRequest {
+                    query: "q".into(),
+                    workspace,
+                })
+                .await
+        });
+        tokio::task::yield_now().await;
+        task.abort();
+        let _ = task.await;
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn wall_deadline_drops_pending_body_stream() {
+        let (workspace, _, _) = workspace();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let provider = OpenRouterDeepRecall::with_transport(
+            config().with_test_timing(40, 10),
+            Arc::new(PendingBodyTransport(dropped.clone())),
+        );
+        let result = provider
+            .gather(DeepRecallProviderRequest {
+                query: "q".into(),
+                workspace,
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.status, DeepRecallStatus::Capped);
+        assert_eq!(result.stop_reason, DeepRecallStopReason::WallTime);
+        assert_eq!(result.generation_ids, vec!["gen-pending"]);
+        assert!(result.usage.unsettled_spend_micros_upper_bound > 0);
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn early_failure_settlement_uses_only_the_reserved_window() {
+        let (workspace, _, _) = workspace();
+        let provider = OpenRouterDeepRecall::with_transport(
+            config().with_test_timing(200, 20),
+            Arc::new(PendingSettlementTransport),
+        );
+        let started = std::time::Instant::now();
+        let result = provider
+            .gather(DeepRecallProviderRequest {
+                query: "q".into(),
+                workspace,
+            })
+            .await
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert_eq!(result.status, DeepRecallStatus::Partial);
+        assert_eq!(result.stop_reason, DeepRecallStopReason::ProviderError);
+        assert!(result.usage.unsettled_spend_micros_upper_bound > 0);
+    }
+
+    #[tokio::test]
+    async fn explicit_pre_stream_429_retries_but_ambiguous_transport_never_does() {
+        let (workspace, _, _) = workspace();
+        let retryable = TransportResponse {
+            status: 429,
+            generation_id: None,
+            retry_after: Some(Duration::ZERO),
+            content_type: Some("application/json".into()),
+            body: Box::pin(futures::stream::empty()),
+        };
+        let finished = sse_response(
+            "gen-after-retry",
+            vec![json!({
+                "model":"anthropic/claude-sonnet-5","provider":"Azure",
+                "choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call","function":{"name":"finish","arguments":"{\"source_ids\":[]}"}}]}}],
+                "usage":{"prompt_tokens":1,"completion_tokens":1,"cost":0.000001}
+            })],
+        );
+        let scripted = Arc::new(ScriptTransport::new(vec![retryable, finished]));
+        let provider =
+            OpenRouterDeepRecall::with_transport(config().with_test_retry(0), scripted.clone());
+        let result = provider
+            .gather(DeepRecallProviderRequest {
+                query: "q".into(),
+                workspace: workspace.clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.status, DeepRecallStatus::Completed);
+        assert_eq!(scripted.requests.lock().unwrap().len(), 2);
+
+        let ambiguous = Arc::new(CountingErrorTransport(AtomicUsize::new(0)));
+        let provider = OpenRouterDeepRecall::with_transport(config(), ambiguous.clone());
+        let result = provider
+            .gather(DeepRecallProviderRequest {
+                query: "q".into(),
+                workspace,
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.status, DeepRecallStatus::Partial);
+        assert_eq!(result.stop_reason, DeepRecallStopReason::ProviderError);
+        assert_eq!(ambiguous.0.load(Ordering::SeqCst), 1);
+        assert!(result.usage.unsettled_spend_micros_upper_bound > 0);
+    }
+
+    #[tokio::test]
+    async fn simultaneous_preflight_caps_prefer_spend_before_context_without_dispatch() {
+        let (workspace, _, _) = workspace();
+        let transport = Arc::new(CountingErrorTransport(AtomicUsize::new(0)));
+        let provider = OpenRouterDeepRecall::with_transport(
+            config().with_test_caps(24, 1, 1),
+            transport.clone(),
+        );
+        let result = provider
+            .gather(DeepRecallProviderRequest {
+                query: "q".into(),
+                workspace,
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.status, DeepRecallStatus::Capped);
+        assert_eq!(result.stop_reason, DeepRecallStopReason::Spend);
+        assert_eq!(transport.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn iteration_cap_returns_ordered_checkpoint_without_an_extra_request() {
+        let (workspace, a, _) = workspace();
+        let checkpoint = sse_response(
+            "gen-checkpoint",
+            vec![json!({
+                "model":"anthropic/claude-sonnet-5","provider":"Azure",
+                "choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call","function":{"name":"record_evidence","arguments":format!("{{\"source_ids\":[\"{a}\"]}}")}}]}}],
+                "usage":{"prompt_tokens":1,"completion_tokens":1,"cost":0.000001}
+            })],
+        );
+        let scripted = Arc::new(ScriptTransport::new(vec![checkpoint]));
+        let provider = OpenRouterDeepRecall::with_transport(
+            config().with_test_caps(1, 96_000, 300_000),
+            scripted.clone(),
+        );
+        let result = provider
+            .gather(DeepRecallProviderRequest {
+                query: "q".into(),
+                workspace,
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.status, DeepRecallStatus::Capped);
+        assert_eq!(result.stop_reason, DeepRecallStopReason::ToolIterations);
+        assert_eq!(result.source_ids, vec![a]);
+        assert_eq!(scripted.requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn paid_failure_generation_lookup_replaces_reservation_with_exact_usage() {
+        let (workspace, _, _) = workspace();
+        let provider =
+            OpenRouterDeepRecall::with_transport(config(), Arc::new(SettledFailureTransport));
+        let result = provider
+            .gather(DeepRecallProviderRequest {
+                query: "q".into(),
+                workspace,
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.status, DeepRecallStatus::Partial);
+        assert_eq!(result.stop_reason, DeepRecallStopReason::ProviderError);
+        assert_eq!(result.usage.context_tokens, 77);
+        assert_eq!(result.usage.spend_micros, 88);
+        assert_eq!(result.usage.unsettled_context_tokens_upper_bound, 0);
+        assert_eq!(result.usage.unsettled_spend_micros_upper_bound, 0);
+    }
+
+    #[tokio::test]
+    async fn second_invalid_tool_response_is_terminal_invalid_output() {
+        let (workspace, _, _) = workspace();
+        let invalid = |id: &str, call: &str| {
+            sse_response(
+                id,
+                vec![json!({
+                    "model":"anthropic/claude-sonnet-5","provider":"Azure",
+                    "choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":call,"function":{"name":"shell","arguments":"{}"}}]}}],
+                    "usage":{"prompt_tokens":1,"completion_tokens":1,"cost":0.000001}
+                })],
+            )
+        };
+        let provider = OpenRouterDeepRecall::with_transport(
+            config(),
+            Arc::new(ScriptTransport::new(vec![
+                invalid("gen-invalid-1", "call-1"),
+                invalid("gen-invalid-2", "call-2"),
+            ])),
+        );
+        let result = provider
+            .gather(DeepRecallProviderRequest {
+                query: "q".into(),
+                workspace,
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.status, DeepRecallStatus::Partial);
+        assert_eq!(result.stop_reason, DeepRecallStopReason::InvalidOutput);
+        assert_eq!(result.usage.tool_iterations, 2);
+        assert_eq!(
+            result.generation_ids,
+            vec!["gen-invalid-1", "gen-invalid-2"]
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_final_usage_is_partial_with_unsettled_upper_bound() {
+        let (workspace, _, _) = workspace();
+        let response = sse_response(
+            "gen-missing-usage",
+            vec![json!({
+                "model":"anthropic/claude-sonnet-5","provider":"Azure",
+                "choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call","function":{"name":"finish","arguments":"{\"source_ids\":[]}"}}]}}]
+            })],
+        );
+        let provider = OpenRouterDeepRecall::with_transport(
+            config(),
+            Arc::new(ScriptTransport::new(vec![response])),
+        );
+        let result = provider
+            .gather(DeepRecallProviderRequest {
+                query: "q".into(),
+                workspace,
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.status, DeepRecallStatus::Partial);
+        assert_eq!(result.stop_reason, DeepRecallStopReason::InvalidOutput);
+        assert!(result.usage.unsettled_context_tokens_upper_bound > 0);
+        assert!(result.usage.unsettled_spend_micros_upper_bound > 0);
+    }
+
+    #[test]
+    fn config_hash_binds_transport_and_retry_boundaries() {
+        let left = OpenRouterDeepRecall::with_transport(config(), Arc::new(PanicTransport));
+        let right = OpenRouterDeepRecall::with_transport(
+            config()
+                .with_openrouter_base_url("https://example.invalid/api/v1")
+                .unwrap(),
+            Arc::new(PanicTransport),
+        );
+        assert_ne!(left.identity.config_hash, right.identity.config_hash);
+    }
+
+    #[test]
+    fn deep_mode_env_grammar_is_strict() {
+        assert!(!deep_mode_from_value(None).unwrap());
+        assert!(!deep_mode_from_value(Some("off")).unwrap());
+        assert!(deep_mode_from_value(Some("on")).unwrap());
+        for invalid in ["", "ON", "true", "1", " on "] {
+            assert!(deep_mode_from_value(Some(invalid)).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn reqwest_transport_streams_against_a_scripted_openrouter_server() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 4096];
+            loop {
+                let read = socket.read(&mut buffer).unwrap();
+                request.extend_from_slice(&buffer[..read]);
+                let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end + 4]);
+                let length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(str::trim)
+                            .and_then(|value| value.parse::<usize>().ok())
+                    })
+                    .unwrap();
+                if request.len() >= header_end + 4 + length {
+                    break;
+                }
+            }
+            let header_end = request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .unwrap();
+            let body: Value = serde_json::from_slice(&request[header_end + 4..]).unwrap();
+            assert_eq!(body["provider"]["only"], json!(["azure"]));
+            assert_eq!(body["max_completion_tokens"], 4096);
+            let event = json!({
+                "model":"anthropic/claude-sonnet-5","provider":"Azure",
+                "choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call","function":{"name":"finish","arguments":"{\"source_ids\":[]}"}}]}}],
+                "usage":{"prompt_tokens":1,"completion_tokens":1,"cost":0.000001}
+            });
+            let response_body = format!("data: {event}\n\ndata: [DONE]\n\n");
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nX-Generation-Id: gen-http\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            )
+            .unwrap();
+        });
+        let (workspace, _, _) = workspace();
+        let provider = OpenRouterDeepRecall::new(
+            config()
+                .with_openrouter_base_url(&format!("http://{address}/api/v1"))
+                .unwrap(),
+        )
+        .unwrap();
+        let result = provider
+            .gather(DeepRecallProviderRequest {
+                query: "q".into(),
+                workspace,
+            })
+            .await
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(result.status, DeepRecallStatus::Completed);
+        assert_eq!(result.generation_ids, vec!["gen-http"]);
+    }
+}

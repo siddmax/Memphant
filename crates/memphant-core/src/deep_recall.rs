@@ -19,8 +19,9 @@ pub struct DeepRecallProviderResult {
     pub stop_reason: DeepRecallStopReason,
     pub source_ids: Vec<Uuid>,
     pub usage: DeepRecallUsage,
-    pub observed_provider: String,
-    pub observed_model: String,
+    pub generation_ids: Vec<String>,
+    pub observed_provider: Option<String>,
+    pub observed_model: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]

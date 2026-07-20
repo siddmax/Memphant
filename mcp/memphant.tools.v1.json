@@ -677,7 +677,8 @@
         "DeepRecallStatus": {
           "enum": [
             "completed",
-            "capped"
+            "capped",
+            "partial"
           ],
           "type": "string"
         },
@@ -687,12 +688,21 @@
             "wall_time",
             "tool_iterations",
             "context_tokens",
-            "spend"
+            "spend",
+            "provider_error",
+            "invalid_output"
           ],
           "type": "string"
         },
         "DeepRecallSummary": {
           "properties": {
+            "generation_ids": {
+              "description": "Ordered provider generation IDs for every accepted model turn.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
             "limits": {
               "$ref": "#/$defs/DeepRecallLimits"
             },
@@ -728,6 +738,20 @@
             },
             "tool_iterations": {
               "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "unsettled_context_tokens_upper_bound": {
+              "default": 0,
+              "description": "Conservative tokens that may have been accepted by a provider but\ncould not be settled to provider-native usage before cancellation.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "unsettled_spend_micros_upper_bound": {
+              "default": 0,
+              "description": "Conservative micro-USD that may have been billed but could not be\nsettled before cancellation. This is never included in trace cost.",
+              "format": "uint64",
               "minimum": 0,
               "type": "integer"
             },
@@ -1612,7 +1636,8 @@
         "DeepRecallStatus": {
           "enum": [
             "completed",
-            "capped"
+            "capped",
+            "partial"
           ],
           "type": "string"
         },
@@ -1622,12 +1647,21 @@
             "wall_time",
             "tool_iterations",
             "context_tokens",
-            "spend"
+            "spend",
+            "provider_error",
+            "invalid_output"
           ],
           "type": "string"
         },
         "DeepRecallSummary": {
           "properties": {
+            "generation_ids": {
+              "description": "Ordered provider generation IDs for every accepted model turn.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
             "limits": {
               "$ref": "#/$defs/DeepRecallLimits"
             },
@@ -1663,6 +1697,20 @@
             },
             "tool_iterations": {
               "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "unsettled_context_tokens_upper_bound": {
+              "default": 0,
+              "description": "Conservative tokens that may have been accepted by a provider but\ncould not be settled to provider-native usage before cancellation.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "unsettled_spend_micros_upper_bound": {
+              "default": 0,
+              "description": "Conservative micro-USD that may have been billed but could not be\nsettled before cancellation. This is never included in trace cost.",
+              "format": "uint64",
               "minimum": 0,
               "type": "integer"
             },

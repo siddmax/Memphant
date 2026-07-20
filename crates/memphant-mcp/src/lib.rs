@@ -529,3 +529,281 @@ impl ServerHandler for MemphantMcp {
 pub fn tools_artifact() -> Value {
     serde_json::to_value(MemphantMcp::tool_router().list_all()).expect("MCP tools serialize")
 }
+
+#[cfg(test)]
+mod deep_runtime_smoke {
+    use super::*;
+    use memphant_core::{FixedClock, InMemoryStore, MemoryStore};
+    use memphant_types::{
+        ActorId, MemoryKind, NewEpisode, NewMemoryUnit, RecallMode, ScopeId, TrustLevel, UnitState,
+    };
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    const CLOCK: FixedClock = FixedClock("2026-07-20T00:00:00Z");
+
+    fn scripted_openrouter() -> (String, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed_calls = calls.clone();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            for turn in 1..=2 {
+                let (mut socket, _) = loop {
+                    match listener.accept() {
+                        Ok(connection) => break connection,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if Instant::now() >= deadline {
+                                return;
+                            }
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("provider accept failed: {error}"),
+                    }
+                };
+                socket.set_nonblocking(false).unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 8192];
+                loop {
+                    let read = socket.read(&mut buffer).unwrap();
+                    request.extend_from_slice(&buffer[..read]);
+                    let Some(header_end) =
+                        request.windows(4).position(|window| window == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let headers = String::from_utf8_lossy(&request[..header_end + 4]);
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(str::trim)
+                                .and_then(|value| value.parse::<usize>().ok())
+                        })
+                        .unwrap();
+                    if request.len() >= header_end + 4 + length {
+                        break;
+                    }
+                }
+                let header_end = request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .unwrap();
+                let body: Value = serde_json::from_slice(&request[header_end + 4..]).unwrap();
+                observed_calls.fetch_add(1, Ordering::SeqCst);
+                let (name, arguments) = if turn == 1 {
+                    ("list_files", "{\"prefix\":\"episodes/\"}".to_string())
+                } else {
+                    let content = body["messages"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .rev()
+                        .find(|message| message["role"] == "tool")
+                        .unwrap()["content"]
+                        .as_str()
+                        .unwrap();
+                    let listed: Value = serde_json::from_str(content).unwrap();
+                    let path = listed["files"][0]["path"].as_str().unwrap();
+                    let source_id = path.trim_start_matches("episodes/").trim_end_matches(".md");
+                    ("finish", format!("{{\"source_ids\":[\"{source_id}\"]}}"))
+                };
+                let event = serde_json::json!({
+                    "model":"anthropic/claude-sonnet-5","provider":"Azure",
+                    "choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":format!("call-{turn}"),"function":{"name":name,"arguments":arguments}}]}}],
+                    "usage":{"prompt_tokens":10,"completion_tokens":1,"cost":0.00001}
+                });
+                let response_body = format!("data: {event}\n\ndata: [DONE]\n\n");
+                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nX-Generation-Id: gen-mcp-{turn}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response_body.len(), response_body).unwrap();
+            }
+        });
+        (format!("http://{address}/api/v1"), calls, server)
+    }
+
+    static DEEP_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct ScopedEnv {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl ScopedEnv {
+        fn set(variables: &[(&'static str, String)]) -> Self {
+            let saved = variables
+                .iter()
+                .map(|(name, _)| (*name, std::env::var(name).ok()))
+                .collect::<Vec<_>>();
+            unsafe {
+                for (name, value) in variables {
+                    std::env::set_var(name, value);
+                }
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            unsafe {
+                for (name, value) in self.saved.drain(..) {
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_recall_surfaces_runtime_deep_summary_and_provenance() {
+        let tenant = TenantId::from_u128(91_000);
+        let scope = ScopeId::from_u128(91_001);
+        let actor = ActorId::from_u128(91_002);
+        let context = memphant_store_testkit::resolved_context(tenant, scope, actor);
+        let store = InMemoryStore::default();
+        store.seed_context_binding(&context);
+        let mut tx = store.begin(&context).await.unwrap();
+        let episode = store
+            .stage_episode(
+                &mut tx,
+                NewEpisode {
+                    tenant_id: tenant,
+                    data_subject_id: context.data_subject_id,
+                    scope_id: scope,
+                    agent_node_id: context.agent_node_id,
+                    subject_generation: 0,
+                    actor_id: actor,
+                    source_kind: "fixture".into(),
+                    source_ref: "mcp:deep".into(),
+                    observed_at: CLOCK.0.into(),
+                    source_trust: TrustLevel::TrustedSystem,
+                    dedup_key: "mcp-deep".into(),
+                    body: "Buried archive says launch code is heliotrope.".into(),
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .stage_memory_unit(
+                &mut tx,
+                NewMemoryUnit {
+                    tenant_id: tenant,
+                    data_subject_id: context.data_subject_id,
+                    scope_id: scope,
+                    agent_node_id: context.agent_node_id,
+                    subject_generation: 0,
+                    kind: MemoryKind::Semantic,
+                    state: UnitState::Active,
+                    fact_key: Some("launch_code".into()),
+                    predicate: None,
+                    body: "Launch code is heliotrope.".into(),
+                    confidence: Some(1.0),
+                    trust_level: TrustLevel::TrustedSystem,
+                    churn_class: None,
+                    freshness_due_at: None,
+                    actor_id: Some(actor),
+                    source_kind: Some("fixture".into()),
+                    source_ref: "mcp:deep".into(),
+                    observed_at: CLOCK.0.into(),
+                    source_episode_id: Some(episode.episode_id),
+                    source_resource_id: None,
+                    deletion_generation: None,
+                    contextual_chunks: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                    transaction_from: None,
+                    transaction_to: None,
+                },
+            )
+            .await
+            .unwrap();
+        store.commit(tx).await.unwrap();
+
+        let (base_url, provider_calls, provider_server) = scripted_openrouter();
+        let prompt = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(prompt.path(), "Use tools only.").unwrap();
+        let variables = [
+            ("MEMPHANT_DEEP", "on".to_string()),
+            ("OPENROUTER_API_KEY", "test-key".to_string()),
+            (
+                "MEMPHANT_DEEP_MODEL",
+                "anthropic/claude-sonnet-5".to_string(),
+            ),
+            (
+                "MEMPHANT_DEEP_PROMPT_PATH",
+                prompt.path().display().to_string(),
+            ),
+            ("MEMPHANT_DEEP_PROVIDERS", "azure".to_string()),
+            (
+                "MEMPHANT_DEEP_INPUT_PRICE_MICROS_PER_MILLION",
+                "2000000".to_string(),
+            ),
+            (
+                "MEMPHANT_DEEP_OUTPUT_PRICE_MICROS_PER_MILLION",
+                "10000000".to_string(),
+            ),
+            ("MEMPHANT_DEEP_OPENROUTER_BASE_URL", base_url),
+            ("MEMPHANT_EMBEDDINGS", "off".to_string()),
+        ];
+        let service = {
+            let _env_lock = DEEP_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let _env = ScopedEnv::set(&variables);
+            memphant_runtime::build_service(AnyStore::Mem(store.clone()))
+        };
+        let mcp = MemphantMcp::new(
+            service,
+            BoundTenant {
+                tenant,
+                max_trust: TrustLevel::TrustedSystem,
+                actor_id: None,
+                scope_id: None,
+                dev_mode: true,
+            },
+        );
+        let response = mcp
+            .recall(Parameters(RecallHttpRequest {
+                subject_id: context.data_subject_id,
+                scope_id: scope,
+                agent_node_id: context.agent_node_id,
+                subject_generation: 0,
+                actor_id: actor,
+                query: "What is the buried launch code?".into(),
+                limit: Some(4),
+                budget_tokens: Some(128),
+                mode: Some(RecallMode::Deep),
+                include_beliefs: None,
+                transaction_as_of: None,
+                valid_at: None,
+                aggregation_window: None,
+            }))
+            .await
+            .unwrap()
+            .0;
+        provider_server.join().unwrap();
+        assert_eq!(provider_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            response.deep.as_ref().unwrap().status,
+            memphant_types::DeepRecallStatus::Completed
+        );
+        assert_eq!(
+            response.deep.as_ref().unwrap().generation_ids,
+            vec!["gen-mcp-1", "gen-mcp-2"]
+        );
+        assert!(response.items[0].body.contains("heliotrope"));
+        let trace = store.trace_by_id_any_tenant(response.trace_id).unwrap();
+        assert_eq!(trace.l4_observed_provider.as_deref(), Some("Azure"));
+        assert_eq!(trace.deep.unwrap(), response.deep.unwrap());
+    }
+}

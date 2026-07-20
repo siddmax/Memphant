@@ -13,6 +13,9 @@ memphant-core.workspace = true
 memphant-store-postgres = { path = "../memphant-store-postgres" }
 memphant-types.workspace = true
 jiff.workspace = true
+eventsource-stream.workspace = true
+futures.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

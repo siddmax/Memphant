@@ -126,6 +126,7 @@ pub mod embeddings;
 
 pub mod api_embeddings;
 mod api_reranking;
+pub mod deep_recall_openrouter;
 mod structured_state_openrouter;
 
 /// Single source of truth mapping an embedder selector id to a provider, shared
@@ -337,13 +338,19 @@ pub fn build_service(store: AnyStore) -> MemoryService<AnyStore> {
         cross_rerank_candidate_selection_from_env()
             .unwrap_or_else(|error| panic!("MEMPHANT_CROSS_RERANK_CANDIDATES: {error}")),
     );
-    if cross_rerank_enabled_from_env() {
+    let service = if cross_rerank_enabled_from_env() {
         let reranker = build_cross_reranker().unwrap_or_else(|error| {
             panic!("MEMPHANT_CROSS_RERANK=1: {error}");
         });
         service.with_cross_reranker(reranker)
     } else {
         service
+    };
+    match deep_recall_openrouter::build_deep_recall_provider()
+        .unwrap_or_else(|error| panic!("MEMPHANT_DEEP: {error}"))
+    {
+        Some(provider) => service.with_deep_recall_provider(provider),
+        None => service,
     }
 }
 

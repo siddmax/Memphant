@@ -119,10 +119,16 @@ struct DeepManifestLine<'a> {
 /// interpreted as a filesystem path.
 pub fn build_deep_workspace(entries: &[DeepSnapshotEntry]) -> DeepWorkspace {
     let mut entries = entries.to_vec();
+    build_deep_workspace_owned(&mut entries)
+}
+
+/// Production builder: consumes the large raw bodies into the workspace while
+/// leaving authorization metadata and bound units available for result checks.
+fn build_deep_workspace_owned(entries: &mut [DeepSnapshotEntry]) -> DeepWorkspace {
     entries.sort_by_key(|entry| (entry.source_kind, entry.source_id));
 
     let mut manifest = String::new();
-    for entry in &entries {
+    for entry in entries.iter() {
         let path = deep_source_path(entry.source_kind, entry.source_id);
         let line = DeepManifestLine {
             source_kind: entry.source_kind,
@@ -157,9 +163,9 @@ pub fn build_deep_workspace(entries: &[DeepSnapshotEntry]) -> DeepWorkspace {
             body: manifest,
         },
     ];
-    files.extend(entries.into_iter().map(|entry| DeepWorkspaceFile {
+    files.extend(entries.iter_mut().map(|entry| DeepWorkspaceFile {
         path: deep_source_path(entry.source_kind, entry.source_id),
-        body: entry.body,
+        body: std::mem::take(&mut entry.body),
     }));
 
     let mut workspace_hasher = Sha256::new();
@@ -5907,8 +5913,8 @@ where
 struct DeepRunFacts {
     summary: DeepRecallSummary,
     identity: DeepProviderIdentity,
-    observed_provider: String,
-    observed_model: String,
+    observed_provider: Option<String>,
+    observed_model: Option<String>,
     workspace_manifest_sha256: String,
     workspace_sha256: String,
     source_ids: Vec<Uuid>,
@@ -5942,16 +5948,36 @@ fn validate_deep_provider_result(
                     | DeepRecallStopReason::ContextTokens
                     | DeepRecallStopReason::Spend
             )
+            | (
+                DeepRecallStatus::Partial,
+                DeepRecallStopReason::ProviderError | DeepRecallStopReason::InvalidOutput
+            )
     );
+    let context_usage = result
+        .usage
+        .context_tokens
+        .checked_add(result.usage.unsettled_context_tokens_upper_bound);
+    let spend_usage = result
+        .usage
+        .spend_micros
+        .checked_add(result.usage.unsettled_spend_micros_upper_bound);
     let usage_fits = result.usage.wall_time_ms <= limits.wall_time_ms
         && result.usage.tool_iterations <= limits.max_tool_iterations
-        && result.usage.context_tokens <= limits.max_context_tokens
-        && result.usage.spend_micros <= limits.max_spend_micros;
-    if !status_matches
-        || !usage_fits
-        || result.observed_provider.trim().is_empty()
-        || result.observed_model.trim().is_empty()
-    {
+        && context_usage.is_some_and(|usage| usage <= limits.max_context_tokens)
+        && spend_usage.is_some_and(|usage| usage <= limits.max_spend_micros);
+    let generation_ids_valid = {
+        let mut seen = HashSet::new();
+        result
+            .generation_ids
+            .iter()
+            .all(|id| !id.trim().is_empty() && seen.insert(id))
+    };
+    let observed_route_valid = match (&result.observed_provider, &result.observed_model) {
+        (None, None) => true,
+        (Some(provider), Some(model)) => !provider.trim().is_empty() && !model.trim().is_empty(),
+        _ => false,
+    };
+    if !status_matches || !usage_fits || !observed_route_valid || !generation_ids_valid {
         return Err(CoreError::DeepProviderInvalidOutput);
     }
     validate_deep_provider_identity(identity)?;
@@ -6104,12 +6130,14 @@ where
                         && high_risk_recall_drop_reason(unit, &request).is_none()
                 })
         });
-        let workspace = build_deep_workspace(&entries);
+        let workspace = build_deep_workspace_owned(&mut entries);
+        let workspace_manifest_sha256 = workspace.manifest_sha256.clone();
+        let workspace_sha256 = workspace.workspace_sha256.clone();
         let limits = provider.limits();
         let result = provider
             .gather(DeepRecallProviderRequest {
                 query: request.query.clone(),
-                workspace: workspace.clone(),
+                workspace,
             })
             .await
             .map_err(|error| match error {
@@ -6123,12 +6151,13 @@ where
                 stop_reason: result.stop_reason,
                 limits,
                 usage: result.usage,
+                generation_ids: result.generation_ids,
             },
             identity,
             observed_provider: result.observed_provider,
             observed_model: result.observed_model,
-            workspace_manifest_sha256: workspace.manifest_sha256,
-            workspace_sha256: workspace.workspace_sha256,
+            workspace_manifest_sha256,
+            workspace_sha256,
             source_ids: result.source_ids,
             ranked_units,
         })
@@ -6667,8 +6696,12 @@ where
         deep: deep_run.as_ref().map(|deep| deep.summary.clone()),
         l4_provider: deep_run.as_ref().map(|deep| deep.identity.provider.clone()),
         l4_model: deep_run.as_ref().map(|deep| deep.identity.model.clone()),
-        l4_observed_provider: deep_run.as_ref().map(|deep| deep.observed_provider.clone()),
-        l4_observed_model: deep_run.as_ref().map(|deep| deep.observed_model.clone()),
+        l4_observed_provider: deep_run
+            .as_ref()
+            .and_then(|deep| deep.observed_provider.clone()),
+        l4_observed_model: deep_run
+            .as_ref()
+            .and_then(|deep| deep.observed_model.clone()),
         l4_prompt_hash: deep_run
             .as_ref()
             .map(|deep| deep.identity.prompt_hash.clone()),
@@ -9354,6 +9387,8 @@ fn deep_stop_reason_name(reason: DeepRecallStopReason) -> &'static str {
         DeepRecallStopReason::ToolIterations => "tool_iterations",
         DeepRecallStopReason::ContextTokens => "context_tokens",
         DeepRecallStopReason::Spend => "spend",
+        DeepRecallStopReason::ProviderError => "provider_error",
+        DeepRecallStopReason::InvalidOutput => "invalid_output",
     }
 }
 
