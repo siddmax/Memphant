@@ -1180,7 +1180,9 @@ def _load_no_model_recovery(
     contract: dict[str, object],
     tools: dict[str, object],
     schema: dict[str, object],
-) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+) -> tuple[
+    dict[str, object], dict[str, object], dict[str, object], dict[str, object]
+]:
     require(fixture.get("name") == "exact",
             "no-model recovery is limited to the exact fixture")
     require(not (output / "PROOF.json").exists(),
@@ -1300,7 +1302,56 @@ def _load_no_model_recovery(
         and recovery.get("executed") is False,
         "no-model recovery attempt accounting drift",
     )
-    return construction, manifest, incident
+    invariants = {
+        "incident_sha256": sha256_file(incident_path),
+        "pre_recovery_inventory": dict(inventory),
+        "case_bank_seal": _case_bank_seal(bank_dir / "manifest.json"),
+    }
+    return construction, manifest, incident, invariants
+
+
+def _revalidate_no_model_recovery(
+    output: Path,
+    construction: dict[str, object],
+    invariants: dict[str, object],
+) -> None:
+    incident_path = output / "RECOVERY-INCIDENT.json"
+    require(
+        incident_path.is_file()
+        and sha256_file(incident_path) == invariants.get("incident_sha256"),
+        "no-model recovery incident drift after arm execution",
+    )
+    inventory = invariants.get("pre_recovery_inventory")
+    require(isinstance(inventory, dict) and inventory,
+            "no-model recovery invariant inventory drift")
+    for relative, expected_sha256 in inventory.items():
+        require(
+            isinstance(relative, str)
+            and not Path(relative).is_absolute()
+            and ".." not in Path(relative).parts,
+            "no-model recovery invariant path drift",
+        )
+        path = output / relative
+        require(
+            isinstance(expected_sha256, str)
+            and path.is_file()
+            and sha256_file(path) == expected_sha256,
+            f"no-model recovery inventory drift after arm execution: {relative}",
+        )
+    bank_dir = output / "case-bank"
+    manifest, _archive = _load_case_bank(bank_dir)
+    require(
+        _case_bank_seal(bank_dir / "manifest.json")
+        == invariants.get("case_bank_seal"),
+        "no-model recovery case bank seal drift after arm execution",
+    )
+    construction_path = output / "construction-proof.json"
+    require(
+        construction_path.is_file()
+        and json.loads(construction_path.read_text()) == construction
+        and manifest.get("construction") == construction,
+        "no-model recovery construction proof drift after arm execution",
+    )
 
 
 def _no_model_attempt_accounting(
@@ -1397,9 +1448,10 @@ def _run_no_model_verifier_locked(
     }
     construction_path = output / "construction-proof.json"
     incident = None
+    recovery_invariants = None
     if resume:
         _require_no_model_recovery_start(source_url, output, str(data["case_id"]))
-        construction, dumped, incident = _load_no_model_recovery(
+        construction, dumped, incident, recovery_invariants = _load_no_model_recovery(
             output, data, contract, tools, schema
         )
         construction_ms = int(dumped["construction_duration_ms"])
@@ -1481,6 +1533,12 @@ def _run_no_model_verifier_locked(
             "no-model source gained an API key")
     require(_job_state_counts(source_url) == (0, 0, 0),
             "no-model source contains transient jobs")
+    if resume:
+        require(isinstance(recovery_invariants, dict),
+                "no-model recovery invariant snapshot is missing")
+        _revalidate_no_model_recovery(
+            output, construction, recovery_invariants
+        )
     # Server/worker text logs are redacted by each adapter phase. The custom
     # dump and its manifest are content-addressed evidence, never text-redact
     # them after sealing; pg_dump does not archive its connection string.

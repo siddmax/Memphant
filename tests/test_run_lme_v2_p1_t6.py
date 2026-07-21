@@ -650,7 +650,7 @@ def test_exact_no_model_resume_skips_construction_dump_and_reset(
         )
     monkeypatch.setattr(
         campaign, "_load_no_model_recovery",
-        lambda *_args: (construction, manifest, incident),
+        lambda *_args: (construction, manifest, incident, {"snapshot": True}),
     )
     restored = []
     monkeypatch.setattr(
@@ -769,6 +769,47 @@ def test_exact_no_model_recovery_counts_diagnostic_restore() -> None:
     assert accounting["attempts"]["recovery"]["restores"] == 1
     assert accounting["recovery"]["repeated_constructions"] == 0
     assert accounting["recovery"]["repeated_dumps"] == 0
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "RECOVERY-INCIDENT.json",
+        "case-bank/manifest.json",
+        "case-bank/archive.dump",
+        "construction-proof.json",
+    ],
+)
+def test_exact_no_model_recovery_rejects_invariant_mutation_after_arm(
+    tmp_path: Path, relative: str
+) -> None:
+    campaign = _load()
+    output = tmp_path / "recovery"
+    paths = [
+        "RECOVERY-INCIDENT.json",
+        "case-bank/manifest.json",
+        "case-bank/archive.dump",
+        "construction-proof.json",
+    ]
+    for item in paths:
+        path = output / item
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("original-" + item)
+    invariants = {
+        "incident_sha256": campaign.sha256_file(output / "RECOVERY-INCIDENT.json"),
+        "pre_recovery_inventory": {
+            item: campaign.sha256_file(output / item)
+            for item in paths if item != "RECOVERY-INCIDENT.json"
+        },
+        "case_bank_seal": {"seal_sha256": "a" * 64},
+    }
+    (output / relative).write_text("mutated-during-arm")
+
+    with pytest.raises(RuntimeError, match="recovery .* drift"):
+        campaign._revalidate_no_model_recovery(
+            output, {"pairing": {}}, invariants
+        )
+    assert not (output / "PROOF.json").exists()
 
 
 def test_no_model_verifier_builds_banks_restores_queries_and_cleans_two_clones(
