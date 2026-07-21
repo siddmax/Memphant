@@ -1,0 +1,103 @@
+{
+  "schema_version": "memphant.p1_t6.dispatch_authorization.v3",
+  "created_at": "2026-07-21T21:00:00Z",
+  "decision": "authorize_one_fresh_registered_n12_fast_sonnet_gate",
+  "supersedes": "docs/build-log/artifacts/p1-t6/DISPATCH-AUTHORIZATION-65981e4f.json",
+  "supersede_reason": "run-65981e4f fail-stopped at row 0002 recall on a vanished local PostgreSQL container (HTTP 503 backend_unavailable, no Deep dispatch bound, no billable spend). Infrastructure restored and verified; this re-authorizes a fresh output root under PRE-EXECUTION-AMENDMENT-14. No runtime, adapter, selection, or context change.",
+  "authorization_commit_parent": "d2f4fcb37e7496c3c847b64b46da090b44324f08",
+  "runtime_source_commit": "69ab5a54",
+  "planned_output_root": "docs/build-log/artifacts/p1-t6/run-d2f4fcb3",
+  "authorization": {
+    "cases": 12,
+    "constructions_max": 12,
+    "answer_rows_max": 24,
+    "deep_dispatches_max": 12,
+    "preexisting_settled_micros": 30771,
+    "preexisting_unresolved_upper_bound_micros": 316142,
+    "preexisting_liability_micros": 346913,
+    "fresh_max_liability_micros": 5697600,
+    "cumulative_worst_case_liability_micros": 6044513,
+    "campaign_hard_ceiling_micros": 6250000,
+    "headroom_micros": 205487,
+    "released_reservation_micros": 300000,
+    "released_reservation_reason": "run-65981e4f row 0002 Deep reservation never drawn (observed_deep_config_hash=null); released, not carried.",
+    "inactive_arms": ["luna", "sol"],
+    "larger_run_authorized": false,
+    "push_authorized": false
+  },
+  "frozen_inputs": {
+    "pre_execution_amendment": {
+      "path": "docs/build-log/artifacts/p1-t6/PRE-EXECUTION-AMENDMENT-14.md",
+      "sha256": "3047addf57e7944d8d5a80135d2717f50f5844f0ba6aab4523a2807e046d4d4e"
+    },
+    "campaign_manifest": {
+      "path": "benchmarks/manifests/longmemeval_v2.p1_t6.json",
+      "sha256": "09d149423ad0ec1591f34a07bcc46b106a5c2111a043c6c1d8bb384c254b74c2"
+    },
+    "selection_sha256": "d7762dbaffff7acfe779162d4993c8c09ef0440e3c1a25e0d3408127d73e25fa",
+    "expanded_run_order_sha256": "59f7ff5cc04a6ecd1b17b69565e51a71ad1b814bfa1345698a10ad766796ad1e",
+    "selected_model": "anthropic/claude-sonnet-5-20260630",
+    "selected_stream_model": "anthropic/claude-sonnet-5",
+    "selected_config_sha256": "a0163962e23e5f34bd1d48e82d149b88b59f0f224f7cd171a92853bde455aedb"
+  },
+  "just_in_time_checks": {
+    "manifest": {
+      "verified": true,
+      "cases": 12,
+      "constructions": 12,
+      "answer_rows": 24,
+      "paid_calls": 0
+    },
+    "credentials": {
+      "source": "doppler project syndai config dev",
+      "openrouter_api_key_present": true,
+      "openai_api_key_present": true,
+      "values_emitted_or_persisted": false
+    },
+    "packaged_binaries": {
+      "profile": "release",
+      "server": {"bytes": 40236512, "sha256": "3ec9e6027d3ef6e2fdb45b501d29e7bd040261705bbf302638a8e67fffa7a231"},
+      "worker": {"bytes": 35963296, "sha256": "d6eaa0522f5838346bc20495a55d1ab2e03b2c75733763a14d91d66dfff0978c"},
+      "cli": {"bytes": 5705024, "sha256": "a8da5a706613654cfe743a55ea93b5c99702962067052503985c1c6dd1af3c0d"}
+    },
+    "scratch_postgres": {
+      "server_major": 17,
+      "server_version": "17.10",
+      "pgvector_version": "0.8.4",
+      "create_connect_extension_drop_smoke": "passed",
+      "base_server_live_reachability_probe": "passed",
+      "remaining_campaign_databases": 0
+    },
+    "cleanup": {
+      "campaign_processes": 0,
+      "launch_agents": 0,
+      "planned_output_root_absent": true
+    }
+  },
+  "static_context_contract": {
+    "decision": "reuse_without_reconstruction",
+    "reason": "The frozen selection, memory parameters, adapter bytes, release binaries, Sonnet config hash, and all context-relevant controller AST identities are unchanged from run-65981e4f. run-65981e4f failed on infrastructure, not context; the prior exact 23,564-of-32,768-token no-model proof remains valid. Reconstructing 670 resources solely for authorization would add no context-size information.",
+    "exact_reader_tokens": 23564,
+    "budget_tokens": 32768,
+    "untruncated": true,
+    "adapter_sha256": "56c2a7264112e012f9376178cc2ef3383d70705f21255d4182e92bf62f8e206c",
+    "live_execution_obligation": "The fresh live root must construct each of its 12 case banks normally and may not import a bank or dump from any prior root."
+  },
+  "paid_route_probe": {
+    "run_now": false,
+    "reason": "The fixture-driven production provider test covers bounded multi-tool execution and the route/parser contract was settled at 69ab5a54. Another paid probe is duplicate evidence."
+  },
+  "execution_environment": {
+    "secret_injection": "wrap only the benchmark process with doppler run --project syndai --config dev",
+    "ci_or_test_secret_injection": false,
+    "database_authority": "local ephemeral scratch PostgreSQL only"
+  },
+  "stop_predicates": [
+    "stop on the first failed pair or missing proof before opening the next case",
+    "stop on any cap, infrastructure, security, write, route, or settlement failure",
+    "never rerun a completed billable row",
+    "stop after the registered Sonnet decision and do not run Luna or Sol",
+    "do not start n100_to_n300 or full_500 from this authorization"
+  ],
+  "claim_boundary": "This authorizes only one fresh P1-T6 n=12 development root. It is not a pass, promotion, SOTA claim, product-default decision, larger-run authorization, merge, or push authorization."
+}
