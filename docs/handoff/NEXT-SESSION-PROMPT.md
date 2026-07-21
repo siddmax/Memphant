@@ -1,207 +1,239 @@
-# MemPhant Campaign Handoff — paste this to resume (rewritten 2026-07-19; supersedes the PMU pointer and the 2026-07-12 R2→R6 prompt; history in git)
+# MemPhant campaign handoff — 2026-07-21
 
-Current STATUS mirror: RUNTIME COMPLETE — BENCHMARK EVIDENCE PENDING
+This is the authoritative next-session handoff for the active P1-T6 campaign.
+Older campaign history remains in git and the linked proof artifacts; do not
+reconstruct it from stale prompts.
 
-You are resuming the MemPhant SOTA campaign in `/Users/sidsharma/Memphant` (sibling
-`/Users/sidsharma/Syndai`; spec mirror stays drift-free: `python3 scripts/check_spec_drift.py`).
-Execution style: **SDD** (subagent implementers, briefs in `.superpowers/sdd/briefs/`, per-task
-review; ledger `.superpowers/sdd/progress.md`). Owner priorities: **accuracy > cost > speed**;
-tri-domain — **agents (chat), RAG (docs), codebase** — on ONE substrate; end state = Syndai
-cutover done, CaaS offered, any-agent distribution (MCP + file adapters). Pre-production: anything
-may be rewritten; never fabricate a number.
+## Goal
 
-**THE FOCUS RULE (owner directive, 2026-07-19).** One active campaign per lane, no detours. The
-PMU/MemSyco weeks produced elite-discipline evidence on a benchmark nobody watches — do not
-repeat that. Any new benchmark, official track, or research rabbit-hole needs an explicit owner
-call first. Sequencing is fixed: **P0 repo green → P1 feature tests (n=12) → P2 cutovers
-(Syndai RAG + CaaS) → P3 public SOTA proof (SWE + LME-V2, leaderboard-submitted).**
+Safely finish the registered MemPhant evidence ladder through the LME-S
+full-500 protocol run, while maximizing user-visible accuracy and preserving
+the two-speed UX: fast recall by default and explicit Deep exploration for
+hard cases. Advance only when each smaller gate passes, never rerun a billable
+row, never use paid keys in CI/tests, and research current 2026 primary sources
+before changing a provider or benchmark contract.
 
-## 1. What happened before and what worked (compressed; details in the linked artifacts)
+## Workspace and live state
 
-- **Runtime is complete and proven** (Postgres REST/MCP/CLI/worker, e2e green, scratch-DB
-  harnesses; bitemporal recall, exact-unit state-aware mutations, chain-heads, fail-closed
-  zero-target — all runtime-proven). STATUS ledger: `docs/superpowers/specs/memphant/STATUS.md`.
-- **PMU campaign complete (2026-07-18)**: MemPhant 298/300 answer accuracy / 300/300 preference
-  use vs RawDialogue 257/291; paired bootstrap lower bounds +0.1000/+0.0133; recall p95 70.61 ms.
-  Dev-evidence only; official track burned. Canonical record:
-  `docs/handoff/2026-07-18-memsyco-personalized-use-sota-handoff.md`; scorecard under
-  `.../candidate-d3c4475f-v12-aggregate/FULL300-SCORECARD.json`. Approved claim wording lives
-  there — nothing stronger.
-- **What worked (keep doing):** the 12-case dev-pack → sealed independent confirmation →
-  full-run loop; one narrow deterministic lever at a time (all 7 retained PMU levers are
-  extraction/canonicalization/packet seam fixes); trace-first diagnosis (fix the first failing
-  stage); rejecting graph memory / learned gates / decay four separate times — externally
-  vindicated (Mem0 dropped its graph; Mem0 scores BELOW no-context on SWE-ContextBench).
-- **What failed (stop doing):** spending elite evidence on low-mindshare benchmarks; opening
-  official/sealed tracks before the shared pipeline survived full-scale exposed pressure (three
-  MemSyco tracks + PMU official burned on first extractor failures); producing evidence that
-  never lands on any public surface; leaving the repo gate red.
-- **Docs lane mechanism validated (2026-07-13)**: balanced admission + Voyage rerank-2.5 top-8 on
-  the corrected 4,870-section corpus — R@10 0.050→0.283 (v1) / 0.100→0.417 (v2), supported
-  answers 0.083→0.350 / 0.117→0.417, CIs exclude zero, p95 ≈ 0.9–1.0 s, zero degraded rows
-  (`docs/build-log/2026-07-13-rag-retrieval-admission.md`). R6 replacement unlock NOT yet fired.
-- **Chat lane**: QA 0.56–0.584 dev (below the honest reproducible band 0.58–0.72). The R2
-  full-500 protocol run — declared the unlock on 2026-07-12 — was never run. It is now P3.1.
-- **Verified external landscape (2026-07-18/19, two adversarial deep-research passes, primary
-  sources):** no vendor has credible SOTA — Supermemory 95% (favorable-judge R@15), Mastra 94.87%
-  (self-run), Zep 71→90% (self; 63.8% independent) are all self-reports with copied competitor
-  numbers; LoCoMo is discredited (6.4% wrong keys, Mem0–Zep denominator scandal → Zep forced to
-  75.14%±0.17). Credible neutral instruments: **LongMemEval-V2** (451Q, 5 abilities, 25M–115M
-  tokens; best = authors' coding-agent AgentRunbook-C 72.5% vs strongest RAG 48.5%; official
-  leaderboard EMPTY), **SWE-ContextBench** (third-party n=99: Supermemory 30.3% resolved best;
-  Mem0 24.24% < no-context 26.26%), **SWE-Explore** (agentic explorers ≫ classical retrieval;
-  line-level coverage is the axis), **MemBench** (ACL 2025). The de facto evidence bar (set by
-  the Mem0–Zep fallout): uniform configs/prompts, standardized judge, multi-run variance,
-  faithful ingestion, leaderboard or third-party run. Nobody has sealed holdouts — our
-  discipline already exceeds the bar; the gap was benchmark allocation, not method.
+- Worktree: `/Users/sidsharma/.codex/worktrees/Memphant/p1-deep-mode`
+- Branch: `codex/memphant-p1-deep-mode`
+- HEAD before this handoff edit: `f97e9a840608e4b58ccff199649105426fbecb43`
+- No push is authorized.
+- Preserve unrelated work and do not stage the old untracked dump:
+  `docs/build-log/artifacts/p1-t6/no-model-exact-29c9eb53/case-bank/7977b0942b90e9dcb8e772bf722ef1cf0b4a3a6f165b279a6fc5e6c23dfbca4a.dump`.
 
-## 2. Standing rules (binding)
+### A live n=12 run is active — do not launch another
 
-All prior promotion rules hold: packaged-runtime + pinned-corpora + executed-scorer provenance;
-paired bootstrap, two-seed/pooled CI excluding zero; same-lattice AND same-binary pairing;
-scratch DBs only; verbatim-is-the-memory; deterministic writes; "SOTA" language banned until the
-P3.1 protocol run; commits small with `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`;
-never push without owner call. New rules from this rewrite:
+Output root:
+`docs/build-log/artifacts/p1-t6/run-65981e4f`
 
-1. **n=12 micro-eval gate (owner directive).** Every new lever/feature runs a ~12-case exposed
-   dev pack vs control FIRST (the PMU dev-pack pattern — it works). Pass → n≈100–300 paired
-   confirmation for promotion; full-scale runs are for claims only. No integration without the
-   n=12 pass. Losing levers: delete code, keep the negative-result artifact.
-2. **No official/sealed track opens until the identical pipeline is green on a full-scale
-   exposed run.** (The rule the MemSyco burns paid for.)
-3. **Mindshare rule.** Headline claims only on LME-S/V2, SWE-ContextBench/SWE-Explore, or a
-   board-backed instrument. Memora/STALE/MemSyco/MemBench are supporting evidence. LongEval-RAG
-   and Re2Bench could NOT be confirmed to exist — never plan spend on them without verifying.
-4. **Submission is part of done.** A P3 campaign is complete when its result is submitted
-   (official board) or published on **Evalrank** (Syndai's leaderboard feature —
-   `backend/src/features/evalrank/` — our public board for benches without an official one:
-   publish harness, configs, variance, and same-harness competitor re-runs there).
+As of 2026-07-21 12:39 America/Los_Angeles:
 
-## 3. Phase plan
+- coordinator PID `30781`, wrapped by Doppler PID `30711`;
+- case-1 child PID `32495` under scratch wrapper PID `32486`;
+- case `19367bc7` constructed all 670 resources once, processed all 670 jobs,
+  and sealed a 177,790,905-byte immutable bank;
+- Fast row `0001-19367bc7-fast` is complete and operational;
+- Fast reader settled at `2,421` micros, with zero unsettled liability;
+- Sonnet row `0002-19367bc7-sonnet` has entered staging and its server has
+  started; it has not yet produced a final row proof;
+- the controller must stop before case 2 if the Sonnet pair fails any proof or
+  settlement predicate.
 
-### P0 — Green the repo (days; blocks everything)
+The process survived the previous Codex-turn interruption. A new session must
+inspect this process tree and artifact root first. Never start a replacement
+while it is alive. Never rerun the completed Fast row.
 
-Fix the exact red predicates preserved in the PMU `POSTFLIGHT-VERIFICATION.json`: five Python
-contract failures, six Clippy findings, three stale `ReflectInput` fixtures, one e2e
-retain-response mismatch. Land the dirty worktree in reviewed commits (owner call on push). Run
-the full `AGENTS.md` gate green. Nothing external ships and no cutover merges while red.
+Read-only first checks:
 
-### P1 — Feature-test wave (n=12 gates; techniques from the verified 2026-07 research)
+```sh
+cd /Users/sidsharma/.codex/worktrees/Memphant/p1-deep-mode
+ps -axo pid=,ppid=,etime=,command= \
+  | rg 'run_lme_v2_p1_t6|memphant-(server|worker)' \
+  | rg -v 'rg '
+find docs/build-log/artifacts/p1-t6/run-65981e4f -maxdepth 3 -type f \
+  -exec stat -f '%N %z %Sm' -t '%Y-%m-%dT%H:%M:%S%z' {} \; | sort | tail -60
+git status --short
+```
 
-Each lever: named failure class → 12-case pack vs control → promote/delete. Ranked by lane:
+If the process is still active, monitor it; do not mutate the root. If it has
+exited, validate the final proofs, settlement ledger, scratch-DB cleanup, and
+process cleanup before deciding anything. A failed/interrupted root is
+immutable diagnostic evidence: preserve it, write the named invalidation
+proof, and do not replay settled rows.
 
-**Chat/agents (failure classes from the flip analysis: 21/44 reader-with-adequate-pack, 16/44
-pack displacement):**
-- T1 **Observation-block hot plane** (Mastra OM pattern, verified mechanics: background
-  compression of history into dense date-annotated observations; retrieval-free block +
-  retrieval hybrid). Our `reflect` loop is the natural owner; generalizes the R2 profile-block
-  lever. The single highest-external-evidence chat lever (OM self-reports beating the oracle).
-- T2 **Chain-of-note reader v4** + calibrated abstention comparison arm.
-- T3 **Temporal re-measure** (date-prefix muting fixed; soft temporal boost; dated packs).
-- T4 **HyDE/query rewrite A/B** (cheap; preference-stratum misses).
-- T5 (diagnostic) cross-rerank at n=300 with `recall_pool_depth=64`.
+## What we completed
 
-**File scale (the verified winner shape: agentic exploration over files beats top-k RAG by ~24
-pts at trajectory scale — LME-V2 72.5 vs 48.5):**
-- T6 **Agentic deep mode** (AgentRunbook-C pattern: trajectories/resources as files + workflow
-  doc + memory manifests + helper scripts; agent gathers evidence at query time). Maps to
-  dormant rung-12 L4 exhaustive — activate as `mode=deep` over the substrate. Latency 100 s+
-  acceptable in deep mode only; hot path unchanged.
-- T7 **L0/L1/L2 multi-resolution resource summaries** (`04` §6.1, dormant; the
-  scan-20-abstracts-load-3 coding-agent case).
+### Product and execution decision
 
-**Code lane:**
-- T8 **Outcome write-back** (worked/failed/invalidated → procedural units; ReasoningBank-shaped
-  `04` §4.1 payload already spec'd). External signal: Letta skill-learning reports +9/+15.7 abs
-  on Terminal Bench 2.0 (vendor-reported; direction matches our design).
+The long-term UX remains a two-speed product:
 
-**Temporal/longitudinal (years-scale; "sleep consolidation"):**
-- T9 **Sleep-time anticipatory consolidation**: idle-time `reflect` pre-computes the observation
-  block / runbook summaries. Verified boundaries (Letta paper, 3-0): pays off only when ≥~10
-  queries amortize one context, and loses to plain test-time scaling at high budgets — gate on
-  amortization math, chat lane first. (`04` §9 reflect IS this loop; the lever is the
-  anticipatory-output half.)
-- T10 **Active freshness** (churn classes on volatile facts, `04` §8.1, dormant) — the
-  years-scale staleness answer; pilot on aged-fact packs.
-- T11 **DSR decay fold pilot** (`fsrs-rs` over the review ledger, rung 11) — internal
-  MemoryStress-style longitudinal suite only; FSRS must beat plain exponential or stay off.
-  External evidence for FSRS-in-agents: none survived verification — treat as hypothesis.
+- `fast` is the default, low-latency path;
+- only the existing deterministic `fast -> balanced` insufficiency cascade may
+  happen automatically;
+- `deep` is an explicit, cancellable user action for hard queries;
+- Deep returns the same cited evidence contract, has hard wall-time/tool/token/
+  spend caps, and returns an honest cited partial result when capped;
+- no second orchestration subsystem or speculative architecture is needed.
 
-Architecture audit verdict (2026-07-19): the substrate already specifies everything the verified
-landscape rewards — five kinds, bitemporal + supersession, retention tiers hot/warm/cold,
-write-time admission control, consolidation with stage checkpoints, event-sourced
-confidence/decay ledgers. **No new architecture is needed for P1–P3; the work is measured
-activation of dormant mechanisms.** Watch-only: learned consolidators (Auto-Dreamer, +7 pts,
-unreplicated preprint) stay data-gated per rung 13.
+Bound execution order:
 
-### P2 — Cutovers (Syndai RAG + CaaS; internal gates, NOT public claims)
+1. T6 Deep n=12 Fast/Sonnet gate — running now.
+2. T6 n≈100-300 paired confirmation — only if n=12 passes and a fresh
+   amendment authorizes it.
+3. T1 observation-block n=12 and confirmation — improves everyday chat UX.
+4. SWE-ContextBench Lite — small coding-memory gate before publicity work.
+5. LME-S full-500 — later; this is the internal SOTA-language unlock.
+6. LME-V2 paired fast/deep runs and submission — final scale flagship.
 
-- **Docs/RAG**: hierarchy parity → comparable-volume full-corpus MemPhant-vs-Syndai on both
-  exposed sets (k=10/b8192; fires the pre-registered R6 unlock on CI-clean) → live restraint
-  10/10 → chat non-regression → sealed version-disjoint holdout → flip
-  `memphant_file_memory_dogfood_enabled` on the Syndai docs surface, then episodic.
-- **CaaS/codebase**: resume `docs/superpowers/plans/2026-07-15-syndai-canonical-memory-cutover.md`
-  task-by-task (subject-bound identity → strict public contracts → provenance/idempotency → …);
-  spec-28 fixture families (arch-decision honored, compaction rehydrate, cross-agent transfer,
-  composite) are the acceptance gate; parity-or-better under the 2,500-token cap; six-table drop
-  only after per-surface proof. T6/T7/T8 feed this lane.
-- Exit: Syndai reads memory only through public MemPhant contracts; legacy tables dropped.
+Full-500 is not needed now. The current n=12 gate is the efficient next step.
 
-### P3 — Public SOTA proof (small runs first; submission = done)
+### Doppler and paid-call boundary
 
-1. **LME-S full-500 protocol run** (the internal "SOTA-language" unlock) + **same-harness
-   competitor re-run** (Mem0, Zep CE/Graphiti, Letta) under uniform configs, standardized judge,
-   10-run variance — published on Evalrank with the harness. This is the Mem0–Zep lesson
-   weaponized: we run the controlled comparison.
-2. **SWE-ContextBench Lite** (99 related tasks; match the paper's Claude Sonnet 4.5 setup;
-   ~20-task subset first). Floor: beat no-context 26.26% resolved. Target: beat Supermemory
-   30.3% → "outperforms every evaluated memory product on a third-party coding-memory
-   benchmark." Then **SWE-Explore** (line-level localization under budget) with T6. No official
-   boards found for either → Evalrank.
-3. **LongMemEval-V2** — the scale flagship (replaces "BEAM 1M": BEAM's operator/submission
-   surface failed verification and its board is competitor-associated per `27` §1; LME-V2 is
-   neutral, 25M–115M tokens, and its empty official leaderboard is a first-mover slot). Verified
-   submission mechanics: Google Form (`forms.gle/rxUpiuRKDERqpqSi9`), tarball with
-   SYSTEM_DESCRIPTION.md + code + `submission_overview.json`; **paired web+enterprise FULL runs
-   per operating point, every question covered** — a 12-case pilot is private-only. Ranking =
-   LAFS Gain (accuracy-latency frontier), which fits us: submit TWO operating points — fast
-   (RAG hot path, sub-second) and deep (T6 agentic mode). Path: Small-tier ~50Q dev subset →
-   full paired runs → submit. Reference bars: strongest RAG 48.5%, Codex 69.3%, AgentRunbook-C
-   72.5% at 108–140 s/query.
-4. Supporting (never headline): full STALE if free capacity; Memora only if the next causal
-   slice improves 53.49; MemSyco held until a new version/holdout exists.
+Commit `129928d8` updated `AGENTS.md`:
 
-## 4. Claim ladder (exact wording gates)
+- Syndai is MemPhant's private sister project;
+- until MemPhant has its own Doppler project, `syndai/dev` is the canonical
+  secret source for explicitly authorized live or paid MemPhant benchmarks;
+- always spell out `--project syndai --config dev` because worktrees do not
+  inherit directory bindings;
+- only the secret-consuming benchmark/diagnostic command may be wrapped;
+- CI, unit/integration tests, provider lint, no-model checks, local Postgres
+  contracts, and ordinary development are secret-free and cannot spend money;
+- shared Doppler does not grant access to a Syndai production database.
 
-- Now: only the approved PMU dev-evidence sentence (see the 07-18 handoff).
-- After P3.1: "full-protocol LongMemEval-S score X±σ; controlled same-harness comparison vs
-  Mem0/Zep/Letta under uniform configs" (never "global SOTA").
-- After P3.2: "outperforms all evaluated memory products on SWE-ContextBench related tasks
-  (third-party benchmark)."
-- After P3.3 acceptance: "first published result on the official LongMemEval-V2 leaderboard."
-- Pareto wins are claimed as "Pareto frontier," never "best accuracy" (`27` §6 rules apply).
+A presence-only live check confirmed both `OPENROUTER_API_KEY` and
+`OPENAI_API_KEY` exist in `syndai/dev`. Their values were never emitted or
+persisted. The current run uses a stripped environment and local ephemeral
+PostgreSQL; Doppler wraps only the benchmark process.
 
-## 5. Ops gotchas (carried; cost hours before)
+### Failures found and durable fixes
 
-- Keys: `VOYAGE_API_KEY` in Doppler **tacitry/dev**; GEMINI/OPENAI/OPENROUTER in syndai/dev.
-- Build campaign binaries from a **clean worktree** at the measured commit; pass
-  `SERVER_BIN/WORKER_BIN/CLI_BIN` + port env to runners. `CARGO_TARGET_DIR=/tmp/...`,
-  `CARGO_BUILD_JOBS=1`, `CARGO_INCREMENTAL=0` must survive the Doppler boundary.
-- One campaign lane, no completion cache, fresh scratch DB per arm, drop at exit; memory arms
-  sequential (`tuple concurrently updated` is infra contention, not a result).
-- Before claiming "stopped": check process TREES, tmux, AND `launchctl list | rg memphant`
-  twice, 3 s apart — delayed Codex app-server children and launch agents restart controllers.
-- Artifact trees can vanish from canonical paths while inodes live under `/.vol` — stat/find
-  before recreating anything; mirror + `MIRROR.json`, never mutate the source.
-- Reader cache `docs/build-log/artifacts/r0-embedder/reader-cache` is shared — reuse it;
-  re-scores of unchanged evidence are free.
-- First model use downloads weights at server boot (10 min); keep `.fastembed_cache/` warm.
-- Absolute `MEMPHANT_STRUCTURED_STATE_PROMPT_PATH` required — the extractor prompt is hash-bound.
+1. The first live root exposed a stream identity mismatch. Commit `2e5c9bcd`
+   separated exact request identity from canonical SSE identity and made the
+   parent fail-stop before opening the next case.
+2. Root `run-e511c817` then proved the transport and billing receipts were
+   valid, but Sonnet ended `partial/invalid_output` before tool iteration one.
+   The controller stopped before case 2 and the root was preserved in commit
+   `1a847f94`.
+3. A single bounded production-schema diagnostic showed transport, Azure
+   routing, usage accounting, SSE fragmentation, and a fragmented single tool
+   call were healthy.
+4. Root cause: the frozen Azure endpoint does not advertise the optional
+   `parallel_tool_calls` parameter under strict `require_parameters=true`, so
+   the request correctly omitted it; OpenRouter defaults the omitted parameter
+   to parallel calls, while MemPhant accepted only one indexed call.
+5. Commit `69ab5a54` fixed the shared runtime root cause. It aggregates
+   contiguous indexed calls across SSE fragments, executes them in stable
+   provider-index order, returns one matching tool result per call, counts each
+   call against the existing 24-tool cap, and keeps route/usage/spend/privacy
+   checks fail-closed. This improves Deep latency and cost by avoiding needless
+   serial provider turns.
+6. ZDR correctly prevents recovering the failed generations' raw SSE chunks.
+   We did not weaken privacy to recreate them.
 
-## 6. Carry-list (fold opportunistically; none block)
+Official references used for that decision:
 
-Packing tier reconciliation (conservative gate holds); fastembed-less CI leg for feature-off
-tests; Retry-After clamp ≤60 s; `FastEmbedModel::parse` vs `fastembed_arm` dedup; trim-vs-span
-exactness; W9 tail cap; fence-aware chunk header; `build_service` panic→error; worker skips
-reranker load; chat-score missing-baseline warning; persist chars/question + rerank p50/p95 into
-provenance; resource-chunks retirement decision (3× ns).
+- <https://openrouter.ai/docs/api/reference/streaming>
+- <https://openrouter.ai/docs/api/reference/overview>
+- <https://openrouter.ai/docs/cookbook/administration/usage-accounting>
+- <https://openrouter.ai/docs/api/reference/parameters>
+- <https://openrouter.ai/docs/guides/features/tool-calling>
+
+### Verification completed
+
+After the root fix, all secret-free gates passed:
+
+- Python: 698 passed, 12 skipped;
+- P1 harness: 159 passed;
+- `cargo fmt --check`;
+- Clippy all targets/features with warnings denied;
+- Rust all-target/all-feature tests and doc tests;
+- provider lint for plain Postgres, Supabase, and Neon;
+- migration dry-run;
+- ignored live-Postgres contracts on ephemeral PostgreSQL 17;
+- real server/worker/CLI e2e probe on ephemeral PostgreSQL 17.
+
+No provider key or paid call was used by those checks. Public/private spec drift
+against the available Syndai checkout still reports many pre-existing divergent
+files, including STATUS. That is unrelated and does not authorize editing the
+private repo or claiming drift-clean.
+
+### Efficient authorization and cost boundary
+
+- Amendment 13: commit `65981e4f`.
+- Current dispatch authorization: commit `f97e9a84`, artifact
+  `docs/build-log/artifacts/p1-t6/DISPATCH-AUTHORIZATION-65981e4f.json`.
+- It authorizes exactly 12 cases, 12 constructions, 24 answer rows, and at most
+  12 Deep dispatches. Luna/Sol, n≈100-300, full-500, merge, and push are not
+  authorized.
+- Preexisting liability: 28,350 settled + 316,142 unresolved upper bound =
+  344,492 micros.
+- Fresh maximum: 5,697,600 micros.
+- Cumulative worst case: 6,042,092 micros under the 6,250,000 ceiling, with
+  207,908 micros headroom.
+
+We intentionally did not repeat a 670-resource authorization-only preflight.
+The memory adapter is byte-identical and all three context-relevant controller
+AST hashes match the exact prior proof; only the post-query Deep parser and
+campaign accounting changed. The exact reader proof remains untruncated at
+23,564/32,768 tokens. Rebuilding 670 resources would add no context-size
+information.
+
+Important terminology: `670` is the resource count in the first selected
+LongMemEval case, not 670 benchmark cases. Each distinct live case must replay
+its own resources once to create the treatment bank, then Fast and Sonnet share
+that bank. Do not run it again merely for tests, CI, or authorization.
+
+## What the next session must do
+
+1. Read `AGENTS.md`, this handoff, Amendment 13, the current dispatch
+   authorization, and live `STATUS.md` before acting.
+2. Inspect the existing `run-65981e4f` process/root. Do not launch another run.
+3. If case 1 finishes, verify both row proofs, exact model/provider receipts,
+   tool iterations, settlement, bank-seal equality, and cleanup. If any
+   predicate fails, preserve and stop; research the exact 2026 provider contract
+   before proposing a root fix.
+4. If the controller remains healthy, let the registered n=12 run continue.
+   Each new case performs one necessary local construction; do not add a second
+   construction preflight.
+5. On n=12 exit, adjudicate the whole root against Amendment 13. Commit only
+   intended proof artifacts; preserve the unrelated old dump.
+6. Only a clean n=12 pass permits preparation of a separately preregistered
+   n≈100-300 confirmation. Run a cost/latency/evidence-efficiency checkpoint
+   before authorizing it.
+7. Do not start full-500. It comes later, after T6 confirmation, T1, and the SWE
+   Lite gate. No SOTA wording before the full-500 protocol completes.
+8. Before every big step ask: what new decision will this evidence unlock, is
+   there a smaller secret-free or small-n check, and are we duplicating a proven
+   path? Browse current primary sources when an issue touches models, providers,
+   libraries, cloud services, or benchmark rules.
+
+## Initial prompt for the new session
+
+```text
+Resume the MemPhant campaign from
+/Users/sidsharma/.codex/worktrees/Memphant/p1-deep-mode on branch
+codex/memphant-p1-deep-mode. First read AGENTS.md and
+docs/handoff/NEXT-SESSION-PROMPT.md completely, then verify the live process and
+immutable artifact state for docs/build-log/artifacts/p1-t6/run-65981e4f.
+
+Do not launch or restart any benchmark until you prove the existing n=12 process
+is gone and adjudicate its artifacts. Never rerun a settled row. Continue the
+registered n=12 T6 Fast/Sonnet gate only while all fail-stop, route, settlement,
+bank-seal, and cost predicates hold. CI/unit/integration tests must remain
+secret-free and incapable of paid calls; use syndai/dev Doppler only around an
+explicitly authorized live benchmark command, never print or persist values,
+and use local ephemeral PostgreSQL only.
+
+When an issue appears, diagnose the root cause, consult current 2026 primary
+documentation, add the narrow regression check, and reassess whether the next
+big step is the smallest evidence needed. Preserve unrelated dirty work and the
+old untracked dump. No push is authorized.
+
+Phase order is binding: finish/adjudicate T6 n=12; if it passes, separately
+preregister T6 n≈100-300; then T1 observation-block gates; then
+SWE-ContextBench Lite; only later LME-S full-500; finally LME-V2. Explain each
+step in user-UX, latency, performance, and cost terms. Do not claim SOTA before
+the full-500 protocol run.
+```
