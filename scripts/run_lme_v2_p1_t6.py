@@ -1273,13 +1273,15 @@ def _load_no_model_recovery(
     contract: dict[str, object],
     tools: dict[str, object],
     schema: dict[str, object],
+    *,
+    allow_completed_proof: bool = False,
 ) -> tuple[
     dict[str, object], dict[str, object], dict[str, object],
     dict[str, object], dict[str, object]
 ]:
     require(fixture.get("name") == "exact",
             "no-model recovery is limited to the exact fixture")
-    require(not (output / "PROOF.json").exists(),
+    require(allow_completed_proof or not (output / "PROOF.json").exists(),
             "completed no-model proof cannot be resumed")
     incident_path = output / "RECOVERY-INCIDENT.json"
     require(incident_path.is_file(), "no-model recovery incident is missing")
@@ -1420,14 +1422,24 @@ def _load_no_model_recovery(
     require(isinstance(inventory, dict) and inventory,
             "no-model recovery pre-recovery inventory is missing")
     lease_path = f"case-leases/{fixture['case_id']}.lock"
-    require(
-        artifact_hashes(
-            output, exclude={
-                "RECOVERY-INCIDENT.json", "FIRST-RECOVERY-FAILURE.json", lease_path,
-            }
-        ) == inventory,
-        "no-model recovery pre-recovery inventory drift",
-    )
+    if allow_completed_proof:
+        require(
+            all(
+                (output / relative).is_file()
+                and sha256_file(output / relative) == digest
+                for relative, digest in inventory.items()
+            ),
+            "no-model recovery pre-recovery inventory drift",
+        )
+    else:
+        require(
+            artifact_hashes(
+                output, exclude={
+                    "RECOVERY-INCIDENT.json", "FIRST-RECOVERY-FAILURE.json", lease_path,
+                }
+            ) == inventory,
+            "no-model recovery pre-recovery inventory drift",
+        )
     require(
         isinstance(initial, dict)
         and initial.get("constructions") == 1
@@ -1797,23 +1809,51 @@ def run_no_model_verifier(
         )
 
 
+def _committed_controller_fingerprint(commit: str) -> dict[str, object]:
+    require(re.fullmatch(r"[0-9a-f]{40}", commit) is not None,
+            "hash repair executor commit is malformed")
+    committed = subprocess.run(
+        ["git", "show", f"{commit}:scripts/run_lme_v2_p1_t6.py"], cwd=ROOT,
+        capture_output=True, check=False,
+    )
+    require(
+        committed.returncode == 0,
+        "hash repair executor controller blob is missing",
+    )
+    return {
+        "bytes": len(committed.stdout),
+        "sha256": hashlib.sha256(committed.stdout).hexdigest(),
+    }
+
+
+def _validate_repair_executor_provenance(executor: object) -> None:
+    require(
+        isinstance(executor, dict)
+        and set(executor) == {"git_commit", "controller"}
+        and isinstance(executor.get("controller"), dict),
+        "hash repair executor provenance drift",
+    )
+    controller = executor["controller"]
+    committed = _committed_controller_fingerprint(str(executor.get("git_commit", "")))
+    require(
+        set(controller) == {"path", "bytes", "sha256"}
+        and isinstance(controller.get("path"), str)
+        and Path(controller["path"]).name == "run_lme_v2_p1_t6.py"
+        and controller.get("bytes") == committed["bytes"]
+        and controller.get("sha256") == committed["sha256"],
+        "hash repair executor controller fingerprint drift",
+    )
+
+
 def _repair_executor_provenance() -> dict[str, object]:
     controller = Path(__file__).resolve()
     commit = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=ROOT,
         capture_output=True, text=True, check=True,
     ).stdout.strip()
-    committed = subprocess.run(
-        ["git", "show", f"{commit}:scripts/run_lme_v2_p1_t6.py"], cwd=ROOT,
-        capture_output=True, check=False,
-    )
-    require(
-        re.fullmatch(r"[0-9a-f]{40}", commit) is not None
-        and committed.returncode == 0
-        and hashlib.sha256(committed.stdout).hexdigest() == sha256_file(controller),
-        "hash repair controller is not the committed executor",
-    )
-    return {"git_commit": commit, "controller": _fingerprint(controller)}
+    executor = {"git_commit": commit, "controller": _fingerprint(controller)}
+    _validate_repair_executor_provenance(executor)
+    return executor
 
 
 def _atomic_create_bytes(path: Path, body: bytes) -> None:
@@ -1850,9 +1890,262 @@ def _no_model_redaction_paths(adapter_proof: dict[str, object]) -> list[str]:
     return found
 
 
+def _reconstruct_pre_redaction_adapter_proof(
+    retained_proof: dict[str, object], execution_binaries: object,
+) -> bytes:
+    require(
+        isinstance(execution_binaries, dict)
+        and all(
+            isinstance(execution_binaries.get(name), dict)
+            and isinstance(execution_binaries[name].get("path"), str)
+            and "[REDACTED]" not in execution_binaries[name]["path"]
+            for name in ("cli", "server", "worker")
+        ),
+        "hash repair execution binary paths drift",
+    )
+    reconstructed = json.loads(json.dumps(retained_proof))
+    contract = reconstructed.get("contract")
+    binaries = contract.get("binaries") if isinstance(contract, dict) else None
+    require(isinstance(binaries, dict),
+            "hash repair retained binary contract drift")
+    for name in ("cli", "server", "worker"):
+        binary = binaries.get(name)
+        require(
+            isinstance(binary, dict)
+            and isinstance(binary.get("path"), str)
+            and binary["path"].count("[REDACTED]") == 1,
+            f"hash repair retained {name} redaction drift",
+        )
+        require(
+            {key: value for key, value in binary.items() if key != "path"}
+            == {
+                key: value for key, value in execution_binaries[name].items()
+                if key != "path"
+            },
+            f"hash repair retained {name} binary fingerprint drift",
+        )
+        binary["path"] = execution_binaries[name]["path"]
+    return (json.dumps(reconstructed, indent=2, sort_keys=True) + "\n").encode()
+
+
+def _validate_no_model_recall_mutation(memory: dict[str, object]) -> None:
+    mutation = memory.get("recall_mutation_proof")
+    require(isinstance(mutation, dict),
+            "retained adapter recall mutation proof is missing")
+    before = mutation.get("before")
+    after = mutation.get("after")
+    require(
+        isinstance(before, dict) and isinstance(after, dict)
+        and set(before) == set(after)
+        and mutation.get("changed_tables") == ["retrieval_trace"]
+        and mutation.get("allowed_audit_rows_added") == 1
+        and mutation.get("corpus_policy_job_tables_unchanged") is True,
+        "retained adapter allowed mutation contract drift",
+    )
+    for table in before:
+        if table == "retrieval_trace":
+            require(
+                isinstance(before[table], dict) and isinstance(after[table], dict)
+                and after[table].get("rows") == before[table].get("rows", -1) + 1,
+                "retained adapter retrieval trace mutation drift",
+            )
+        else:
+            require(before[table] == after[table],
+                    "retained adapter corpus or policy table mutated")
+
+
+def _validate_no_model_quiescence(quiescence: object) -> None:
+    require(
+        isinstance(quiescence, dict)
+        and quiescence.get("policy") == "only_exact_autovacuum_worker_may_wait"
+        and quiescence.get("timeout_seconds") == 180.0
+        and quiescence.get("sample_interval_seconds") == 1.0
+        and isinstance(quiescence.get("sample_count"), int)
+        and quiescence["sample_count"] >= 2
+        and quiescence.get("consecutive_zero_samples") == 2
+        and quiescence.get("unexpected_sessions") == []
+        and quiescence.get("terminated_sessions") == 0
+        and isinstance(quiescence.get("observed_connections"), list)
+        and all(
+            isinstance(session, dict)
+            and session.get("backend_type") == "autovacuum worker"
+            for session in quiescence["observed_connections"]
+        )
+        and isinstance(quiescence.get("observed_progress"), list),
+        "completed no-model arm quiescence proof drift",
+    )
+
+
+def _validate_no_model_no_secrets(
+    output: Path,
+    inventory: dict[str, str],
+    *,
+    additional_text: dict[str, bytes] | None = None,
+) -> int:
+    credential = re.compile(
+        rb"(?i)(?:postgres(?:ql)?://[^\s\"']*:[^\s\"'@]+@|"
+        rb"(?:openai|openrouter)_api_key[\"'\s:=]+[A-Za-z0-9_-]{8,}|"
+        rb"sk-[A-Za-z0-9_-]{16,})"
+    )
+    scanned = 0
+    for relative in inventory:
+        path = output / relative
+        if path.suffix == ".dump":
+            continue
+        body = path.read_bytes()
+        require(credential.search(body) is None,
+                f"hash repair secret scan failed: {relative}")
+        scanned += 1
+    for label, body in (additional_text or {}).items():
+        require(credential.search(body) is None,
+                f"hash repair secret scan failed: {label}")
+        scanned += 1
+    return scanned
+
+
+def _validate_completed_no_model_semantics(
+    output: Path,
+    proof: dict[str, object],
+    manifest: dict[str, object],
+) -> dict[str, object]:
+    construction = manifest.get("construction")
+    pairing = construction.get("pairing") if isinstance(construction, dict) else None
+    retains = pairing.get("retains") if isinstance(pairing, dict) else None
+    require(isinstance(retains, list),
+            "completed no-model construction retains are missing")
+    trajectory_ids = [
+        retain.get("trajectory_id") for retain in retains
+        if isinstance(retain, dict)
+    ]
+    fixture = {
+        "name": "exact",
+        "case_id": NO_MODEL_HASH_REPAIR_TARGET["case_id"],
+        "trajectory_ids": trajectory_ids,
+    }
+    require(
+        len(trajectory_ids) == len(set(trajectory_ids)) == 500
+        and _no_model_proof_classification(fixture, construction)
+        == "no_model_exact_case_authorization_candidate",
+        "completed no-model exact 500/670 retain order drift",
+    )
+    contract = manifest.get("case_contract")
+    proof_fixture = proof.get("fixture")
+    require(
+        isinstance(contract, dict)
+        and contract.get("fixture") == "exact"
+        and contract.get("case_id") == fixture["case_id"]
+        and isinstance(proof_fixture, dict)
+        and proof_fixture.get("input_sha256") == contract.get("input_sha256"),
+        "completed no-model exact input contract drift",
+    )
+    construction_loaded, _dumped, incident, first_failure, _invariants = (
+        _load_no_model_recovery(
+            output,
+            fixture,
+            contract,
+            proof.get("archive_tools"),
+            proof.get("database_schema_identity"),
+            allow_completed_proof=True,
+        )
+    )
+    require(construction_loaded == construction,
+            "completed no-model recovered construction drift")
+    accounting = _no_model_attempt_accounting(True, incident, first_failure)
+    accounting["recovery"]["incident_sha256"] = sha256_file(
+        output / "RECOVERY-INCIDENT.json"
+    )
+    accounting["recovery"]["first_recovery_failure_sha256"] = sha256_file(
+        output / "FIRST-RECOVERY-FAILURE.json"
+    )
+    require(
+        proof.get("counts") == accounting["counts"] == {
+            "constructions": 1,
+            "dumps": 1,
+            "restores": 4,
+            "clones": 2,
+            "query_only_recalls": 2,
+        }
+        and proof.get("attempts") == accounting["attempts"]
+        and proof.get("recovery") == accounting["recovery"],
+        "completed no-model 1/1/4/2/2 ledger drift",
+    )
+    logical = manifest.get("logical_identity")
+    require(
+        isinstance(logical, dict)
+        and proof.get("construction_proof_sha256")
+        == manifest.get("construction_proof_sha256")
+        and proof.get("logical_identity_sha256") == logical.get("sha256")
+        and proof.get("cleanup") == {
+            "source_api_key_count": 0,
+            "source_job_state": {"pending": 0, "dead": 0, "total": 0},
+            "orphan_clone_count": 0,
+            "force_drop_verified": True,
+        }
+        and proof.get("external_dispatch") == {
+            "configured": False, "dispatches": 0, "deep_enabled": False,
+        },
+        "completed no-model cleanup, identity, or dispatch drift",
+    )
+    arms = proof.get("arms")
+    require(isinstance(arms, list), "completed no-model arms are missing")
+    clone_names = set()
+    for arm in arms:
+        name = arm["arm"]
+        retained = NO_MODEL_HASH_REPAIR_TARGET["retained_artifacts"][name]
+        memory = json.loads((output / retained["path"]).read_text())
+        _validate_query_only_memory_proof(memory, manifest)
+        _validate_no_model_recall_mutation(memory)
+        query = memory["query"]
+        clone = arm.get("clone_database")
+        require(
+            arm.get("query_only") is True
+            and arm.get("verification_recall_mode") == "fast"
+            and arm.get("construction_work") == {"retains": 0, "worker_drains": 0}
+            and arm.get("construction_proof_sha256")
+            == manifest.get("construction_proof_sha256")
+            and query.get("question_id")
+            == f"no-model-{fixture['case_id']}-{name}"
+            and arm.get("context_sha256") == query.get("context_sha256")
+            and arm.get("timing_ms", {}).get("recall")
+            == query.get("recall_duration_ms")
+            and arm.get("pre_query_logical_identity_sha256") == logical.get("sha256")
+            and arm.get("post_query_logical_identity_sha256") == logical.get("sha256")
+            and arm.get("api_key_count") == 1
+            and arm.get("job_state") == {"pending": 0, "dead": 0, "total": 0}
+            and isinstance(clone, str)
+            and ARM_DATABASE_PATTERN.fullmatch(clone) is not None
+            and clone.endswith("_" + name),
+            f"completed no-model {name} query-only arm drift",
+        )
+        _validate_no_model_quiescence(arm.get("source_quiescence"))
+        clone_names.add(clone)
+    require(len(clone_names) == 2,
+            "completed no-model clone identities are not distinct")
+    scanned = _validate_no_model_no_secrets(
+        output,
+        proof["artifact_hashes"],
+        additional_text={
+            "original-proof": (
+                json.dumps(proof, indent=2, sort_keys=True) + "\n"
+            ).encode(),
+        },
+    )
+    return {
+        "trajectory_count": 500,
+        "resource_count": 670,
+        "ordered_unique_retains": 500,
+        "ledger": proof["counts"],
+        "query_only_fast_arms": ["fast", "sonnet"],
+        "cleanup_verified": True,
+        "external_dispatches": 0,
+        "secret_scanned_text_artifacts": scanned,
+        "recovery_lineage_verified": True,
+    }
+
+
 def _validate_original_no_model_hash_repair(
     output: Path, proof_bytes: bytes,
-) -> tuple[dict[str, object], dict[str, list[str]]]:
+) -> tuple[dict[str, object], dict[str, object]]:
     target = NO_MODEL_HASH_REPAIR_TARGET
     require(hashlib.sha256(proof_bytes).hexdigest() == target["proof_file_sha256"],
             "hash repair original proof file drift")
@@ -1919,6 +2212,7 @@ def _validate_original_no_model_hash_repair(
         "hash repair arm ordering drift",
     )
     redactions: dict[str, list[str]] = {}
+    reconstructed_hashes: dict[str, str] = {}
     for arm in arms:
         name = arm["arm"]
         retained = target["retained_artifacts"][name]
@@ -1935,15 +2229,36 @@ def _validate_original_no_model_hash_repair(
         retained_proof = json.loads(retained_path.read_text())
         require(isinstance(retained_proof, dict),
                 f"hash repair {name} retained adapter proof is invalid")
+        require(
+            retained_path.read_bytes()
+            == (json.dumps(retained_proof, indent=2, sort_keys=True) + "\n").encode(),
+            f"hash repair {name} retained adapter serialization drift",
+        )
         redactions[name] = _no_model_redaction_paths(retained_proof)
-    return proof, redactions
+        reconstructed = _reconstruct_pre_redaction_adapter_proof(
+            retained_proof, proof.get("binaries")
+        )
+        reconstructed_hashes[name] = hashlib.sha256(reconstructed).hexdigest()
+        require(
+            reconstructed_hashes[name] == target["old_explicit_hashes"][name],
+            f"hash repair {name} reconstructed root cause mismatch",
+        )
+    root_cause_evidence = {
+        "redacted_binary_path_fields": redactions,
+        "reconstructed_pre_redaction_sha256": reconstructed_hashes,
+    }
+    root_cause_evidence["semantic_revalidation"] = (
+        _validate_completed_no_model_semantics(output, proof, manifest)
+    )
+    return proof, root_cause_evidence
 
 
 def _no_model_hash_repair_record(
     original: dict[str, object],
-    redactions: dict[str, list[str]],
+    root_cause_evidence: dict[str, object],
     executor: dict[str, object],
 ) -> dict[str, object]:
+    _validate_repair_executor_provenance(executor)
     target = NO_MODEL_HASH_REPAIR_TARGET
     core = {
         "schema_version": 1,
@@ -1963,7 +2278,7 @@ def _no_model_hash_repair_record(
             "the phase-final redaction rewrote the retained proof bytes"
         ),
         "root_cause_evidence": {
-            "redacted_binary_path_fields": redactions,
+            **root_cause_evidence,
             "redacted_fields_per_arm": 3,
             "secret_values_recorded": False,
         },
@@ -2005,23 +2320,15 @@ def _no_model_hash_repair_record(
 def _validate_no_model_hash_repair_record(
     record: object,
     original: dict[str, object],
-    redactions: dict[str, list[str]],
+    root_cause_evidence: dict[str, object],
 ) -> dict[str, object]:
     require(isinstance(record, dict), "hash repair record is invalid")
     executor = record.get("repair_executor")
+    _validate_repair_executor_provenance(executor)
     require(
-        isinstance(executor, dict)
-        and re.fullmatch(r"[0-9a-f]{40}", str(executor.get("git_commit", "")))
-        is not None
-        and isinstance(executor.get("controller"), dict)
-        and isinstance(executor["controller"].get("bytes"), int)
-        and re.fullmatch(
-            r"[0-9a-f]{64}", str(executor["controller"].get("sha256", ""))
-        ) is not None,
-        "hash repair executor provenance drift",
-    )
-    require(
-        record == _no_model_hash_repair_record(original, redactions, executor),
+        record == _no_model_hash_repair_record(
+            original, root_cause_evidence, executor
+        ),
         "hash repair record drift",
     )
     return executor
@@ -2082,6 +2389,23 @@ def _require_no_model_hash_repair_allowlist(
                 "hash repair changed non-hash arm evidence")
 
 
+def _clear_bounded_hash_repair_temporaries(output: Path) -> list[str]:
+    removed = []
+    for name in (
+        "PROOF.pre-hash-repair.json.tmp",
+        "PROOF-HASH-REPAIR.json.tmp",
+        "PROOF.json.tmp",
+    ):
+        temporary = output / name
+        if not temporary.exists():
+            continue
+        require(temporary.is_file() and not temporary.is_symlink(),
+                f"unsafe hash repair temporary: {name}")
+        temporary.unlink()
+        removed.append(name)
+    return removed
+
+
 def repair_no_model_proof_hashes(
     output: Path,
     *,
@@ -2109,6 +2433,7 @@ def repair_no_model_proof_hashes(
         proof_path = output / "PROOF.json"
         predecessor_path = output / "PROOF.pre-hash-repair.json"
         record_path = output / "PROOF-HASH-REPAIR.json"
+        cleared_temporaries = _clear_bounded_hash_repair_temporaries(output)
         require(proof_path.is_file(), "hash repair current proof is missing")
         require(not record_path.exists() or predecessor_path.exists(),
                 "hash repair sidecars are in an impossible order")
@@ -2127,7 +2452,18 @@ def repair_no_model_proof_hashes(
             )
             require(current == expected,
                     "completed hash repair proof or sidecar drift")
-            raise RuntimeError("no-model proof hashes are already repaired")
+            return {
+                "verified": True,
+                "classification": current["classification"],
+                "proof_sha256": current["proof_sha256"],
+                "predecessor_sha256": sha256_file(predecessor_path),
+                "repair_record_sha256": sha256_file(record_path),
+                "database_connections": 0,
+                "model_calls": 0,
+                "paid_calls": 0,
+                "reused": True,
+                "cleared_temporaries": cleared_temporaries,
+            }
 
         original_bytes = proof_path.read_bytes()
         original, redactions = _validate_original_no_model_hash_repair(
@@ -2175,6 +2511,7 @@ def repair_no_model_proof_hashes(
         _require_no_model_hash_repair_allowlist(original, repaired)
         atomic_write_json(proof_path, repaired)
         return {
+            "verified": True,
             "classification": repaired["classification"],
             "proof_sha256": repaired["proof_sha256"],
             "predecessor_sha256": sha256_file(predecessor_path),
@@ -2182,6 +2519,8 @@ def repair_no_model_proof_hashes(
             "database_connections": 0,
             "model_calls": 0,
             "paid_calls": 0,
+            "reused": False,
+            "cleared_temporaries": cleared_temporaries,
         }
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)

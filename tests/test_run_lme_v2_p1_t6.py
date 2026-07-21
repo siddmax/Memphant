@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import fcntl
 import hashlib
 import http.client
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -636,6 +638,11 @@ def _write_no_model_hash_repair_fixture(campaign, tmp_path: Path, monkeypatch):
     campaign.atomic_write_json(output / "construction-proof.json", construction)
     retained = {}
     retained_paths = {}
+    execution_binaries = {
+        name: {"path": f"/release/memphant-{name}"}
+        for name in ("cli", "server", "worker")
+    }
+    old_hashes = {}
     for arm in ("fast", "sonnet"):
         relative = f"arms/{arm}/adapter.json"
         path = output / relative
@@ -650,13 +657,18 @@ def _write_no_model_hash_repair_fixture(campaign, tmp_path: Path, monkeypatch):
         })
         retained[arm] = campaign.sha256_file(path)
         retained_paths[arm] = {"path": relative, "sha256": retained[arm]}
+        old_hashes[arm] = hashlib.sha256(
+            campaign._reconstruct_pre_redaction_adapter_proof(
+                json.loads(path.read_text()), execution_binaries
+            )
+        ).hexdigest()
     original_inventory = campaign.artifact_hashes(output)
-    old_hashes = {"fast": "1" * 64, "sonnet": "2" * 64}
     proof = {
         "schema_version": 1,
         "classification": "original-classification",
         "git_commit": "a" * 40,
         "controller": {"path": "/controller", "bytes": 123, "sha256": "b" * 64},
+        "binaries": execution_binaries,
         "fixture": {"name": "exact", "case_id": "19367bc7"},
         "archive": {
             "sha256": archive_sha,
@@ -699,10 +711,26 @@ def _write_no_model_hash_repair_fixture(campaign, tmp_path: Path, monkeypatch):
     monkeypatch.setattr(campaign, "NO_MODEL_HASH_REPAIR_ROOT", root)
     monkeypatch.setattr(campaign, "NO_MODEL_HASH_REPAIR_TARGET", target)
     monkeypatch.setattr(
+        campaign, "_validate_completed_no_model_semantics",
+        lambda *_args: {"synthetic_semantics": "verified"},
+    )
+    monkeypatch.setattr(
+        campaign, "_committed_controller_fingerprint",
+        lambda commit: (
+            {"bytes": 456, "sha256": "d" * 64}
+            if commit == "c" * 40
+            else (_ for _ in ()).throw(RuntimeError("forged executor commit"))
+        ),
+    )
+    monkeypatch.setattr(
         campaign, "_repair_executor_provenance",
         lambda: {
             "git_commit": "c" * 40,
-            "controller": {"path": "/repair", "bytes": 456, "sha256": "d" * 64},
+            "controller": {
+                "path": "/repair/run_lme_v2_p1_t6.py",
+                "bytes": 456,
+                "sha256": "d" * 64,
+            },
         },
     )
     return output, proof, original_bytes, original_inventory, retained
@@ -751,10 +779,11 @@ def test_no_model_hash_repair_is_lineage_preserving_and_idempotent(
     }
     assert all(repaired[key] == original[key] for key in unchanged)
     assert audit["database_connections"] == audit["model_calls"] == audit["paid_calls"] == 0
+    assert audit["reused"] is False
 
     completed_hashes = campaign.artifact_hashes(output)
-    with pytest.raises(RuntimeError, match="already repaired"):
-        campaign.repair_no_model_proof_hashes(output)
+    reused = campaign.repair_no_model_proof_hashes(output)
+    assert reused["reused"] is True and reused["paid_calls"] == 0
     assert campaign.artifact_hashes(output) == completed_hashes
 
 
@@ -840,6 +869,274 @@ def test_no_model_hash_repair_cli_accepts_only_output(
     )
     with pytest.raises(RuntimeError, match="accepts only --output"):
         campaign.main()
+
+
+def test_no_model_hash_repair_requires_reconstructed_old_hash_correlation(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    campaign = _load()
+    output, *_ = _write_no_model_hash_repair_fixture(campaign, tmp_path, monkeypatch)
+    proof_path = output / "PROOF.json"
+    proof = json.loads(proof_path.read_text())
+    forged = "e" * 64
+    proof["arms"][0]["adapter_proof_sha256"] = forged
+    proof["proof_sha256"] = campaign.canonical_sha256({
+        key: value for key, value in proof.items() if key != "proof_sha256"
+    })
+    campaign.atomic_write_json(proof_path, proof)
+    campaign.NO_MODEL_HASH_REPAIR_TARGET["old_explicit_hashes"]["fast"] = forged
+    campaign.NO_MODEL_HASH_REPAIR_TARGET["proof_sha256"] = proof["proof_sha256"]
+    campaign.NO_MODEL_HASH_REPAIR_TARGET["proof_file_sha256"] = (
+        campaign.sha256_file(proof_path)
+    )
+    with pytest.raises(RuntimeError, match="reconstructed root cause mismatch"):
+        campaign.repair_no_model_proof_hashes(output)
+
+
+def test_no_model_hash_repair_rejects_forged_executor_and_resumes_exact_temps(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    campaign = _load()
+    output, *_ = _write_no_model_hash_repair_fixture(campaign, tmp_path, monkeypatch)
+    (output / "PROOF.pre-hash-repair.json.tmp").write_text("partial")
+    audit = campaign.repair_no_model_proof_hashes(output)
+    assert audit["cleared_temporaries"] == ["PROOF.pre-hash-repair.json.tmp"]
+    assert not (output / "PROOF.pre-hash-repair.json.tmp").exists()
+    (output / "PROOF.json.tmp").write_text("partial-current")
+    reused = campaign.repair_no_model_proof_hashes(output)
+    assert reused["reused"] is True
+    assert reused["cleared_temporaries"] == ["PROOF.json.tmp"]
+
+    other_output, *_ = _write_no_model_hash_repair_fixture(
+        campaign, tmp_path / "other", monkeypatch
+    )
+    with pytest.raises(RuntimeError, match="stop after hash repair record"):
+        campaign.repair_no_model_proof_hashes(other_output, _stop_after="record")
+    record_path = other_output / "PROOF-HASH-REPAIR.json"
+    record = json.loads(record_path.read_text())
+    record["repair_executor"]["git_commit"] = "f" * 40
+    record["record_sha256"] = campaign.canonical_sha256({
+        key: value for key, value in record.items() if key != "record_sha256"
+    })
+    campaign.atomic_write_json(record_path, record)
+    with pytest.raises(RuntimeError, match="forged executor commit"):
+        campaign.repair_no_model_proof_hashes(other_output)
+
+    bounded_output, *_ = _write_no_model_hash_repair_fixture(
+        campaign, tmp_path / "bounded", monkeypatch
+    )
+    unrecognized = bounded_output / "unrecognized.tmp"
+    unrecognized.write_text("must-not-delete")
+    with pytest.raises(RuntimeError, match="artifact inventory drift"):
+        campaign.repair_no_model_proof_hashes(bounded_output)
+    assert unrecognized.read_text() == "must-not-delete"
+
+
+def test_no_model_hash_repair_lock_and_external_helpers_are_unreachable(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    campaign = _load()
+    output, *_ = _write_no_model_hash_repair_fixture(campaign, tmp_path, monkeypatch)
+    lock_fd = os.open(output, os.O_RDONLY)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        with pytest.raises(RuntimeError, match="already active"):
+            campaign.repair_no_model_proof_hashes(output)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+    def unreachable(*_args, **_kwargs):
+        pytest.fail("offline hash repair reached an external helper")
+
+    for name in (
+        "_psql_json", "_run_postgres_command", "_run_no_model_adapter_phase",
+    ):
+        monkeypatch.setattr(campaign, name, unreachable)
+    monkeypatch.setattr(campaign.urllib.request, "urlopen", unreachable)
+    audit = campaign.repair_no_model_proof_hashes(output)
+    assert audit["database_connections"] == audit["model_calls"] == 0
+
+
+def test_no_model_hash_repair_secret_scan_fails_closed(
+    tmp_path: Path,
+) -> None:
+    campaign = _load()
+    safe = tmp_path / "safe.json"
+    safe.write_text('{"value":"[REDACTED]"}\n')
+    inventory = {"safe.json": campaign.sha256_file(safe)}
+    assert campaign._validate_no_model_no_secrets(tmp_path, inventory) == 1
+    safe.write_text('{"value":"postgres://user:password@example.invalid/db"}\n')
+    with pytest.raises(RuntimeError, match="secret scan failed"):
+        campaign._validate_no_model_no_secrets(tmp_path, inventory)
+
+
+@pytest.mark.parametrize(
+    "tamper, message",
+    [
+        ("ledger", "1/1/4/2/2 ledger drift"),
+        ("arm_mode", "query-only arm drift"),
+        ("cleanup", "cleanup, identity, or dispatch drift"),
+        ("dispatch", "cleanup, identity, or dispatch drift"),
+        ("quiescence", "quiescence proof drift"),
+    ],
+)
+def test_completed_no_model_semantics_rejects_authorization_field_tamper(
+    tmp_path: Path, monkeypatch, tamper: str, message: str,
+) -> None:
+    campaign = _load()
+    output = tmp_path / "semantic"
+    output.mkdir()
+    campaign.atomic_write_json(output / "RECOVERY-INCIDENT.json", {"incident": True})
+    campaign.atomic_write_json(
+        output / "FIRST-RECOVERY-FAILURE.json", {"failure": True}
+    )
+    worker = {
+        "completed_sources": 670,
+        "stdout_sha256": "1" * 64,
+        "stderr_sha256": "2" * 64,
+    }
+    retains = [{"trajectory_id": f"trajectory-{index:03d}"} for index in range(500)]
+    construction = {"pairing": {
+        "trajectory_count": 500,
+        "resource_count": 670,
+        "worker": worker,
+        "retains": retains,
+    }}
+    construction["construction_proof_sha256"] = campaign.canonical_sha256(
+        construction
+    )
+    manifest = {
+        "construction": construction,
+        "construction_proof_sha256": construction["construction_proof_sha256"],
+        "case_contract": {
+            "fixture": "exact", "case_id": "19367bc7", "input_sha256": "3" * 64,
+        },
+        "logical_identity": {"sha256": "4" * 64},
+    }
+    incident = {
+        "initial_attempt": {
+            "constructions": 1, "dumps": 1, "resets": 1, "restores": 1,
+            "clones": 0, "query_only_recalls": 0, "external_dispatches": 0,
+        },
+        "diagnostic_archive_only_pg17_replay": {
+            "constructions": 0, "dumps": 0, "resets": 0, "restores": 1,
+            "clones": 0, "query_only_recalls": 0, "external_dispatches": 0,
+        },
+    }
+    failure = {"attempt": {
+        "constructions": 0, "dumps": 0, "resets": 0, "restores": 1,
+        "clones": 0, "query_only_recalls": 0, "external_dispatches": 0,
+    }}
+    accounting = campaign._no_model_attempt_accounting(True, incident, failure)
+    accounting["recovery"]["incident_sha256"] = campaign.sha256_file(
+        output / "RECOVERY-INCIDENT.json"
+    )
+    accounting["recovery"]["first_recovery_failure_sha256"] = campaign.sha256_file(
+        output / "FIRST-RECOVERY-FAILURE.json"
+    )
+    retained = {}
+    for arm in ("fast", "sonnet"):
+        relative = f"arms/{arm}/adapter.json"
+        campaign.atomic_write_json(output / relative, {
+            "query": {
+                "question_id": f"no-model-19367bc7-{arm}",
+                "context_sha256": "5" * 64,
+                "recall_duration_ms": 1,
+            },
+            "recall_mutation_proof": {
+                "before": {
+                    "resource": {"rows": 670, "content_md5": "a"},
+                    "retrieval_trace": {"rows": 0, "content_md5": "b"},
+                },
+                "after": {
+                    "resource": {"rows": 670, "content_md5": "a"},
+                    "retrieval_trace": {"rows": 1, "content_md5": "c"},
+                },
+                "changed_tables": ["retrieval_trace"],
+                "allowed_audit_rows_added": 1,
+                "corpus_policy_job_tables_unchanged": True,
+            },
+        })
+        retained[arm] = {"path": relative, "sha256": campaign.sha256_file(output / relative)}
+    monkeypatch.setattr(
+        campaign, "NO_MODEL_HASH_REPAIR_TARGET",
+        {**campaign.NO_MODEL_HASH_REPAIR_TARGET,
+         "case_id": "19367bc7", "retained_artifacts": retained},
+    )
+    validated_memory = []
+    monkeypatch.setattr(
+        campaign, "_validate_query_only_memory_proof",
+        lambda memory, bank: validated_memory.append((memory, bank)),
+    )
+    monkeypatch.setattr(
+        campaign, "_load_no_model_recovery",
+        lambda *_args, **_kwargs: (
+            construction, manifest, incident, failure, {"validated": True},
+        ),
+    )
+    monkeypatch.setattr(
+        campaign, "_validate_no_model_no_secrets", lambda *_args, **_kwargs: 4
+    )
+    proof = {
+        "fixture": {"name": "exact", "case_id": "19367bc7", "input_sha256": "3" * 64},
+        "archive_tools": {},
+        "database_schema_identity": {},
+        **accounting,
+        "construction_proof_sha256": construction["construction_proof_sha256"],
+        "logical_identity_sha256": "4" * 64,
+        "cleanup": {
+            "source_api_key_count": 0,
+            "source_job_state": {"pending": 0, "dead": 0, "total": 0},
+            "orphan_clone_count": 0,
+            "force_drop_verified": True,
+        },
+        "external_dispatch": {"configured": False, "dispatches": 0, "deep_enabled": False},
+        "artifact_hashes": {},
+        "arms": [{
+            "arm": arm,
+            "query_only": True,
+            "verification_recall_mode": "fast",
+            "construction_work": {"retains": 0, "worker_drains": 0},
+            "construction_proof_sha256": construction["construction_proof_sha256"],
+            "context_sha256": "5" * 64,
+            "timing_ms": {"recall": 1},
+            "pre_query_logical_identity_sha256": "4" * 64,
+            "post_query_logical_identity_sha256": "4" * 64,
+            "api_key_count": 1,
+            "job_state": {"pending": 0, "dead": 0, "total": 0},
+            "clone_database": f"memphant_p1t6_19367bc7_deadbeef_{arm}",
+            "source_quiescence": {
+                "policy": "only_exact_autovacuum_worker_may_wait",
+                "timeout_seconds": 180.0,
+                "sample_interval_seconds": 1.0,
+                "sample_count": 2,
+                "consecutive_zero_samples": 2,
+                "unexpected_sessions": [],
+                "terminated_sessions": 0,
+                "observed_connections": [],
+                "observed_progress": [],
+            },
+        } for arm in ("fast", "sonnet")],
+    }
+    assert campaign._validate_completed_no_model_semantics(
+        output, proof, manifest
+    )["recovery_lineage_verified"] is True
+    assert len(validated_memory) == 2
+    if tamper == "ledger":
+        proof["counts"]["restores"] = 3
+    elif tamper == "arm_mode":
+        proof["arms"][0]["verification_recall_mode"] = "sonnet"
+    elif tamper == "cleanup":
+        proof["cleanup"]["orphan_clone_count"] = 1
+    elif tamper == "dispatch":
+        proof["external_dispatch"]["dispatches"] = 1
+    else:
+        proof["arms"][0]["source_quiescence"]["unexpected_sessions"] = [
+            {"backend_type": "client backend"}
+        ]
+    with pytest.raises(RuntimeError, match=message):
+        campaign._validate_completed_no_model_semantics(output, proof, manifest)
 
 
 def test_arm_clone_cleanup_is_forceful_and_name_bounded(monkeypatch) -> None:
