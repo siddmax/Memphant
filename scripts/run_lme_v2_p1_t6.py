@@ -162,6 +162,32 @@ def _database_url_with_name(database_url: str, database_name: str) -> str:
     return urllib.parse.urlunsplit(parsed._replace(path="/" + database_name))
 
 
+def _require_live_database(base_database_url: str) -> None:
+    """Fail before any paid work if the base PostgreSQL is not reachable.
+
+    Amendment 14 root cause: run-65981e4f reached the second paid row before a
+    vanished local container surfaced as an HTTP 503 at recall, stranding the
+    root. URL-shape validation (`_local_database_parts`) proves intent, not
+    liveness. A `select 1` here converts that failure from mid-campaign to
+    row-zero, with no billable call made. This is Phase 0 P0.2 of the
+    tri-domain plan: the code form of the amendment's prose preflight.
+    """
+    _local_database_parts(base_database_url)
+    completed = subprocess.run(
+        [
+            "psql", "--no-psqlrc", "--set", "ON_ERROR_STOP=1", "--quiet",
+            "-tAc", "select 1", base_database_url,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    require(
+        completed.returncode == 0 and completed.stdout.strip() == "1",
+        "base PostgreSQL is not reachable before dispatch: "
+        f"psql exited {completed.returncode}: {completed.stderr.strip()[-400:]}",
+    )
+
+
 def _require_scratch_source(database_url: str) -> str:
     _, database_name = _local_database_parts(database_url)
     require(
@@ -5107,7 +5133,7 @@ def run_row(directory: Path, materialized: Path, output: Path, row: dict, manife
 
 
 def run_campaign(directory: Path, materialized: Path, output: Path, base_database_url: str, manifest: dict) -> dict:
-    _local_database_parts(base_database_url)
+    _require_live_database(base_database_url)
     directory, materialized, output = _resolve_execution_paths(
         directory, materialized, output
     )

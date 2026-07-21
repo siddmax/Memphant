@@ -935,3 +935,55 @@ async fn nominating_a_source_removed_by_query_policy_is_invalid_output() {
     ));
     assert!(!provider.workspaces.lock().unwrap()[0].contains("Buried archive:"));
 }
+
+/// A0 differential (tri-domain-sota-plan Phase A0): the load-bearing Deep claim
+/// as ONE falsifiable assertion on a SINGLE seed — Fast misses exactly the
+/// buried unit that Deep surfaces. The pre-existing tests prove each half
+/// separately (Fast omits `answer_id`; Deep whitelists it), but neither pins
+/// the *contrast*: a regression that let Fast accidentally surface the buried
+/// unit would pass both halves while silently voiding the reason Deep exists.
+/// This is the first artifact proving Deep changes the answer set for the
+/// same store, same query, same k.
+#[tokio::test]
+async fn deep_recovers_exactly_the_unit_fast_misses() {
+    let (store, context, answer_id, source_id) = seeded_service().await;
+    let provider = Arc::new(RecordingProvider::completed(vec![source_id]));
+    let service = MemoryService::new(
+        Arc::new(store.clone()),
+        Arc::new(CLOCK),
+        Arc::new(NoopEmbedding),
+    )
+    .with_deep_recall_provider(provider.clone());
+
+    // Same seed, same query, same k — only the mode differs.
+    let fast = service
+        .recall_internal(request(context.clone(), RecallMode::Fast))
+        .await
+        .unwrap();
+    let deep = service
+        .recall_internal(request(context, RecallMode::Deep))
+        .await
+        .unwrap();
+
+    // The differential claim, stated as one contrast:
+    assert!(
+        !fast.candidate_whitelist.contains(&answer_id),
+        "Fast must miss the buried unit; if it surfaces it, Deep has no reason to exist"
+    );
+    assert!(
+        deep.candidate_whitelist.contains(&answer_id),
+        "Deep must recover the buried unit Fast missed"
+    );
+    // The recovered unit is cited through the Deep channel with real provenance,
+    // not smuggled in via the ordinary pool.
+    assert!(deep.deep.is_some(), "Deep response must carry a deep envelope");
+    assert!(fast.deep.is_none(), "Fast response must not carry a deep envelope");
+    let deep_trace = store.trace_by_id_any_tenant(deep.trace_id).unwrap();
+    assert!(
+        deep_trace.candidates.iter().any(|c| {
+            c.unit_id == answer_id && c.channel == RecallChannel::Deep
+        }),
+        "the recovered unit must be attributed to the Deep channel, not the fast pool"
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1, "Deep called the provider exactly once");
+}

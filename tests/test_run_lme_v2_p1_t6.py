@@ -2357,6 +2357,10 @@ def test_run_campaign_uses_one_scratch_lifecycle_per_case(
         run_calls.append(command)
         if command[:3] == ["git", "rev-parse", "HEAD"]:
             return campaign.subprocess.CompletedProcess(command, 0, "commit", "")
+        # The P0.2 liveness preflight probes the base DB with `select 1`; the
+        # stubbed server answers "1" so run_campaign proceeds past the guard.
+        if command[-2:] == ["-tAc", "select 1"] or "select 1" in command:
+            return campaign.subprocess.CompletedProcess(command, 0, "1", "")
         return campaign.subprocess.CompletedProcess(command, 0, "", "")
 
     case_commands = []
@@ -4402,3 +4406,30 @@ def test_judge_post_acceptance_audit_failure_never_replays_or_changes_2xx(
         server.server_close()
     assert len(calls) == 1
     assert json.loads((tmp_path / "judge/0001.json").read_text())["audit_status"] == "invalid"
+
+
+def test_require_live_database_gates_before_paid_work() -> None:
+    """Phase 0 P0.2: liveness must fail at row zero on a dead DB, not mid-root.
+
+    Reproduces the run-65981e4f fault (a vanished container that only surfaced
+    as an HTTP 503 mid-campaign) and proves the preflight now catches it before
+    any billable call. The live arm uses the campaign Postgres if reachable and
+    is skipped otherwise so the check stays runnable without a DB.
+    """
+    campaign = _load()
+
+    # Dead DB: a valid-shape local URL on a port nothing listens on.
+    with pytest.raises(RuntimeError, match="not reachable"):
+        campaign._require_live_database(
+            "postgres://memphant:memphant@localhost:59999/memphant_dead"
+        )
+
+    # Live DB: only assert the happy path when a real server answers, so this
+    # test needs no fixture to run in CI's no-Postgres leg.
+    live_url = "postgres://memphant:memphant@localhost:5432/memphant"
+    probe = subprocess.run(
+        ["psql", "--no-psqlrc", "-tAc", "select 1", live_url],
+        capture_output=True, text=True,
+    )
+    if probe.returncode == 0 and probe.stdout.strip() == "1":
+        campaign._require_live_database(live_url)  # must not raise
