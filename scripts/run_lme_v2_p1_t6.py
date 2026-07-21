@@ -3376,9 +3376,9 @@ def verify_campaign_manifest(manifest: dict) -> dict[str, int]:
     spend = manifest["campaign_spend"]
     require(spend["hard_ceiling_usd"] == 6.25, "campaign spend ceiling drift")
     preexisting = spend["preexisting_liability"]
-    require(preexisting["settled_micros"] == 7542
+    require(preexisting["settled_micros"] == 17420
             and preexisting["unsettled_upper_bound_micros"] == 316142
-            and preexisting["total_micros"] == 323684,
+            and preexisting["total_micros"] == 333562,
             "preexisting campaign liability drift")
     require(preexisting["settled_micros"] + preexisting["unsettled_upper_bound_micros"]
             == preexisting["total_micros"], "preexisting liability sum drift")
