@@ -1,0 +1,112 @@
+{
+  "schema_version": "memphant.p1_t6.dispatch_authorization.v2",
+  "created_at": "2026-07-21T17:16:41Z",
+  "decision": "authorize_one_fresh_registered_n12_fast_sonnet_gate",
+  "runtime_source_commit": "e511c8177337b44045c9fbc1f756956a7dd8646e",
+  "planned_output_root": "docs/build-log/artifacts/p1-t6/run-e511c817",
+  "authorization": {
+    "cases": 12,
+    "constructions_max": 12,
+    "answer_rows_max": 24,
+    "deep_dispatches_max": 12,
+    "preexisting_liability_micros": 333562,
+    "fresh_max_liability_micros": 5697600,
+    "cumulative_worst_case_liability_micros": 6031162,
+    "campaign_hard_ceiling_micros": 6250000,
+    "headroom_micros": 218838,
+    "inactive_arms": ["luna", "sol"],
+    "larger_run_authorized": false,
+    "push_authorized": false
+  },
+  "frozen_inputs": {
+    "pre_execution_amendment": {
+      "path": "docs/build-log/artifacts/p1-t6/PRE-EXECUTION-AMENDMENT-12.md",
+      "sha256": "8e74825776386274e1ddad2bf35cb021d648fcca8ce1c6067645c1e5dc47b4e4"
+    },
+    "campaign_manifest": {
+      "path": "benchmarks/manifests/longmemeval_v2.p1_t6.json",
+      "sha256": "12e063eac437332655b6f4f3a098d40d18a2b89af4ef8aa395a7d258b4942a19"
+    },
+    "selection_sha256": "d7762dbaffff7acfe779162d4993c8c09ef0440e3c1a25e0d3408127d73e25fa",
+    "expanded_run_order_sha256": "59f7ff5cc04a6ecd1b17b69565e51a71ad1b814bfa1345698a10ad766796ad1e",
+    "selected_model": "anthropic/claude-sonnet-5-20260630",
+    "selected_stream_model": "anthropic/claude-sonnet-5",
+    "selected_config_sha256": "d521ab622efb03a0ecf5b17c8b86fdc0944c3719fceb976b0a7dbce4e2313a7c"
+  },
+  "just_in_time_checks": {
+    "manifest": {
+      "verified": true,
+      "cases": 12,
+      "constructions": 12,
+      "answer_rows": 24,
+      "paid_calls": 0
+    },
+    "python_and_materialization": {
+      "interpreter": "/private/tmp/memphant-p1-t6-venv/bin/python",
+      "packages_sha256": "584c237d77404a5ed1431588908cc83984027bed82357a6e2449e18443024b1c",
+      "materialization_proof_sha256": "35a696fef3a2efc217ed4a3c02eb87f50b8edc6c3439fb649f7c32c07a1f2b59",
+      "paid_calls": 0
+    },
+    "credentials": {
+      "source": "doppler project syndai config dev",
+      "openrouter_api_key_present": true,
+      "openai_api_key_present": true,
+      "values_emitted_or_persisted": false
+    },
+    "endpoint_inventory": {
+      "reader_material_contract_sha256": "7a151a24435766a089675dbc36f47e2c270c6632c9ee4db140046c194850465d",
+      "reader_matching_endpoint_sha256": ["d38ef0b2f83fd862ae08cee90ecc435072ae2a4beea7326693cc40dbfcb9c423"],
+      "sonnet_material_contract_sha256": "456641f458d0aeaff5b5e1df9c42d7715c905239d78c05fa4a723b9c64835b3a",
+      "sonnet_matching_endpoint_sha256": ["43a3db7bc7c2e03aa4c913ef08dcfdda115568d7a76073672435598a8d95424d"]
+    },
+    "packaged_binaries": {
+      "profile": "release",
+      "server": {"bytes": 40242032, "sha256": "4d0fb4e7e2ded657f67c3048d0e0c3dc8f1542b3eef7968543932569c003dfe1"},
+      "worker": {"bytes": 35968464, "sha256": "e569a8b11c15495fd3b23c5423c54d08b826f31a329d0b1e2d1ea7801d299bcf"},
+      "cli": {"bytes": 5705024, "sha256": "a8da5a706613654cfe743a55ea93b5c99702962067052503985c1c6dd1af3c0d"}
+    },
+    "scratch_postgres": {
+      "server_major": 17,
+      "create_connect_drop_smoke": "passed",
+      "remaining_campaign_databases": 0
+    },
+    "cleanup": {
+      "campaign_processes": 0,
+      "launch_agents": 0,
+      "checks_three_seconds_apart": 2,
+      "planned_output_root_absent": true
+    }
+  },
+  "static_context_contract": {
+    "decision": "reuse_without_reconstruction",
+    "exact_reader_tokens": 23564,
+    "budget_tokens": 32768,
+    "untruncated": true,
+    "no_model_proof_sha256": "3b52a77d435c37be35e392af28b5f2d9e57e7ead36a7b808763f7aecf0a24dd3",
+    "official_context_proof_sha256": "ae9f3ec5618c12ed6c0e7a35e7b6302485f036621b8137937632aebeca80d794",
+    "adapter_sha256": "56c2a7264112e012f9376178cc2ef3383d70705f21255d4182e92bf62f8e206c",
+    "context_relevant_controller_ast_sha256": {
+      "_context_contract_audit": "133dcab0cfa2014d1aab80ac500c8e19e2166c69470dafae4fa96db4034ef51a",
+      "_load_selected_trajectories": "6a4600ed38c378ec23d1cac790ff9705bbb445dd5c85a5742b1a2fcd0dbb5933",
+      "run_context_preflight": "a0c5bc3f607bf8f81ff438b2ce5cdc81668a9fd06221662559f3ea1b3258447d"
+    },
+    "reason": "The selection, memory parameters, adapter, core/store context path, and context-relevant controller AST are unchanged. The only runtime change separates exact request identity from canonical SSE identity and cannot change the already proven query/context bytes. Rebuilding 670 resources would add no context-size information."
+  },
+  "paid_route_probe": {
+    "run_now": false,
+    "reason": "The settled one-call stream diagnostic proves the current live SSE shape, while secret-free runtime, server, CLI, and MCP fixtures exercise that shape through the corrected production parser. Another paid probe is duplicate evidence."
+  },
+  "execution_environment": {
+    "secret_injection": "wrap only the benchmark process with doppler run --project syndai --config dev",
+    "ci_or_test_secret_injection": false,
+    "database_authority": "local ephemeral scratch PostgreSQL only"
+  },
+  "stop_predicates": [
+    "stop on the first failed pair or missing proof before opening the next case",
+    "stop on any cap, infrastructure, security, write, route, or settlement failure",
+    "never rerun a completed billable row",
+    "stop after the registered Sonnet decision and do not run Luna or Sol",
+    "do not start n100_to_n300 or full_500 from this authorization"
+  ],
+  "claim_boundary": "This authorizes only one fresh P1-T6 n=12 development root. It is not a pass, promotion, SOTA claim, product-default decision, larger-run authorization, merge, or push authorization."
+}
