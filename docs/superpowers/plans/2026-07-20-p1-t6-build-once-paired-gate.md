@@ -16,7 +16,10 @@
 - The stopped `run-408363c9` root remains diagnostic-only and immutable; never replay its completed Fast row.
 - Every pair uses the exact same pinned case in both arms. Across the 12 cases this is 7,934 resources total (613-713 per case) over 5,979 trajectories (479 for `b05cf470`, 500 for every other case). Gold, answer, evaluator, and prior-output fields never enter construction or recall.
 - A construction source has zero active connections before `createdb --template`; Fast and Deep database names are distinct; every arm clone is force-dropped on success, failure, or interruption recovery.
+- Resolve and freeze matching `pg_dump` and `pg_restore` binaries against the local server major before constructing any case; never discover an archive-tool mismatch after ingestion.
+- Hold a nonblocking per-case OS lease before orphan-clone recovery and through both rows, so a concurrent resume cannot classify or destroy a live paid attempt.
 - Pair identity uses the established bank exclusions for `memphant.api_key`, schema migrations, event outbox, job state, retrieval traces, and review-event tables. Those are separately proven as schema identity, completed construction, empty query audit state, or transport authentication. Every corpus, compiled-unit, policy, context, subject, tenant, trust, embedding, and relevant sequence row included by the bank must match the frozen logical identity exactly before recall.
+- Each immutable row binds the same canonical bank seal (manifest, archive, construction, case contract, and logical identity); a coherent bank replacement between Fast and Deep invalidates the root rather than creating a mixed-state pair.
 - Query-only adapter execution validates all trajectory IDs and hashes but performs zero episode POSTs and zero worker drains.
 - A completed billable row is immutable. Missing/tampered archive state after one completed row invalidates the root rather than replaying that row.
 - Before each paid or large-compute step, archive an efficiency checkpoint proving necessity, reusable work, expected information gain, maximum rows, maximum construction count, worst-case liability, and stop predicate.
