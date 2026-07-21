@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 from decimal import Decimal, ROUND_CEILING
+import fcntl
 import hashlib
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -196,6 +197,68 @@ def _postgres_tool_identity(binary: str, database_url: str) -> dict[str, object]
     require(identity["major"] == server_major,
             f"PostgreSQL tool major {identity['major']} does not match server major {server_major}")
     return identity
+
+
+def _postgres_server_major(database_url: str) -> int:
+    return int(_psql_json(
+        database_url,
+        "select (current_setting('server_version_num')::int / 10000)::int as major",
+    )[0]["major"])
+
+
+def _archive_tool_candidates(name: str, major: int) -> list[str]:
+    override_name = {
+        "pg_dump": "MEMPHANT_PG_DUMP_BIN",
+        "pg_restore": "MEMPHANT_PG_RESTORE_BIN",
+    }[name]
+    override = os.environ.get(override_name, "").strip()
+    if override:
+        require(Path(override).is_absolute(),
+                f"{override_name} must be an absolute path")
+        return [override]
+    candidates = [
+        f"/opt/homebrew/opt/postgresql@{major}/bin/{name}",
+        f"/usr/local/opt/postgresql@{major}/bin/{name}",
+        f"/usr/lib/postgresql/{major}/bin/{name}",
+        shutil.which(f"{name}-{major}"),
+        shutil.which(name),
+    ]
+    return list(dict.fromkeys(candidate for candidate in candidates if candidate))
+
+
+def _resolve_archive_tools(database_url: str) -> dict[str, object]:
+    server_major = _postgres_server_major(database_url)
+    resolved: dict[str, object] = {"server_major": server_major}
+    for name in ("pg_dump", "pg_restore"):
+        selected = None
+        failures = []
+        for candidate in _archive_tool_candidates(name, server_major):
+            try:
+                identity = _postgres_tool_identity(candidate, database_url)
+            except (OSError, RuntimeError, ValueError) as error:
+                failures.append(f"{candidate}: {error}")
+                continue
+            if identity["major"] == identity["server_major"] == server_major:
+                selected = identity
+                break
+            failures.append(f"{candidate}: major {identity['major']}")
+        require(selected is not None,
+                f"no PostgreSQL {server_major} {name} found: {'; '.join(failures)}")
+        resolved[name] = selected
+    return resolved
+
+
+def _revalidate_archive_tools(
+    frozen: dict[str, object], database_url: str
+) -> None:
+    require(frozen.get("server_major") == _postgres_server_major(database_url),
+            "P1-T6 PostgreSQL server major drift")
+    for name in ("pg_dump", "pg_restore"):
+        expected = frozen.get(name)
+        require(isinstance(expected, dict) and isinstance(expected.get("binary"), str),
+                f"P1-T6 frozen {name} identity is missing")
+        require(_postgres_tool_identity(str(expected["binary"]), database_url) == expected,
+                f"P1-T6 frozen {name} identity drift")
 
 
 def _database_schema_identity(database_url: str) -> dict[str, object]:
@@ -526,6 +589,85 @@ def _verify_case_archive_resume(bank_dir: Path, *, completed_rows: int) -> None:
         raise
 
 
+@contextmanager
+def _case_lease(output: Path, case_id: str):
+    require(re.fullmatch(r"[0-9a-f]{8}", case_id) is not None,
+            "P1-T6 case lease id is invalid")
+    lease_dir = output / "case-leases"
+    lease_dir.mkdir(parents=True, exist_ok=True)
+    lease_path = lease_dir / f"{case_id}.lock"
+    with lease_path.open("a+", encoding="utf-8") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise RuntimeError(f"P1-T6 case is already active: {case_id}") from error
+        handle.seek(0)
+        handle.truncate()
+        handle.write(str(os.getpid()) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _case_bank_seal(manifest_path: Path) -> dict[str, str]:
+    manifest = json.loads(manifest_path.read_text())
+    logical_identity = manifest.get("logical_identity")
+    require(isinstance(logical_identity, dict),
+            "P1-T6 case bank seal lacks logical identity")
+    core = {
+        "manifest_sha256": sha256_file(manifest_path),
+        "archive_sha256": manifest.get("archive_sha256"),
+        "logical_identity_sha256": logical_identity.get("sha256"),
+        "construction_proof_sha256": manifest.get("construction_proof_sha256"),
+        "case_contract_sha256": manifest.get("case_contract_sha256"),
+    }
+    require(all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)
+                for value in core.values()),
+            "P1-T6 case bank seal identity is malformed")
+    return {**core, "seal_sha256": canonical_sha256(core)}
+
+
+def _verify_case_bank_seal(
+    bank_dir: Path, expected_seal: dict[str, str]
+) -> None:
+    manifest, _archive = _load_case_bank(bank_dir)
+    construction_path = bank_dir / "construction-proof.json"
+    require(
+        construction_path.is_file()
+        and json.loads(construction_path.read_text()) == manifest["construction"],
+        "P1-T6 frozen construction proof drift before arm execution",
+    )
+    require(_case_bank_seal(bank_dir / "manifest.json") == expected_seal,
+            "P1-T6 case bank seal drift before arm execution")
+
+
+def _validate_completed_case_row(
+    output: Path, row: dict, expected_seal: dict[str, str]
+) -> dict:
+    row_dir = output / row["row_id"]
+    proof_path = row_dir / "row-proof.json"
+    require(proof_path.is_file(), f"completed row proof is missing: {row['row_id']}")
+    proof = json.loads(proof_path.read_text())
+    seal_path = row_dir / "case-bank-seal.json"
+    require(
+        proof.get("complete") is True
+        and proof.get("row") == row
+        and seal_path.is_file()
+        and json.loads(seal_path.read_text()) == expected_seal
+        and proof.get("case_bank_seal_sha256") == expected_seal["seal_sha256"],
+        f"completed row case bank seal drift: {row['row_id']}",
+    )
+    require(
+        proof.get("artifact_hashes")
+        == artifact_hashes(row_dir, exclude={"row-proof.json"}),
+        f"completed row artifact binding drift: {row['row_id']}",
+    )
+    return proof
+
+
 def _preserve_incomplete_bank(output: Path, bank_dir: Path, case_id: str) -> None:
     if not bank_dir.exists():
         return
@@ -545,10 +687,21 @@ def _retire_case_archive(
     manifest_path = bank_dir / "manifest.json"
     require(manifest_path.is_file(), "completed P1-T6 pair lost its bank manifest")
     manifest = json.loads(manifest_path.read_text())
+    seal = _case_bank_seal(manifest_path)
+    row_proofs = {
+        row["arm"]: _validate_completed_case_row(output, row, seal)
+        for row in rows
+    }
+    require(
+        {proof["case_bank_seal_sha256"] for proof in row_proofs.values()}
+        == {seal["seal_sha256"]},
+        "P1-T6 pair row case bank seals differ",
+    )
     retirement_path = bank_dir / "archive-retirement.json"
     expected = {
         "archive_sha256": manifest.get("archive_sha256"),
         "manifest_sha256": sha256_file(manifest_path),
+        "case_bank_seal_sha256": seal["seal_sha256"],
         "reason": "both_immutable_arm_rows_complete",
         "row_proof_sha256": {
             row["arm"]: sha256_file(output / row["row_id"] / "row-proof.json")
@@ -756,6 +909,7 @@ def _execute_case_row(
     output: Path,
     row: dict,
     manifest: dict,
+    bank_seal: dict[str, str],
 ) -> dict:
     ledger = output / "spend-ledger"
     ledger.mkdir(exist_ok=True)
@@ -773,6 +927,9 @@ def _execute_case_row(
         attempt = json.loads(attempt_path.read_text())
         require(not _pid_alive(attempt.get("child_pid")),
                 f"row attempt is still active: {row['row_id']}")
+        seal_path = staging / "case-bank-seal.json"
+        require(seal_path.is_file() and json.loads(seal_path.read_text()) == bank_seal,
+                "orphaned row case bank seal drift")
         atomic_write_json(staging / "failure.json", {
             "row": row,
             "reason": "orphaned_attempt_recovered_without_replay",
@@ -785,17 +942,27 @@ def _execute_case_row(
         os.replace(staging, output / row["row_id"])
         return proof
     staging.mkdir()
+    atomic_write_json(staging / "case-bank-seal.json", bank_seal)
     atomic_write_json(staging / "attempt.json", {
         "row": row,
         "dispatch_started": True,
         "coordinator_pid": os.getpid(),
-        "child_pid": None,
+        "child_pid": os.getpid(),
+        "case_bank_seal_sha256": bank_seal["seal_sha256"],
         "reservation_sha256": sha256_file(ledger_row),
     })
     return run_row(directory, materialized, output, row, manifest)
 
 
-def _run_case(
+def _case_archive_tools(output: Path, source_url: str) -> dict[str, object]:
+    root = json.loads((output / "pre-execution-proof.json").read_text())
+    frozen = root.get("archive_tools")
+    require(isinstance(frozen, dict), "P1-T6 frozen archive tools are missing")
+    _revalidate_archive_tools(frozen, source_url)
+    return frozen
+
+
+def _run_case_locked(
     directory: Path,
     materialized: Path,
     output: Path,
@@ -804,6 +971,7 @@ def _run_case(
 ) -> dict[str, object]:
     source_url = os.environ.get("MEMPHANT_TEST_DATABASE_URL", "")
     _require_scratch_source(source_url)
+    archive_tools = _case_archive_tools(output, source_url)
     rows = [
         row for row in expanded_run_order(manifest)
         if row["question_id"] == case_id
@@ -847,12 +1015,19 @@ def _run_case(
         )
         bank_dir.mkdir(parents=True, exist_ok=True)
         atomic_write_json(bank_dir / "construction-proof.json", construction_proof)
-        _dump_case_bank(source_url, bank_dir, construction_proof, case_contract)
+        _dump_case_bank(
+            source_url, bank_dir, construction_proof, case_contract,
+            pg_dump_bin=str(archive_tools["pg_dump"]["binary"]),
+        )
         _reset_case_source(source_url)
     else:
         _verify_case_archive_resume(bank_dir, completed_rows=len(completed))
+    bank_seal = _case_bank_seal(bank_dir / "manifest.json")
+    for row in completed:
+        _validate_completed_case_row(output, row, bank_seal)
     bank_manifest = _restore_case_bank(
-        source_url, bank_dir, case_contract
+        source_url, bank_dir, case_contract,
+        pg_restore_bin=str(archive_tools["pg_restore"]["binary"]),
     )
     construction_path = bank_dir / "construction-proof.json"
     require(construction_path.is_file(), "P1-T6 construction proof is missing")
@@ -867,6 +1042,7 @@ def _run_case(
     for row in rows:
         if row in completed:
             continue
+        _verify_case_bank_seal(bank_dir, bank_seal)
         clone_url = _clone_case_source(
             source_url, clone_names[row["arm"]], logical_identity
         )
@@ -875,7 +1051,10 @@ def _run_case(
                 "MEMPHANT_TEST_DATABASE_URL": clone_url,
                 "MEMPHANT_LME_PREBUILT_PROOF": str(construction_path.resolve()),
             }):
-                _execute_case_row(directory, materialized, output, row, manifest)
+                _execute_case_row(
+                    directory, materialized, output, row, manifest, bank_seal
+                )
+            _validate_completed_case_row(output, row, bank_seal)
             require(_database_key_count(clone_url) == 1,
                     "query-only arm must mint exactly one clone-local API key")
         finally:
@@ -886,6 +1065,17 @@ def _run_case(
             "P1-T6 case did not finalize both row proofs")
     _retire_case_archive(bank_dir, output, rows)
     return {"case_id": case_id, "constructed": constructed, "completed_rows": 2}
+
+
+def _run_case(
+    directory: Path,
+    materialized: Path,
+    output: Path,
+    case_id: str,
+    manifest: dict,
+) -> dict[str, object]:
+    with _case_lease(output, case_id):
+        return _run_case_locked(directory, materialized, output, case_id, manifest)
 
 
 def _binary_path(name: str) -> Path:
@@ -2388,6 +2578,12 @@ def _write_row_proof(row_dir: Path, row: dict, reservation_path: Path, outcome: 
                                      capture_output=True, text=True, check=True).stdout.strip(),
         "manifest_sha256": sha256_file(CAMPAIGN_MANIFEST), "immutable": True, "complete": True,
     }
+    seal_path = row_dir / "case-bank-seal.json"
+    if seal_path.is_file():
+        seal = json.loads(seal_path.read_text())
+        require(isinstance(seal, dict) and isinstance(seal.get("seal_sha256"), str),
+                "row case bank seal artifact is malformed")
+        proof["case_bank_seal_sha256"] = seal["seal_sha256"]
     proof.update(extra or {})
     proof["artifact_hashes"] = artifact_hashes(row_dir, exclude={"row-proof.json"})
     atomic_write_json(row_dir / "row-proof.json", proof)
@@ -2410,6 +2606,7 @@ def verify_resume_contract(frozen: dict, current: dict) -> None:
         "materialization", "git_commit", "binaries", "deep_prompt_sha256",
         "deep_config_hashes", "environment_contract_sha256", "python_environment",
         "binary_profile",
+        "archive_tools",
         "preexisting_campaign_liability",
     ):
         require(frozen[field] == current[field], f"campaign resume contract drift: {field}")
@@ -2778,7 +2975,12 @@ def run_row(directory: Path, materialized: Path, output: Path, row: dict, manife
     require(row_dir.is_dir() and (row_dir / "attempt.json").is_file(),
             f"row lacks pre-dispatch attempt marker: {row_dir}")
     attempt = json.loads((row_dir / "attempt.json").read_text())
-    require(attempt["row"] == row and attempt["dispatch_started"] is True, "attempt marker drift")
+    require(
+        attempt["row"] == row
+        and attempt["dispatch_started"] is True
+        and attempt.get("child_pid") == os.getpid(),
+        "attempt marker drift",
+    )
     reservation_path = output / "spend-ledger" / f"{row['sequence']:04d}.json"
     proxy, reader_url = _reader_proxy(openrouter_key, row_dir / "reader-route.json", manifest)
     judge_proxy, judge_url = _judge_proxy(openai_key, row_dir / "judge-routes", manifest)
@@ -2950,6 +3152,7 @@ def run_campaign(directory: Path, materialized: Path, output: Path, base_databas
     )
     require(os.environ.get("OPENROUTER_API_KEY") and os.environ.get("OPENAI_API_KEY"),
             "OPENROUTER_API_KEY and OPENAI_API_KEY are required")
+    archive_tools = _resolve_archive_tools(base_database_url)
     preflight_proof = preflight(directory, materialized, manifest)
     endpoint_hashes = verify_endpoint_inventory(manifest)
     subprocess.run(_production_build_command(), cwd=ROOT, check=True)
@@ -2967,6 +3170,7 @@ def run_campaign(directory: Path, materialized: Path, output: Path, base_databas
                                      capture_output=True, text=True, check=True).stdout.strip(),
         "binaries": frozen_binaries,
         "binary_profile": PRODUCTION_BINARY_PROFILE,
+        "archive_tools": archive_tools,
         "deep_prompt_sha256": sha256_file(ROOT / "config/deep-recall-v1.txt"),
         "deep_config_hashes": {
             name: candidate["config_sha256"]
@@ -3037,6 +3241,54 @@ def _percentile(values: list[int], fraction: float) -> int:
     return ordered[math.ceil(fraction * len(ordered)) - 1]
 
 
+def _validate_retired_case_banks(
+    output: Path, rows: list[dict]
+) -> dict[str, str]:
+    case_rows = {
+        case_id: [row for row in rows if row["question_id"] == case_id]
+        for case_id in sorted({row["question_id"] for row in rows})
+    }
+    bank_root = output / "case-banks"
+    require(bank_root.is_dir(), "P1-T6 case-bank root is missing")
+    require(
+        {path.name for path in bank_root.iterdir() if path.is_dir()}
+        == set(case_rows),
+        "P1-T6 case-bank manifest inventory drift",
+    )
+    seals = {}
+    for case_id, paired_rows in case_rows.items():
+        bank_dir = bank_root / case_id
+        manifest_path = bank_dir / "manifest.json"
+        retirement_path = bank_dir / "archive-retirement.json"
+        require(manifest_path.is_file() and retirement_path.is_file(),
+                f"P1-T6 retired case-bank proof is incomplete: {case_id}")
+        seal = _case_bank_seal(manifest_path)
+        proofs = {
+            row["arm"]: _validate_completed_case_row(output, row, seal)
+            for row in paired_rows
+        }
+        manifest = json.loads(manifest_path.read_text())
+        expected_retirement = {
+            "archive_sha256": manifest["archive_sha256"],
+            "manifest_sha256": seal["manifest_sha256"],
+            "case_bank_seal_sha256": seal["seal_sha256"],
+            "reason": "both_immutable_arm_rows_complete",
+            "row_proof_sha256": {
+                row["arm"]: sha256_file(output / row["row_id"] / "row-proof.json")
+                for row in paired_rows
+            },
+        }
+        require(json.loads(retirement_path.read_text()) == expected_retirement,
+                f"P1-T6 retired case-bank proof drift: {case_id}")
+        require(not (bank_dir / f"{manifest['archive_sha256']}.dump").exists(),
+                f"P1-T6 retired case-bank archive still exists: {case_id}")
+        require({proof["case_bank_seal_sha256"] for proof in proofs.values()}
+                == {seal["seal_sha256"]},
+                f"P1-T6 paired row seals differ: {case_id}")
+        seals[case_id] = seal["seal_sha256"]
+    return seals
+
+
 def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
     rows = expanded_run_order(manifest)
     root_path = output / "pre-execution-proof.json"
@@ -3058,18 +3310,41 @@ def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
         root_proof.get("binary_profile") == PRODUCTION_BINARY_PROFILE,
         "campaign did not freeze production release binaries",
     )
+    archive_tools = root_proof.get("archive_tools")
+    require(
+        isinstance(archive_tools, dict)
+        and isinstance(archive_tools.get("server_major"), int)
+        and all(
+            isinstance(archive_tools.get(name), dict)
+            and archive_tools[name].get("major") == archive_tools["server_major"]
+            and archive_tools[name].get("server_major") == archive_tools["server_major"]
+            and Path(str(archive_tools[name].get("binary", ""))).is_absolute()
+            for name in ("pg_dump", "pg_restore")
+        ),
+        "campaign archive-tool freeze is invalid",
+    )
     require(root_proof["binaries"] == {
         name: _fingerprint(_binary_path(name))
         for name in ("server", "worker", "cli")
     }, "packaged binaries changed after execution freeze")
     root_sha256 = sha256_file(root_path)
     expected_row_ids = {row["row_id"] for row in rows}
-    observed_row_ids = {
+    observed_directories = {
         path.name for path in output.iterdir()
         if path.is_dir() and not path.name.startswith(".")
-        and path.name != "spend-ledger"
     }
-    require(observed_row_ids == expected_row_ids, "missing or extra finalized rows")
+    auxiliary_directories = {
+        "spend-ledger", "case-banks", "case-construction",
+        "incomplete-case-banks", "case-leases",
+    }
+    require(
+        expected_row_ids <= observed_directories
+        and not (observed_directories - expected_row_ids - auxiliary_directories),
+        "missing or extra finalized rows",
+    )
+    case_bank_seals = _validate_retired_case_banks(output, rows)
+    require(len(case_bank_seals) == 12,
+            "P1-T6 aggregate requires exactly 12 retired case banks")
     reservation_paths = sorted((output / "spend-ledger").glob("*.json"))
     settlement_paths = [output / row["row_id"] / "spend-settlement.json" for row in rows]
     require(len(reservation_paths) == len(rows) and all(path.is_file() for path in settlement_paths),

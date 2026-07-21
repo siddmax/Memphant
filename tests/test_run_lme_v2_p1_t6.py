@@ -51,6 +51,11 @@ def _write_synthetic_root(campaign, output: Path, manifest: dict) -> None:
         ).stdout.strip(),
         "binaries": binaries,
         "binary_profile": campaign.PRODUCTION_BINARY_PROFILE,
+        "archive_tools": {
+            "server_major": 17,
+            "pg_dump": {"binary": "/pg_dump", "major": 17, "server_major": 17},
+            "pg_restore": {"binary": "/pg_restore", "major": 17, "server_major": 17},
+        },
         "deep_prompt_sha256": campaign.sha256_file(campaign.ROOT / "config/deep-recall-v1.txt"),
         "deep_config_hashes": {
             name: candidate["config_sha256"]
@@ -64,6 +69,39 @@ def _write_synthetic_root(campaign, output: Path, manifest: dict) -> None:
             case["id"]: {"synthetic": case["id"]} for case in manifest["selection"]["cases"]
         }},
     })
+
+
+def _write_synthetic_case_banks(campaign, output: Path, rows: list[dict]) -> None:
+    for case_id in sorted({row["question_id"] for row in rows}):
+        bank = output / "case-banks" / case_id
+        bank.mkdir(parents=True)
+        manifest = {
+            "archive_sha256": "a" * 64,
+            "logical_identity": {"sha256": "e" * 64},
+            "construction_proof_sha256": "c" * 64,
+            "case_contract_sha256": "f" * 64,
+        }
+        campaign.atomic_write_json(bank / "manifest.json", manifest)
+        seal = campaign._case_bank_seal(bank / "manifest.json")
+        row_hashes = {}
+        for row in [item for item in rows if item["question_id"] == case_id]:
+            row_dir = output / row["row_id"]
+            campaign.atomic_write_json(row_dir / "case-bank-seal.json", seal)
+            proof_path = row_dir / "row-proof.json"
+            proof = json.loads(proof_path.read_text())
+            proof["case_bank_seal_sha256"] = seal["seal_sha256"]
+            proof["artifact_hashes"] = campaign.artifact_hashes(
+                row_dir, exclude={"row-proof.json"}
+            )
+            campaign.atomic_write_json(proof_path, proof)
+            row_hashes[row["arm"]] = campaign.sha256_file(proof_path)
+        campaign.atomic_write_json(bank / "archive-retirement.json", {
+            "archive_sha256": manifest["archive_sha256"],
+            "case_bank_seal_sha256": seal["seal_sha256"],
+            "manifest_sha256": seal["manifest_sha256"],
+            "reason": "both_immutable_arm_rows_complete",
+            "row_proof_sha256": row_hashes,
+        })
 
 
 def _load_memory_adapter(monkeypatch):
@@ -331,13 +369,13 @@ def test_run_case_builds_once_restores_then_runs_two_key_local_clones(
         "isolation": {"tenant_id": "tenant"},
         "pairing": {"resource_count": 2, "worker": {"completed_sources": 2}},
     }
-    logical = {"tables": {}, "sha256": "l" * 64}
+    logical = {"tables": {}, "sha256": "e" * 64}
 
     def construct(*_args):
         events.append("construct")
         return construction
 
-    def dump(_url, bank, proof, _contract):
+    def dump(_url, bank, proof, _contract, **_kwargs):
         events.append("dump")
         bank.mkdir(parents=True, exist_ok=True)
         archive_body = b"archive"
@@ -348,11 +386,13 @@ def test_run_case_builds_once_restores_then_runs_two_key_local_clones(
             "format_version": campaign.BANK_FORMAT_VERSION,
             "archive": digest + ".dump", "archive_sha256": digest,
             "logical_identity": logical,
+            "construction_proof_sha256": "c" * 64,
+            "case_contract_sha256": campaign.canonical_sha256(_contract),
         }
         campaign.atomic_write_json(bank / "manifest.json", result)
         return result
 
-    def restore(_url, _bank, _contract):
+    def restore(_url, _bank, _contract, **_kwargs):
         events.append("restore")
         return {
             "logical_identity": logical,
@@ -364,7 +404,7 @@ def test_run_case_builds_once_restores_then_runs_two_key_local_clones(
         events.append(("clone", name, expected["sha256"]))
         return source_url.rsplit("/", 1)[0] + "/" + name
 
-    def execute(_directory, _materialized, root, row, _manifest):
+    def execute(_directory, _materialized, root, row, _manifest, bank_seal):
         events.append((
             "execute", row["arm"],
             campaign.os.environ["MEMPHANT_LME_PREBUILT_PROOF"],
@@ -372,17 +412,24 @@ def test_run_case_builds_once_restores_then_runs_two_key_local_clones(
         ))
         row_dir = root / row["row_id"]
         row_dir.mkdir()
+        campaign.atomic_write_json(row_dir / "case-bank-seal.json", bank_seal)
         campaign.atomic_write_json(row_dir / "row-proof.json", {
             "complete": True, "row": row, "query_only": True,
+            "case_bank_seal_sha256": bank_seal["seal_sha256"],
+            "artifact_hashes": campaign.artifact_hashes(row_dir),
         })
 
     monkeypatch.setattr(campaign, "_recover_orphan_clones", lambda *_args: events.append("recover"))
+    monkeypatch.setattr(campaign, "_case_archive_tools", lambda *_args: {
+        "pg_dump": {"binary": "/pg_dump"}, "pg_restore": {"binary": "/pg_restore"},
+    })
     monkeypatch.setattr(campaign, "_case_bank_contract", lambda *_args: {"question_id": case_id})
     monkeypatch.setattr(campaign, "_construct_case_source", construct)
     monkeypatch.setattr(campaign, "_dump_case_bank", dump)
     monkeypatch.setattr(campaign, "_reset_case_source", lambda _url: events.append("reset"))
     monkeypatch.setattr(campaign, "_restore_case_bank", restore)
     monkeypatch.setattr(campaign, "_clone_case_source", clone)
+    monkeypatch.setattr(campaign, "_verify_case_bank_seal", lambda *_args: None)
     monkeypatch.setattr(campaign, "_execute_case_row", execute)
     monkeypatch.setattr(campaign, "_database_key_count", lambda url: 0 if url == source_url else 1)
     monkeypatch.setattr(campaign, "_drop_local_database", lambda url: events.append(("drop", url)))
@@ -445,13 +492,27 @@ def test_run_case_reuses_archive_after_interruption_and_drops_failed_clone(
         "postgres_major": 18,
         "logical_identity": logical,
     })
+    bank_seal = campaign._case_bank_seal(bank / "manifest.json")
+    campaign.atomic_write_json(completed / "case-bank-seal.json", bank_seal)
+    completed_proof = json.loads((completed / "row-proof.json").read_text())
+    completed_proof.update({
+        "case_bank_seal_sha256": bank_seal["seal_sha256"],
+        "artifact_hashes": campaign.artifact_hashes(
+            completed, exclude={"row-proof.json"}
+        ),
+    })
+    campaign.atomic_write_json(completed / "row-proof.json", completed_proof)
     events = []
     monkeypatch.setattr(campaign, "_recover_orphan_clones", lambda *_args: events.append("recover"))
+    monkeypatch.setattr(campaign, "_case_archive_tools", lambda *_args: {
+        "pg_dump": {"binary": "/pg_dump"}, "pg_restore": {"binary": "/pg_restore"},
+    })
     monkeypatch.setattr(campaign, "_case_bank_contract", lambda *_args: {"question_id": case_id})
     monkeypatch.setattr(campaign, "_construct_case_source", lambda *_args: pytest.fail("archive resume rebuilt construction"))
     monkeypatch.setattr(campaign, "_dump_case_bank", lambda *_args: pytest.fail("archive resume redumped construction"))
-    monkeypatch.setattr(campaign, "_restore_case_bank", lambda *_args: events.append("restore") or json.loads((bank / "manifest.json").read_text()))
+    monkeypatch.setattr(campaign, "_restore_case_bank", lambda *_args, **_kwargs: events.append("restore") or json.loads((bank / "manifest.json").read_text()))
     monkeypatch.setattr(campaign, "_clone_case_source", lambda _url, name, _identity: source_url.rsplit("/", 1)[0] + "/" + name)
+    monkeypatch.setattr(campaign, "_verify_case_bank_seal", lambda *_args: None)
     monkeypatch.setattr(campaign, "_database_key_count", lambda url: 0 if url == source_url else 1)
     monkeypatch.setattr(campaign, "_drop_local_database", lambda url: events.append(("drop", url)))
     monkeypatch.setattr(campaign, "_execute_case_row", lambda *_args: (_ for _ in ()).throw(RuntimeError("synthetic row failure")))
@@ -481,6 +542,11 @@ def test_run_campaign_uses_one_scratch_lifecycle_per_case(
         "python": {"packages_sha256": "p" * 64},
     })
     monkeypatch.setattr(campaign, "verify_endpoint_inventory", lambda _manifest: {})
+    monkeypatch.setattr(campaign, "_resolve_archive_tools", lambda _url: {
+        "server_major": 17,
+        "pg_dump": {"binary": "/pg_dump", "major": 17, "server_major": 17},
+        "pg_restore": {"binary": "/pg_restore", "major": 17, "server_major": 17},
+    })
     monkeypatch.setattr(
         campaign,
         "_fingerprint",
@@ -514,6 +580,73 @@ def test_run_campaign_uses_one_scratch_lifecycle_per_case(
     assert len(case_commands) == 12
     assert all("_run-case" in command and "_run-row" not in command for command in case_commands)
     assert [command[command.index("--case-id") + 1] for command in case_commands] == manifest["run_order"]["case_order"]
+
+
+def test_archive_tools_resolve_matching_major_before_construction(monkeypatch) -> None:
+    campaign = _load()
+    source = "postgres://bench:secret@127.0.0.1:5432/memphant_scratch_1_2"
+    monkeypatch.setattr(campaign, "_postgres_server_major", lambda _url: 17)
+    monkeypatch.setattr(campaign, "_archive_tool_candidates", lambda name, major: [
+        f"/usr/bin/{name}", f"/opt/homebrew/opt/postgresql@{major}/bin/{name}",
+    ])
+
+    def identity(binary, _url):
+        major = 17 if "postgresql@17" in binary else 14
+        return {"binary": binary, "version": f"PostgreSQL {major}", "major": major, "server_major": 17}
+
+    monkeypatch.setattr(campaign, "_postgres_tool_identity", identity)
+    tools = campaign._resolve_archive_tools(source)
+    assert tools["server_major"] == 17
+    assert tools["pg_dump"]["binary"] == "/opt/homebrew/opt/postgresql@17/bin/pg_dump"
+    assert tools["pg_restore"]["binary"] == "/opt/homebrew/opt/postgresql@17/bin/pg_restore"
+
+
+def test_case_lease_rejects_concurrent_resume_before_recovery(
+    tmp_path: Path, monkeypatch
+) -> None:
+    campaign = _load()
+    monkeypatch.setattr(
+        campaign, "_run_case_locked",
+        lambda *_args: pytest.fail("concurrent resume reached orphan recovery"),
+    )
+    with campaign._case_lease(tmp_path, "19367bc7"):
+        with pytest.raises(RuntimeError, match="case is already active"):
+            campaign._run_case(
+                tmp_path, tmp_path, tmp_path, "19367bc7", {}
+            )
+
+
+def test_completed_fast_row_rejects_coherent_case_bank_rewrite(tmp_path: Path) -> None:
+    campaign = _load()
+    row = {"question_id": "19367bc7", "arm": "fast", "row_id": "0001-fast-19367bc7"}
+    row_dir = tmp_path / row["row_id"]
+    row_dir.mkdir()
+    old_manifest = tmp_path / "old-manifest.json"
+    campaign.atomic_write_json(old_manifest, {
+        "archive_sha256": "a" * 64,
+        "logical_identity": {"sha256": "e" * 64},
+        "construction_proof_sha256": "c" * 64,
+        "case_contract_sha256": "f" * 64,
+    })
+    old_seal = campaign._case_bank_seal(old_manifest)
+    campaign.atomic_write_json(row_dir / "case-bank-seal.json", old_seal)
+    campaign.atomic_write_json(row_dir / "row-proof.json", {
+        "complete": True,
+        "row": row,
+        "case_bank_seal_sha256": old_seal["seal_sha256"],
+        "artifact_hashes": campaign.artifact_hashes(row_dir),
+    })
+    replacement = tmp_path / "replacement-manifest.json"
+    campaign.atomic_write_json(replacement, {
+        "archive_sha256": "b" * 64,
+        "logical_identity": {"sha256": "e" * 64},
+        "construction_proof_sha256": "d" * 64,
+        "case_contract_sha256": "f" * 64,
+    })
+    with pytest.raises(RuntimeError, match="case bank seal drift"):
+        campaign._validate_completed_case_row(
+            tmp_path, row, campaign._case_bank_seal(replacement)
+        )
 
 
 def test_execution_paths_are_absolute_before_official_cwd_changes(
@@ -716,6 +849,7 @@ def test_resume_keeps_initial_inventory_evidence_when_material_contract_is_stabl
         "python_environment": {"packages_sha256": "p"},
         "environment_contract_sha256": "j",
         "binary_profile": "release",
+        "archive_tools": {"server_major": 17},
         "preexisting_campaign_liability": {"total_micros": 320666},
     }
     frozen = {**common, "endpoint_hashes": {
@@ -1227,6 +1361,7 @@ def test_synthetic_all_failure_aggregate_is_complete_and_zero_scored(tmp_path: P
             row_dir, row, reservation_path, "operational_failure",
             {"failure_reason": "synthetic"}, orphaned=True,
         )
+    _write_synthetic_case_banks(campaign, tmp_path, rows)
     aggregate = campaign.aggregate_campaign(tmp_path, manifest)
     assert aggregate["decision"] == "retire_deep_product_code"
     assert aggregate["advance_to_separate_confirmation"] == []
@@ -1312,6 +1447,7 @@ def test_synthetic_success_aggregate_applies_registered_ranking(tmp_path: Path) 
             "judge_route_sha256": campaign.canonical_sha256([]),
             "official_score_sha256": campaign.sha256_file(score_path),
         })
+    _write_synthetic_case_banks(campaign, tmp_path, rows)
     aggregate = campaign.aggregate_campaign(tmp_path, manifest)
     assert all(candidate["feasible"] for candidate in aggregate["candidates"].values())
     assert all(candidate["predicates"]["no_context_truncation"]
