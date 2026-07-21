@@ -133,10 +133,15 @@
 
 ## Corrected P1-T6 Task 4 - build-once aggregate evidence
 
-- Status: reviewer follow-up P1 fixed with focused verification green; re-review pending
+- Status: completed and approved
 - Base: `0c67c13ad50177973ca62fc7fda7da88391c6949`
 - Brief: `.superpowers/sdd/task-4-brief.md`
 - Report: `.superpowers/sdd/task-4-report.md`
+- Implementation commit: `c1d6cf0591f13df739114f0ef3248c20c7964df5`
+- Hardening commits: `25a70807e3256777bc738843cbf7909db36f42bd`, `4cceafaf4d3a30de564e536e01f6ce6c338c34bb`
+- Review package: `.superpowers/sdd/review-0c67c13a..4cceafaf.diff`
+- Reviewer: `/root/t6_efficient_task4_review`
+- Final review: approved with no P0-P2 findings; 78 focused tests and 15 adapter tests passed, 1 deferred live integration skip
 - Contract: exactly 12 Fast/Sonnet pairs, 12 unique sealed construction proofs, and 24 distinct case/arm clone identities
 - Construction duration/cost is reported separately from Fast/Deep query recall and generation latency/cost
 - Stopped diagnostic root `run-408363c9` remains immutable and ineligible
