@@ -141,6 +141,13 @@ def test_campaign_is_single_candidate_paired_gate() -> None:
     }
     assert manifest["run_order"]["arm_order_per_case"] == ["fast", "sonnet"]
     assert manifest["protocol"]["selected_deep_arm"] == "sonnet"
+    rows = campaign.expanded_run_order(manifest)
+    assert [row["sequence"] for row in rows] == list(range(1, 25))
+    assert {row["question_id"] for row in rows} == EXPECTED_IDS
+    for question_id in sorted(EXPECTED_IDS):
+        question_rows = [row for row in rows if row["question_id"] == question_id]
+        assert [row["arm"] for row in question_rows] == ["fast", "sonnet"]
+        assert len({row["row_id"] for row in question_rows}) == 2
 
 
 def test_minimal_acquisition_excludes_trajectory_screenshot_archives() -> None:
@@ -407,7 +414,7 @@ def test_fresh_reservations_plus_prior_attempts_stay_below_campaign_ceiling() ->
     assert fresh + prior["total_micros"] == 6_021_284
     assert campaign.usd_to_micros(
         manifest["campaign_spend"]["hard_ceiling_usd"]
-    ) - fresh - prior["total_micros"] == 9_478_716
+    ) - fresh - prior["total_micros"] == 228_716
 
 
 def test_settled_proxy_cost_must_fit_its_pre_dispatch_reservation() -> None:
@@ -796,11 +803,21 @@ def test_deep_receipts_must_exactly_reconcile_ids_route_tokens_and_cost(
     ]
 
 
-def test_manifest_binds_selected_candidate_to_the_runtime_config_hash() -> None:
+def test_manifest_binds_all_candidate_metadata_to_runtime_config_hashes() -> None:
     campaign = _load()
-    protocol = campaign.load_campaign_manifest()["protocol"]
-    candidate = protocol["deep_candidates"][protocol["selected_deep_arm"]]
-    assert campaign._expected_deep_config_hash(candidate) == candidate["config_sha256"]
+    manifest = campaign.load_campaign_manifest()
+    protocol = manifest["protocol"]
+    assert protocol["selected_deep_arm"] == "sonnet"
+    assert {
+        name: campaign._expected_deep_config_hash(candidate)
+        for name, candidate in protocol["deep_candidates"].items()
+    } == {
+        name: candidate["config_sha256"]
+        for name, candidate in protocol["deep_candidates"].items()
+    }
+    protocol["deep_candidates"]["luna"]["config_sha256"] = "0" * 64
+    with pytest.raises(RuntimeError, match="Deep runtime config hash drift: luna"):
+        campaign.verify_campaign_manifest(manifest)
 
 
 def test_deep_receipt_archive_is_sanitized_and_exact(tmp_path: Path, monkeypatch) -> None:
@@ -851,7 +868,6 @@ def test_deep_receipt_archive_is_sanitized_and_exact(tmp_path: Path, monkeypatch
     assert "secret-key" not in archived
 
 
-@pytest.mark.skip(reason="Task 4 rebinds aggregate proofs to the selected paired arm.")
 def test_synthetic_all_failure_aggregate_is_complete_and_zero_scored(tmp_path: Path) -> None:
     campaign = _load()
     manifest = campaign.load_campaign_manifest()
@@ -872,6 +888,7 @@ def test_synthetic_all_failure_aggregate_is_complete_and_zero_scored(tmp_path: P
     aggregate = campaign.aggregate_campaign(tmp_path, manifest)
     assert aggregate["decision"] == "retire_deep_product_code"
     assert aggregate["advance_to_separate_confirmation"] == []
+    assert set(aggregate["candidates"]) == {"sonnet"}
     assert all(not candidate["feasible"] for candidate in aggregate["candidates"].values())
     assert all(
         pair["deep_score"] == 0.0
@@ -880,7 +897,6 @@ def test_synthetic_all_failure_aggregate_is_complete_and_zero_scored(tmp_path: P
     )
 
 
-@pytest.mark.skip(reason="Task 4 rebinds aggregate proofs to the selected paired arm.")
 def test_synthetic_success_aggregate_applies_registered_ranking(tmp_path: Path) -> None:
     campaign = _load()
     manifest = campaign.load_campaign_manifest()
@@ -958,7 +974,8 @@ def test_synthetic_success_aggregate_applies_registered_ranking(tmp_path: Path) 
     assert all(candidate["feasible"] for candidate in aggregate["candidates"].values())
     assert all(candidate["predicates"]["no_context_truncation"]
                for candidate in aggregate["candidates"].values())
-    assert aggregate["advance_to_separate_confirmation"] == ["sonnet", "luna"]
+    assert set(aggregate["candidates"]) == {"sonnet"}
+    assert aggregate["advance_to_separate_confirmation"] == ["sonnet"]
     assert aggregate["decision"] == "confirmation_manifest_required"
 
 

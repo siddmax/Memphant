@@ -24,20 +24,43 @@ Deep arm. Luna and Sol remain an inactive researched shortlist.
   micros for 24 reader/judge reservations.
 - Prior liability now includes the stopped `run-408363c9` reader's settled
   3,018 micros: 7,542 settled plus 316,142 unresolved, 323,684 micros total.
-- Cumulative maximum is 6,021,284 micros under the 15,500,000-micro hard cap.
+- Cumulative maximum is 6,021,284 micros under the 6,250,000-micro hard cap.
 - Amendment 11 binds the manifest and stopped-root hashes and preregisters the
   required efficiency checkpoint and stop rule.
 
 ## Verification
 
-- `python3 -m pytest tests/test_run_lme_v2_p1_t6.py -q` — 46 passed, 2 skipped.
+- Initial `python3 -m pytest tests/test_run_lme_v2_p1_t6.py -q` — 46 passed,
+  2 skipped; superseded by the review-fix verification below.
 - `python3 -m json.tool benchmarks/manifests/longmemeval_v2.p1_t6.json`.
 - `git diff --check`.
 
 ## Self-review
 
-The runner change is restricted to manifest verification; aggregate selection
-remains deliberately deferred to Task 4. Its two legacy four-arm synthetic
-aggregate tests are explicitly skipped until Task 4 replaces them with paired
-aggregate contracts. No treatment was dispatched, no historical artifact was
-changed, and the unrelated handoff edit was left unstaged.
+Aggregation now follows the selected paired arm and the restored synthetic
+tests exercise a valid 24-row root. All candidate metadata hashes remain
+verified even though only Sonnet can execute. No treatment was dispatched, no
+historical artifact was changed, and the unrelated handoff edit was left
+unstaged.
+
+## Review-fix follow-up
+
+The controller audit found that `aggregate_campaign()` still iterated the
+superseded Sonnet/Luna/Sol set, so a valid 24-row root raised `KeyError` for
+Luna. The fix binds aggregation and confirmation advance directly to
+`protocol.selected_deep_arm`, restores both synthetic aggregate tests, verifies
+all three immutable candidate config hashes, restores full 24-row ordering
+coverage, and tightens the hard ceiling to 6,250,000 micros.
+
+### Test-first evidence
+
+Before the production fix, `python3 -m pytest tests/test_run_lme_v2_p1_t6.py
+-q` failed as intended: 4 failed, 44 passed. The failures covered the old
+15.5-dollar ceiling, inactive Luna config-hash drift going unchecked, and both
+valid 24-row aggregate fixtures raising `KeyError` for Luna.
+
+### Verification
+
+- `python3 -m pytest tests/test_run_lme_v2_p1_t6.py -q` — 48 passed in 3.96s.
+- `python3 -m json.tool benchmarks/manifests/longmemeval_v2.p1_t6.json >/dev/null` — passed.
+- `git diff --check` — passed.

@@ -462,7 +462,7 @@ def verify_campaign_manifest(manifest: dict) -> dict[str, int]:
     require(manifest["run_order"]["arm_order_per_case"] == ["fast", selected_deep_arm],
             "arm order drift")
     spend = manifest["campaign_spend"]
-    require(spend["hard_ceiling_usd"] == 15.5, "campaign spend ceiling drift")
+    require(spend["hard_ceiling_usd"] == 6.25, "campaign spend ceiling drift")
     preexisting = spend["preexisting_liability"]
     require(preexisting["settled_micros"] == 7542
             and preexisting["unsettled_upper_bound_micros"] == 316142
@@ -508,9 +508,9 @@ def verify_campaign_manifest(manifest: dict) -> dict[str, int]:
             "completion": reader["completion_price_micros_per_million"] / 1_000_000,
         },
     }, "reader dispatch policy drift")
-    selected_candidate = protocol["deep_candidates"][selected_deep_arm]
-    require(selected_candidate["config_sha256"] == _expected_deep_config_hash(selected_candidate),
-            "selected Deep runtime config hash drift")
+    for name, candidate in protocol["deep_candidates"].items():
+        require(candidate["config_sha256"] == _expected_deep_config_hash(candidate),
+                f"Deep runtime config hash drift: {name}")
     return {"cases": 12, "rows": 24, "arms": 2, "constructions": 12}
 
 
@@ -2429,9 +2429,10 @@ def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
             "memory_proof_sha256": proof["memory_proof_sha256"],
         }
 
+    selected_deep_arm = manifest["protocol"]["selected_deep_arm"]
     candidates: dict[str, dict[str, object]] = {}
     cases = {case["id"]: case for case in manifest["selection"]["cases"]}
-    for arm in ("sonnet", "luna", "sol"):
+    for arm in (selected_deep_arm,):
         pairs = []
         for question_id in manifest["run_order"]["case_order"]:
             fast = records[(question_id, "fast")]
@@ -2488,20 +2489,7 @@ def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
             "failed_predicates": [name for name, passed in predicates.items() if not passed],
             "feasible": all(predicates.values()), "pairs": pairs,
         }
-    feasible = [arm for arm, result in candidates.items() if result["feasible"]]
-    feasible.sort(key=lambda arm: (
-        -candidates[arm]["mean_score"], candidates[arm]["deep_cost_micros"]["mean"],
-        candidates[arm]["latency_ms"]["p95"],
-    ))
-    advance: list[str] = feasible[:1]
-    if feasible:
-        top_correct = candidates[feasible[0]]["mean_score"] * 12
-        alternatives = [
-            arm for arm in feasible[1:]
-            if top_correct - candidates[arm]["mean_score"] * 12 <= 1
-        ]
-        if alternatives:
-            advance.append(min(alternatives, key=lambda arm: candidates[arm]["deep_cost_micros"]["mean"]))
+    advance = [selected_deep_arm] if candidates[selected_deep_arm]["feasible"] else []
     aggregate = {
         "campaign": manifest["campaign"], "manifest_sha256": sha256_file(CAMPAIGN_MANIFEST),
         "primary_metric": "paired official per-question binary score",

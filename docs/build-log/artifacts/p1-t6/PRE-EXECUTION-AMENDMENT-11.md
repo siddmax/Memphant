@@ -18,7 +18,7 @@ The stopped `run-408363c9` root is diagnostic-only and is never replayed. Its
 invalidation proof SHA-256 is
 `7e360eadceead985dbc729a935cbf8d276abde27a8b016c262b49c961a210bad`.
 The frozen paired manifest SHA-256 is
-`032199092ff4bb42694bf8b5ab22c8a23046b461bf84cb6ddec4192a7694870a`.
+`0cbc32d51b8ec665d9c1b4ac7dcdc8dec1f975ad63b830501846b797e9bdda6a`.
 
 ## Cumulative hard-cap contract
 
@@ -27,8 +27,8 @@ prior liability. Prior liability is therefore 7,542 settled micros plus
 316,142 unresolved upper-bound micros, or 323,684 micros total. Fresh
 reservations are 3,600,000 micros for 12 bounded Deep dispatches and
 2,097,600 micros for 24 reader/judge reservations, or 5,697,600 micros.
-The cumulative maximum is 6,021,284 micros, below the unchanged 15,500,000
-micro-dollar hard ceiling, with 9,478,716 micros headroom. The runner must
+The cumulative maximum is 6,021,284 micros, below the tightened 6,250,000
+micro-dollar hard ceiling, with 228,716 micros headroom. The runner must
 carry all settled and unsettled prior liability before every reservation and
 fail closed at that ceiling.
 
