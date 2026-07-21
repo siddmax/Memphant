@@ -41,9 +41,12 @@ def test_longmemeval_v2_release_is_immutably_pinned_and_native_scored():
         "official evaluation/harness.py at code.commit"
     )
     assert lock["dataset"]["files"]["trajectories.jsonl"]["bytes"] == 1_195_604_539
-    assert lock["dataset"]["files"]["trajectory_screenshots/web_screenshots.tar.gz"][
-        "bytes"
-    ] == 2_562_302_847
+    assert (
+        lock["dataset"]["files"]["trajectory_screenshots/web_screenshots.tar.gz"][
+            "bytes"
+        ]
+        == 2_562_302_847
+    )
 
 
 def test_release_urls_are_revision_pinned():
@@ -144,7 +147,9 @@ def load_memphant_adapter(monkeypatch):
     memory_module.register_memory = register_memory
     monkeypatch.setitem(sys.modules, "memory_modules", package)
     monkeypatch.setitem(sys.modules, "memory_modules.memory", memory_module)
-    spec = importlib.util.spec_from_file_location("fixture_memphant_memory", MEMPHANT_ADAPTER)
+    spec = importlib.util.spec_from_file_location(
+        "fixture_memphant_memory", MEMPHANT_ADAPTER
+    )
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -259,7 +264,10 @@ def test_memphant_memory_uses_isolated_rest_scope_and_emits_trace_proof(
             }
         if path == "/v1/episodes":
             resource_count += 1
-            return {"resource_id": f"resource-{resource_count}", "enqueued": ["compile"]}
+            return {
+                "resource_id": f"resource-{resource_count}",
+                "enqueued": ["compile"],
+            }
         if path == "/v1/recall":
             return {
                 "trace_id": "00000000-0000-0000-0000-000000000404",
@@ -299,15 +307,20 @@ def test_memphant_memory_uses_isolated_rest_scope_and_emits_trace_proof(
             "citations": [{"unit_id": "unit-1", "resource_id": "resource-1"}],
         }
 
-    monkeypatch.setattr(adapter._JsonClient, "request", lambda self, *a, **k: fake_request(*a, **k))
     monkeypatch.setattr(
-        adapter,
-        "_drain_worker",
-        lambda worker_bin, database_url, expected: {
+        adapter._JsonClient, "request", lambda self, *a, **k: fake_request(*a, **k)
+    )
+    worker_calls = []
+
+    def fake_drain_worker(worker_bin, database_url, expected):
+        worker_calls.append((worker_bin, database_url, expected))
+        return {
             "completed_sources": expected,
             "stdout_sha256": "a" * 64,
-        },
-    )
+            "stderr_sha256": "b" * 64,
+        }
+
+    monkeypatch.setattr(adapter, "_drain_worker", fake_drain_worker)
     schema_snapshots = iter(
         [
             {
@@ -320,7 +333,9 @@ def test_memphant_memory_uses_isolated_rest_scope_and_emits_trace_proof(
             },
         ]
     )
-    monkeypatch.setattr(adapter, "_schema_snapshot", lambda database_url: next(schema_snapshots))
+    monkeypatch.setattr(
+        adapter, "_schema_snapshot", lambda database_url: next(schema_snapshots)
+    )
     config = json.loads(MEMPHANT_CONFIG.read_text())["memory_params"]
     memory = registry["memphant"](config)
     memory.insert(
@@ -351,6 +366,7 @@ def test_memphant_memory_uses_isolated_rest_scope_and_emits_trace_proof(
         question_id="question-1",
         question_item={"answer": "GOLD MUST NOT LEAK", "eval_function": "secret"},
     )
+    construction = memory.prepare()
     context = memory.query("What value was retained?")
     metadata = memory.post_query_hook(
         query="What value was retained?", query_image=None, memory_context=context
@@ -370,7 +386,9 @@ def test_memphant_memory_uses_isolated_rest_scope_and_emits_trace_proof(
     assert recall["limit"] == 20
     assert recall["budget_tokens"] == 32768
     assert "allowed_scope_ids" not in recall
-    assert next(timeout for _, path, _, timeout in requests if path == "/v1/recall") == 600
+    assert (
+        next(timeout for _, path, _, timeout in requests if path == "/v1/recall") == 600
+    )
     assert metadata["trace_id"] == "00000000-0000-0000-0000-000000000404"
     assert len(metadata["trace_sha256"]) == len(metadata["context_sha256"]) == 64
     proof = json.loads(next((tmp_path / "proof").glob("*.json")).read_text())
@@ -384,11 +402,289 @@ def test_memphant_memory_uses_isolated_rest_scope_and_emits_trace_proof(
     assert proof["public"]["recall_response"]["trace_id"] == metadata["trace_id"]
     assert proof["public"]["trace"]["id"] == metadata["trace_id"]
     assert set(proof["contract"]["binaries"]) == {"server", "cli", "worker"}
-    assert proof["contract"]["binaries"]["server"]["sha256"] == hashlib.sha256(
-        b"fixture-server"
-    ).hexdigest()
+    assert (
+        proof["contract"]["binaries"]["server"]["sha256"]
+        == hashlib.sha256(b"fixture-server").hexdigest()
+    )
     assert proof["contract"]["recall_request_timeout_seconds"] == 600
     assert any("create-tenant" in call for call in cli_calls)
+    assert len(worker_calls) == 1
+    assert construction["pairing"]["trajectory_count"] == 1
+    assert construction["pairing"]["resource_count"] == 1
+    assert construction["pairing"]["worker"]["completed_sources"] == 1
+    assert construction["isolation"]["tenant_id"] == memory.tenant_id
+    assert construction["isolation"]["context"] == memory.context
+    assert "api_key" not in json.dumps(construction)
+
+
+def test_memphant_query_only_reuses_frozen_construction_without_writes(
+    monkeypatch, tmp_path
+):
+    adapter, registry = load_memphant_adapter(monkeypatch)
+    cli_bin = tmp_path / "cli"
+    server_bin = tmp_path / "server"
+    worker_bin = tmp_path / "worker"
+    cli_bin.write_bytes(b"fixture-cli")
+    server_bin.write_bytes(b"fixture-server")
+    worker_bin.write_bytes(b"fixture-worker")
+    for key, value in {
+        "MEMPHANT_SCRATCH_ACTIVE": "1",
+        "MEMPHANT_TEST_DATABASE_URL": "postgres://fixture",
+        "MEMPHANT_LME_SERVER_URL": "http://fixture",
+        "MEMPHANT_LME_PROOF_DIR": str(tmp_path / "proof"),
+        "MEMPHANT_CLI_BIN": str(cli_bin),
+        "MEMPHANT_LME_SERVER_BIN": str(server_bin),
+        "MEMPHANT_LME_WORKER_BIN": str(worker_bin),
+        "MEMPHANT_LME_RUN_ID": "fixture",
+    }.items():
+        monkeypatch.setenv(key, value)
+
+    tenant_id = "00000000-0000-0000-0000-000000000111"
+    frozen_context = {
+        "subject_id": "00000000-0000-0000-0000-000000000201",
+        "scope_id": "00000000-0000-0000-0000-000000000202",
+        "actor_id": "00000000-0000-0000-0000-000000000203",
+        "agent_node_id": "00000000-0000-0000-0000-000000000204",
+        "subject_generation": 0,
+    }
+    cli_actions = []
+
+    def fake_provision_tenant(**_kwargs):
+        cli_actions.append("create-tenant")
+        return tenant_id, "mk_source"
+
+    def fake_create_api_key(**kwargs):
+        cli_actions.append(("create-key", kwargs["tenant_id"]))
+        return "mk_clone"
+
+    monkeypatch.setattr(adapter, "_provision_tenant", fake_provision_tenant)
+    monkeypatch.setattr(adapter, "_create_api_key", fake_create_api_key)
+    monkeypatch.setattr(
+        adapter,
+        "_provision_context",
+        lambda _client, _instance_id: dict(frozen_context),
+    )
+    worker_calls = []
+    monkeypatch.setattr(
+        adapter,
+        "_drain_worker",
+        lambda worker_bin, database_url, expected: worker_calls.append(expected)
+        or {
+            "completed_sources": expected,
+            "stdout_sha256": "a" * 64,
+            "stderr_sha256": "b" * 64,
+        },
+    )
+    requests = []
+
+    def fake_request(_self, method, path, payload=None, *, timeout_seconds=None):
+        requests.append((method, path, payload, timeout_seconds))
+        if path == "/v1/episodes":
+            return {"resource_id": "resource-1", "enqueued": ["compile"]}
+        if path == "/v1/recall":
+            return {
+                "trace_id": "00000000-0000-0000-0000-000000000404",
+                "items": [],
+                "citations": [],
+                "degraded": False,
+            }
+        assert path.startswith("/v1/traces/")
+        return {
+            "id": "00000000-0000-0000-0000-000000000404",
+            "tenant_id": tenant_id,
+            "scope_id": frozen_context["scope_id"],
+            "actor_id": frozen_context["actor_id"],
+            "query_hash": "native-query-hash",
+            "context_items": [],
+            "citations": [],
+        }
+
+    monkeypatch.setattr(adapter._JsonClient, "request", fake_request)
+    snapshots = iter(
+        [
+            {"retrieval_trace": {"rows": 0, "content_md5": "before"}},
+            {"retrieval_trace": {"rows": 1, "content_md5": "after"}},
+        ]
+    )
+    monkeypatch.setattr(
+        adapter, "_schema_snapshot", lambda _database_url: next(snapshots)
+    )
+    trajectory = {
+        "id": "trajectory-1",
+        "goal": "Find the setting",
+        "outcome": "success",
+        "start_url": "https://example.test",
+        "states": [
+            {
+                "url": "https://example.test/one",
+                "action": "read value",
+                "thought": None,
+                "accessibility_tree": "Value is retained",
+                "screenshot": "unused.png",
+            }
+        ],
+    }
+    source_config = json.loads(MEMPHANT_CONFIG.read_text())["memory_params"]
+    source_config["mode"] = "fast"
+    source = registry["memphant"](source_config)
+    source.insert(trajectory)
+    construction = source.prepare()
+    construction_path = tmp_path / "construction.json"
+    construction_path.write_text(json.dumps(construction))
+    monkeypatch.setenv("MEMPHANT_LME_PREBUILT_PROOF", str(construction_path))
+
+    clone_config = dict(source_config)
+    clone_config["mode"] = "deep"
+    clone = registry["memphant"](clone_config)
+    assert clone.tenant_id == source.tenant_id
+    assert clone.context == source.context
+    clone.insert(trajectory)
+    clone.set_query_context(
+        question_id="question-1", question_item={"answer": "secret"}
+    )
+    context = clone.query("What value was retained?")
+    metadata = clone.post_query_hook(
+        query="What value was retained?", query_image=None, memory_context=context
+    )
+
+    assert worker_calls == [1]
+    assert [path for _, path, _, _ in requests].count("/v1/episodes") == 1
+    assert cli_actions == ["create-tenant", ("create-key", tenant_id)]
+    assert metadata["query_only"] is True
+    assert (
+        metadata["construction_proof_sha256"]
+        == construction["construction_proof_sha256"]
+    )
+    proof = json.loads(next((tmp_path / "proof").glob("*.json")).read_text())
+    assert proof["pairing"]["query_only"] is True
+    assert proof["pairing"]["resource_count"] == 1
+    assert proof["pairing"]["worker"]["completed_sources"] == 1
+    assert (
+        proof["pairing"]["construction_proof_sha256"]
+        == construction["construction_proof_sha256"]
+    )
+    assert "retains" not in proof["pairing"]
+
+
+def test_memphant_query_only_fails_closed_on_tampered_or_out_of_order_proof(
+    monkeypatch, tmp_path
+):
+    adapter, registry = load_memphant_adapter(monkeypatch)
+    cli_bin = tmp_path / "cli"
+    server_bin = tmp_path / "server"
+    worker_bin = tmp_path / "worker"
+    for path in (cli_bin, server_bin, worker_bin):
+        path.write_bytes(b"fixture")
+    for key, value in {
+        "MEMPHANT_SCRATCH_ACTIVE": "1",
+        "MEMPHANT_TEST_DATABASE_URL": "postgres://fixture",
+        "MEMPHANT_LME_SERVER_URL": "http://fixture",
+        "MEMPHANT_LME_PROOF_DIR": str(tmp_path / "proof"),
+        "MEMPHANT_CLI_BIN": str(cli_bin),
+        "MEMPHANT_LME_SERVER_BIN": str(server_bin),
+        "MEMPHANT_LME_WORKER_BIN": str(worker_bin),
+        "MEMPHANT_LME_RUN_ID": "fixture",
+    }.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(adapter, "_create_api_key", lambda **_kwargs: "mk_clone")
+    trajectory = {
+        "id": "trajectory-1",
+        "goal": "goal",
+        "outcome": None,
+        "states": [
+            {
+                "url": "https://example.test",
+                "action": None,
+                "thought": None,
+                "accessibility_tree": "state",
+            }
+        ],
+    }
+    config = json.loads(MEMPHANT_CONFIG.read_text())["memory_params"]
+    core = {
+        "schema_version": 1,
+        "contract": {
+            "adapter_sha256": hashlib.sha256(MEMPHANT_ADAPTER.read_bytes()).hexdigest(),
+            "construction_params_sha256": adapter._construction_params_sha256(config),
+            "binaries": {
+                "server": adapter._binary_fingerprint(str(server_bin)),
+                "cli": adapter._binary_fingerprint(str(cli_bin)),
+                "worker": adapter._binary_fingerprint(str(worker_bin)),
+            },
+        },
+        "isolation": {
+            "tenant_id": "00000000-0000-0000-0000-000000000111",
+            "instance_id": "frozen-instance",
+            "context": {
+                "subject_id": "00000000-0000-0000-0000-000000000201",
+                "scope_id": "00000000-0000-0000-0000-000000000202",
+                "actor_id": "00000000-0000-0000-0000-000000000203",
+                "agent_node_id": "00000000-0000-0000-0000-000000000204",
+                "subject_generation": 0,
+            },
+        },
+        "pairing": {
+            "trajectory_count": 1,
+            "resource_count": 1,
+            "worker": {
+                "completed_sources": 1,
+                "stdout_sha256": "d" * 64,
+                "stderr_sha256": "e" * 64,
+            },
+            "retains": [
+                {
+                    "trajectory_id": "trajectory-2",
+                    "trajectory_sha256": adapter._sha256_json(
+                        {**trajectory, "id": "trajectory-2"}
+                    ),
+                    "state_count": 1,
+                    "canonical_body_bytes": 1,
+                    "canonical_body_sha256": "f" * 64,
+                    "fragments": [
+                        {
+                            "fragment_index": 1,
+                            "resource_id": "resource-1",
+                            "body_bytes": 1,
+                            "serialized_request_bytes": 1,
+                            "resource_body_sha256": "1" * 64,
+                            "request_sha256": "2" * 64,
+                            "idempotency_key_sha256": "3" * 64,
+                            "response_sha256": "4" * 64,
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+    sealed = {
+        **core,
+        "construction_proof_sha256": adapter._sha256_json(core),
+    }
+    path = tmp_path / "construction.json"
+    path.write_text(json.dumps(sealed))
+    monkeypatch.setenv("MEMPHANT_LME_PREBUILT_PROOF", str(path))
+    memory = registry["memphant"](config)
+
+    with pytest.raises(RuntimeError, match="trajectory order or identity mismatch"):
+        memory.insert(trajectory)
+
+    sealed["pairing"]["resource_count"] = 2
+    path.write_text(json.dumps(sealed))
+    with pytest.raises(RuntimeError, match="construction proof sha256 mismatch"):
+        registry["memphant"](config)
+
+    sealed["pairing"]["resource_count"] = 1
+    sealed["contract"]["adapter_sha256"] = "0" * 64
+    sealed["construction_proof_sha256"] = adapter._sha256_json(
+        {
+            key: value
+            for key, value in sealed.items()
+            if key != "construction_proof_sha256"
+        }
+    )
+    path.write_text(json.dumps(sealed))
+    with pytest.raises(RuntimeError, match="construction proof adapter mismatch"):
+        registry["memphant"](config)
 
 
 def test_memphant_memory_fails_closed_when_worker_pairing_is_incomplete(
@@ -428,11 +724,16 @@ def test_memphant_memory_fails_closed_when_worker_pairing_is_incomplete(
             "subject_generation": 0,
         },
     )
-    memory = registry["memphant"](json.loads(MEMPHANT_CONFIG.read_text())["memory_params"])
+    memory = registry["memphant"](
+        json.loads(MEMPHANT_CONFIG.read_text())["memory_params"]
+    )
     monkeypatch.setattr(
         memory.client,
         "request",
-        lambda method, path, payload=None: {"resource_id": "resource", "enqueued": ["compile"]},
+        lambda method, path, payload=None: {
+            "resource_id": "resource",
+            "enqueued": ["compile"],
+        },
     )
     monkeypatch.setattr(
         adapter,
@@ -464,7 +765,9 @@ def test_memphant_memory_fails_closed_when_worker_pairing_is_incomplete(
         memory.query("query")
 
 
-def test_memphant_harness_command_bootstraps_adapter_without_patching_upstream(tmp_path):
+def test_memphant_harness_command_bootstraps_adapter_without_patching_upstream(
+    tmp_path,
+):
     adapter = load_adapter()
     command = adapter.memphant_harness_command(
         official_dir=tmp_path / "official",
@@ -535,17 +838,21 @@ def test_memphant_adapter_artifacts_match_immutable_contract():
     lock = json.loads(MEMPHANT_ADAPTER_LOCK.read_text())
     for relative, expected in lock["files"].items():
         assert hashlib.sha256((ROOT / relative).read_bytes()).hexdigest() == expected
-    assert hashlib.sha256(
-        (ROOT / "benchmarks/manifests/longmemeval_v2.lock.json").read_bytes()
-    ).hexdigest() == lock["upstream_release_lock_sha256"]
-    assert hashlib.sha256((ROOT / "openapi/memphant.v1.json").read_bytes()).hexdigest() == lock[
-        "openapi_sha256"
-    ]
+    assert (
+        hashlib.sha256(
+            (ROOT / "benchmarks/manifests/longmemeval_v2.lock.json").read_bytes()
+        ).hexdigest()
+        == lock["upstream_release_lock_sha256"]
+    )
+    assert (
+        hashlib.sha256((ROOT / "openapi/memphant.v1.json").read_bytes()).hexdigest()
+        == lock["openapi_sha256"]
+    )
     assert lock["paid_models_run"] is False
 
 
 def test_runtime_materializer_uses_official_selection_and_proves_complete_pairing(
-    tmp_path
+    tmp_path,
 ):
     official = tmp_path / "official"
     data_package = official / "data"
