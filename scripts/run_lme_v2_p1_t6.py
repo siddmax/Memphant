@@ -447,28 +447,34 @@ def verify_campaign_manifest(manifest: dict) -> dict[str, int]:
             "answer-blind population fixture drift")
     require(select_cases(source["rows"]) == selection["cases"], "selection reproduction drift")
     rows = expanded_run_order(manifest)
-    require(len(rows) == 48 and len({row["row_id"] for row in rows}) == 48,
+    require(len(rows) == 24 and len({row["row_id"] for row in rows}) == 24,
             "run-order completeness drift")
     expected_ids = {row["id"] for row in selection["cases"]}
     require({row["question_id"] for row in rows} == expected_ids, "run-order case drift")
     require(manifest["run_order"]["outputs_observed"] is False, "run order was post-scored")
     require(manifest["run_order"]["case_order"] == sorted(expected_ids), "case-major order drift")
-    require(manifest["run_order"]["arm_order_per_case"] == ["fast", "sonnet", "luna", "sol"],
+    protocol = manifest["protocol"]
+    selected_deep_arm = protocol["selected_deep_arm"]
+    require(selected_deep_arm == "sonnet", "selected Deep arm drift")
+    require(protocol["inactive_researched_shortlist"] == ["luna", "sol"],
+            "inactive Deep shortlist drift")
+    require(selected_deep_arm in protocol["deep_candidates"], "selected Deep arm is unknown")
+    require(manifest["run_order"]["arm_order_per_case"] == ["fast", selected_deep_arm],
             "arm order drift")
     spend = manifest["campaign_spend"]
     require(spend["hard_ceiling_usd"] == 15.5, "campaign spend ceiling drift")
     preexisting = spend["preexisting_liability"]
-    require(preexisting["settled_micros"] == 4524
+    require(preexisting["settled_micros"] == 7542
             and preexisting["unsettled_upper_bound_micros"] == 316142
-            and preexisting["total_micros"] == 320666,
+            and preexisting["total_micros"] == 323684,
             "preexisting campaign liability drift")
     require(preexisting["settled_micros"] + preexisting["unsettled_upper_bound_micros"]
             == preexisting["total_micros"], "preexisting liability sum drift")
     for proof_path in preexisting["proofs"].values():
         require((ROOT / proof_path).is_file(), f"preexisting liability proof missing: {proof_path}")
-    require(spend["deep_max_liability_usd"] == 10.8,
+    require(spend["deep_max_liability_usd"] == 3.6,
             "Deep campaign reserve drift")
-    require(spend["reader_and_judge_reserve_usd"] == 4.1952,
+    require(spend["reader_and_judge_reserve_usd"] == 2.0976,
             "reader and judge campaign reserve drift")
     require(
         usd_to_micros(spend["reader_and_judge_reserve_usd"])
@@ -502,10 +508,10 @@ def verify_campaign_manifest(manifest: dict) -> dict[str, int]:
             "completion": reader["completion_price_micros_per_million"] / 1_000_000,
         },
     }, "reader dispatch policy drift")
-    for name, candidate in manifest["protocol"]["deep_candidates"].items():
-        require(candidate["config_sha256"] == _expected_deep_config_hash(candidate),
-                f"Deep runtime config hash drift: {name}")
-    return {"cases": 12, "rows": 48, "arms": 4}
+    selected_candidate = protocol["deep_candidates"][selected_deep_arm]
+    require(selected_candidate["config_sha256"] == _expected_deep_config_hash(selected_candidate),
+            "selected Deep runtime config hash drift")
+    return {"cases": 12, "rows": 24, "arms": 2, "constructions": 12}
 
 
 def write_memory_config(base: dict, mode: str, path: Path) -> dict:
