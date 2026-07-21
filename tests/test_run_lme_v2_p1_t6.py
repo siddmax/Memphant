@@ -387,6 +387,153 @@ def test_arm_clone_cleanup_is_forceful_and_name_bounded(monkeypatch) -> None:
         )
 
 
+def test_no_model_verifier_rejects_model_configuration_before_scratch_helper(
+    tmp_path: Path, monkeypatch
+) -> None:
+    campaign = _load()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "must-not-dispatch")
+    monkeypatch.setattr(
+        campaign.subprocess, "run",
+        lambda *_args, **_kwargs: pytest.fail("scratch helper reached"),
+    )
+    with pytest.raises(RuntimeError, match="forbids external model configuration"):
+        campaign.run_no_model_verifier_with_scratch(
+            tmp_path / "proof",
+            "postgres://bench:secret@127.0.0.1:5432/memphant",
+        )
+
+
+def test_no_model_verifier_builds_banks_restores_queries_and_cleans_two_clones(
+    tmp_path: Path, monkeypatch
+) -> None:
+    campaign = _load()
+    source = "postgres://bench:secret@127.0.0.1:5432/memphant_scratch_1_2"
+    output = tmp_path / "proof"
+    logical = {"tables": {}, "sequences": {}}
+    logical["sha256"] = campaign.canonical_sha256(logical)
+    construction = {
+        "schema_version": 1,
+        "contract": {},
+        "isolation": {},
+        "pairing": {
+            "trajectory_count": 1,
+            "resource_count": 1,
+            "worker": {"completed_sources": 1},
+            "retains": [{}],
+        },
+    }
+    construction["construction_proof_sha256"] = campaign.canonical_sha256(
+        construction
+    )
+    events = []
+    clones = set()
+    monkeypatch.setenv("MEMPHANT_SCRATCH_ACTIVE", "1")
+    monkeypatch.setenv("MEMPHANT_TEST_DATABASE_URL", source)
+    monkeypatch.setattr(campaign, "_assert_no_model_environment", lambda: None)
+    monkeypatch.setattr(campaign, "_fingerprint", lambda path: {
+        "path": str(path), "bytes": 1, "sha256": "b" * 64,
+    })
+    monkeypatch.setattr(campaign, "_resolve_archive_tools", lambda _url: {
+        "server_major": 17,
+        "pg_dump": {"binary": "/pg17/pg_dump", "major": 17, "server_major": 17},
+        "pg_restore": {"binary": "/pg17/pg_restore", "major": 17, "server_major": 17},
+    })
+    monkeypatch.setattr(campaign, "_database_schema_identity", lambda _url: {
+        "sha256": "s" * 64,
+    })
+    monkeypatch.setattr(campaign, "_database_bank_identity", lambda _url: logical)
+    monkeypatch.setattr(campaign, "_database_key_count", lambda url: 0 if url == source else 1)
+    monkeypatch.setattr(campaign, "_job_state_counts", lambda _url: (0, 0, 0))
+    monkeypatch.setattr(campaign, "_construct_no_model_source", lambda *_args: (
+        events.append("construct") or (construction, 11)
+    ))
+
+    def dump(_url, bank, proof, contract, **_kwargs):
+        events.append("dump")
+        bank.mkdir(parents=True)
+        archive = bank / ("a" * 64 + ".dump")
+        archive.write_bytes(b"archive")
+        manifest = {
+            "archive": archive.name,
+            "archive_sha256": campaign.sha256_file(archive),
+            "logical_identity": logical,
+            "construction": proof,
+            "construction_proof_sha256": proof["construction_proof_sha256"],
+            "case_contract_sha256": campaign.canonical_sha256(contract),
+        }
+        campaign.atomic_write_json(bank / "manifest.json", manifest)
+        return manifest
+
+    monkeypatch.setattr(campaign, "_dump_case_bank", dump)
+    monkeypatch.setattr(campaign, "_reset_case_source", lambda _url: events.append("reset"))
+    monkeypatch.setattr(
+        campaign, "_restore_case_bank",
+        lambda *_args, **_kwargs: events.append("restore") or json.loads(
+            (output / "case-bank/manifest.json").read_text()
+        ),
+    )
+    monkeypatch.setattr(
+        campaign, "_case_bank_seal",
+        lambda _path: {
+            "manifest_sha256": "1" * 64,
+            "archive_sha256": campaign.sha256_file(output / "case-bank" / ("a" * 64 + ".dump")),
+            "logical_identity_sha256": logical["sha256"],
+            "construction_proof_sha256": construction["construction_proof_sha256"],
+            "case_contract_sha256": "2" * 64,
+            "seal_sha256": "3" * 64,
+        },
+    )
+
+    def clone(_url, name, _identity):
+        events.append(("clone", name))
+        clone_url = source.rsplit("/", 1)[0] + "/" + name
+        clones.add(clone_url)
+        return clone_url
+
+    def query(clone_url, *_args):
+        arm = clone_url.rsplit("_", 1)[-1]
+        events.append(("query", arm))
+        return {
+            "arm": arm,
+            "query_only": True,
+            "verification_recall_mode": "fast",
+            "construction_proof_sha256": construction["construction_proof_sha256"],
+            "adapter_proof_sha256": ("4" if arm == "fast" else "5") * 64,
+            "construction_work": {"retains": 0, "worker_drains": 0},
+            "timing_ms": {"recall": 1},
+        }
+
+    monkeypatch.setattr(campaign, "_clone_case_source", clone)
+    monkeypatch.setattr(campaign, "_run_no_model_clone_query", query)
+    monkeypatch.setattr(
+        campaign, "_drop_local_database",
+        lambda url: (events.append(("drop", url)), clones.discard(url)),
+    )
+    monkeypatch.setattr(campaign, "_database_exists", lambda url: url in clones)
+    monkeypatch.setattr(
+        campaign.subprocess, "run",
+        lambda command, **_kwargs: campaign.subprocess.CompletedProcess(
+            command, 0, "deadbeef\n", ""
+        ),
+    )
+
+    proof = campaign.run_no_model_verifier(output)
+
+    assert events[:4] == ["construct", "dump", "reset", "restore"]
+    assert [event[0] for event in events if isinstance(event, tuple)] == [
+        "clone", "query", "drop", "clone", "query", "drop",
+    ]
+    assert proof["classification"] == "no_model_clone_mechanics_smoke_not_authorization"
+    assert proof["counts"] == {
+        "constructions": 1, "dumps": 1, "restores": 1,
+        "clones": 2, "query_only_recalls": 2,
+    }
+    assert {arm["verification_recall_mode"] for arm in proof["arms"]} == {"fast"}
+    assert proof["cleanup"]["orphan_clone_count"] == 0
+    assert source not in json.dumps(proof)
+    assert "secret" not in json.dumps(proof)
+
+
 def test_archive_state_fails_closed_after_first_completed_row(tmp_path: Path) -> None:
     campaign = _load()
     bank = tmp_path / "bank"

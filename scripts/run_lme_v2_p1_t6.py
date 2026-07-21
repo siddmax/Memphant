@@ -83,6 +83,7 @@ ARM_DATABASE_PATTERN = re.compile(
     r"memphant_p1t6_[0-9a-f]{8}_[0-9a-f]{8}_(?:fast|sonnet)"
 )
 SCRATCH_DATABASE_PATTERN = re.compile(r"memphant_scratch_[0-9]+_[0-9]+")
+NO_MODEL_CONFIGURATION_MARKERS = ("OPENROUTER", "OPENAI", "MEMPHANT_DEEP_")
 
 
 def require(condition: bool, message: str) -> None:
@@ -892,6 +893,388 @@ def _construct_case_source(
     return construction_proof, construction_duration_ms
 
 
+def _assert_no_model_environment() -> None:
+    configured = sorted(
+        name for name, value in os.environ.items()
+        if value and (
+            any(marker in name for marker in NO_MODEL_CONFIGURATION_MARKERS)
+            or name.startswith("DEEP")
+        )
+    )
+    deep = os.environ.get("MEMPHANT_DEEP", "off").strip().lower()
+    require(
+        not configured and deep in {"", "off"},
+        "no-model verifier forbids external model configuration",
+    )
+
+
+def _no_model_fixture(
+    fixture: str,
+    directory: Path | None,
+    materialized: Path | None,
+    case_id: str | None,
+) -> dict[str, object]:
+    params = json.loads(MEMORY_CONFIG.read_text())["memory_params"]
+    params["mode"] = "fast"
+    if fixture == "tiny":
+        require(directory is None and materialized is None and case_id is None,
+                "tiny no-model fixture does not accept dataset paths or case id")
+        trajectories = [{
+            "id": "fixture-trajectory",
+            "goal": "Remember the launch code",
+            "outcome": "success",
+            "start_url": "https://example.test",
+            "states": [{
+                "url": "https://example.test/code",
+                "action": "read launch code",
+                "thought": "store the exact value",
+                "accessibility_tree": "The launch code is ORCHID-17.",
+                "screenshot": "not-consumed.png",
+            }],
+        }]
+        return {
+            "name": "tiny", "case_id": "00000000",
+            "question": "What is the launch code?", "trajectories": trajectories,
+            "memory_params": params,
+            "input_sha256": canonical_sha256(trajectories),
+        }
+    require(fixture == "exact", "unknown no-model fixture")
+    require(
+        directory is not None and directory.is_absolute()
+        and materialized is not None and materialized.is_absolute(),
+        "exact no-model fixture requires absolute directory and materialized paths",
+    )
+    require(
+        isinstance(case_id, str) and re.fullmatch(r"[0-9a-f]{8}", case_id) is not None,
+        "exact no-model fixture requires an eight-hex case id",
+    )
+    case_dir = materialized / case_id
+    haystacks = json.loads((case_dir / "haystack.json").read_text())
+    trajectory_ids = haystacks.get(case_id)
+    require(isinstance(trajectory_ids, list) and trajectory_ids,
+            "exact no-model fixture haystack is missing")
+    selected = _load_selected_trajectories(
+        directory / "data/trajectories.jsonl", trajectory_ids
+    )
+    questions = json.loads((case_dir / "questions.json").read_text())
+    question = next((row for row in questions if row.get("id") == case_id), None)
+    require(isinstance(question, dict) and isinstance(question.get("question"), str),
+            "exact no-model fixture question is missing")
+    trajectories = [selected[trajectory_id] for trajectory_id in trajectory_ids]
+    return {
+        "name": "exact", "case_id": case_id,
+        "question": question["question"], "trajectories": trajectories,
+        "memory_params": params,
+        "input_sha256": canonical_sha256({
+            "question_id": case_id,
+            "question_sha256": hashlib.sha256(question["question"].encode()).hexdigest(),
+            "trajectory_sha256": [canonical_sha256(row) for row in trajectories],
+        }),
+    }
+
+
+def _run_no_model_adapter_phase(
+    database_url: str, proof_dir: Path, run_id: str, action
+):
+    binaries = {name: _binary_path(name) for name in ("server", "worker", "cli")}
+    proof_dir.mkdir(parents=True, exist_ok=True)
+    port = _free_port()
+    server_url = f"http://127.0.0.1:{port}"
+    environment = _clean_environment({
+        "MEMPHANT_APP_DATABASE_URL": database_url,
+        "MEMPHANT_AUTHN_DATABASE_URL": database_url,
+        "MEMPHANT_BIND": f"127.0.0.1:{port}",
+        "MEMPHANT_RESOURCE_CHUNKS": "on",
+        "MEMPHANT_STRUCTURED_STATE": "off",
+        "MEMPHANT_DEEP": "off",
+    })
+    with (proof_dir / "server.stdout").open("wb") as stdout, (
+        proof_dir / "server.stderr"
+    ).open("wb") as stderr:
+        server = subprocess.Popen(
+            [str(binaries["server"])], env=environment, stdout=stdout, stderr=stderr
+        )
+    try:
+        _wait_health(server_url, server)
+        adapter_environment = {
+            "MEMPHANT_LME_SERVER_URL": server_url,
+            "MEMPHANT_TEST_DATABASE_URL": database_url,
+            "MEMPHANT_CLI_BIN": str(binaries["cli"]),
+            "MEMPHANT_LME_SERVER_BIN": str(binaries["server"]),
+            "MEMPHANT_LME_WORKER_BIN": str(binaries["worker"]),
+            "MEMPHANT_LME_PROOF_DIR": str(proof_dir),
+            "MEMPHANT_LME_RUN_ID": run_id,
+            "MEMPHANT_DEEP": "off",
+        }
+        with _temporary_environment(adapter_environment):
+            return action(_load_adapter(ROOT))
+    finally:
+        _terminate_and_reap(server)
+        _redact_secrets(proof_dir, _row_secret_values("", "", database_url))
+
+
+def _construct_no_model_source(
+    database_url: str, output: Path, fixture: dict[str, object]
+) -> tuple[dict[str, object], int]:
+    started = time.perf_counter()
+
+    def construct(adapter):
+        memory = adapter.MemphantMemory(fixture["memory_params"])
+        for trajectory in fixture["trajectories"]:
+            memory.insert(trajectory)
+        return memory.prepare()
+
+    proof = _run_no_model_adapter_phase(
+        database_url, output / "construction", "p1-t6-no-model-build", construct
+    )
+    _clear_source_api_keys(database_url)
+    return proof, int(round((time.perf_counter() - started) * 1000))
+
+
+def _run_no_model_clone_query(
+    clone_url: str,
+    output: Path,
+    arm: str,
+    fixture: dict[str, object],
+    construction_path: Path,
+) -> dict[str, object]:
+    started = time.perf_counter()
+    proof_dir = output / "arms" / arm
+
+    def query(adapter):
+        with _temporary_environment({
+            "MEMPHANT_LME_PREBUILT_PROOF": str(construction_path.resolve())
+        }):
+            memory = adapter.MemphantMemory(fixture["memory_params"])
+            for trajectory in fixture["trajectories"]:
+                memory.insert(trajectory)
+            memory.set_query_context(question_id=f"no-model-{fixture['case_id']}-{arm}")
+            context = memory.query(fixture["question"])
+            metadata = memory.post_query_hook(
+                query=fixture["question"], query_image=None, memory_context=context
+            )
+        paths = list(proof_dir.glob("*.json"))
+        require(len(paths) == 1, "no-model clone emitted an invalid adapter proof count")
+        adapter_proof = json.loads(paths[0].read_text())
+        pairing = adapter_proof.get("pairing", {})
+        require(
+            adapter_proof.get("query", {}).get("query_only") is True
+            and pairing.get("query_only") is True
+            and "retains" not in pairing,
+            "no-model clone did not use query-only recall",
+        )
+        return {
+            "arm": arm,
+            "query_only": True,
+            "verification_recall_mode": "fast",
+            "construction_proof_sha256": metadata["construction_proof_sha256"],
+            "adapter_proof_sha256": sha256_file(paths[0]),
+            "context_sha256": metadata["context_sha256"],
+            "construction_work": {"retains": 0, "worker_drains": 0},
+            "timing_ms": {"recall": metadata["recall_duration_ms"]},
+        }
+
+    result = _run_no_model_adapter_phase(
+        clone_url, proof_dir, f"p1-t6-no-model-{arm}", query
+    )
+    result["timing_ms"]["total"] = int(round((time.perf_counter() - started) * 1000))
+    return result
+
+
+def run_no_model_verifier(
+    output: Path,
+    *,
+    fixture: str = "tiny",
+    directory: Path | None = None,
+    materialized: Path | None = None,
+    case_id: str | None = None,
+) -> dict[str, object]:
+    _assert_no_model_environment()
+    source_url = os.environ.get("MEMPHANT_TEST_DATABASE_URL", "")
+    source_name = _require_scratch_source(source_url)
+    require(not output.exists(), "no-model verifier output must be new")
+    data = _no_model_fixture(fixture, directory, materialized, case_id)
+    output.mkdir(parents=True)
+    started = time.perf_counter()
+    tools = _resolve_archive_tools(source_url)
+    binaries = {
+        name: _fingerprint(_binary_path(name)) for name in ("server", "worker", "cli")
+    }
+    schema = _database_schema_identity(source_url)
+    construction, construction_ms = _construct_no_model_source(source_url, output, data)
+    construction_path = output / "construction-proof.json"
+    atomic_write_json(construction_path, construction)
+    bank_dir = output / "case-bank"
+    contract = {
+        "classification": "no_model_clone_mechanics",
+        "fixture": data["name"],
+        "case_id": data["case_id"],
+        "input_sha256": data["input_sha256"],
+        "adapter_sha256": sha256_file(ROOT / "benchmarks/longmemeval_v2/memphant_memory.py"),
+        "memory_params_sha256": canonical_sha256(data["memory_params"]),
+    }
+    dumped = _dump_case_bank(
+        source_url, bank_dir, construction, contract,
+        construction_duration_ms=construction_ms,
+        pg_dump_bin=str(tools["pg_dump"]["binary"]),
+    )
+    _reset_case_source(source_url)
+    restored = _restore_case_bank(
+        source_url, bank_dir, contract,
+        pg_restore_bin=str(tools["pg_restore"]["binary"]),
+    )
+    logical = restored["logical_identity"]
+    require(logical == dumped["logical_identity"],
+            "no-model restored logical identity drift")
+    require(_database_key_count(source_url) == 0,
+            "no-model restored source must remain key-free")
+    seal = _case_bank_seal(bank_dir / "manifest.json")
+    clone_names = _case_clone_names(output, str(data["case_id"]))
+    arms = []
+    clone_databases = []
+    try:
+        for arm in ("fast", "sonnet"):
+            clone_url = _clone_case_source(source_url, clone_names[arm], logical)
+            clone_databases.append(clone_names[arm])
+            try:
+                arm_proof = _run_no_model_clone_query(
+                    clone_url, output, arm, data, construction_path
+                )
+                require(
+                    arm_proof.get("query_only") is True
+                    and arm_proof.get("verification_recall_mode") == "fast"
+                    and arm_proof.get("construction_proof_sha256")
+                    == construction["construction_proof_sha256"],
+                    "no-model clone query proof drift",
+                )
+                require(
+                    arm_proof.get("construction_work")
+                    == {"retains": 0, "worker_drains": 0},
+                    "no-model clone performed construction work",
+                )
+                require(_database_bank_identity(clone_url) == logical,
+                        "no-model clone changed bank logical identity")
+                require(_database_key_count(clone_url) == 1,
+                        "no-model clone must mint exactly one local API key")
+                pending, dead, total = _job_state_counts(clone_url)
+                require((pending, dead, total) == (0, 0, 0),
+                        "no-model clone created construction jobs")
+                arms.append({
+                    **arm_proof,
+                    "clone_database": clone_names[arm],
+                    "pre_query_logical_identity_sha256": logical["sha256"],
+                    "post_query_logical_identity_sha256": logical["sha256"],
+                    "api_key_count": 1,
+                    "job_state": {"pending": 0, "dead": 0, "total": 0},
+                })
+            finally:
+                _drop_local_database(clone_url)
+    finally:
+        for clone_name in clone_names.values():
+            clone_url = _database_url_with_name(source_url, clone_name)
+            if _database_exists(clone_url):
+                _drop_local_database(clone_url)
+    require(len(set(clone_databases)) == 2, "no-model clone databases are not distinct")
+    orphan_count = sum(
+        int(_database_exists(_database_url_with_name(source_url, name)))
+        for name in clone_names.values()
+    )
+    require(orphan_count == 0, "no-model verifier left orphan clones")
+    require(_database_key_count(source_url) == 0,
+            "no-model source gained an API key")
+    require(_job_state_counts(source_url) == (0, 0, 0),
+            "no-model source contains transient jobs")
+    _redact_secrets(output, _row_secret_values("", "", source_url))
+    artifacts = artifact_hashes(output)
+    core = {
+        "schema_version": 1,
+        "classification": "no_model_clone_mechanics_smoke_not_authorization",
+        "git_commit": subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT,
+            capture_output=True, text=True, check=True,
+        ).stdout.strip(),
+        "controller": _fingerprint(Path(__file__).resolve()),
+        "fixture": {key: data[key] for key in ("name", "case_id", "input_sha256")},
+        "source_database_identity": source_name,
+        "binaries": binaries,
+        "archive_tools": tools,
+        "database_schema_identity": schema,
+        "construction_proof_sha256": construction["construction_proof_sha256"],
+        "archive": {
+            "sha256": dumped["archive_sha256"],
+            "manifest_sha256": sha256_file(bank_dir / "manifest.json"),
+            "seal": seal,
+        },
+        "logical_identity_sha256": logical["sha256"],
+        "arms": arms,
+        "counts": {
+            "constructions": 1, "dumps": 1, "restores": 1,
+            "clones": 2, "query_only_recalls": 2,
+        },
+        "timing_ms": {
+            "construction": construction_ms,
+            "total": int(round((time.perf_counter() - started) * 1000)),
+        },
+        "cleanup": {
+            "source_api_key_count": 0,
+            "source_job_state": {"pending": 0, "dead": 0, "total": 0},
+            "orphan_clone_count": orphan_count,
+            "force_drop_verified": True,
+        },
+        "external_dispatch": {
+            "configured": False, "dispatches": 0, "deep_enabled": False,
+        },
+        "artifact_hashes": artifacts,
+    }
+    proof = {**core, "proof_sha256": canonical_sha256(core)}
+    atomic_write_json(output / "PROOF.json", proof)
+    require(source_url not in json.dumps(proof),
+            "no-model proof contains database credentials")
+    return proof
+
+
+def run_no_model_verifier_with_scratch(
+    output: Path,
+    base_database_url: str,
+    *,
+    fixture: str = "tiny",
+    directory: Path | None = None,
+    materialized: Path | None = None,
+    case_id: str | None = None,
+) -> dict[str, object]:
+    _assert_no_model_environment()
+    _local_database_parts(base_database_url)
+    require(not output.exists(), "no-model verifier output must be new")
+    command = [
+        "bash", str(SCRATCH_HELPER), base_database_url,
+        "MEMPHANT_TEST_DATABASE_URL", sys.executable, str(Path(__file__).resolve()),
+        "_verify-no-model", "--fixture", fixture, "--output", str(output.resolve()),
+    ]
+    if fixture == "exact":
+        require(directory is not None and materialized is not None and case_id is not None,
+                "exact no-model fixture requires directory, materialized, and case id")
+        command.extend([
+            "--directory", str(directory), "--materialized", str(materialized),
+            "--case-id", case_id,
+        ])
+    environment = _clean_environment({"MEMPHANT_SCRATCH_ACTIVE": "1", "MEMPHANT_DEEP": "off"})
+    for name in ("MEMPHANT_PG_DUMP_BIN", "MEMPHANT_PG_RESTORE_BIN"):
+        if os.environ.get(name):
+            environment[name] = os.environ[name]
+    completed = subprocess.run(
+        command, cwd=ROOT, env=environment, text=True, capture_output=True, check=False
+    )
+    require(completed.returncode == 0,
+            "no-model scratch verifier failed: " + completed.stderr.strip()[-1000:])
+    try:
+        envelope = json.loads(completed.stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError) as error:
+        raise RuntimeError("no-model scratch verifier returned invalid JSON") from error
+    require(envelope.get("verified") is True and envelope.get("paid_calls") == 0,
+            "no-model scratch verifier envelope drift")
+    return envelope["audit"]
+
+
 def _case_bank_contract(
     materialized: Path, output: Path, case_id: str, manifest: dict
 ) -> dict[str, object]:
@@ -1659,6 +2042,16 @@ def _load_adapter(official: Path):
     class Memory:
         def __init__(self, memory_params: dict) -> None:
             self.memory_params = memory_params
+            self._query_context: dict[str, object] = {}
+
+        def set_query_context(self, **kwargs: object) -> None:
+            self._query_context = dict(kwargs)
+
+        def get_query_context(self) -> dict[str, object]:
+            return dict(self._query_context)
+
+        def clear_query_context(self) -> None:
+            self._query_context = {}
 
     memory.Memory = Memory
     memory.MemoryContextItem = dict
@@ -3743,7 +4136,7 @@ def main() -> int:
         choices=(
             "verify-selection", "acquire", "materialize", "preflight", "run",
             "aggregate", "_context-preflight", "_reader-route-preflight", "_run-row",
-            "_run-case",
+            "_run-case", "verify-no-model", "_verify-no-model",
         ),
     )
     parser.add_argument("--directory", type=Path)
@@ -3753,6 +4146,7 @@ def main() -> int:
     parser.add_argument("--base-database-url")
     parser.add_argument("--row-id")
     parser.add_argument("--case-id")
+    parser.add_argument("--fixture", choices=("tiny", "exact"), default="tiny")
     args = parser.parse_args()
     manifest = load_campaign_manifest()
     if args.command == "verify-selection":
@@ -3785,6 +4179,21 @@ def main() -> int:
             args.directory.resolve(), args.materialized.resolve(), args.output.resolve(),
             args.case_id, manifest,
         )
+    elif args.command == "_verify-no-model":
+        require(args.output is not None, "_verify-no-model requires output")
+        audit = run_no_model_verifier(
+            args.output.resolve(), fixture=args.fixture,
+            directory=args.directory, materialized=args.materialized,
+            case_id=args.case_id,
+        )
+    elif args.command == "verify-no-model":
+        require(args.output is not None and args.base_database_url,
+                "verify-no-model requires output and base-database-url")
+        audit = run_no_model_verifier_with_scratch(
+            args.output.resolve(), args.base_database_url, fixture=args.fixture,
+            directory=args.directory, materialized=args.materialized,
+            case_id=args.case_id,
+        )
     elif args.command == "run":
         require(args.directory and args.output and args.materialized and args.base_database_url,
                 "run requires directory, output, materialized, and base-database-url")
@@ -3807,7 +4216,7 @@ def main() -> int:
     envelope = {"verified": True, "audit": audit}
     if args.command in {
         "verify-selection", "acquire", "materialize", "preflight",
-        "_context-preflight",
+        "_context-preflight", "verify-no-model", "_verify-no-model",
     }:
         envelope["paid_calls"] = 0
     elif args.command == "_reader-route-preflight":
