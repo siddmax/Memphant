@@ -485,7 +485,9 @@ def test_source_quiescence_samples_use_separate_admin_transactions(monkeypatch) 
     assert all(url.endswith("/postgres") for url, _sql in calls)
 
 
-def test_source_maintenance_progress_uses_separate_admin_transactions(monkeypatch) -> None:
+def test_source_maintenance_progress_uses_pg17_columns_and_separate_transactions(
+    monkeypatch,
+) -> None:
     campaign = _load()
     monkeypatch.setenv("MEMPHANT_SCRATCH_ACTIVE", "1")
     calls = []
@@ -502,6 +504,31 @@ def test_source_maintenance_progress_uses_separate_admin_transactions(monkeypatc
     assert "pg_stat_progress_vacuum" in calls[0][1]
     assert "pg_stat_progress_analyze" in calls[1][1]
     assert all(url.endswith("/postgres") for url, _sql in calls)
+    vacuum_select = calls[0][1].removeprefix("select ").split(" from ", 1)[0]
+    vacuum_select = vacuum_select.replace("coalesce(phase, '') as phase", "phase")
+    assert tuple(vacuum_select.split(", ")) == (
+        "phase",
+        "heap_blks_total",
+        "heap_blks_scanned",
+        "heap_blks_vacuumed",
+        "index_vacuum_count",
+        "max_dead_tuple_bytes",
+        "dead_tuple_bytes",
+        "num_dead_item_ids",
+        "indexes_total",
+        "indexes_processed",
+    )
+    analyze_select = calls[1][1].removeprefix("select ").split(" from ", 1)[0]
+    analyze_select = analyze_select.replace("coalesce(phase, '') as phase", "phase")
+    assert tuple(analyze_select.split(", ")) == (
+        "phase",
+        "sample_blks_total",
+        "sample_blks_scanned",
+        "ext_stats_total",
+        "ext_stats_computed",
+        "child_tables_total",
+        "child_tables_done",
+    )
 
 
 def test_arm_clone_cleanup_is_forceful_and_name_bounded(monkeypatch) -> None:

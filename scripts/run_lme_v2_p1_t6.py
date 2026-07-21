@@ -557,7 +557,8 @@ def _source_maintenance_progress(database_url: str) -> dict[str, list[dict[str, 
     vacuum = _psql_json(
         admin_url,
         "select coalesce(phase, '') as phase, heap_blks_total, heap_blks_scanned, "
-        "heap_blks_vacuumed, index_vacuum_count, num_dead_tuples, max_dead_tuples "
+        "heap_blks_vacuumed, index_vacuum_count, max_dead_tuple_bytes, "
+        "dead_tuple_bytes, num_dead_item_ids, indexes_total, indexes_processed "
         "from pg_stat_progress_vacuum where " + database_filter,
     )
     analyze = _psql_json(
