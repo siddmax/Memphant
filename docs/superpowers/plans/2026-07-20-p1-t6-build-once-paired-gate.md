@@ -188,6 +188,27 @@ Add a tested controller command that exercises the production construction, bank
 
 Build 670 resources once, dump once, restore once, clone twice, run scripted/local recall only, and prove equal pre-query identities, zero arm retains/drains, distinct DBs, complete cleanup, and no external dispatch.
 
+Recovery amendment after the first exact attempt: the attempt at controller commit
+`29c9eb53` completed the single 500-trajectory/670-resource construction, sealed
+one content-addressed PostgreSQL 17 bank, restored it, and then failed closed
+before the first clone because the source-connection check observed one transient
+session. Preserve that attempt and its incident inventory immutably. Authorize
+exactly one fresh-scratch recovery from the sealed bank only after independent
+review of the recovery controller. The recovery may perform zero constructions,
+zero dumps, one restore, two local Fast query-only clone checks, and zero model
+dispatches. Cumulative truthful counts are one construction, one dump, two
+restores, two clones, and two local queries. The recovery must hold a nonblocking
+exclusive output/case lease; validate the exact fixture, controller lineage,
+construction proof, archive/manifest/contract/logical hashes, PostgreSQL tools,
+fresh schema, source key/job state, and pre-recovery inventory; reject an existing
+final proof, any arm artifact, or any unexpected clone. Before each template clone,
+require two consecutive zero-session observations from separate admin-database
+transactions with a bounded timeout and no intervening source query. Never
+terminate a session, redump, reconstruct, or automatically retry. Stop on any
+mismatch or quiescence timeout. A passing proof is classified separately as
+`no_model_exact_case_recovered_authorization_candidate` and must expose per-attempt
+and cumulative counts plus zero external dispatch.
+
 - [ ] **Step 2: Run the focused and full repository gates**
 
 Run the complete `AGENTS.md` verification suite, including scratch PostgreSQL contracts, all provider lints, migration dry-run, and packaged e2e probe. Preserve exact outputs at the measured commit.
