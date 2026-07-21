@@ -412,6 +412,117 @@ def test_no_model_verifier_rejects_model_configuration_before_scratch_helper(
         )
 
 
+def test_exact_no_model_wrapper_forwards_registered_absolute_inputs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    campaign = _load()
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    calls = []
+
+    def run(command, **_kwargs):
+        calls.append(command)
+        return campaign.subprocess.CompletedProcess(
+            command, 0,
+            json.dumps({"verified": True, "paid_calls": 0, "audit": {"ok": True}}),
+            "",
+        )
+
+    monkeypatch.setattr(campaign.subprocess, "run", run)
+    directory = tmp_path / "dataset"
+    materialized = tmp_path / "materialized"
+    result = campaign.run_no_model_verifier_with_scratch(
+        tmp_path / "proof",
+        "postgres://bench:secret@127.0.0.1:5432/memphant",
+        fixture="exact", directory=directory, materialized=materialized,
+        case_id="19367bc7",
+    )
+
+    assert result == {"ok": True}
+    command = calls[0]
+    assert command[command.index("--fixture") + 1] == "exact"
+    assert command[command.index("--directory") + 1] == str(directory)
+    assert command[command.index("--materialized") + 1] == str(materialized)
+    assert command[command.index("--case-id") + 1] == "19367bc7"
+
+
+def test_exact_no_model_fixture_binds_registered_case_order_and_fast_config(
+    tmp_path: Path,
+) -> None:
+    campaign = _load()
+    case_id = campaign.load_campaign_manifest()["run_order"]["case_order"][0]
+    assert case_id == "19367bc7"
+    directory = tmp_path / "dataset"
+    materialized = tmp_path / "materialized"
+    case_dir = materialized / case_id
+    (directory / "data").mkdir(parents=True)
+    case_dir.mkdir(parents=True)
+    trajectory_ids = [f"trajectory-{index:03d}" for index in range(500)]
+    trajectories = [
+        {
+            "id": trajectory_id,
+            "goal": "remember",
+            "outcome": "success",
+            "states": [{"url": "https://example.test", "accessibility_tree": trajectory_id}],
+        }
+        for trajectory_id in trajectory_ids
+    ]
+    (directory / "data/trajectories.jsonl").write_text(
+        "\n".join(json.dumps(row, separators=(",", ":")) for row in trajectories) + "\n"
+    )
+    campaign.atomic_write_json(case_dir / "haystack.json", {case_id: trajectory_ids})
+    campaign.atomic_write_json(case_dir / "questions.json", [{
+        "id": case_id, "question": "What was remembered?", "answer": "not consumed",
+    }])
+    memory_config = json.loads(campaign.MEMORY_CONFIG.read_text())
+    memory_config["memory_params"]["mode"] = "fast"
+    memory_config["memory_params"]["compiler_version"] = "materialized-fast-fixture"
+    campaign.atomic_write_json(case_dir / "memory.fast.json", memory_config)
+
+    fixture = campaign._no_model_fixture(
+        "exact", directory, materialized, case_id
+    )
+
+    assert fixture["case_id"] == "19367bc7"
+    assert fixture["trajectory_ids"] == trajectory_ids
+    assert [row["id"] for row in fixture["trajectories"]] == trajectory_ids
+    assert fixture["memory_params"] == memory_config["memory_params"]
+    with pytest.raises(RuntimeError, match="registered first case"):
+        campaign._no_model_fixture("exact", directory, materialized, "21f3228c")
+    campaign.atomic_write_json(
+        case_dir / "haystack.json", {case_id: trajectory_ids[:-1]}
+    )
+    with pytest.raises(RuntimeError, match="exactly 500 ordered trajectories"):
+        campaign._no_model_fixture("exact", directory, materialized, case_id)
+
+
+def test_exact_no_model_classification_requires_frozen_500_670_pairing() -> None:
+    campaign = _load()
+    trajectory_ids = [f"trajectory-{index:03d}" for index in range(500)]
+    fixture = {
+        "name": "exact", "case_id": "19367bc7",
+        "trajectory_ids": trajectory_ids,
+    }
+    construction = {
+        "pairing": {
+            "trajectory_count": 500,
+            "resource_count": 670,
+            "worker": {"completed_sources": 670},
+            "retains": [{"trajectory_id": item} for item in trajectory_ids],
+        }
+    }
+    assert campaign._no_model_proof_classification(fixture, construction) == (
+        "no_model_exact_case_authorization_candidate"
+    )
+    wrong = json.loads(json.dumps(construction))
+    wrong["pairing"]["resource_count"] = 669
+    with pytest.raises(RuntimeError, match="500 trajectories and 670 resources"):
+        campaign._no_model_proof_classification(fixture, wrong)
+    assert campaign._no_model_proof_classification(
+        {"name": "tiny", "case_id": "00000000"},
+        {"pairing": {"trajectory_count": 1, "resource_count": 1}},
+    ) == "no_model_clone_mechanics_smoke_not_authorization"
+
+
 def test_no_model_verifier_builds_banks_restores_queries_and_cleans_two_clones(
     tmp_path: Path, monkeypatch
 ) -> None:

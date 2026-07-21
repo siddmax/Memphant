@@ -908,17 +908,24 @@ def _assert_no_model_environment() -> None:
     )
 
 
+def _registered_no_model_exact_case_id() -> str:
+    case_order = load_campaign_manifest().get("run_order", {}).get("case_order", [])
+    require(case_order and case_order[0] == "19367bc7",
+            "registered no-model exact first case drift")
+    return case_order[0]
+
+
 def _no_model_fixture(
     fixture: str,
     directory: Path | None,
     materialized: Path | None,
     case_id: str | None,
 ) -> dict[str, object]:
-    params = json.loads(MEMORY_CONFIG.read_text())["memory_params"]
-    params["mode"] = "fast"
     if fixture == "tiny":
         require(directory is None and materialized is None and case_id is None,
                 "tiny no-model fixture does not accept dataset paths or case id")
+        params = json.loads(MEMORY_CONFIG.read_text())["memory_params"]
+        params["mode"] = "fast"
         trajectories = [{
             "id": "fixture-trajectory",
             "goal": "Remember the launch code",
@@ -944,15 +951,26 @@ def _no_model_fixture(
         and materialized is not None and materialized.is_absolute(),
         "exact no-model fixture requires absolute directory and materialized paths",
     )
-    require(
-        isinstance(case_id, str) and re.fullmatch(r"[0-9a-f]{8}", case_id) is not None,
-        "exact no-model fixture requires an eight-hex case id",
-    )
+    require(case_id == _registered_no_model_exact_case_id(),
+            "exact no-model fixture must use the registered first case")
     case_dir = materialized / case_id
     haystacks = json.loads((case_dir / "haystack.json").read_text())
     trajectory_ids = haystacks.get(case_id)
-    require(isinstance(trajectory_ids, list) and trajectory_ids,
-            "exact no-model fixture haystack is missing")
+    require(
+        isinstance(trajectory_ids, list)
+        and len(trajectory_ids) == 500
+        and len(set(trajectory_ids)) == 500
+        and all(isinstance(item, str) and item for item in trajectory_ids),
+        "exact no-model fixture requires exactly 500 ordered trajectories",
+    )
+    memory_config = json.loads((case_dir / "memory.fast.json").read_text())
+    params = memory_config.get("memory_params")
+    require(
+        memory_config.get("memory_type") == "memphant"
+        and isinstance(params, dict)
+        and params.get("mode") == "fast",
+        "exact no-model fixture requires materialized Fast memory config",
+    )
     selected = _load_selected_trajectories(
         directory / "data/trajectories.jsonl", trajectory_ids
     )
@@ -964,13 +982,48 @@ def _no_model_fixture(
     return {
         "name": "exact", "case_id": case_id,
         "question": question["question"], "trajectories": trajectories,
+        "trajectory_ids": trajectory_ids,
         "memory_params": params,
         "input_sha256": canonical_sha256({
             "question_id": case_id,
             "question_sha256": hashlib.sha256(question["question"].encode()).hexdigest(),
             "trajectory_sha256": [canonical_sha256(row) for row in trajectories],
+            "memory_config_sha256": sha256_file(case_dir / "memory.fast.json"),
         }),
     }
+
+
+def _no_model_proof_classification(
+    fixture: dict[str, object], construction: dict[str, object]
+) -> str:
+    if fixture.get("name") == "tiny":
+        return "no_model_clone_mechanics_smoke_not_authorization"
+    require(
+        fixture.get("name") == "exact"
+        and fixture.get("case_id") == _registered_no_model_exact_case_id(),
+        "no-model exact construction is not bound to the registered first case",
+    )
+    pairing = construction.get("pairing")
+    expected_ids = fixture.get("trajectory_ids")
+    retains = pairing.get("retains") if isinstance(pairing, dict) else None
+    worker = pairing.get("worker") if isinstance(pairing, dict) else None
+    require(
+        isinstance(pairing, dict)
+        and pairing.get("trajectory_count") == 500
+        and pairing.get("resource_count") == 670
+        and isinstance(worker, dict)
+        and worker.get("completed_sources") == 670,
+        "exact no-model construction requires 500 trajectories and 670 resources",
+    )
+    require(
+        isinstance(expected_ids, list)
+        and len(expected_ids) == 500
+        and isinstance(retains, list)
+        and [retain.get("trajectory_id") for retain in retains
+             if isinstance(retain, dict)] == expected_ids,
+        "exact no-model construction trajectory order drift",
+    )
+    return "no_model_exact_case_authorization_candidate"
 
 
 def _run_no_model_adapter_phase(
@@ -1102,6 +1155,7 @@ def run_no_model_verifier(
     }
     schema = _database_schema_identity(source_url)
     construction, construction_ms = _construct_no_model_source(source_url, output, data)
+    classification = _no_model_proof_classification(data, construction)
     construction_path = output / "construction-proof.json"
     atomic_write_json(construction_path, construction)
     bank_dir = output / "case-bank"
@@ -1190,7 +1244,7 @@ def run_no_model_verifier(
     artifacts = artifact_hashes(output)
     core = {
         "schema_version": 1,
-        "classification": "no_model_clone_mechanics_smoke_not_authorization",
+        "classification": classification,
         "git_commit": subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=ROOT,
             capture_output=True, text=True, check=True,
@@ -1257,6 +1311,8 @@ def run_no_model_verifier_with_scratch(
                 "exact no-model fixture requires directory, materialized, and case id")
         require(directory.is_absolute() and materialized.is_absolute(),
                 "exact no-model fixture requires absolute directory and materialized paths")
+        require(case_id == _registered_no_model_exact_case_id(),
+                "exact no-model fixture must use the registered first case")
         command.extend([
             "--directory", str(directory), "--materialized", str(materialized),
             "--case-id", case_id,
