@@ -180,6 +180,10 @@ Commit: `test: prove P1-T6 build-once pairing`
 **Files:**
 - Add: immutable no-model build/clone proof under `docs/build-log/artifacts/p1-t6/`
 
+- [ ] **Step 0: Implement and review the reusable no-model verifier**
+
+Add a tested controller command that exercises the production construction, bank, restore, clone, query-only, identity, key, session, cleanup, and no-external-dispatch paths without reader, judge, or Deep credentials. Run a tiny scratch-Postgres smoke and independently review the command before the exact-case construction; do not use ad hoc shell-only evidence for authorization.
+
 - [ ] **Step 1: Run one no-model exact-case integration**
 
 Build 670 resources once, dump once, restore once, clone twice, run scripted/local recall only, and prove equal pre-query identities, zero arm retains/drains, distinct DBs, complete cleanup, and no external dispatch.
