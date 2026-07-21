@@ -214,6 +214,31 @@ mismatch or quiescence timeout. A passing proof is classified separately as
 `no_model_exact_case_recovered_authorization_candidate` and must expose per-attempt
 and cumulative counts plus zero external dispatch.
 
+Second recovery amendment: the one recovery authorized above restored the sealed
+bank at controller commit `3a85d518` and then failed closed before its first clone
+because the 3-second quiescence bound observed only an active PostgreSQL
+`autovacuum worker`. It created no arm artifact, clone, query, or model dispatch,
+and the scratch helper cleaned the database. Preserve this failure in a separate
+immutable lineage artifact; do not rewrite the original incident. The prior
+single-recovery authorization is exhausted. After independent controller review,
+authorize exactly one second fresh-scratch recovery from the same byte-identical
+bank with zero constructions, zero dumps, one restore, two local Fast query-only
+clone checks, and zero model dispatches. Cumulative successful-proof counts must
+be one construction, one dump, four restores, two clones, and two local queries.
+The source quiescence policy may wait up to 180 monotonic seconds at approximately
+one-second intervals only when every observed session is exactly an
+`autovacuum worker`, recording bounded VACUUM/ANALYZE progress. Any client or
+unknown backend fails immediately. Require two zero-session samples from separate
+admin transactions, then make `createdb` the next database operation. Never
+disable or terminate autovacuum and never retry `createdb`. Hold the exclusive
+lease across all recovery work; validate and post-query revalidate both lineage
+artifacts, the complete original inventory, construction proof, and bank seal.
+The final attempt ledger must distinguish initial, diagnostic, failed first
+recovery, and completed second recovery. A passing proof is classified
+`no_model_exact_case_second_recovery_authorization_candidate` and exposes each
+arm's quiescence policy/results, no unexpected or terminated sessions, and zero
+external dispatch.
+
 - [ ] **Step 2: Run the focused and full repository gates**
 
 Run the complete `AGENTS.md` verification suite, including scratch PostgreSQL contracts, all provider lints, migration dry-run, and packaged e2e probe. Preserve exact outputs at the measured commit.
