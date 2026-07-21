@@ -332,7 +332,7 @@ def test_manifest_rejects_order_and_spend_ceiling_drift() -> None:
         campaign.verify_campaign_manifest(manifest)
     manifest = campaign.load_campaign_manifest()
     manifest["campaign_spend"]["deep_max_liability_usd"] = 10.9
-    with pytest.raises(RuntimeError, match="liability exceeds"):
+    with pytest.raises(RuntimeError, match="Deep campaign reserve drift"):
         campaign.verify_campaign_manifest(manifest)
 
 
@@ -370,7 +370,7 @@ def test_resume_keeps_initial_inventory_evidence_when_material_contract_is_stabl
         "python_environment": {"packages_sha256": "p"},
         "environment_contract_sha256": "j",
         "binary_profile": "release",
-        "preexisting_campaign_liability": {"total_micros": 3912},
+        "preexisting_campaign_liability": {"total_micros": 307608},
     }
     frozen = {**common, "endpoint_hashes": {
         "reader": {"inventory_sha256": "old", "material_contract_sha256": "stable"}
@@ -402,12 +402,15 @@ def test_fresh_reservations_plus_prior_attempts_stay_below_campaign_ceiling() ->
     prior = manifest["campaign_spend"]["preexisting_liability"]
     assert fresh == 14_995_200
     assert prior == {
-        "settled_micros": 828,
-        "unsettled_upper_bound_micros": 3_084,
-        "total_micros": 3_912,
+        "settled_micros": 4_524,
+        "unsettled_upper_bound_micros": 303_084,
+        "total_micros": 307_608,
         "proofs": prior["proofs"],
     }
-    assert fresh + prior["total_micros"] == 14_999_112
+    assert fresh + prior["total_micros"] == 15_302_808
+    assert campaign.usd_to_micros(
+        manifest["campaign_spend"]["hard_ceiling_usd"]
+    ) - fresh - prior["total_micros"] == 197_192
 
 
 def test_settled_proxy_cost_must_fit_its_pre_dispatch_reservation() -> None:

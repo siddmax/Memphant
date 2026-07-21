@@ -327,6 +327,13 @@ impl OpenRouterDeepRecall {
                 "implicit_protocol_retries": "disabled",
                 "redirects": "disabled",
                 "ambient_proxies": "disabled",
+                "request_contract": {
+                    "stream": true,
+                    "tool_choice": "required",
+                    "parallel_tool_calls": "omitted",
+                    "single_tool_call_enforcement": "response_parser",
+                    "provider_require_parameters": true,
+                },
                 "tool_limits": {
                     "list_results": MAX_LIST_RESULTS,
                     "query_chars": MAX_QUERY_CHARS,
@@ -358,7 +365,6 @@ impl OpenRouterDeepRecall {
             "messages": messages,
             "max_completion_tokens": self.config.max_completion_tokens,
             "stream": true,
-            "parallel_tool_calls": false,
             "tool_choice": "required",
             "tools": tool_definitions(),
             "provider": {
@@ -1933,16 +1939,53 @@ mod tests {
     fn request_is_exact_model_private_azure_and_locally_price_bounded() {
         let provider = OpenRouterDeepRecall::with_transport(config(), Arc::new(PanicTransport));
         let body = provider.request_body(&[json!({"role": "user", "content": "q"})]);
+        assert_eq!(
+            body.as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([
+                "max_completion_tokens",
+                "messages",
+                "model",
+                "provider",
+                "stream",
+                "tool_choice",
+                "tools",
+            ]),
+            "new top-level request parameters must be proven against every frozen endpoint"
+        );
         assert_eq!(body["model"], "anthropic/claude-sonnet-5");
         assert!(body.get("models").is_none());
         assert_eq!(body["stream"], true);
         assert_eq!(body["tool_choice"], "required");
-        assert_eq!(body["parallel_tool_calls"], false);
+        assert!(
+            body.get("parallel_tool_calls").is_none(),
+            "Azure does not advertise parallel_tool_calls under require_parameters; \
+             the protocol parser already rejects multiple calls"
+        );
         assert_eq!(body["max_completion_tokens"], 4096);
         assert_eq!(body["provider"]["only"], json!(["azure"]));
         assert_eq!(body["provider"]["zdr"], true);
         assert_eq!(body["provider"]["data_collection"], "deny");
         assert_eq!(body["provider"]["require_parameters"], true);
+        assert_eq!(
+            body["provider"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([
+                "allow_fallbacks",
+                "data_collection",
+                "max_price",
+                "only",
+                "require_parameters",
+                "zdr",
+            ])
+        );
         assert_eq!(body["provider"]["max_price"]["prompt"], 2);
         assert_eq!(body["provider"]["max_price"]["completion"], 10);
         assert!(body.get("usage").is_none());
@@ -2552,19 +2595,19 @@ mod tests {
                 "anthropic/claude-sonnet-5-20260630",
                 2_000_000,
                 10_000_000,
-                "cc38c23befeb5de0aeb8250277c22a7babe8439cae3a6f4f8977b27d27264b1c",
+                "22730027f29f7daa15b7b8905878ce6d9f45ee49491db415960f431da72bcf75",
             ),
             (
                 "openai/gpt-5.6-luna-20260709",
                 1_100_000,
                 6_600_000,
-                "292510ca45480129e94d459a4eaa4c70556369dfcd11a24e72f5c30f0c848b05",
+                "bb4174d62de4083817d5fe4741ad12552e9c857abc7bb419b55c5898c335f6a9",
             ),
             (
                 "openai/gpt-5.6-sol-20260709",
                 5_500_000,
                 33_000_000,
-                "b02a7147b5eaaf286b0192e3e7d0108f06af8d1a52783f7a9afcc63db36199a3",
+                "028fcf5f3aeac5eb32a10cc3ad0095d48585e4c13cf97b77efe7591773b1770c",
             ),
         ] {
             let candidate = DeepConfig::new(

@@ -313,6 +313,13 @@ def _expected_deep_config_hash(candidate: dict) -> str:
         "implicit_protocol_retries": "disabled",
         "redirects": "disabled",
         "ambient_proxies": "disabled",
+        "request_contract": {
+            "stream": True,
+            "tool_choice": "required",
+            "parallel_tool_calls": "omitted",
+            "single_tool_call_enforcement": "response_parser",
+            "provider_require_parameters": True,
+        },
         "tool_limits": {
             "list_results": 256,
             "query_chars": 256,
@@ -449,16 +456,20 @@ def verify_campaign_manifest(manifest: dict) -> dict[str, int]:
     require(manifest["run_order"]["arm_order_per_case"] == ["fast", "sonnet", "luna", "sol"],
             "arm order drift")
     spend = manifest["campaign_spend"]
-    require(spend["hard_ceiling_usd"] == 15.0, "campaign spend ceiling drift")
+    require(spend["hard_ceiling_usd"] == 15.5, "campaign spend ceiling drift")
     preexisting = spend["preexisting_liability"]
-    require(preexisting["settled_micros"] == 828
-            and preexisting["unsettled_upper_bound_micros"] == 3084
-            and preexisting["total_micros"] == 3912,
+    require(preexisting["settled_micros"] == 4524
+            and preexisting["unsettled_upper_bound_micros"] == 303084
+            and preexisting["total_micros"] == 307608,
             "preexisting campaign liability drift")
     require(preexisting["settled_micros"] + preexisting["unsettled_upper_bound_micros"]
             == preexisting["total_micros"], "preexisting liability sum drift")
     for proof_path in preexisting["proofs"].values():
         require((ROOT / proof_path).is_file(), f"preexisting liability proof missing: {proof_path}")
+    require(spend["deep_max_liability_usd"] == 10.8,
+            "Deep campaign reserve drift")
+    require(spend["reader_and_judge_reserve_usd"] == 4.1952,
+            "reader and judge campaign reserve drift")
     require(
         usd_to_micros(spend["reader_and_judge_reserve_usd"])
         == len(rows) * spend["reader_and_judge_max_liability_micros_per_row"],
