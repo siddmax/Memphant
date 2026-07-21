@@ -75,10 +75,30 @@ def _write_synthetic_case_banks(campaign, output: Path, rows: list[dict]) -> Non
     for case_id in sorted({row["question_id"] for row in rows}):
         bank = output / "case-banks" / case_id
         bank.mkdir(parents=True)
+        construction = {
+            "schema_version": 1,
+            "pairing": {
+                "trajectory_count": 500,
+                "resource_count": 670,
+                "worker": {
+                    "completed_sources": 670,
+                    "stdout_sha256": "1" * 64,
+                    "stderr_sha256": "2" * 64,
+                },
+                "retains": [{"trajectory_id": case_id}],
+            },
+        }
+        construction["construction_proof_sha256"] = campaign.canonical_sha256(
+            construction
+        )
         manifest = {
             "archive_sha256": "a" * 64,
             "logical_identity": {"sha256": "e" * 64},
-            "construction_proof_sha256": "c" * 64,
+            "construction": construction,
+            "construction_proof_sha256": construction[
+                "construction_proof_sha256"
+            ],
+            "construction_duration_ms": 10_000,
             "case_contract_sha256": "f" * 64,
         }
         campaign.atomic_write_json(bank / "manifest.json", manifest)
@@ -90,6 +110,9 @@ def _write_synthetic_case_banks(campaign, output: Path, rows: list[dict]) -> Non
             proof_path = row_dir / "row-proof.json"
             proof = json.loads(proof_path.read_text())
             proof["case_bank_seal_sha256"] = seal["seal_sha256"]
+            proof["scratch_database_identity"] = (
+                f"memphant_p1t6_{case_id}_12345678_{row['arm']}"
+            )
             proof["artifact_hashes"] = campaign.artifact_hashes(
                 row_dir, exclude={"row-proof.json"}
             )
@@ -101,6 +124,28 @@ def _write_synthetic_case_banks(campaign, output: Path, rows: list[dict]) -> Non
             "manifest_sha256": seal["manifest_sha256"],
             "reason": "both_immutable_arm_rows_complete",
             "row_proof_sha256": row_hashes,
+        })
+
+
+def _refresh_synthetic_case_bank_retirements(
+    campaign, output: Path, rows: list[dict]
+) -> None:
+    for case_id in sorted({row["question_id"] for row in rows}):
+        bank = output / "case-banks" / case_id
+        manifest_path = bank / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        seal = campaign._case_bank_seal(manifest_path)
+        campaign.atomic_write_json(bank / "archive-retirement.json", {
+            "archive_sha256": manifest["archive_sha256"],
+            "case_bank_seal_sha256": seal["seal_sha256"],
+            "manifest_sha256": seal["manifest_sha256"],
+            "reason": "both_immutable_arm_rows_complete",
+            "row_proof_sha256": {
+                row["arm"]: campaign.sha256_file(
+                    output / row["row_id"] / "row-proof.json"
+                )
+                for row in rows if row["question_id"] == case_id
+            },
         })
 
 
@@ -262,11 +307,13 @@ def test_case_bank_contract_is_local_key_free_and_content_addressed(
 
     monkeypatch.setattr(campaign.subprocess, "run", run)
     manifest = campaign._dump_case_bank(
-        database_url, tmp_path / "bank", construction, case_contract
+        database_url, tmp_path / "bank", construction, case_contract,
+        construction_duration_ms=12_345,
     )
     archive = tmp_path / "bank" / manifest["archive"]
     assert archive.name == f"{campaign.sha256_file(archive)}.dump"
     assert manifest["archive_sha256"] == campaign.sha256_file(archive)
+    assert manifest["construction_duration_ms"] == 12_345
     assert manifest["excluded_tables"] == list(campaign.BANK_EXCLUDED_TABLES)
     serialized = json.dumps(manifest)
     assert "secret" not in serialized and database_url not in serialized
@@ -373,10 +420,11 @@ def test_run_case_builds_once_restores_then_runs_two_key_local_clones(
 
     def construct(*_args):
         events.append("construct")
-        return construction
+        return construction, 12_345
 
-    def dump(_url, bank, proof, _contract, **_kwargs):
+    def dump(_url, bank, proof, _contract, **kwargs):
         events.append("dump")
+        assert kwargs["construction_duration_ms"] == 12_345
         bank.mkdir(parents=True, exist_ok=True)
         archive_body = b"archive"
         digest = hashlib.sha256(archive_body).hexdigest()
@@ -387,6 +435,7 @@ def test_run_case_builds_once_restores_then_runs_two_key_local_clones(
             "archive": digest + ".dump", "archive_sha256": digest,
             "logical_identity": logical,
             "construction_proof_sha256": "c" * 64,
+            "construction_duration_ms": 12_345,
             "case_contract_sha256": campaign.canonical_sha256(_contract),
         }
         campaign.atomic_write_json(bank / "manifest.json", result)
@@ -486,6 +535,7 @@ def test_run_case_reuses_archive_after_interruption_and_drops_failed_clone(
         "excluded_tables": list(campaign.BANK_EXCLUDED_TABLES),
         "construction": construction,
         "construction_proof_sha256": construction["construction_proof_sha256"],
+        "construction_duration_ms": 12_345,
         "case_contract": case_contract,
         "case_contract_sha256": campaign.canonical_sha256(case_contract),
         "postgres": {"major": 18, "server_major": 18},
@@ -1406,10 +1456,9 @@ def test_synthetic_all_failure_aggregate_is_complete_and_zero_scored(tmp_path: P
     )
 
 
-def test_synthetic_success_aggregate_applies_registered_ranking(tmp_path: Path) -> None:
-    campaign = _load()
-    manifest = campaign.load_campaign_manifest()
-    rows = campaign.expanded_run_order(manifest)
+def _write_synthetic_success_campaign(
+    campaign, tmp_path: Path, manifest: dict, rows: list[dict]
+) -> None:
     _write_synthetic_root(campaign, tmp_path, manifest)
     ledger = tmp_path / "spend-ledger"
     ledger.mkdir()
@@ -1438,7 +1487,22 @@ def test_synthetic_success_aggregate_applies_registered_ranking(tmp_path: Path) 
         memory = {
             "public": {"recall_response": {"trace_id": "trace", "deep": deep}, "trace": trace},
             "recall_mutation_proof": {"corpus_policy_job_tables_unchanged": True},
-            "query": {"recall_duration_ms": 1000},
+            "query": {
+                "recall_duration_ms": 1000,
+                "construction_proof_sha256": "filled-after-bank-write",
+                "query_only": True,
+            },
+            "pairing": {
+                "trajectory_count": 500,
+                "resource_count": 670,
+                "worker": {
+                    "completed_sources": 670,
+                    "stdout_sha256": "1" * 64,
+                    "stderr_sha256": "2" * 64,
+                },
+                "construction_proof_sha256": "filled-after-bank-write",
+                "query_only": True,
+            },
         }
         memory_path = row_dir / "memory-proofs/proof.json"
         campaign.atomic_write_json(memory_path, memory)
@@ -1480,6 +1544,35 @@ def test_synthetic_success_aggregate_applies_registered_ranking(tmp_path: Path) 
             "official_score_sha256": campaign.sha256_file(score_path),
         })
     _write_synthetic_case_banks(campaign, tmp_path, rows)
+    for row in rows:
+        bank = json.loads(
+            (tmp_path / "case-banks" / row["question_id"] / "manifest.json").read_text()
+        )
+        memory_path = tmp_path / row["row_id"] / "memory-proofs/proof.json"
+        memory = json.loads(memory_path.read_text())
+        memory["query"]["construction_proof_sha256"] = bank[
+            "construction_proof_sha256"
+        ]
+        memory["pairing"]["construction_proof_sha256"] = bank[
+            "construction_proof_sha256"
+        ]
+        campaign.atomic_write_json(memory_path, memory)
+        row_dir = tmp_path / row["row_id"]
+        proof_path = row_dir / "row-proof.json"
+        proof = json.loads(proof_path.read_text())
+        proof["memory_proof_sha256"] = campaign.sha256_file(memory_path)
+        proof["artifact_hashes"] = campaign.artifact_hashes(
+            row_dir, exclude={"row-proof.json"}
+        )
+        campaign.atomic_write_json(proof_path, proof)
+    _refresh_synthetic_case_bank_retirements(campaign, tmp_path, rows)
+
+
+def test_synthetic_success_aggregate_applies_registered_ranking(tmp_path: Path) -> None:
+    campaign = _load()
+    manifest = campaign.load_campaign_manifest()
+    rows = campaign.expanded_run_order(manifest)
+    _write_synthetic_success_campaign(campaign, tmp_path, manifest, rows)
     aggregate = campaign.aggregate_campaign(tmp_path, manifest)
     assert all(candidate["feasible"] for candidate in aggregate["candidates"].values())
     assert all(candidate["predicates"]["no_context_truncation"]
@@ -1487,6 +1580,194 @@ def test_synthetic_success_aggregate_applies_registered_ranking(tmp_path: Path) 
     assert set(aggregate["candidates"]) == {"sonnet"}
     assert aggregate["advance_to_separate_confirmation"] == ["sonnet"]
     assert aggregate["decision"] == "confirmation_manifest_required"
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda campaign, root, row, bank, memory: memory["query"].update(
+                {"query_only": False}
+            ),
+            "query-only",
+        ),
+        (
+            lambda campaign, root, row, bank, memory: memory["pairing"].update(
+                {"retains": [{"resource_id": "arm-retain"}]}
+            ),
+            "construction work",
+        ),
+        (
+            lambda campaign, root, row, bank, memory: memory["query"].update(
+                {"construction_duration_ms": 1000}
+            ),
+            "mixes construction",
+        ),
+        (
+            lambda campaign, root, row, bank, memory: memory["query"].update(
+                {"construction_proof_sha256": "0" * 64}
+            ),
+            "construction proof",
+        ),
+    ],
+)
+def test_aggregate_rejects_non_query_only_or_mixed_arm_evidence(
+    tmp_path: Path, mutate, message: str
+) -> None:
+    campaign = _load()
+    manifest = campaign.load_campaign_manifest()
+    rows = campaign.expanded_run_order(manifest)
+    _write_synthetic_success_campaign(campaign, tmp_path, manifest, rows)
+    row = rows[0]
+    row_dir = tmp_path / row["row_id"]
+    memory_path = row_dir / "memory-proofs/proof.json"
+    memory = json.loads(memory_path.read_text())
+    bank = json.loads(
+        (tmp_path / "case-banks" / row["question_id"] / "manifest.json").read_text()
+    )
+    mutate(campaign, tmp_path, row, bank, memory)
+    campaign.atomic_write_json(memory_path, memory)
+    proof_path = row_dir / "row-proof.json"
+    proof = json.loads(proof_path.read_text())
+    proof["memory_proof_sha256"] = campaign.sha256_file(memory_path)
+    proof["artifact_hashes"] = campaign.artifact_hashes(
+        row_dir, exclude={"row-proof.json"}
+    )
+    campaign.atomic_write_json(proof_path, proof)
+    _refresh_synthetic_case_bank_retirements(campaign, tmp_path, rows)
+    with pytest.raises(RuntimeError, match=message):
+        campaign.aggregate_campaign(tmp_path, manifest)
+
+
+def test_aggregate_validates_memory_proof_on_operational_failure(
+    tmp_path: Path,
+) -> None:
+    campaign = _load()
+    manifest = campaign.load_campaign_manifest()
+    rows = campaign.expanded_run_order(manifest)
+    _write_synthetic_success_campaign(campaign, tmp_path, manifest, rows)
+    row = rows[0]
+    row_dir = tmp_path / row["row_id"]
+    memory_path = row_dir / "memory-proofs/proof.json"
+    memory = json.loads(memory_path.read_text())
+    memory["query"]["query_only"] = False
+    campaign.atomic_write_json(memory_path, memory)
+    proof_path = row_dir / "row-proof.json"
+    proof = json.loads(proof_path.read_text())
+    proof["outcome"] = "operational_failure"
+    proof["memory_proof_sha256"] = campaign.sha256_file(memory_path)
+    proof["artifact_hashes"] = campaign.artifact_hashes(
+        row_dir, exclude={"row-proof.json"}
+    )
+    campaign.atomic_write_json(proof_path, proof)
+    _refresh_synthetic_case_bank_retirements(campaign, tmp_path, rows)
+    with pytest.raises(RuntimeError, match="not query-only"):
+        campaign.aggregate_campaign(tmp_path, manifest)
+
+
+def test_aggregate_requires_12_unique_constructions_and_24_clone_databases(
+    tmp_path: Path,
+) -> None:
+    campaign = _load()
+    manifest = campaign.load_campaign_manifest()
+    rows = campaign.expanded_run_order(manifest)
+    _write_synthetic_success_campaign(campaign, tmp_path, manifest, rows)
+    first, second = rows[1], rows[3]
+    second_proof_path = tmp_path / second["row_id"] / "row-proof.json"
+    second_proof = json.loads(second_proof_path.read_text())
+    second_proof["scratch_database_identity"] = json.loads(
+        (tmp_path / first["row_id"] / "row-proof.json").read_text()
+    )["scratch_database_identity"]
+    campaign.atomic_write_json(second_proof_path, second_proof)
+    _refresh_synthetic_case_bank_retirements(campaign, tmp_path, rows)
+    with pytest.raises(RuntimeError, match="clone database identity"):
+        campaign.aggregate_campaign(tmp_path, manifest)
+
+
+def test_aggregate_rejects_reused_construction_proof_across_cases(
+    tmp_path: Path,
+) -> None:
+    campaign = _load()
+    manifest = campaign.load_campaign_manifest()
+    rows = campaign.expanded_run_order(manifest)
+    _write_synthetic_success_campaign(campaign, tmp_path, manifest, rows)
+    first_case, second_case = manifest["run_order"]["case_order"][:2]
+    first_manifest = json.loads(
+        (tmp_path / "case-banks" / first_case / "manifest.json").read_text()
+    )
+    second_manifest_path = tmp_path / "case-banks" / second_case / "manifest.json"
+    second_manifest = json.loads(second_manifest_path.read_text())
+    second_manifest["construction"] = first_manifest["construction"]
+    second_manifest["construction_proof_sha256"] = first_manifest[
+        "construction_proof_sha256"
+    ]
+    campaign.atomic_write_json(second_manifest_path, second_manifest)
+    seal = campaign._case_bank_seal(second_manifest_path)
+    for row in [item for item in rows if item["question_id"] == second_case]:
+        row_dir = tmp_path / row["row_id"]
+        memory_path = row_dir / "memory-proofs/proof.json"
+        memory = json.loads(memory_path.read_text())
+        memory["query"]["construction_proof_sha256"] = first_manifest[
+            "construction_proof_sha256"
+        ]
+        memory["pairing"]["construction_proof_sha256"] = first_manifest[
+            "construction_proof_sha256"
+        ]
+        memory["pairing"]["worker"] = first_manifest["construction"]["pairing"][
+            "worker"
+        ]
+        campaign.atomic_write_json(memory_path, memory)
+        campaign.atomic_write_json(row_dir / "case-bank-seal.json", seal)
+        proof_path = row_dir / "row-proof.json"
+        proof = json.loads(proof_path.read_text())
+        proof["case_bank_seal_sha256"] = seal["seal_sha256"]
+        proof["memory_proof_sha256"] = campaign.sha256_file(memory_path)
+        proof["artifact_hashes"] = campaign.artifact_hashes(
+            row_dir, exclude={"row-proof.json"}
+        )
+        campaign.atomic_write_json(proof_path, proof)
+    _refresh_synthetic_case_bank_retirements(campaign, tmp_path, rows)
+    with pytest.raises(RuntimeError, match="12 unique construction"):
+        campaign.aggregate_campaign(tmp_path, manifest)
+
+
+def test_aggregate_rejects_inactive_candidate_row_directory(tmp_path: Path) -> None:
+    campaign = _load()
+    manifest = campaign.load_campaign_manifest()
+    rows = campaign.expanded_run_order(manifest)
+    _write_synthetic_success_campaign(campaign, tmp_path, manifest, rows)
+    (tmp_path / "0025-luna-19367bc7").mkdir()
+    with pytest.raises(RuntimeError, match="missing or extra finalized rows"):
+        campaign.aggregate_campaign(tmp_path, manifest)
+
+
+def test_aggregate_reports_sealed_construction_latency_separately(
+    tmp_path: Path,
+) -> None:
+    campaign = _load()
+    manifest = campaign.load_campaign_manifest()
+    rows = campaign.expanded_run_order(manifest)
+    _write_synthetic_success_campaign(campaign, tmp_path, manifest, rows)
+    aggregate = campaign.aggregate_campaign(tmp_path, manifest)
+    assert aggregate["construction"] == {
+        "case_count": 12,
+        "cost_micros": 0,
+        "duration_ms": {
+            "total": 120_000,
+            "p50": 10_000,
+            "p95": 10_000,
+            "max": 10_000,
+        },
+        "proof_sha256s": sorted(
+            json.loads(path.read_text())["construction_proof_sha256"]
+            for path in (tmp_path / "case-banks").glob("*/manifest.json")
+        ),
+    }
+    assert aggregate["candidates"]["sonnet"]["latency_ms"] == {
+        "p50": 1000,
+        "p95": 1000,
+        "max": 1000,
+    }
 
 
 class _FakeResponse:

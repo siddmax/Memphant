@@ -360,6 +360,7 @@ def _dump_case_bank(
     construction_proof: dict[str, object],
     case_contract: dict[str, object],
     *,
+    construction_duration_ms: int,
     pg_dump_bin: str = "pg_dump",
 ) -> dict[str, object]:
     _require_scratch_source(database_url)
@@ -388,6 +389,8 @@ def _dump_case_bank(
             "construction left queued, running, or dead job state")
     require(_database_key_count(database_url) == 0,
             "construction source must be key-free before archive")
+    require(isinstance(construction_duration_ms, int) and construction_duration_ms >= 0,
+            "construction duration is invalid")
     tool = _postgres_tool_identity(pg_dump_bin, database_url)
     schema_identity = _database_schema_identity(database_url)
     logical_identity = _database_bank_identity(database_url)
@@ -412,6 +415,7 @@ def _dump_case_bank(
             "case_contract_sha256": canonical_sha256(case_contract),
             "construction": construction_proof,
             "construction_proof_sha256": construction_proof.get("construction_proof_sha256"),
+            "construction_duration_ms": construction_duration_ms,
             "resource_count": resource_count,
             "postgres": tool,
             "postgres_major": tool["major"],
@@ -447,6 +451,11 @@ def _load_case_bank(bank_dir: Path) -> tuple[dict[str, object], Path]:
         == canonical_sha256(construction_core)
         == manifest.get("construction_proof_sha256"),
         "P1-T6 case bank construction proof drift",
+    )
+    require(
+        isinstance(manifest.get("construction_duration_ms"), int)
+        and manifest["construction_duration_ms"] >= 0,
+        "P1-T6 case bank construction duration is invalid",
     )
     case_contract = manifest.get("case_contract")
     require(
@@ -804,7 +813,7 @@ def _construct_case_source(
     materialized: Path,
     output: Path,
     case_id: str,
-) -> dict[str, object]:
+) -> tuple[dict[str, object], int]:
     database_url = os.environ.get("MEMPHANT_TEST_DATABASE_URL", "")
     _require_scratch_source(database_url)
     case_dir = materialized / case_id
@@ -834,6 +843,7 @@ def _construct_case_source(
         "MEMPHANT_STRUCTURED_STATE": "off",
         "MEMPHANT_DEEP": "off",
     })
+    construction_started = time.perf_counter()
     with (proof_dir / "server.stdout").open("wb") as stdout, (
         proof_dir / "server.stderr"
     ).open("wb") as stderr:
@@ -870,12 +880,16 @@ def _construct_case_source(
     pending_jobs, dead_jobs, _total_jobs = _job_state_counts(database_url)
     require((pending_jobs, dead_jobs) == (0, 0),
             "P1-T6 construction did not drain all jobs")
+    construction_duration_ms = int(round(
+        (time.perf_counter() - construction_started) * 1000
+    ))
     atomic_write_json(proof_dir / "complete.json", {
         "case_id": case_id,
         "construction_proof_sha256": construction_proof["construction_proof_sha256"],
+        "construction_duration_ms": construction_duration_ms,
         "complete": True,
     })
-    return construction_proof
+    return construction_proof, construction_duration_ms
 
 
 def _case_bank_contract(
@@ -1010,13 +1024,14 @@ def _run_case_locked(
     if constructed:
         require(not completed,
                 "completed billable row has a missing construction archive")
-        construction_proof = _construct_case_source(
+        construction_proof, construction_duration_ms = _construct_case_source(
             directory, materialized, output, case_id
         )
         bank_dir.mkdir(parents=True, exist_ok=True)
         atomic_write_json(bank_dir / "construction-proof.json", construction_proof)
         _dump_case_bank(
             source_url, bank_dir, construction_proof, case_contract,
+            construction_duration_ms=construction_duration_ms,
             pg_dump_bin=str(archive_tools["pg_dump"]["binary"]),
         )
         _reset_case_source(source_url)
@@ -2578,6 +2593,9 @@ def _write_row_proof(row_dir: Path, row: dict, reservation_path: Path, outcome: 
                                      capture_output=True, text=True, check=True).stdout.strip(),
         "manifest_sha256": sha256_file(CAMPAIGN_MANIFEST), "immutable": True, "complete": True,
     }
+    database_url = os.environ.get("MEMPHANT_TEST_DATABASE_URL", "")
+    if database_url:
+        proof["scratch_database_identity"] = _require_arm_database(database_url)
     seal_path = row_dir / "case-bank-seal.json"
     if seal_path.is_file():
         seal = json.loads(seal_path.read_text())
@@ -3290,6 +3308,39 @@ def _validate_retired_case_banks(
     return seals
 
 
+def _validate_query_only_memory_proof(
+    memory: dict[str, object], bank_manifest: dict[str, object]
+) -> None:
+    query = memory.get("query")
+    pairing = memory.get("pairing")
+    require(
+        isinstance(query, dict) and isinstance(pairing, dict)
+        and query.get("query_only") is True
+        and pairing.get("query_only") is True,
+        "archived memory proof is not query-only",
+    )
+    expected_construction_hash = bank_manifest["construction_proof_sha256"]
+    require(
+        query.get("construction_proof_sha256") == expected_construction_hash
+        and pairing.get("construction_proof_sha256")
+        == expected_construction_hash,
+        "row memory construction proof does not match its case bank",
+    )
+    construction = bank_manifest["construction"]
+    require(
+        "retains" not in pairing
+        and pairing.get("worker") == construction["pairing"]["worker"],
+        "query-only arm contains construction work",
+    )
+    require(
+        not {
+            "construction_duration_ms", "construction_cost_micros",
+            "insert_duration_ms", "worker_duration_ms",
+        }.intersection(query),
+        "arm query timing mixes construction with recall",
+    )
+
+
 def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
     rows = expanded_run_order(manifest)
     root_path = output / "pre-execution-proof.json"
@@ -3346,6 +3397,35 @@ def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
     case_bank_seals = _validate_retired_case_banks(output, rows)
     require(len(case_bank_seals) == 12,
             "P1-T6 aggregate requires exactly 12 retired case banks")
+    construction_hashes: list[str] = []
+    construction_durations: list[int] = []
+    case_bank_manifests: dict[str, dict[str, object]] = {}
+    for case_id in manifest["run_order"]["case_order"]:
+        bank_manifest = json.loads(
+            (output / "case-banks" / case_id / "manifest.json").read_text()
+        )
+        construction = bank_manifest.get("construction")
+        require(isinstance(construction, dict),
+                f"P1-T6 construction proof is missing: {case_id}")
+        construction_core = {
+            key: value for key, value in construction.items()
+            if key != "construction_proof_sha256"
+        }
+        construction_hash = bank_manifest.get("construction_proof_sha256")
+        require(
+            isinstance(construction_hash, str)
+            and construction.get("construction_proof_sha256") == construction_hash
+            and construction_hash == canonical_sha256(construction_core),
+            f"P1-T6 construction proof drift: {case_id}",
+        )
+        duration = bank_manifest.get("construction_duration_ms")
+        require(isinstance(duration, int) and duration >= 0,
+                f"P1-T6 construction duration is invalid: {case_id}")
+        construction_hashes.append(construction_hash)
+        construction_durations.append(duration)
+        case_bank_manifests[case_id] = bank_manifest
+    require(len(set(construction_hashes)) == 12,
+            "P1-T6 aggregate requires exactly 12 unique construction proofs")
     reservation_paths = sorted((output / "spend-ledger").glob("*.json"))
     settlement_paths = [output / row["row_id"] / "spend-settlement.json" for row in rows]
     require(len(reservation_paths) == len(rows) and all(path.is_file() for path in settlement_paths),
@@ -3371,6 +3451,7 @@ def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
             <= usd_to_micros(manifest["campaign_spend"]["hard_ceiling_usd"]),
             "settled plus outstanding campaign liability exceeds hard ceiling")
     records: dict[tuple[str, str], dict[str, object]] = {}
+    clone_database_identities: set[str] = set()
     for row in rows:
         row_dir = output / row["row_id"]
         proof = json.loads((row_dir / "row-proof.json").read_text())
@@ -3394,6 +3475,22 @@ def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
             require(proof["binaries"] == root_proof["binaries"], "row used mixed binaries")
         require(proof["artifact_hashes"] == artifact_hashes(row_dir, exclude={"row-proof.json"}),
                 "row artifact inventory drift")
+        require(
+            proof.get("case_bank_seal_sha256")
+            == case_bank_seals[row["question_id"]],
+            "row construction state differs from its paired case bank",
+        )
+        clone_database = proof.get("scratch_database_identity")
+        require(
+            isinstance(clone_database, str)
+            and ARM_DATABASE_PATTERN.fullmatch(clone_database) is not None
+            and clone_database.startswith(
+                f"memphant_p1t6_{row['question_id']}_"
+            )
+            and clone_database.endswith("_" + row["arm"]),
+            "row clone database identity is invalid",
+        )
+        clone_database_identities.add(clone_database)
         reservation = reservations[row["sequence"] - 1]
         settlement = settlements[row["sequence"] - 1]
         require(reservation == _reservation(row, manifest), "row reservation contract drift")
@@ -3404,6 +3501,19 @@ def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
         require(settlement == _row_settlement(
             row_dir, row, reservation, orphaned=bool(settlement["orphaned_attempt"])
         ), "row settlement does not reconcile to archived provider evidence")
+        memory_paths = list((row_dir / "memory-proofs").glob("*.json"))
+        require(len(memory_paths) <= 1, "row archives multiple memory proofs")
+        memory = None
+        if memory_paths:
+            memory = json.loads(memory_paths[0].read_text())
+            _validate_query_only_memory_proof(
+                memory, case_bank_manifests[row["question_id"]]
+            )
+            if proof.get("memory_proof_sha256") is not None:
+                require(
+                    sha256_file(memory_paths[0]) == proof["memory_proof_sha256"],
+                    "memory proof hash drift",
+                )
         if proof["outcome"] != "success":
             records[(row["question_id"], row["arm"])] = {
                 "score": 0.0, "raw_score": 0.0, "operational": False,
@@ -3415,7 +3525,6 @@ def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
             continue
         require(proof.get("deep_config_hash_bound") is True,
                 "successful row did not observe its frozen Deep config hash")
-        memory_paths = list((row_dir / "memory-proofs").glob("*.json"))
         require(len(memory_paths) == 1, "successful row lacks one memory proof")
         memory_path = memory_paths[0]
         require(sha256_file(memory_path) == proof["memory_proof_sha256"], "memory proof hash drift")
@@ -3433,7 +3542,7 @@ def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
                 "official score hash drift")
         judge_hashes = [sha256_file(path) for path in sorted((row_dir / "judge-routes").glob("*.json"))]
         require(canonical_sha256(judge_hashes) == proof["judge_route_sha256"], "judge proof hash drift")
-        memory = json.loads(memory_path.read_text())
+        require(memory is not None, "successful row memory proof is missing")
         public = memory["public"]
         require(public["recall_response"]["trace_id"] == public["trace"]["id"], "trace pairing drift")
         require(memory["recall_mutation_proof"]["corpus_policy_job_tables_unchanged"] is True,
@@ -3463,6 +3572,9 @@ def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
             "deep_config_hash": public["trace"].get("l4_config_hash"),
             "memory_proof_sha256": proof["memory_proof_sha256"],
         }
+
+    require(len(clone_database_identities) == 24,
+            "P1-T6 aggregate requires 24 distinct clone database identities")
 
     selected_deep_arm = manifest["protocol"]["selected_deep_arm"]
     candidates: dict[str, dict[str, object]] = {}
@@ -3529,6 +3641,17 @@ def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
         "campaign": manifest["campaign"], "manifest_sha256": sha256_file(CAMPAIGN_MANIFEST),
         "primary_metric": "paired official per-question binary score",
         "failure_treatment_applied": True, "candidates": candidates,
+        "construction": {
+            "case_count": 12,
+            "proof_sha256s": sorted(construction_hashes),
+            "duration_ms": {
+                "total": sum(construction_durations),
+                "p50": _percentile(construction_durations, .50),
+                "p95": _percentile(construction_durations, .95),
+                "max": max(construction_durations),
+            },
+            "cost_micros": 0,
+        },
         "spend_proof": {
             "preexisting_liability": manifest["campaign_spend"]["preexisting_liability"],
             "reservation_hashes": [sha256_file(path) for path in reservation_paths],
