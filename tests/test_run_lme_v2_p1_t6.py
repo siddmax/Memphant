@@ -2101,8 +2101,9 @@ def test_archive_state_fails_closed_after_first_completed_row(tmp_path: Path) ->
     assert campaign._verify_case_archive_resume(bank, completed_rows=2) is None
 
 
+@pytest.mark.parametrize("sonnet_operational", [True, False])
 def test_run_case_builds_once_restores_then_runs_two_key_local_clones(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, sonnet_operational: bool
 ) -> None:
     campaign = _load()
     manifest = campaign.load_campaign_manifest()
@@ -2165,7 +2166,14 @@ def test_run_case_builds_once_restores_then_runs_two_key_local_clones(
         row_dir.mkdir()
         campaign.atomic_write_json(row_dir / "case-bank-seal.json", bank_seal)
         campaign.atomic_write_json(row_dir / "row-proof.json", {
-            "complete": True, "row": row, "query_only": True,
+            "complete": True, "execution_complete": True,
+            "treatment_operational": row["arm"] == "fast" or sonnet_operational,
+            "outcome": (
+                "success"
+                if row["arm"] == "fast" or sonnet_operational
+                else "operational_failure"
+            ),
+            "row": row, "query_only": True,
             "case_bank_seal_sha256": bank_seal["seal_sha256"],
             "artifact_hashes": campaign.artifact_hashes(row_dir),
         })
@@ -2185,7 +2193,12 @@ def test_run_case_builds_once_restores_then_runs_two_key_local_clones(
     monkeypatch.setattr(campaign, "_database_key_count", lambda url: 0 if url == source_url else 1)
     monkeypatch.setattr(campaign, "_drop_local_database", lambda url: events.append(("drop", url)))
 
-    result = campaign._run_case(tmp_path, tmp_path, output, case_id, manifest)
+    if sonnet_operational:
+        result = campaign._run_case(tmp_path, tmp_path, output, case_id, manifest)
+    else:
+        with pytest.raises(RuntimeError, match="non-operational pair"):
+            campaign._run_case(tmp_path, tmp_path, output, case_id, manifest)
+        result = None
     assert events[:4] == ["recover", "construct", "dump", "reset"]
     assert events[4] == "restore"
     clones = [event for event in events if isinstance(event, tuple) and event[0] == "clone"]
@@ -2196,7 +2209,8 @@ def test_run_case_builds_once_restores_then_runs_two_key_local_clones(
     assert all(event[2].endswith("construction-proof.json") for event in executes)
     assert executes[0][3] != executes[1][3]
     assert len([event for event in events if isinstance(event, tuple) and event[0] == "drop"]) == 2
-    assert result == {"case_id": case_id, "constructed": True, "completed_rows": 2}
+    if sonnet_operational:
+        assert result == {"case_id": case_id, "constructed": True, "completed_rows": 2}
 
 
 def test_run_case_reuses_archive_after_interruption_and_drops_failed_clone(
@@ -2282,6 +2296,29 @@ def test_run_case_reuses_archive_after_interruption_and_drops_failed_clone(
         campaign._run_case(tmp_path, tmp_path, output, case_id, manifest)
     assert events[0:2] == ["recover", "restore"]
     assert len([event for event in events if isinstance(event, tuple) and event[0] == "drop"]) == 1
+
+
+def test_case_gate_rejects_non_operational_pair_before_next_case(tmp_path: Path) -> None:
+    campaign = _load()
+    manifest = campaign.load_campaign_manifest()
+    case_id = manifest["run_order"]["case_order"][0]
+    rows = [
+        row for row in campaign.expanded_run_order(manifest)
+        if row["question_id"] == case_id
+    ]
+    for row in rows:
+        row_dir = tmp_path / row["row_id"]
+        row_dir.mkdir()
+        campaign.atomic_write_json(row_dir / "row-proof.json", {
+            "complete": True,
+            "execution_complete": True,
+            "treatment_operational": row["arm"] == "fast",
+            "outcome": "success" if row["arm"] == "fast" else "operational_failure",
+            "row": row,
+        })
+
+    with pytest.raises(RuntimeError, match="non-operational pair"):
+        campaign._require_operational_case_rows(tmp_path, rows)
 
 
 def test_run_campaign_uses_one_scratch_lifecycle_per_case(
@@ -3066,6 +3103,59 @@ def test_deep_receipts_must_exactly_reconcile_ids_route_tokens_and_cost(
 
     receipt["receipts"][0]["total_cost_micros"] = 999
     campaign.atomic_write_json(tmp_path / "deep-generation-receipts.json", receipt)
+    settlement = campaign._row_settlement(
+        tmp_path, row, reservation, orphaned=False
+    )
+    assert settlement["deep_settled_micros"] == 0
+    assert settlement["deep_unsettled_upper_bound_micros"] == reservation[
+        "deep_hard_cap_micros"
+    ]
+
+
+def test_late_deep_receipt_settles_truthful_runtime_reservation(tmp_path: Path) -> None:
+    campaign = _load()
+    manifest = campaign.load_campaign_manifest()
+    row = next(
+        item for item in campaign.expanded_run_order(manifest) if item["arm"] == "sonnet"
+    )
+    candidate = manifest["protocol"]["deep_candidates"]["sonnet"]
+    reservation = campaign._reservation(row, manifest)
+    (tmp_path / "memory-proofs").mkdir()
+    campaign.atomic_write_json(tmp_path / "memory-proofs/proof.json", {
+        "public": {"recall_response": {"deep": {
+            "generation_ids": ["gen-late"],
+            "usage": {
+                "context_tokens": 0,
+                "spend_micros": 0,
+                "unsettled_context_tokens_upper_bound": 6_525,
+                "unsettled_spend_micros_upper_bound": 45_818,
+            },
+        }}},
+    })
+    campaign.atomic_write_json(tmp_path / "deep-generation-receipts.json", {
+        "audit_status": "settled",
+        "generation_ids": ["gen-late"],
+        "receipts": [{
+            "id": "gen-late",
+            "provider_name": "Azure",
+            "model": candidate["model"],
+            "tokens_prompt": 512,
+            "tokens_completion": 22,
+            "total_cost_micros": 3_380,
+        }],
+    })
+
+    settlement = campaign._row_settlement(
+        tmp_path, row, reservation, orphaned=False
+    )
+
+    assert settlement["deep_settled_micros"] == 3_380
+    assert settlement["deep_unsettled_upper_bound_micros"] == 0
+
+    receipt_path = tmp_path / "deep-generation-receipts.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["receipts"][0]["total_cost_micros"] = 45_819
+    campaign.atomic_write_json(receipt_path, receipt)
     settlement = campaign._row_settlement(
         tmp_path, row, reservation, orphaned=False
     )

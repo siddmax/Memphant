@@ -70,9 +70,9 @@
     "selected_deep_arm": "sonnet",
     "inactive_researched_shortlist": ["luna","sol"],
     "deep_candidates": {
-      "sonnet": {"requested_alias":"anthropic/claude-sonnet-5","model":"anthropic/claude-sonnet-5-20260630","endpoint_model_id":"anthropic/claude-sonnet-5","providers":["azure"],"input_price_micros_per_million":2000000,"output_price_micros_per_million":10000000,"config_sha256":"22730027f29f7daa15b7b8905878ce6d9f45ee49491db415960f431da72bcf75"},
-      "luna": {"requested_alias":"openai/gpt-5.6-luna","model":"openai/gpt-5.6-luna-20260709","endpoint_model_id":"openai/gpt-5.6-luna","providers":["azure"],"input_price_micros_per_million":1100000,"output_price_micros_per_million":6600000,"config_sha256":"bb4174d62de4083817d5fe4741ad12552e9c857abc7bb419b55c5898c335f6a9"},
-      "sol": {"requested_alias":"openai/gpt-5.6-sol","model":"openai/gpt-5.6-sol-20260709","endpoint_model_id":"openai/gpt-5.6-sol","providers":["azure"],"input_price_micros_per_million":5500000,"output_price_micros_per_million":33000000,"config_sha256":"028fcf5f3aeac5eb32a10cc3ad0095d48585e4c13cf97b77efe7591773b1770c"}
+      "sonnet": {"requested_alias":"anthropic/claude-sonnet-5","model":"anthropic/claude-sonnet-5-20260630","endpoint_model_id":"anthropic/claude-sonnet-5","providers":["azure"],"input_price_micros_per_million":2000000,"output_price_micros_per_million":10000000,"config_sha256":"d521ab622efb03a0ecf5b17c8b86fdc0944c3719fceb976b0a7dbce4e2313a7c"},
+      "luna": {"requested_alias":"openai/gpt-5.6-luna","model":"openai/gpt-5.6-luna-20260709","endpoint_model_id":"openai/gpt-5.6-luna","providers":["azure"],"input_price_micros_per_million":1100000,"output_price_micros_per_million":6600000,"config_sha256":"3ae0721f98a72511c8dd22a2021cbcb91263d0a0b3f236752a77ad7341ae6f7f"},
+      "sol": {"requested_alias":"openai/gpt-5.6-sol","model":"openai/gpt-5.6-sol-20260709","endpoint_model_id":"openai/gpt-5.6-sol","providers":["azure"],"input_price_micros_per_million":5500000,"output_price_micros_per_million":33000000,"config_sha256":"52f45079da9fa238c4f566dd381476964dd4ecf850053379678fc607a4b6f5ed"}
     }
   },
   "run_order": {

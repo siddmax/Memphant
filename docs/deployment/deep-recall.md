@@ -15,7 +15,8 @@ Cancellation drops the streaming HTTP request so Azure can stop processing and b
 Deep is off when `MEMPHANT_DEEP` is unset or exactly `off`. The only enabled value is exact `on`; other values fail startup. When enabled, set:
 
 - `OPENROUTER_API_KEY`
-- `MEMPHANT_DEEP_MODEL` to one exact model ID (floating aliases such as `latest` are rejected)
+- `MEMPHANT_DEEP_MODEL` to the exact immutable model ID used for the request and later generation receipt (floating aliases such as `latest` are rejected)
+- `MEMPHANT_DEEP_RESPONSE_MODEL` to the separately registered canonical model ID that OpenRouter emits in streaming events
 - `MEMPHANT_DEEP_PROMPT_PATH` to an immutable prompt file
 - `MEMPHANT_DEEP_PROVIDERS=azure`
 - `MEMPHANT_DEEP_INPUT_PRICE_MICROS_PER_MILLION`
@@ -25,6 +26,8 @@ Deep is off when `MEMPHANT_DEEP` is unset or exactly `off`. The only enabled val
 
 That validated endpoint is the complete egress boundary. The Deep HTTP client disables redirects, ignores ambient/system proxy configuration, and disables reqwest's implicit protocol retries. MemPhant's explicit retry loop is therefore the only replay mechanism, and it runs only for a proven pre-generation 429/5xx response without a generation ID. Redirect, proxy, and implicit-retry policy are immutable facts covered by the config hash. If a deployment needs a proxy later, it must become explicit validated configuration with provenance rather than inheriting process or host settings.
 
-The shipped operating point is one 120-second wall deadline, at most 24 completed model responses, 96,000 cumulative provider input tokens, USD 0.30 maximum spend, and 4,096 maximum completion tokens. Retries, tool turns, and final usage reconciliation share those ceilings. Each current dispatch owns its reservation and optional validated generation ID, so settlement can never reuse an earlier turn's ID or erase a later unknown charge. Model, provider, prompt, prices, limits, transport endpoints, egress/replay policy, retry policy, and tool-output bounds are construction-time facts covered by the prompt/config hashes.
+The shipped operating point is one 120-second wall deadline, at most 24 completed model responses, 96,000 cumulative provider input tokens, USD 0.30 maximum spend, and 4,096 maximum completion tokens. Retries, tool turns, and final usage reconciliation share those ceilings. Each current dispatch owns its reservation and optional validated generation ID, so settlement can never reuse an earlier turn's ID or erase a later unknown charge.
+
+The request model and streamed response model are separate fail-closed contracts: the request pins an immutable snapshot, OpenRouter streaming may identify that snapshot by its canonical alias, and the post-response generation receipt must identify the exact snapshot. Both model IDs, along with provider, prompt, prices, limits, transport endpoints, egress/replay policy, retry policy, and tool-output bounds, are construction-time facts covered by the prompt/config hashes.
 
 Only server and MCP recall services install the provider through `build_service`. The worker never reads this configuration or sends source data to a model.

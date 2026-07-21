@@ -35,6 +35,7 @@ const DEFAULT_OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 pub struct DeepConfig {
     api_key: String,
     model: String,
+    response_model: String,
     prompt: String,
     providers: Vec<String>,
     input_price_micros_per_million: u64,
@@ -54,13 +55,21 @@ impl DeepConfig {
     pub fn new(
         api_key: String,
         model: String,
+        response_model: String,
         prompt: String,
         providers: Vec<String>,
         input_price_micros_per_million: u64,
         output_price_micros_per_million: u64,
     ) -> Result<Self, String> {
-        if api_key.trim().is_empty() || prompt.trim().is_empty() || model.trim().is_empty() {
-            return Err("Deep API key, model, and prompt must not be empty".to_string());
+        if api_key.trim().is_empty()
+            || prompt.trim().is_empty()
+            || model.trim().is_empty()
+            || response_model.trim().is_empty()
+        {
+            return Err(
+                "Deep API key, request model, response model, and prompt must not be empty"
+                    .to_string(),
+            );
         }
         if model.to_ascii_lowercase().contains("latest") || model.contains('*') {
             return Err("MEMPHANT_DEEP_MODEL must be an exact non-floating model id".to_string());
@@ -74,6 +83,7 @@ impl DeepConfig {
         Ok(Self {
             api_key,
             model,
+            response_model,
             prompt,
             providers,
             input_price_micros_per_million,
@@ -313,6 +323,7 @@ impl OpenRouterDeepRecall {
         let config_hash = sha256(
             serde_json::to_vec(&json!({
                 "model": config.model,
+                "response_model": config.response_model,
                 "providers": config.providers,
                 "input_price_micros_per_million": config.input_price_micros_per_million,
                 "output_price_micros_per_million": config.output_price_micros_per_million,
@@ -581,7 +592,7 @@ impl OpenRouterDeepRecall {
                 }
             };
             if state
-                .observe_route(&turn, &self.config.providers, &self.config.model)
+                .observe_route(&turn, &self.config.providers, &self.config.response_model)
                 .is_err()
                 || state.settle(turn.prompt_tokens, turn.cost_micros).is_err()
             {
@@ -784,7 +795,7 @@ impl LoopState {
         &mut self,
         turn: &ParsedTurn,
         allowed_providers: &[String],
-        expected_model: &str,
+        expected_response_model: &str,
     ) -> Result<(), DeepRecallProviderError> {
         if !allowed_providers
             .iter()
@@ -792,7 +803,7 @@ impl LoopState {
         {
             return Err(DeepRecallProviderError::InvalidOutput);
         }
-        if turn.model != expected_model {
+        if turn.model != expected_response_model {
             return Err(DeepRecallProviderError::InvalidOutput);
         }
         if self
@@ -1099,6 +1110,7 @@ pub fn build_deep_recall_provider() -> Result<Option<Arc<dyn DeepRecallProvider>
             };
             let api_key = required("OPENROUTER_API_KEY")?;
             let model = required("MEMPHANT_DEEP_MODEL")?;
+            let response_model = required("MEMPHANT_DEEP_RESPONSE_MODEL")?;
             let providers = required("MEMPHANT_DEEP_PROVIDERS")?
                 .split(',')
                 .map(str::to_string)
@@ -1112,6 +1124,7 @@ pub fn build_deep_recall_provider() -> Result<Option<Arc<dyn DeepRecallProvider>
             let config = DeepConfig::new(
                 api_key,
                 model,
+                response_model,
                 prompt.trim_end_matches(['\r', '\n']).to_string(),
                 providers,
                 input_price,
@@ -1927,6 +1940,7 @@ mod tests {
         DeepConfig::new(
             "secret".into(),
             "anthropic/claude-sonnet-5".into(),
+            "anthropic/claude-sonnet-5".into(),
             "Use tools only.".into(),
             vec!["azure".into()],
             2_000_000,
@@ -1998,6 +2012,7 @@ mod tests {
             DeepConfig::new(
                 "key".into(),
                 "openai/gpt-latest".into(),
+                "openai/gpt".into(),
                 "prompt".into(),
                 vec!["azure".into()],
                 1,
@@ -2008,6 +2023,7 @@ mod tests {
         assert!(
             DeepConfig::new(
                 "key".into(),
+                "openai/gpt-5.6-sol".into(),
                 "openai/gpt-5.6-sol".into(),
                 "prompt".into(),
                 vec!["bedrock".into()],
@@ -2030,6 +2046,57 @@ mod tests {
             config()
                 .with_openrouter_base_url("http://127.0.0.1:9999/api/v1")
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn exact_request_model_accepts_only_registered_canonical_stream_model() {
+        let candidate = DeepConfig::new(
+            "secret".into(),
+            "anthropic/claude-sonnet-5-20260630".into(),
+            "anthropic/claude-sonnet-5".into(),
+            "Use tools only.".into(),
+            vec!["azure".into()],
+            2_000_000,
+            10_000_000,
+        )
+        .unwrap();
+        let mut state = LoopState::new(
+            DeepRecallProviderRequest {
+                query: "q".into(),
+                workspace: workspace().0,
+            },
+            &candidate,
+        )
+        .unwrap();
+        let turn = ParsedTurn {
+            call_id: "call-1".into(),
+            tool_name: "finish".into(),
+            arguments: "{\"source_ids\":[]}".into(),
+            reasoning_details: Vec::new(),
+            provider: "Azure".into(),
+            model: "anthropic/claude-sonnet-5".into(),
+            prompt_tokens: 10,
+            cost_micros: 20,
+        };
+
+        assert!(
+            state
+                .observe_route(&turn, &candidate.providers, &candidate.response_model)
+                .is_ok()
+        );
+        let wrong_snapshot = ParsedTurn {
+            model: "anthropic/claude-sonnet-5-20260501".into(),
+            ..turn
+        };
+        assert!(
+            state
+                .observe_route(
+                    &wrong_snapshot,
+                    &candidate.providers,
+                    &candidate.response_model,
+                )
+                .is_err()
         );
     }
 
@@ -2590,29 +2657,33 @@ mod tests {
 
     #[test]
     fn campaign_candidate_config_hashes_are_cross_language_frozen() {
-        for (model, input_price, output_price, expected) in [
+        for (model, response_model, input_price, output_price, expected) in [
             (
                 "anthropic/claude-sonnet-5-20260630",
+                "anthropic/claude-sonnet-5",
                 2_000_000,
                 10_000_000,
-                "22730027f29f7daa15b7b8905878ce6d9f45ee49491db415960f431da72bcf75",
+                "d521ab622efb03a0ecf5b17c8b86fdc0944c3719fceb976b0a7dbce4e2313a7c",
             ),
             (
                 "openai/gpt-5.6-luna-20260709",
+                "openai/gpt-5.6-luna",
                 1_100_000,
                 6_600_000,
-                "bb4174d62de4083817d5fe4741ad12552e9c857abc7bb419b55c5898c335f6a9",
+                "3ae0721f98a72511c8dd22a2021cbcb91263d0a0b3f236752a77ad7341ae6f7f",
             ),
             (
                 "openai/gpt-5.6-sol-20260709",
+                "openai/gpt-5.6-sol",
                 5_500_000,
                 33_000_000,
-                "028fcf5f3aeac5eb32a10cc3ad0095d48585e4c13cf97b77efe7591773b1770c",
+                "52f45079da9fa238c4f566dd381476964dd4ecf850053379678fc607a4b6f5ed",
             ),
         ] {
             let candidate = DeepConfig::new(
                 "secret".into(),
                 model.into(),
+                response_model.into(),
                 "campaign prompt".into(),
                 vec!["azure".into()],
                 input_price,

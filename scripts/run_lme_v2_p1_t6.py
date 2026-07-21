@@ -2850,6 +2850,25 @@ def _case_archive_tools(output: Path, source_url: str) -> dict[str, object]:
     return frozen
 
 
+def _require_operational_case_rows(output: Path, rows: list[dict]) -> None:
+    failures = []
+    for row in rows:
+        proof = json.loads(
+            (output / row["row_id"] / "row-proof.json").read_text()
+        )
+        if not (
+            proof.get("complete") is True
+            and proof.get("execution_complete") is True
+            and proof.get("treatment_operational") is True
+            and proof.get("outcome") == "success"
+        ):
+            failures.append(row["row_id"])
+    require(
+        not failures,
+        "P1-T6 non-operational pair: " + ", ".join(failures),
+    )
+
+
 def _run_case_locked(
     directory: Path,
     materialized: Path,
@@ -2886,6 +2905,7 @@ def _run_case_locked(
             allow_new=False,
         )
         _retire_case_archive(bank_dir, output, rows)
+        _require_operational_case_rows(output, rows)
         return {"case_id": case_id, "constructed": False, "completed_rows": 2}
     case_contract = _case_bank_contract(materialized, output, case_id, manifest)
     bank_ready = False
@@ -2968,6 +2988,7 @@ def _run_case_locked(
     require(all((output / row["row_id"] / "row-proof.json").is_file() for row in rows),
             "P1-T6 case did not finalize both row proofs")
     _retire_case_archive(bank_dir, output, rows)
+    _require_operational_case_rows(output, rows)
     return {"case_id": case_id, "constructed": constructed, "completed_rows": 2}
 
 
@@ -3184,6 +3205,7 @@ def _row_secret_values(
 def _expected_deep_config_hash(candidate: dict) -> str:
     return canonical_sha256({
         "model": candidate["model"],
+        "response_model": candidate["endpoint_model_id"],
         "providers": ["azure"],
         "input_price_micros_per_million": candidate["input_price_micros_per_million"],
         "output_price_micros_per_million": candidate["output_price_micros_per_million"],
@@ -4319,7 +4341,11 @@ def _deep_receipt_payload_agrees(payload: dict, deep: dict, candidate: dict) -> 
     ):
         return False
     receipts = payload.get("receipts")
-    if not isinstance(receipts, list) or [item.get("id") for item in receipts] != generation_ids:
+    if (
+        not isinstance(receipts, list)
+        or not all(isinstance(item, dict) for item in receipts)
+        or [item.get("id") for item in receipts] != generation_ids
+    ):
         return False
     for receipt in receipts:
         if (
@@ -4336,13 +4362,23 @@ def _deep_receipt_payload_agrees(payload: dict, deep: dict, candidate: dict) -> 
             or receipt["total_cost_micros"] < 0
         ):
             return False
+    usage_fields = [
+        usage.get("context_tokens"),
+        usage.get("spend_micros"),
+        usage.get("unsettled_context_tokens_upper_bound"),
+        usage.get("unsettled_spend_micros_upper_bound"),
+    ]
+    if not all(
+        isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        for value in usage_fields
+    ):
+        return False
+    settled_context, settled_spend, unresolved_context, unresolved_spend = usage_fields
+    receipt_context = sum(item["tokens_prompt"] for item in receipts)
+    receipt_spend = sum(item["total_cost_micros"] for item in receipts)
     return (
-        int(usage.get("unsettled_context_tokens_upper_bound", -1)) == 0
-        and int(usage.get("unsettled_spend_micros_upper_bound", -1)) == 0
-        and sum(item["tokens_prompt"] for item in receipts)
-        == int(usage.get("context_tokens", -1))
-        and sum(item["total_cost_micros"] for item in receipts)
-        == int(usage.get("spend_micros", -1))
+        settled_context <= receipt_context <= settled_context + unresolved_context
+        and settled_spend <= receipt_spend <= settled_spend + unresolved_spend
     )
 
 
@@ -4414,14 +4450,19 @@ def _row_settlement(row_dir: Path, row: dict, reservation: dict, *, orphaned: bo
         deep = _deep_evidence(row_dir)
         receipt_path = row_dir / "deep-generation-receipts.json"
         candidate = load_campaign_manifest()["protocol"]["deep_candidates"][row["arm"]]
+        receipt_payload = (
+            json.loads(receipt_path.read_text()) if receipt_path.is_file() else None
+        )
         if (
             isinstance(deep, dict)
-            and receipt_path.is_file()
+            and isinstance(receipt_payload, dict)
             and _deep_receipt_payload_agrees(
-                json.loads(receipt_path.read_text()), deep, candidate
+                receipt_payload, deep, candidate
             )
         ):
-            deep_settled = int(deep["usage"]["spend_micros"])
+            deep_settled = sum(
+                item["total_cost_micros"] for item in receipt_payload["receipts"]
+            )
         else:
             deep_unsettled = int(reservation["deep_hard_cap_micros"])
 
@@ -4920,6 +4961,7 @@ def run_row(directory: Path, materialized: Path, output: Path, row: dict, manife
         server_env.update({
             "OPENROUTER_API_KEY": openrouter_key,
             "MEMPHANT_DEEP": "on", "MEMPHANT_DEEP_MODEL": candidate["model"],
+            "MEMPHANT_DEEP_RESPONSE_MODEL": candidate["endpoint_model_id"],
             "MEMPHANT_DEEP_PROMPT_PATH": str(ROOT / "config/deep-recall-v1.txt"),
             "MEMPHANT_DEEP_PROVIDERS": "azure",
             "MEMPHANT_DEEP_INPUT_PRICE_MICROS_PER_MILLION": str(candidate["input_price_micros_per_million"]),

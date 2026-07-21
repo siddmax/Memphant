@@ -1,0 +1,61 @@
+{
+  "schema_version": "memphant.p1_t6.stream_diagnostic_result.v1",
+  "completed_at": "2026-07-21T17:01:47Z",
+  "authorization": {
+    "path": "docs/build-log/artifacts/p1-t6/STREAM-DIAGNOSTIC-AUTHORIZATION-63be29d1.json",
+    "sha256": "a279ac2a6f017d0e11ec05e2b1540e50cccc08552ed706a7c6a0250e285f25e0"
+  },
+  "dispatch_audit": {
+    "provider_dispatches": 1,
+    "benchmark_cases": 0,
+    "database_connections": 0,
+    "resource_constructions": 0,
+    "http_status": 200,
+    "content_type": "text/event-stream",
+    "elapsed_ms": 10555,
+    "generation_id": "gen-1784652329-D3RkCgtWICTjPpkwHEAA",
+    "provider": "Azure"
+  },
+  "stream_shape": {
+    "model": "anthropic/claude-sonnet-5",
+    "tool_call_chunks_present": true,
+    "tool_call_shape_valid": true,
+    "final_usage_present": true,
+    "done_event_present": true,
+    "prompt_tokens": 610,
+    "completion_tokens": 40,
+    "raw_content_or_tool_arguments_persisted": false
+  },
+  "generation_receipt": {
+    "poll_attempts": 8,
+    "model": "anthropic/claude-sonnet-5-20260630",
+    "provider_name": "Azure",
+    "finish_reason": "tool_calls",
+    "native_finish_reason": "tool_use",
+    "tokens_prompt": 107,
+    "tokens_completion": 6,
+    "total_cost_micros": 1620,
+    "provider_liability_settled": true
+  },
+  "finding": {
+    "classification": "exact_request_model_uses_registered_canonical_stream_identity",
+    "root_cause": "The production parser compared every SSE event model against the exact dated request model. OpenRouter emitted the registered canonical alias in the otherwise valid stream and retained the exact dated snapshot in the generation receipt, so the runtime rejected the first response before tool iteration one.",
+    "parser_contract": "DeepConfig must bind and validate both the exact request and receipt model and the registered canonical SSE response model.",
+    "controller_contract": "A completed case containing any non-operational row must exit nonzero after retiring its local archive and before the parent opens the next case."
+  },
+  "accounting_note": "OpenRouter's final SSE usage token counts and generation receipt native token counts differ, while the provider-reported cost agrees. The exact generation receipt is authoritative for external spend settlement; the immutable runtime reservation remains evidence of what was known at response time.",
+  "campaign_liability": {
+    "prior_settled_micros": 15800,
+    "diagnostic_settled_micros": 1620,
+    "cumulative_settled_micros": 17420,
+    "cumulative_unsettled_upper_bound_micros": 316142,
+    "cumulative_liability_micros": 333562
+  },
+  "stop_audit": {
+    "diagnostic_retried": false,
+    "benchmark_started": false,
+    "fresh_campaign_root_started": false,
+    "future_paid_dispatch_authorized": false
+  },
+  "claim_boundary": "This one-call synthetic diagnostic identifies a transport contract mismatch. It is not benchmark evidence, a model-quality evaluation, a SOTA claim, or authority for a new campaign run."
+}

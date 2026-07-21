@@ -737,6 +737,10 @@ mod deep_runtime_smoke {
             ("OPENROUTER_API_KEY", "test-key".to_string()),
             (
                 "MEMPHANT_DEEP_MODEL",
+                "anthropic/claude-sonnet-5-20260630".to_string(),
+            ),
+            (
+                "MEMPHANT_DEEP_RESPONSE_MODEL",
                 "anthropic/claude-sonnet-5".to_string(),
             ),
             (
