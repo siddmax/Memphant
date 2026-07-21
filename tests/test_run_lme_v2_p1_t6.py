@@ -1485,6 +1485,8 @@ def _write_synthetic_success_campaign(
                 "l4_config_hash": candidate["config_sha256"],
             })
         memory = {
+            "contract": {"adapter_sha256": "a" * 64},
+            "isolation": {"tenant_id": "tenant"},
             "public": {"recall_response": {"trace_id": "trace", "deep": deep}, "trace": trace},
             "recall_mutation_proof": {"corpus_policy_job_tables_unchanged": True},
             "query": {
@@ -1685,6 +1687,44 @@ def test_aggregate_rejects_pairing_drift_for_success_and_failure_rows(
     memory_path = row_dir / "memory-proofs/proof.json"
     memory = json.loads(memory_path.read_text())
     memory["pairing"].update(mutation)
+    campaign.atomic_write_json(memory_path, memory)
+    proof_path = row_dir / "row-proof.json"
+    proof = json.loads(proof_path.read_text())
+    proof["outcome"] = outcome
+    proof["memory_proof_sha256"] = campaign.sha256_file(memory_path)
+    proof["artifact_hashes"] = campaign.artifact_hashes(
+        row_dir, exclude={"row-proof.json"}
+    )
+    campaign.atomic_write_json(proof_path, proof)
+    _refresh_synthetic_case_bank_retirements(campaign, tmp_path, rows)
+    with pytest.raises(RuntimeError, match=message):
+        campaign.aggregate_campaign(tmp_path, manifest)
+
+
+@pytest.mark.parametrize("outcome", ["success", "operational_failure"])
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda memory: memory.update({"construction_duration_ms": 1}),
+         "construction timing or cost"),
+        (lambda memory: memory["public"].update(
+            {"construction": {"duration_ms": 1}}
+        ), "construction timing or cost"),
+        (lambda memory: memory.update({"retains": []}), "retains"),
+    ],
+)
+def test_aggregate_rejects_construction_evidence_anywhere_in_memory_proof(
+    tmp_path: Path, outcome: str, mutation, message: str
+) -> None:
+    campaign = _load()
+    manifest = campaign.load_campaign_manifest()
+    rows = campaign.expanded_run_order(manifest)
+    _write_synthetic_success_campaign(campaign, tmp_path, manifest, rows)
+    row = rows[0]
+    row_dir = tmp_path / row["row_id"]
+    memory_path = row_dir / "memory-proofs/proof.json"
+    memory = json.loads(memory_path.read_text())
+    mutation(memory)
     campaign.atomic_write_json(memory_path, memory)
     proof_path = row_dir / "row-proof.json"
     proof = json.loads(proof_path.read_text())

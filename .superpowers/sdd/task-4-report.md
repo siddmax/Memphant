@@ -28,7 +28,7 @@ security, settlement, and positive-delta predicates are unchanged.
 ## TDD evidence
 
 - Red: `python3 -m pytest tests/test_run_lme_v2_p1_t6.py -q` -> 58 passed, 7 failed before aggregate enforcement
-- Green: `python3 -m pytest tests/test_run_lme_v2_p1_t6.py -q` -> 72 passed
+- Green: `python3 -m pytest tests/test_run_lme_v2_p1_t6.py -q` -> 78 passed
 - Adapter regression: `python3 -m pytest tests/test_public_benchmark_adapters.py -q` -> 15 passed, 1 intentional packaged integration skip
 - `git diff --check` -> passed
 
@@ -57,3 +57,15 @@ cost fields are rejected before outcome scoring.
 - Red: focused success/failure drift regression -> 4 failed
 - Green: full focused suite -> 72 passed
 - Successful and operational-failure rows both reject count drift and pairing-local construction duration
+
+The follow-up review extended the same fail-closed rule across the entire
+archived memory proof. The top-level schema must now exactly match Task 2, any
+`retains` key is rejected at any depth, and path-aware recursion rejects
+construction/insert/worker duration, latency, cost, or spend evidence anywhere
+in the document. Only the legitimate bank-equal `pairing.worker` proof and the
+Task 2 contract binary fingerprint are accepted as worker keys; construction
+proof hash references are restricted to query and pairing.
+
+- Red: whole-proof success/failure regression -> 6 failed
+- Green: full focused suite -> 78 passed
+- Both outcomes reject top-level construction duration, nested `public.construction.duration_ms`, and top-level retains

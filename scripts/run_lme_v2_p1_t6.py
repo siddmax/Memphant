@@ -3319,23 +3319,55 @@ def _validate_query_only_memory_proof(
         and pairing.get("query_only") is True,
         "archived memory proof is not query-only",
     )
-    def contains_construction_metric(value: object, path: str = "") -> bool:
+
+    def validate_evidence_paths(value: object, path: tuple[str, ...] = ()) -> None:
         if isinstance(value, dict):
             for key, item in value.items():
-                normalized = "_".join(filter(None, (path, str(key).lower())))
-                if (
-                    any(phase in normalized for phase in ("construction", "insert", "worker"))
-                    and any(metric in normalized for metric in ("duration", "latency", "cost", "spend"))
-                ) or contains_construction_metric(item, normalized):
-                    return True
+                key_name = str(key).lower()
+                item_path = (*path, key_name)
+                require(key_name != "retains",
+                        "archived memory proof contains retains construction work")
+                if key_name == "worker":
+                    require(
+                        item_path in {
+                            ("pairing", "worker"),
+                            ("contract", "binaries", "worker"),
+                        },
+                        "archived memory proof contains arm worker evidence",
+                    )
+                if key_name == "construction_proof_sha256":
+                    require(
+                        item_path in {
+                            ("pairing", "construction_proof_sha256"),
+                            ("query", "construction_proof_sha256"),
+                        },
+                        "archived memory construction proof reference is misplaced",
+                    )
+                normalized = "_".join(item_path)
+                require(
+                    not (
+                        any(phase in normalized for phase in (
+                            "construction", "insert", "worker",
+                        ))
+                        and any(metric in normalized for metric in (
+                            "duration", "latency", "cost", "spend",
+                        ))
+                    ),
+                    "arm query timing mixes construction with recall; "
+                    "construction timing or cost is forbidden",
+                )
+                validate_evidence_paths(item, item_path)
         elif isinstance(value, list):
-            return any(contains_construction_metric(item, path) for item in value)
-        return False
+            for item in value:
+                validate_evidence_paths(item, path)
 
+    validate_evidence_paths(memory)
     require(
-        not contains_construction_metric(query)
-        and not contains_construction_metric(pairing),
-        "arm query timing mixes construction with recall; construction timing or cost is forbidden",
+        set(memory) == {
+            "contract", "isolation", "pairing", "recall_mutation_proof",
+            "public", "query",
+        },
+        "archived memory proof top-level shape is invalid",
     )
     query_fields = {
         "question_id", "query_sha256", "query_image_present",
