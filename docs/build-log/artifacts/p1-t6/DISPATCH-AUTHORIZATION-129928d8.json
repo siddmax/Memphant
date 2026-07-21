@@ -1,0 +1,72 @@
+{
+  "schema_version": "memphant.p1_t6.dispatch_authorization.v1",
+  "created_at": "2026-07-21T15:38:31Z",
+  "decision": "authorize_registered_n12_fast_sonnet_gate",
+  "runtime_source_commit": "129928d8385d1cbba4c01ff52f3e3d0c279aeb6a",
+  "planned_output_root": "docs/build-log/artifacts/p1-t6/run-129928d8",
+  "authorization": {
+    "cases": 12,
+    "constructions": 12,
+    "answer_rows": 24,
+    "deep_dispatches_max": 12,
+    "cumulative_worst_case_liability_micro_usd": 6021284,
+    "campaign_hard_ceiling_micro_usd": 6250000,
+    "inactive_arms": [
+      "luna",
+      "sol"
+    ],
+    "larger_run_authorized": false,
+    "push_authorized": false
+  },
+  "just_in_time_checks": {
+    "credentials": {
+      "source": "doppler project syndai config dev",
+      "openrouter_api_key_present": true,
+      "openai_api_key_present": true,
+      "values_emitted_or_persisted": false
+    },
+    "endpoint_inventory": {
+      "reader_material_contract_sha256": "7a151a24435766a089675dbc36f47e2c270c6632c9ee4db140046c194850465d",
+      "reader_matching_endpoint_sha256": [
+        "d38ef0b2f83fd862ae08cee90ecc435072ae2a4beea7326693cc40dbfcb9c423"
+      ],
+      "sonnet_material_contract_sha256": "456641f458d0aeaff5b5e1df9c42d7715c905239d78c05fa4a723b9c64835b3a",
+      "sonnet_matching_endpoint_sha256": [
+        "43a3db7bc7c2e03aa4c913ef08dcfdda115568d7a76073672435598a8d95424d"
+      ]
+    },
+    "scratch_postgres": {
+      "server_major": 17,
+      "create_connect_drop_smoke": "passed",
+      "remaining_scratch_databases": 0
+    },
+    "runtime_inputs_unchanged": true,
+    "planned_output_root_absent": true,
+    "static_context_contract": {
+      "decision": "reuse",
+      "authorization_path": "docs/build-log/artifacts/p1-t6/CONTEXT-PREFLIGHT-REUSE-AUTHORIZATION.json",
+      "exact_reader_tokens": 23564,
+      "budget_tokens": 32768,
+      "untruncated": true
+    }
+  },
+  "paid_route_probe": {
+    "run_now": false,
+    "reason": "The frozen preexisting-liability ledger already includes the settled reader route proof, current no-paid endpoint inventory matches both executable routes, and another paid probe would add duplicate unregistered liability. The first reserved benchmark dispatch remains fail-closed and the campaign stops on any route or settlement failure.",
+    "existing_proof": "docs/build-log/artifacts/p1-t6/live-reader-route-05e2bf66/PROOF.json"
+  },
+  "execution_environment": {
+    "secret_injection": "wrap only the benchmark process with doppler run --project syndai --config dev",
+    "child_environment": "empty base plus HOME, PATH, locale, timezone, OPENROUTER_API_KEY, and OPENAI_API_KEY",
+    "ci_or_test_secret_injection": false,
+    "database_authority": "local ephemeral scratch Postgres only"
+  },
+  "stop_predicates": [
+    "stop on any failed pair or missing proof",
+    "stop on any cap, infrastructure, security, write, route, or settlement failure",
+    "never rerun a completed billable row",
+    "stop after the registered Sonnet decision and do not run Luna or Sol",
+    "do not start n100_to_n300 or full_500 from this authorization"
+  ],
+  "claim_boundary": "This authorizes only the frozen P1-T6 n=12 development gate. It is not a pass, SOTA claim, default routing decision, larger-run authorization, merge, or push authorization."
+}
