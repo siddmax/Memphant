@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "executed_at": "2026-07-20",
+  "purpose": "Isolate the first-request Deep route failure without replaying an immutable benchmark row.",
+  "model": "anthropic/claude-sonnet-5-20260630",
+  "provider_policy": {
+    "only": [
+      "azure"
+    ],
+    "allow_fallbacks": true,
+    "require_parameters": true,
+    "data_collection": "deny",
+    "zdr": true,
+    "max_price": {
+      "prompt": 2.0,
+      "completion": 10.0
+    }
+  },
+  "control": {
+    "parallel_tool_calls": false,
+    "http_status": 404,
+    "generation_id": null,
+    "error_code": 404,
+    "error_message": "No endpoints found that can handle the requested parameters. To learn more about provider routing, visit: https://openrouter.ai/docs/guides/routing/provider-selection",
+    "settled_cost_micros": 0,
+    "unsettled_upper_bound_micros": 0
+  },
+  "treatment": {
+    "parallel_tool_calls": "omitted",
+    "http_status": 200,
+    "generation_id": "gen-1784599051-POODgvPPgFyX8VwfgCjj",
+    "observed_model": "anthropic/claude-sonnet-5-20260630",
+    "observed_provider": "Azure",
+    "finish_reason": "tool_calls",
+    "tool_call_count": 1,
+    "receipt": {
+      "tokens_prompt": 64,
+      "tokens_completion": 1,
+      "total_cost": 0.001236,
+      "total_cost_micros": 1236,
+      "generation_time_ms": 3115,
+      "latency_ms": 2790
+    },
+    "settled_cost_micros": 1236,
+    "unsettled_upper_bound_micros": 0
+  },
+  "live_endpoint_inventory": {
+    "source": "https://openrouter.ai/api/v1/models/anthropic/claude-sonnet-5-20260630/endpoints",
+    "canonical_model": "anthropic/claude-sonnet-5",
+    "azure_status": 0,
+    "azure_supported_parameters": [
+      "reasoning",
+      "include_reasoning",
+      "structured_outputs",
+      "max_tokens",
+      "max_completion_tokens",
+      "tools",
+      "tool_choice",
+      "response_format",
+      "verbosity",
+      "stop",
+      "reasoning_effort"
+    ],
+    "parallel_tool_calls_advertised": false
+  },
+  "conclusion": "With require_parameters=true, parallel_tool_calls=false makes the exact Azure route ineligible. Omitting that optional parameter admits the frozen Azure endpoint and yields exactly one tool call. Single-call safety remains enforced by the response parser."
+}

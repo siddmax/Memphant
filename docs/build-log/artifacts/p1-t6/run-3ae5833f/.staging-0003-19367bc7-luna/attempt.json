@@ -1,0 +1,12 @@
+{
+  "child_pid": 27677,
+  "coordinator_pid": 17584,
+  "dispatch_started": true,
+  "reservation_sha256": "ee1a6edbdf030e59e0adaddae4fa13d175c6172689d6b83519b7bcd8a310a287",
+  "row": {
+    "arm": "luna",
+    "question_id": "19367bc7",
+    "row_id": "0003-19367bc7-luna",
+    "sequence": 3
+  }
+}

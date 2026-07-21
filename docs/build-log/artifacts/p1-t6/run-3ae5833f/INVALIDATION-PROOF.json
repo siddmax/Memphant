@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "attempt": "run-3ae5833f",
+  "classification": "deep_route_parameter_incompatibility_after_one_valid_fast_row",
+  "invalidated_at": "2026-07-20",
+  "measured_commit": "3ae5833f3e1f3f18f66fccde50d2e79bc58da90d",
+  "preserved_evidence": {
+    "pre_append_inventory_files": 38,
+    "pre_append_inventory_sha256": "7155c8e19b6fb29b96bec0b7eaf4bd408be233352e5ad80e170b2fc7e18b4432",
+    "pre_execution_proof_sha256": "7e9423fc702abe5eba5263d38a29e6c776c38771a136e202b4d353529a9423e2",
+    "frozen_run_order_sha256": "89917f248be4aff9a49fdb2ecbeb9f6d8e1d8efb869c90ebba1075619768a792",
+    "finalized_rows": [
+      "0001-19367bc7-fast",
+      "0002-19367bc7-sonnet"
+    ],
+    "interrupted_staging_rows": [
+      ".staging-0003-19367bc7-luna"
+    ],
+    "fast_row_proof_sha256": "88c68bb518d62a3285dc4993aff0a1b53fd93483ae61f1302077bccb888181f8",
+    "sonnet_row_proof_sha256": "822f18f61342248f0d95f802e0ffeb3ae9215a32c2acaff1825650cc457039bb"
+  },
+  "successful_fast_boundary": {
+    "official_exit_code": 0,
+    "treatment_operational": true,
+    "worker_completed_sources": 670,
+    "worker_failures": 0,
+    "recall_duration_ms": 53456,
+    "memory_context_tokens": 23564,
+    "memory_context_truncated": false,
+    "reader_provider": "DeepInfra",
+    "reader_model": "qwen/qwen3.5-9b-20260310",
+    "reader_generation_id": "gen-1784594858-bbiCN2EIY8luRO09Inin",
+    "official_score": 0.0,
+    "claim_boundary": "Valid development evidence inside an invalidated campaign root; not a product latency SLO, promotion result, public benchmark claim, or replay authorization."
+  },
+  "failure": {
+    "stage": "first_sonnet_deep_recall_after_successful_compile",
+    "public_error_code": "deep_unavailable",
+    "http_status": 503,
+    "deep_config_hash_bound": false,
+    "worker_completed_sources": 670,
+    "worker_failures": 0,
+    "reason": "The installed Deep provider sent parallel_tool_calls=false while provider.require_parameters=true. OpenRouter rejected the exact Azure route with HTTP 404 because Azure did not advertise that optional parameter. The server intentionally collapsed the upstream pre-generation route failure to deep_unavailable."
+  },
+  "isolated_route_diagnostic": {
+    "proof_path": "../live-deep-route-diagnostic-3ae5833f/PROOF.json",
+    "proof_sha256": "76ff822930cdd8a96bf81fb4319cc83356d3168ef2d4bee3d2218d5a0b9084c3",
+    "control_http_status": 404,
+    "control_generation_id": null,
+    "treatment_http_status": 200,
+    "treatment_generation_id": "gen-1784599051-POODgvPPgFyX8VwfgCjj",
+    "treatment_provider": "Azure",
+    "treatment_model": "anthropic/claude-sonnet-5-20260630",
+    "treatment_tool_call_count": 1,
+    "settled_micros": 1236,
+    "unsettled_upper_bound_micros": 0
+  },
+  "external_dispatch_audit": {
+    "fast_reader_settled_micros": 2460,
+    "fast_reader_unsettled_upper_bound_micros": 0,
+    "sonnet_deep_settled_micros": 0,
+    "sonnet_deep_unsettled_upper_bound_micros": 300000,
+    "sonnet_reader_or_judge_dispatches": 0,
+    "interrupted_luna_external_dispatches": 0,
+    "diagnostic_settled_micros": 1236,
+    "invalid_root_and_diagnostic_settled_micros": 3696,
+    "invalid_root_and_diagnostic_unsettled_upper_bound_micros": 300000,
+    "conclusion": "The 404 carried no generation ID and the isolated control costs zero, but the immutable Sonnet row remains conservatively reserved at its full Deep upper bound because the campaign proof cannot retroactively equate a separate diagnostic with the original request."
+  },
+  "cleanup_audit": {
+    "campaign_processes_remaining": 0,
+    "scratch_databases_remaining": 0
+  },
+  "retry_decision": {
+    "same_output_root_replay_authorized": false,
+    "fresh_output_root_authorized": false,
+    "authorization_requirements": [
+      "remove parallel_tool_calls from the exact provider request while retaining response-parser single-call enforcement",
+      "bind the omission and parser enforcement into each candidate config hash",
+      "add a pre-compilation exact-route readiness gate with settlement evidence",
+      "include all invalid-root and diagnostic liabilities in the next hard-cap contract",
+      "commit a fresh pre-execution amendment before any retry"
+    ]
+  }
+}
