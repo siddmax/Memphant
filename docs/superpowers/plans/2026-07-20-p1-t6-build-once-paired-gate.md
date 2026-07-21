@@ -127,11 +127,11 @@ Use the unchanged `with_scratch_db.sh` once around `_run_case` so every initial 
 
 - [ ] **Step 4: Freeze and restore the state identity**
 
-Require the build worker to complete every resource and leave zero queued/running/dead jobs before dump. The dump excludes all API keys and transient tables. On restore, verify schema/migration identity, PostgreSQL major, archive SHA, and exact logical identity; then mint exactly one trusted-system key for the frozen tenant. Archive no raw key or database credential.
+Require the build worker to complete every resource and leave zero queued/running/dead jobs before dump. The dump excludes all API keys and transient tables. On restore, verify schema/migration identity, PostgreSQL major, archive SHA, and exact logical identity; keep the restored source key-free. Archive no raw key or database credential.
 
 - [ ] **Step 5: Clone and execute each row**
 
-Stop the source server and verify zero connections, run `createdb --maintenance-db=<admin> --template=<source> <arm-db>`, compare the clone's logical identity with the frozen source, and invoke the existing official row path in query-only mode with the ephemeral key. Force-drop the arm clone in `finally` and redact all external and local credentials after child reaping.
+Stop the source server and verify zero connections, run `createdb --maintenance-db=<admin> --template=<source> <arm-db>`, and compare the clone's logical identity with the frozen source. Inside each clone, let the approved query-only adapter mint exactly one trusted-system key for the frozen tenant; never copy or reuse a key across arms. Invoke the existing official row path in query-only mode, force-drop the arm clone in `finally`, and redact all external and local credentials after child reaping.
 
 - [ ] **Step 6: Make resume semantics immutable**
 
