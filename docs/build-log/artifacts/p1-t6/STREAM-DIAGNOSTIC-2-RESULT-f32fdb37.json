@@ -1,0 +1,87 @@
+{
+  "schema_version": "memphant.p1_t6.stream_diagnostic_result.v2",
+  "completed_at": "2026-07-21T18:31:18Z",
+  "authorization": {
+    "path": "docs/build-log/artifacts/p1-t6/STREAM-DIAGNOSTIC-2-AUTHORIZATION-1a847f94.json",
+    "sha256": "d0defa643039a85d9c2460aa3add3092f2b1b3cccdc6975032a128f204173ac5"
+  },
+  "source_failure": {
+    "path": "docs/build-log/artifacts/p1-t6/run-e511c817/INVALIDATION-PROOF.json",
+    "sha256": "e55a29e29c00008c03d249fdea208f12d1289f7b7a12e3c65c11ce0d0f4db480"
+  },
+  "dispatch_audit": {
+    "provider_dispatches": 1,
+    "benchmark_cases": 0,
+    "resource_constructions": 0,
+    "database_connections": 0,
+    "http_status": 200,
+    "content_type": "text/event-stream",
+    "generation_id": "gen-1784658308-LgtrXpBfQNYBn21avYZY",
+    "elapsed_ms": 22494
+  },
+  "stream_shape": {
+    "event_count": 5,
+    "done_event_present": true,
+    "provider": "Azure",
+    "model": "anthropic/claude-sonnet-5",
+    "tool_call_indices": [
+      0
+    ],
+    "tool_name": "list_files",
+    "tool_call_fragment_count": 3,
+    "final_usage_present": true,
+    "production_parser_first_failure": null,
+    "raw_content_or_tool_arguments_persisted": false
+  },
+  "generation_receipt": {
+    "poll_attempts": 6,
+    "model": "anthropic/claude-sonnet-5-20260630",
+    "provider_name": "Azure",
+    "finish_reason": "tool_calls",
+    "native_finish_reason": "tool_use",
+    "tokens_prompt": 469,
+    "tokens_completion": 3,
+    "total_cost_micros": 2522,
+    "provider_liability_settled": true
+  },
+  "campaign_liability": {
+    "prior_settled_micros": 25828,
+    "diagnostic_settled_micros": 2522,
+    "cumulative_settled_micros": 28350,
+    "cumulative_unsettled_upper_bound_micros": 316142,
+    "cumulative_liability_micros": 344492
+  },
+  "research": [
+    {
+      "url": "https://openrouter.ai/docs/api/reference/parameters",
+      "finding": "parallel_tool_calls is optional and defaults true; false requests sequential calls"
+    },
+    {
+      "url": "https://openrouter.ai/docs/guides/features/tool-calling",
+      "finding": "streaming clients must aggregate indexed tool calls and parallel calls are a supported multi-tool workflow"
+    },
+    {
+      "url": "https://openrouter.ai/docs/api/reference/streaming",
+      "finding": "SSE may include keepalive comments and the generation ID is available in the response header"
+    }
+  ],
+  "finding": {
+    "classification": "provider_default_parallel_tool_calls_conflict_with_single_call_parser",
+    "confirmed_contract_defect": "The production request omits parallel_tool_calls because the frozen Azure endpoint does not advertise that optional parameter under require_parameters. OpenRouter therefore permits multiple calls by default, while the production parser rejects any response containing more than one indexed call.",
+    "historical_stream_boundary": "The two failed ZDR generations are settled and both report tool use with identical 512 prompt and 22 completion tokens, but their raw SSE chunks are intentionally unavailable. The exact historical call count cannot be recovered without weakening the privacy policy.",
+    "control_result": "The production prompt and five-tool schema produce a valid one-call stream through the existing parser, excluding a general transport, route-identity, usage, and single-call fragmentation defect.",
+    "durable_fix": "Accept contiguous indexed provider-default tool calls, execute them deterministically in index order, emit one matching tool response per call, and count every executed call against the existing 24-tool cap."
+  },
+  "efficiency_decision": {
+    "another_670_resource_construction": false,
+    "another_paid_protocol_probe": false,
+    "reason": "The no-database diagnostic isolated the request/parser contract defect. Supporting bounded indexed calls removes avoidable serial model round trips and is testable without another live call."
+  },
+  "stop_audit": {
+    "diagnostic_retried": false,
+    "benchmark_started": false,
+    "fresh_campaign_root_started": false,
+    "future_paid_dispatch_authorized": false
+  },
+  "claim_boundary": "This one-call synthetic diagnostic is protocol evidence only. It is not benchmark evidence, a model-quality evaluation, a P1-T6 pass, a SOTA claim, or authority for a new campaign run."
+}

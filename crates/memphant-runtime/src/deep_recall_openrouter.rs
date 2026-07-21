@@ -341,8 +341,8 @@ impl OpenRouterDeepRecall {
                 "request_contract": {
                     "stream": true,
                     "tool_choice": "required",
-                    "parallel_tool_calls": "omitted",
-                    "single_tool_call_enforcement": "response_parser",
+                    "parallel_tool_calls": "provider_default",
+                    "parallel_tool_call_execution": "bounded_index_order",
                     "provider_require_parameters": true,
                 },
                 "tool_limits": {
@@ -602,43 +602,58 @@ impl OpenRouterDeepRecall {
                     None,
                 ));
             }
-            state.usage.tool_iterations = state
-                .usage
-                .tool_iterations
-                .checked_add(1)
-                .ok_or(DeepRecallProviderError::InvalidOutput)?;
-
-            let args = match serde_json::from_str::<Value>(&turn.arguments) {
-                Ok(args) => args,
-                Err(_) => json!(null),
+            let call_count = u32::try_from(turn.tool_calls.len())
+                .map_err(|_| DeepRecallProviderError::InvalidOutput)?;
+            let Some(tool_iterations) = state.usage.tool_iterations.checked_add(call_count) else {
+                return Err(DeepRecallProviderError::InvalidOutput);
             };
-            let tool = state.tools.call(&turn.tool_name, args);
-            let malformed = tool.content.get("error").is_some();
-            if malformed {
-                state.malformed_responses += 1;
-                if state.malformed_responses > self.config.malformed_response_limit {
-                    return Ok(state.result(
-                        DeepRecallStatus::Partial,
-                        DeepRecallStopReason::InvalidOutput,
-                        None,
-                    ));
+            if tool_iterations > self.config.limits.max_tool_iterations {
+                return Ok(state.result(
+                    DeepRecallStatus::Capped,
+                    DeepRecallStopReason::ToolIterations,
+                    None,
+                ));
+            }
+            state.usage.tool_iterations = tool_iterations;
+
+            let mut assistant_calls = Vec::with_capacity(turn.tool_calls.len());
+            let mut tool_messages = Vec::with_capacity(turn.tool_calls.len());
+            let mut finished = None;
+            for call in turn.tool_calls {
+                let args = match serde_json::from_str::<Value>(&call.arguments) {
+                    Ok(args) => args,
+                    Err(_) => json!(null),
+                };
+                let tool = state.tools.call(&call.tool_name, args);
+                if tool.content.get("error").is_some() {
+                    state.malformed_responses += 1;
+                    if state.malformed_responses > self.config.malformed_response_limit {
+                        return Ok(state.result(
+                            DeepRecallStatus::Partial,
+                            DeepRecallStopReason::InvalidOutput,
+                            None,
+                        ));
+                    }
                 }
+                assistant_calls.push(json!({
+                    "id": call.call_id,
+                    "type": "function",
+                    "function": {"name": call.tool_name, "arguments": call.arguments}
+                }));
+                tool_messages.push(json!({
+                    "role": "tool",
+                    "tool_call_id": call.call_id,
+                    "content": tool.content.to_string()
+                }));
+                finished = finished.or(tool.finish);
             }
             state.messages.push(json!({
                 "role": "assistant",
                 "reasoning_details": turn.reasoning_details,
-                "tool_calls": [{
-                    "id": turn.call_id,
-                    "type": "function",
-                    "function": {"name": turn.tool_name, "arguments": turn.arguments}
-                }]
+                "tool_calls": assistant_calls
             }));
-            state.messages.push(json!({
-                "role": "tool",
-                "tool_call_id": turn.call_id,
-                "content": tool.content.to_string()
-            }));
-            if let Some(source_ids) = tool.finish {
+            state.messages.extend(tool_messages);
+            if let Some(source_ids) = finished {
                 return Ok(state.result(
                     DeepRecallStatus::Completed,
                     DeepRecallStopReason::Completed,
@@ -891,10 +906,14 @@ impl LoopState {
     }
 }
 
-struct ParsedTurn {
+struct ParsedToolCall {
     call_id: String,
     tool_name: String,
     arguments: String,
+}
+
+struct ParsedTurn {
+    tool_calls: Vec<ParsedToolCall>,
     reasoning_details: Vec<Value>,
     provider: String,
     model: String,
@@ -905,9 +924,7 @@ struct ParsedTurn {
 async fn parse_turn(body: ByteStream) -> Result<ParsedTurn, DeepRecallStopReason> {
     let mut events = body.eventsource();
     let mut done = false;
-    let mut call_id = String::new();
-    let mut tool_name = String::new();
-    let mut arguments = String::new();
+    let mut tool_calls: BTreeMap<u64, ParsedToolCall> = BTreeMap::new();
     let mut reasoning_details = Vec::new();
     let mut provider: Option<String> = None;
     let mut model: Option<String> = None;
@@ -969,35 +986,55 @@ async fn parse_turn(body: ByteStream) -> Result<ParsedTurn, DeepRecallStopReason
             reasoning_details.extend(details.iter().cloned());
         }
         if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
-            if calls.len() != 1 || calls[0].get("index").and_then(Value::as_u64) != Some(0) {
-                return Err(DeepRecallStopReason::InvalidOutput);
-            }
-            let call = &calls[0];
-            if let Some(id) = call.get("id").and_then(Value::as_str) {
-                if !call_id.is_empty() && call_id != id {
-                    return Err(DeepRecallStopReason::InvalidOutput);
+            for call in calls {
+                let index = call
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .ok_or(DeepRecallStopReason::InvalidOutput)?;
+                let accumulated = tool_calls.entry(index).or_insert_with(|| ParsedToolCall {
+                    call_id: String::new(),
+                    tool_name: String::new(),
+                    arguments: String::new(),
+                });
+                if let Some(id) = call.get("id").and_then(Value::as_str) {
+                    if !accumulated.call_id.is_empty() && accumulated.call_id != id {
+                        return Err(DeepRecallStopReason::InvalidOutput);
+                    }
+                    accumulated.call_id = id.to_string();
                 }
-                call_id = id.to_string();
-            }
-            if let Some(name) = call.pointer("/function/name").and_then(Value::as_str) {
-                if !tool_name.is_empty() && tool_name != name {
-                    return Err(DeepRecallStopReason::InvalidOutput);
+                if let Some(name) = call.pointer("/function/name").and_then(Value::as_str) {
+                    if !accumulated.tool_name.is_empty() && accumulated.tool_name != name {
+                        return Err(DeepRecallStopReason::InvalidOutput);
+                    }
+                    accumulated.tool_name = name.to_string();
                 }
-                tool_name = name.to_string();
-            }
-            if let Some(fragment) = call.pointer("/function/arguments").and_then(Value::as_str) {
-                arguments.push_str(fragment);
+                if let Some(fragment) = call.pointer("/function/arguments").and_then(Value::as_str)
+                {
+                    accumulated.arguments.push_str(fragment);
+                }
             }
         }
     }
     let (prompt_tokens, cost_micros) = usage.ok_or(DeepRecallStopReason::InvalidOutput)?;
-    if !done || call_id.trim().is_empty() || tool_name.trim().is_empty() || arguments.is_empty() {
+    if !done || tool_calls.is_empty() {
         return Err(DeepRecallStopReason::InvalidOutput);
     }
+    let tool_calls = tool_calls
+        .into_iter()
+        .enumerate()
+        .map(|(expected, (index, call))| {
+            if u64::try_from(expected).ok() != Some(index)
+                || call.call_id.trim().is_empty()
+                || call.tool_name.trim().is_empty()
+                || call.arguments.is_empty()
+            {
+                return Err(DeepRecallStopReason::InvalidOutput);
+            }
+            Ok(call)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(ParsedTurn {
-        call_id,
-        tool_name,
-        arguments,
+        tool_calls,
         reasoning_details,
         provider: provider
             .filter(|value| !value.trim().is_empty())
@@ -1977,7 +2014,7 @@ mod tests {
         assert!(
             body.get("parallel_tool_calls").is_none(),
             "Azure does not advertise parallel_tool_calls under require_parameters; \
-             the protocol parser already rejects multiple calls"
+             bounded provider-default calls execute in stable index order"
         );
         assert_eq!(body["max_completion_tokens"], 4096);
         assert_eq!(body["provider"]["only"], json!(["azure"]));
@@ -2070,9 +2107,11 @@ mod tests {
         )
         .unwrap();
         let turn = ParsedTurn {
-            call_id: "call-1".into(),
-            tool_name: "finish".into(),
-            arguments: "{\"source_ids\":[]}".into(),
+            tool_calls: vec![ParsedToolCall {
+                call_id: "call-1".into(),
+                tool_name: "finish".into(),
+                arguments: "{\"source_ids\":[]}".into(),
+            }],
             reasoning_details: Vec::new(),
             provider: "Azure".into(),
             model: "anthropic/claude-sonnet-5".into(),
@@ -2164,6 +2203,65 @@ mod tests {
                 })
                 .unwrap()["reasoning_details"],
             json!([{"type":"reasoning.text","text":"keep this exact"}])
+        );
+    }
+
+    #[tokio::test]
+    async fn parallel_tool_calls_execute_in_index_order_with_one_provider_turn() {
+        let (workspace, a, b) = workspace();
+        let responses = vec![
+            sse_response(
+                "gen-parallel",
+                vec![json!({
+                    "model":"anthropic/claude-sonnet-5",
+                    "provider":"Azure",
+                    "choices":[{"index":0,"delta":{"tool_calls":[
+                        {"index":0,"id":"call-a","type":"function","function":{"name":"record_evidence","arguments":format!("{{\"source_ids\":[\"{a}\"]}}")}},
+                        {"index":1,"id":"call-b","type":"function","function":{"name":"record_evidence","arguments":format!("{{\"source_ids\":[\"{b}\"]}}")}}
+                    ]},"finish_reason":"tool_calls"}],
+                    "usage":{"prompt_tokens":10,"completion_tokens":2,"cost":0.0001}
+                })],
+            ),
+            sse_response(
+                "gen-finish",
+                vec![json!({
+                    "model":"anthropic/claude-sonnet-5",
+                    "provider":"Azure",
+                    "choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-finish","type":"function","function":{"name":"finish","arguments":format!("{{\"source_ids\":[\"{b}\",\"{a}\"]}}")}}]},"finish_reason":"tool_calls"}],
+                    "usage":{"prompt_tokens":20,"completion_tokens":2,"cost":0.0002}
+                })],
+            ),
+        ];
+        let transport = Arc::new(ScriptTransport::new(responses));
+        let provider = OpenRouterDeepRecall::with_transport(config(), transport.clone());
+        let result = provider
+            .gather(DeepRecallProviderRequest {
+                query: "find both".into(),
+                workspace,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, DeepRecallStatus::Completed);
+        assert_eq!(result.source_ids, vec![b, a]);
+        assert_eq!(result.usage.tool_iterations, 3);
+        let requests = transport.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let messages = requests[1]["messages"].as_array().unwrap();
+        let assistant = messages
+            .iter()
+            .find(|message| message["role"] == "assistant")
+            .unwrap();
+        assert_eq!(assistant["tool_calls"].as_array().unwrap().len(), 2);
+        assert_eq!(assistant["tool_calls"][0]["id"], "call-a");
+        assert_eq!(assistant["tool_calls"][1]["id"], "call-b");
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message["role"] == "tool")
+                .map(|message| message["tool_call_id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["call-a", "call-b"]
         );
     }
 
@@ -2663,21 +2761,21 @@ mod tests {
                 "anthropic/claude-sonnet-5",
                 2_000_000,
                 10_000_000,
-                "d521ab622efb03a0ecf5b17c8b86fdc0944c3719fceb976b0a7dbce4e2313a7c",
+                "a0163962e23e5f34bd1d48e82d149b88b59f0f224f7cd171a92853bde455aedb",
             ),
             (
                 "openai/gpt-5.6-luna-20260709",
                 "openai/gpt-5.6-luna",
                 1_100_000,
                 6_600_000,
-                "3ae0721f98a72511c8dd22a2021cbcb91263d0a0b3f236752a77ad7341ae6f7f",
+                "68fcd10ff271213553f1989a23ba9507b2625a2c87c047511e530323c65e9efb",
             ),
             (
                 "openai/gpt-5.6-sol-20260709",
                 "openai/gpt-5.6-sol",
                 5_500_000,
                 33_000_000,
-                "52f45079da9fa238c4f566dd381476964dd4ecf850053379678fc607a4b6f5ed",
+                "274585e56ecbd4e88845181c66498895e3826dd31335ef04564596f21e192f07",
             ),
         ] {
             let candidate = DeepConfig::new(

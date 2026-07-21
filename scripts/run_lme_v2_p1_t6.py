@@ -3228,8 +3228,8 @@ def _expected_deep_config_hash(candidate: dict) -> str:
         "request_contract": {
             "stream": True,
             "tool_choice": "required",
-            "parallel_tool_calls": "omitted",
-            "single_tool_call_enforcement": "response_parser",
+            "parallel_tool_calls": "provider_default",
+            "parallel_tool_call_execution": "bounded_index_order",
             "provider_require_parameters": True,
         },
         "tool_limits": {
@@ -3376,9 +3376,9 @@ def verify_campaign_manifest(manifest: dict) -> dict[str, int]:
     spend = manifest["campaign_spend"]
     require(spend["hard_ceiling_usd"] == 6.25, "campaign spend ceiling drift")
     preexisting = spend["preexisting_liability"]
-    require(preexisting["settled_micros"] == 17420
+    require(preexisting["settled_micros"] == 28350
             and preexisting["unsettled_upper_bound_micros"] == 316142
-            and preexisting["total_micros"] == 333562,
+            and preexisting["total_micros"] == 344492,
             "preexisting campaign liability drift")
     require(preexisting["settled_micros"] + preexisting["unsettled_upper_bound_micros"]
             == preexisting["total_micros"], "preexisting liability sum drift")

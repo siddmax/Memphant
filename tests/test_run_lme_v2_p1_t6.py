@@ -2715,15 +2715,15 @@ def test_fresh_reservations_plus_prior_attempts_stay_below_campaign_ceiling() ->
     prior = manifest["campaign_spend"]["preexisting_liability"]
     assert fresh == 5_697_600
     assert prior == {
-        "settled_micros": 17_420,
+        "settled_micros": 28_350,
         "unsettled_upper_bound_micros": 316_142,
-        "total_micros": 333_562,
+        "total_micros": 344_492,
         "proofs": prior["proofs"],
     }
-    assert fresh + prior["total_micros"] == 6_031_162
+    assert fresh + prior["total_micros"] == 6_042_092
     assert campaign.usd_to_micros(
         manifest["campaign_spend"]["hard_ceiling_usd"]
-    ) - fresh - prior["total_micros"] == 218_838
+    ) - fresh - prior["total_micros"] == 207_908
 
 
 def test_settled_proxy_cost_must_fit_its_pre_dispatch_reservation() -> None:
