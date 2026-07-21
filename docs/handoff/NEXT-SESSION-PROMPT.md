@@ -1,5 +1,7 @@
 # MemPhant campaign handoff — 2026-07-21
 
+Current STATUS mirror: RUNTIME COMPLETE — BENCHMARK EVIDENCE PENDING
+
 This is the authoritative next-session handoff for the active P1-T6 campaign.
 Older campaign history remains in git and the linked proof artifacts; do not
 reconstruct it from stale prompts.
