@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "attempt": "run-b8dbf0a7",
+  "classification": "reader_pre_generation_rate_limit_without_bounded_retry",
+  "invalidated_at": "2026-07-20",
+  "measured_commit": "b8dbf0a717d4abd74b890844ae5646698443fdda",
+  "preserved_evidence": {
+    "pre_append_inventory_files": 25,
+    "pre_append_inventory_sha256": "f56254112f90c505f09e2affa9ba97871562f15b967540a26705f36076a5b2c5",
+    "pre_execution_proof_sha256": "85004bdbec018c1d7976051029ad63fcb75049e92bd3d111aa7ae0fea2470308",
+    "frozen_run_order_sha256": "89917f248be4aff9a49fdb2ecbeb9f6d8e1d8efb869c90ebba1075619768a792",
+    "finalized_failure_rows": [
+      "0001-19367bc7-fast"
+    ],
+    "interrupted_staging_rows": [
+      ".staging-0002-19367bc7-sonnet"
+    ],
+    "fast_row_proof_sha256": "e7193da32d84dc67a8636740c9f387812f67e15cb5b9a1a91f3d38462b1e3809"
+  },
+  "successful_memphant_boundary": {
+    "trajectory_count": 500,
+    "resource_count": 670,
+    "worker_completed_sources": 670,
+    "worker_failures": 0,
+    "recall_duration_ms": 45279,
+    "mode_requested": "fast",
+    "mode_executed": "fast",
+    "runtime_token_estimate": 32757,
+    "exact_qwen_context_tokens": 23564,
+    "memory_context_truncated": false,
+    "context_items": 1,
+    "claim_boundary": "Valid packaged development evidence for the MemPhant boundary inside an invalidated campaign root; not a product SLO, promotion result, or public benchmark claim."
+  },
+  "host_scheduling": {
+    "reversible_process_group_pauses": 2,
+    "pause_stage": "cold compilation before recall",
+    "observed_unrelated_load_peak": "approximately 49",
+    "official_memory_query_seconds": 3271.3898840839975,
+    "latency_policy": "The official wrapper duration includes cold compilation and deliberate host-yield pauses and is excluded from product latency claims. The adapter's internal 45,279 ms recall duration does not include those pauses."
+  },
+  "failure": {
+    "stage": "reader_dispatch_after_successful_fast_recall",
+    "upstream_status": 429,
+    "upstream_provider": "DeepInfra",
+    "upstream_provider_error_code": "engine_overloaded",
+    "generation_id_archived": false,
+    "reason": "The strict Qwen reader endpoint was temporarily rate-limited before a generation ID. The proxy preserved the rejection and did not blindly replay, but lacked the bounded explicit pre-generation retry that OpenRouter documents for 429 and 503 responses."
+  },
+  "external_dispatch_audit": {
+    "reader_dispatches": 1,
+    "reader_audit_status": "rejected",
+    "reader_settled_micros": 0,
+    "reader_unsettled_upper_bound_micros": 13058,
+    "judge_dispatches": 0,
+    "deep_dispatches": 0,
+    "interrupted_sonnet_external_dispatches": 0,
+    "settlement_sha256": "e87f2dc11700c92be1eac6232aa18ed69b3433e3970402e5b07736d0b5f5f59e",
+    "conclusion": "The 429 proof did not archive response headers or a generation ID, so its full reader reservation remains conservatively unresolved. The separate Sonnet staging reservation is internal only because execution stopped before any provider dispatch."
+  },
+  "cleanup_audit": {
+    "campaign_processes_remaining": 0,
+    "scratch_databases_remaining": 0
+  },
+  "retry_decision": {
+    "same_output_root_replay_authorized": false,
+    "fresh_output_root_authorized": false,
+    "authorization_requirements": [
+      "retry only explicit HTTP 429 or 503 responses that carry no X-Generation-Id",
+      "honor Retry-After with a bounded fallback and a 60-second maximum",
+      "never retry ambiguous transport failures or any response carrying a generation ID",
+      "archive every pre-generation rejection and dispatch count",
+      "include the 13,058-micro unresolved reader liability in the next cumulative hard-cap contract",
+      "commit a fresh pre-execution amendment before any retry"
+    ]
+  }
+}
