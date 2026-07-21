@@ -745,6 +745,32 @@ def test_exact_no_model_recovery_rejects_wrong_bank_fixture(
         )
 
 
+def test_exact_no_model_recovery_counts_diagnostic_restore() -> None:
+    campaign = _load()
+    incident = {
+        "initial_attempt": {
+            "constructions": 1, "dumps": 1, "resets": 1, "restores": 1,
+            "clones": 0, "query_only_recalls": 0, "external_dispatches": 0,
+            "outcome": "pre_clone_quiescence_failure",
+        },
+        "diagnostic_archive_only_pg17_replay": {
+            "constructions": 0, "dumps": 0, "resets": 0, "restores": 1,
+            "clones": 0, "query_only_recalls": 0, "external_dispatches": 0,
+            "persistent_source_sessions": 0,
+            "outcome": "archive_restored_and_source_sessions_queried",
+            "authorization_evidence": False,
+        },
+    }
+
+    accounting = campaign._no_model_attempt_accounting(True, incident)
+
+    assert accounting["counts"]["restores"] == 3
+    assert accounting["attempts"]["diagnostic"]["restores"] == 1
+    assert accounting["attempts"]["recovery"]["restores"] == 1
+    assert accounting["recovery"]["repeated_constructions"] == 0
+    assert accounting["recovery"]["repeated_dumps"] == 0
+
+
 def test_no_model_verifier_builds_banks_restores_queries_and_cleans_two_clones(
     tmp_path: Path, monkeypatch
 ) -> None:

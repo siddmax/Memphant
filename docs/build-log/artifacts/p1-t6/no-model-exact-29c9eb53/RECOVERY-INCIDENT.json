@@ -46,8 +46,15 @@
     "construction/worker.stdout": "bbb046f9ff622a6ca702c8928d2055f68e7c5616afd3b9d9bdee0a8b7a123ac6"
   },
   "diagnostic_archive_only_pg17_replay": {
+    "constructions": 0,
+    "dumps": 0,
+    "resets": 0,
+    "restores": 1,
+    "clones": 0,
+    "query_only_recalls": 0,
     "persistent_source_sessions": 0,
     "external_dispatches": 0,
+    "outcome": "archive_restored_and_source_sessions_queried",
     "authorization_evidence": false
   },
   "recovery": {

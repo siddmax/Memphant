@@ -1221,6 +1221,7 @@ def _load_no_model_recovery(
     )
     bank = incident.get("bank")
     initial = incident.get("initial_attempt")
+    diagnostic = incident.get("diagnostic_archive_only_pg17_replay")
     recovery = incident.get("recovery")
     require(
         isinstance(bank, dict)
@@ -1280,6 +1281,18 @@ def _load_no_model_recovery(
         and initial.get("clones") == 0
         and initial.get("query_only_recalls") == 0
         and initial.get("external_dispatches") == 0
+        and isinstance(diagnostic, dict)
+        and diagnostic.get("constructions") == 0
+        and diagnostic.get("dumps") == 0
+        and diagnostic.get("resets") == 0
+        and diagnostic.get("restores") == 1
+        and diagnostic.get("clones") == 0
+        and diagnostic.get("query_only_recalls") == 0
+        and diagnostic.get("persistent_source_sessions") == 0
+        and diagnostic.get("external_dispatches") == 0
+        and diagnostic.get("outcome")
+        == "archive_restored_and_source_sessions_queried"
+        and diagnostic.get("authorization_evidence") is False
         and isinstance(recovery, dict)
         and recovery.get("same_sealed_bank_required") is True
         and recovery.get("reconstruction_allowed") is False
@@ -1288,6 +1301,50 @@ def _load_no_model_recovery(
         "no-model recovery attempt accounting drift",
     )
     return construction, manifest, incident
+
+
+def _no_model_attempt_accounting(
+    resume: bool, incident: dict[str, object] | None
+) -> dict[str, object]:
+    if not resume:
+        return {
+            "counts": {
+                "constructions": 1, "dumps": 1, "restores": 1,
+                "clones": 2, "query_only_recalls": 2,
+            },
+            "attempts": {"initial": {
+                "constructions": 1, "dumps": 1, "resets": 1,
+                "restores": 1, "clones": 2, "query_only_recalls": 2,
+                "external_dispatches": 0, "outcome": "complete",
+            }},
+            "recovery": {"resumed": False},
+        }
+    require(isinstance(incident, dict), "no-model recovery incident is missing")
+    initial = incident.get("initial_attempt")
+    diagnostic = incident.get("diagnostic_archive_only_pg17_replay")
+    require(isinstance(initial, dict) and isinstance(diagnostic, dict),
+            "no-model recovery attempt accounting is missing")
+    return {
+        "counts": {
+            "constructions": 1, "dumps": 1, "restores": 3,
+            "clones": 2, "query_only_recalls": 2,
+        },
+        "attempts": {
+            "initial": initial,
+            "diagnostic": diagnostic,
+            "recovery": {
+                "constructions": 0, "dumps": 0, "resets": 0,
+                "restores": 1, "clones": 2, "query_only_recalls": 2,
+                "external_dispatches": 0, "outcome": "complete",
+            },
+        },
+        "recovery": {
+            "resumed": True,
+            "same_sealed_bank": True,
+            "repeated_constructions": 0,
+            "repeated_dumps": 0,
+        },
+    }
 
 
 def _require_no_model_recovery_start(
@@ -1428,6 +1485,11 @@ def _run_no_model_verifier_locked(
     # dump and its manifest are content-addressed evidence, never text-redact
     # them after sealing; pg_dump does not archive its connection string.
     artifacts = artifact_hashes(output)
+    accounting = _no_model_attempt_accounting(resume, incident)
+    if resume:
+        accounting["recovery"]["incident_sha256"] = sha256_file(
+            output / "RECOVERY-INCIDENT.json"
+        )
     core = {
         "schema_version": 1,
         "classification": classification,
@@ -1449,37 +1511,7 @@ def _run_no_model_verifier_locked(
         },
         "logical_identity_sha256": logical["sha256"],
         "arms": arms,
-        "counts": {
-            "constructions": 1, "dumps": 1, "restores": 2 if resume else 1,
-            "clones": 2, "query_only_recalls": 2,
-        },
-        "attempts": (
-            {
-                "initial": incident["initial_attempt"],
-                "recovery": {
-                    "constructions": 0, "dumps": 0, "resets": 0,
-                    "restores": 1, "clones": 2, "query_only_recalls": 2,
-                    "external_dispatches": 0, "outcome": "complete",
-                },
-            }
-            if resume else {
-                "initial": {
-                    "constructions": 1, "dumps": 1, "resets": 1,
-                    "restores": 1, "clones": 2, "query_only_recalls": 2,
-                    "external_dispatches": 0, "outcome": "complete",
-                }
-            }
-        ),
-        "recovery": (
-            {
-                "resumed": True,
-                "same_sealed_bank": True,
-                "repeated_constructions": 0,
-                "repeated_dumps": 0,
-                "incident_sha256": sha256_file(output / "RECOVERY-INCIDENT.json"),
-            }
-            if resume else {"resumed": False}
-        ),
+        **accounting,
         "timing_ms": {
             "construction": construction_ms,
             "total": int(round((time.perf_counter() - started) * 1000)),
