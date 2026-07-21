@@ -534,14 +534,53 @@ def _restore_case_bank(
     return manifest
 
 
-def _source_connection_count(database_url: str) -> int:
+def _source_connection_diagnostics(database_url: str) -> list[dict[str, str]]:
     source_name = _require_scratch_source(database_url)
     admin_url = _database_url_with_name(database_url, "postgres")
-    return int(_psql_json(
+    rows = _psql_json(
         admin_url,
-        "select count(*)::int as count from pg_stat_activity where datname = "
+        "select coalesce(backend_type, '') as backend_type, "
+        "coalesce(state, '') as state, coalesce(application_name, '') as application_name "
+        "from pg_stat_activity where datname = "
         + "'" + source_name + "'",
-    )[0]["count"])
+    )
+    return [{
+        key: re.sub(r"[^A-Za-z0-9_.:/ -]", "?", str(row.get(key, "")))[:64]
+        for key in ("backend_type", "state", "application_name")
+    } for row in rows]
+
+
+def _wait_for_source_quiescence(
+    database_url: str,
+    *,
+    timeout_seconds: float = 3.0,
+    sample_interval_seconds: float = 0.1,
+) -> dict[str, object]:
+    require(timeout_seconds >= 0 and sample_interval_seconds >= 0,
+            "source quiescence timing is invalid")
+    deadline = time.perf_counter() + timeout_seconds
+    consecutive_zero = 0
+    sample_count = 0
+    observed: list[dict[str, str]] = []
+    while True:
+        connections = _source_connection_diagnostics(database_url)
+        sample_count += 1
+        for connection in connections:
+            if connection not in observed:
+                observed.append(connection)
+        consecutive_zero = consecutive_zero + 1 if not connections else 0
+        if consecutive_zero == 2:
+            return {
+                "sample_count": sample_count,
+                "consecutive_zero_samples": consecutive_zero,
+                "observed_connections": observed,
+            }
+        if time.perf_counter() >= deadline:
+            raise RuntimeError(
+                "P1-T6 source did not quiesce; persistent source sessions: "
+                + json.dumps(observed, sort_keys=True)
+            )
+        time.sleep(sample_interval_seconds)
 
 
 def _drop_local_database(database_url: str) -> None:
@@ -565,8 +604,9 @@ def _clone_case_source(
             "P1-T6 source must remain key-free before clone")
     require(_database_bank_identity(source_database_url) == expected_logical_identity,
             "P1-T6 source logical identity drift before clone")
-    require(_source_connection_count(source_database_url) == 0,
-            "P1-T6 source must have zero active connections before clone")
+    # Each sample opens its own admin-database psql transaction. Keep createdb
+    # as the next database operation after the second zero sample.
+    _wait_for_source_quiescence(source_database_url)
     admin_url = _database_url_with_name(source_database_url, "postgres")
     _run_postgres_command(
         ["createdb", f"--maintenance-db={admin_url}", f"--template={source_name}", clone_name],
@@ -1134,30 +1174,161 @@ def _run_no_model_clone_query(
     return result
 
 
-def run_no_model_verifier(
+def _load_no_model_recovery(
+    output: Path,
+    fixture: dict[str, object],
+    contract: dict[str, object],
+    tools: dict[str, object],
+    schema: dict[str, object],
+) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+    require(fixture.get("name") == "exact",
+            "no-model recovery is limited to the exact fixture")
+    require(not (output / "PROOF.json").exists(),
+            "completed no-model proof cannot be resumed")
+    incident_path = output / "RECOVERY-INCIDENT.json"
+    require(incident_path.is_file(), "no-model recovery incident is missing")
+    incident = json.loads(incident_path.read_text())
+    require(
+        incident.get("classification") == "p1_t6_exact_pre_clone_quiescence_failure"
+        and incident.get("case_id") == fixture.get("case_id")
+        and incident.get("external_dispatches") == 0,
+        "no-model recovery incident drift",
+    )
+    bank_dir = output / "case-bank"
+    manifest, _archive = _load_case_bank(bank_dir)
+    require(manifest.get("case_contract") == contract,
+            "no-model recovery bank contract drift")
+    construction_path = output / "construction-proof.json"
+    require(
+        construction_path.is_file()
+        and json.loads(construction_path.read_text()) == manifest.get("construction"),
+        "no-model recovery construction proof drift",
+    )
+    construction = manifest["construction"]
+    require(
+        _no_model_proof_classification(fixture, construction)
+        == "no_model_exact_case_authorization_candidate",
+        "no-model recovery original exact predicates failed",
+    )
+    require(manifest.get("database_schema_identity") == schema,
+            "no-model recovery schema drift")
+    require(
+        manifest.get("postgres") == tools.get("pg_dump")
+        and manifest.get("postgres_major") == tools.get("server_major")
+        and isinstance(tools.get("pg_restore"), dict)
+        and tools["pg_restore"].get("major") == manifest.get("postgres_major"),
+        "no-model recovery PostgreSQL tool drift",
+    )
+    bank = incident.get("bank")
+    initial = incident.get("initial_attempt")
+    recovery = incident.get("recovery")
+    require(
+        isinstance(bank, dict)
+        and bank.get("archive_sha256") == manifest.get("archive_sha256")
+        and bank.get("manifest_sha256") == sha256_file(bank_dir / "manifest.json")
+        and bank.get("construction_proof_file_sha256") == sha256_file(construction_path)
+        and bank.get("construction_proof_sha256")
+        == construction.get("construction_proof_sha256")
+        and bank.get("logical_identity_sha256")
+        == manifest.get("logical_identity", {}).get("sha256")
+        and bank.get("case_contract_sha256")
+        == manifest.get("case_contract_sha256"),
+        "no-model recovery incident bank drift",
+    )
+    trace = incident.get("failure_evidence")
+    require(
+        incident.get("measured_commit")
+        == "29c9eb53556139bdb1d651f3c79716586ab04cfd"
+        and incident.get("campaign_manifest_sha256") == sha256_file(CAMPAIGN_MANIFEST)
+        and isinstance(trace, dict)
+        and trace.get("durably_captured_exception") is True
+        and trace.get("durably_captured_restore_return") is True
+        and hashlib.sha256(
+            str(trace.get("sanitized_trace_excerpt", "")).encode()
+        ).hexdigest() == trace.get("sanitized_trace_excerpt_sha256"),
+        "no-model recovery producer or captured failure evidence drift",
+    )
+    producer = subprocess.run(
+        [
+            "git", "show",
+            incident["measured_commit"] + ":scripts/run_lme_v2_p1_t6.py",
+        ],
+        cwd=ROOT, capture_output=True, check=False,
+    )
+    require(
+        producer.returncode == 0
+        and hashlib.sha256(producer.stdout).hexdigest()
+        == incident.get("controller_sha256"),
+        "no-model recovery producer controller drift",
+    )
+    inventory = incident.get("pre_recovery_inventory")
+    require(isinstance(inventory, dict) and inventory,
+            "no-model recovery pre-recovery inventory is missing")
+    lease_path = f"case-leases/{fixture['case_id']}.lock"
+    require(
+        artifact_hashes(
+            output, exclude={"RECOVERY-INCIDENT.json", lease_path}
+        ) == inventory,
+        "no-model recovery pre-recovery inventory drift",
+    )
+    require(
+        isinstance(initial, dict)
+        and initial.get("constructions") == 1
+        and initial.get("dumps") == 1
+        and initial.get("resets") == 1
+        and initial.get("restores") == 1
+        and initial.get("clones") == 0
+        and initial.get("query_only_recalls") == 0
+        and initial.get("external_dispatches") == 0
+        and isinstance(recovery, dict)
+        and recovery.get("same_sealed_bank_required") is True
+        and recovery.get("reconstruction_allowed") is False
+        and recovery.get("redump_allowed") is False
+        and recovery.get("executed") is False,
+        "no-model recovery attempt accounting drift",
+    )
+    return construction, manifest, incident
+
+
+def _require_no_model_recovery_start(
+    source_url: str, output: Path, case_id: str
+) -> None:
+    require(not (output / "PROOF.json").exists(),
+            "completed no-model proof cannot be resumed")
+    require(not (output / "arms").exists(),
+            "no-model recovery found an arm artifact")
+    clone_names = _case_clone_names(output, case_id)
+    existing = [
+        name for name in clone_names.values()
+        if _database_exists(_database_url_with_name(source_url, name))
+    ]
+    require(not existing, "no-model recovery found an unexpected arm clone")
+
+
+def _run_no_model_verifier_locked(
     output: Path,
     *,
     fixture: str = "tiny",
     directory: Path | None = None,
     materialized: Path | None = None,
     case_id: str | None = None,
+    resume: bool = False,
 ) -> dict[str, object]:
     _assert_no_model_environment()
     source_url = os.environ.get("MEMPHANT_TEST_DATABASE_URL", "")
     source_name = _require_scratch_source(source_url)
-    require(not output.exists(), "no-model verifier output must be new")
     data = _no_model_fixture(fixture, directory, materialized, case_id)
-    output.mkdir(parents=True)
+    if resume:
+        require(output.is_dir(), "no-model recovery output must already exist")
+    else:
+        require(not output.exists(), "no-model verifier output must be new")
+        output.mkdir(parents=True)
     started = time.perf_counter()
     tools = _resolve_archive_tools(source_url)
     binaries = {
         name: _fingerprint(_binary_path(name)) for name in ("server", "worker", "cli")
     }
     schema = _database_schema_identity(source_url)
-    construction, construction_ms = _construct_no_model_source(source_url, output, data)
-    classification = _no_model_proof_classification(data, construction)
-    construction_path = output / "construction-proof.json"
-    atomic_write_json(construction_path, construction)
     bank_dir = output / "case-bank"
     contract = {
         "classification": "no_model_clone_mechanics",
@@ -1167,12 +1338,27 @@ def run_no_model_verifier(
         "adapter_sha256": sha256_file(ROOT / "benchmarks/longmemeval_v2/memphant_memory.py"),
         "memory_params_sha256": canonical_sha256(data["memory_params"]),
     }
-    dumped = _dump_case_bank(
-        source_url, bank_dir, construction, contract,
-        construction_duration_ms=construction_ms,
-        pg_dump_bin=str(tools["pg_dump"]["binary"]),
-    )
-    _reset_case_source(source_url)
+    construction_path = output / "construction-proof.json"
+    incident = None
+    if resume:
+        _require_no_model_recovery_start(source_url, output, str(data["case_id"]))
+        construction, dumped, incident = _load_no_model_recovery(
+            output, data, contract, tools, schema
+        )
+        construction_ms = int(dumped["construction_duration_ms"])
+        classification = "no_model_exact_case_recovered_authorization_candidate"
+    else:
+        construction, construction_ms = _construct_no_model_source(
+            source_url, output, data
+        )
+        classification = _no_model_proof_classification(data, construction)
+        atomic_write_json(construction_path, construction)
+        dumped = _dump_case_bank(
+            source_url, bank_dir, construction, contract,
+            construction_duration_ms=construction_ms,
+            pg_dump_bin=str(tools["pg_dump"]["binary"]),
+        )
+        _reset_case_source(source_url)
     restored = _restore_case_bank(
         source_url, bank_dir, contract,
         pg_restore_bin=str(tools["pg_restore"]["binary"]),
@@ -1264,9 +1450,36 @@ def run_no_model_verifier(
         "logical_identity_sha256": logical["sha256"],
         "arms": arms,
         "counts": {
-            "constructions": 1, "dumps": 1, "restores": 1,
+            "constructions": 1, "dumps": 1, "restores": 2 if resume else 1,
             "clones": 2, "query_only_recalls": 2,
         },
+        "attempts": (
+            {
+                "initial": incident["initial_attempt"],
+                "recovery": {
+                    "constructions": 0, "dumps": 0, "resets": 0,
+                    "restores": 1, "clones": 2, "query_only_recalls": 2,
+                    "external_dispatches": 0, "outcome": "complete",
+                },
+            }
+            if resume else {
+                "initial": {
+                    "constructions": 1, "dumps": 1, "resets": 1,
+                    "restores": 1, "clones": 2, "query_only_recalls": 2,
+                    "external_dispatches": 0, "outcome": "complete",
+                }
+            }
+        ),
+        "recovery": (
+            {
+                "resumed": True,
+                "same_sealed_bank": True,
+                "repeated_constructions": 0,
+                "repeated_dumps": 0,
+                "incident_sha256": sha256_file(output / "RECOVERY-INCIDENT.json"),
+            }
+            if resume else {"resumed": False}
+        ),
         "timing_ms": {
             "construction": construction_ms,
             "total": int(round((time.perf_counter() - started) * 1000)),
@@ -1289,6 +1502,30 @@ def run_no_model_verifier(
     return proof
 
 
+def run_no_model_verifier(
+    output: Path,
+    *,
+    fixture: str = "tiny",
+    directory: Path | None = None,
+    materialized: Path | None = None,
+    case_id: str | None = None,
+    resume: bool = False,
+) -> dict[str, object]:
+    if not resume:
+        return _run_no_model_verifier_locked(
+            output, fixture=fixture, directory=directory,
+            materialized=materialized, case_id=case_id, resume=False,
+        )
+    require(output.is_dir(), "no-model recovery output must already exist")
+    require(case_id == _registered_no_model_exact_case_id(),
+            "no-model recovery requires the registered exact case")
+    with _case_lease(output, case_id):
+        return _run_no_model_verifier_locked(
+            output, fixture=fixture, directory=directory,
+            materialized=materialized, case_id=case_id, resume=True,
+        )
+
+
 def run_no_model_verifier_with_scratch(
     output: Path,
     base_database_url: str,
@@ -1297,15 +1534,20 @@ def run_no_model_verifier_with_scratch(
     directory: Path | None = None,
     materialized: Path | None = None,
     case_id: str | None = None,
+    resume: bool = False,
 ) -> dict[str, object]:
     _assert_no_model_environment()
     _local_database_parts(base_database_url)
-    require(not output.exists(), "no-model verifier output must be new")
+    require(output.is_dir() if resume else not output.exists(),
+            "no-model verifier recovery/output state is invalid")
     command = [
         "bash", str(SCRATCH_HELPER), base_database_url,
         "MEMPHANT_TEST_DATABASE_URL", sys.executable, str(Path(__file__).resolve()),
         "_verify-no-model", "--fixture", fixture, "--output", str(output.resolve()),
     ]
+    if resume:
+        require(fixture == "exact", "no-model recovery is limited to exact fixture")
+        command.append("--resume")
     if fixture == "exact":
         require(directory is not None and materialized is not None and case_id is not None,
                 "exact no-model fixture requires directory, materialized, and case id")
@@ -4207,6 +4449,7 @@ def main() -> int:
     parser.add_argument("--row-id")
     parser.add_argument("--case-id")
     parser.add_argument("--fixture", choices=("tiny", "exact"), default="tiny")
+    parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
     manifest = load_campaign_manifest()
     if args.command == "verify-selection":
@@ -4244,7 +4487,7 @@ def main() -> int:
         audit = run_no_model_verifier(
             args.output.resolve(), fixture=args.fixture,
             directory=args.directory, materialized=args.materialized,
-            case_id=args.case_id,
+            case_id=args.case_id, resume=args.resume,
         )
     elif args.command == "verify-no-model":
         require(args.output is not None and args.base_database_url,
@@ -4252,7 +4495,7 @@ def main() -> int:
         audit = run_no_model_verifier_with_scratch(
             args.output.resolve(), args.base_database_url, fixture=args.fixture,
             directory=args.directory, materialized=args.materialized,
-            case_id=args.case_id,
+            case_id=args.case_id, resume=args.resume,
         )
     elif args.command == "run":
         require(args.directory and args.output and args.materialized and args.base_database_url,

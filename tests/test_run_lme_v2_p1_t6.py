@@ -340,7 +340,10 @@ def test_clone_requires_quiescent_source_and_preserves_identity(
 
     monkeypatch.setattr(campaign, "_database_bank_identity", identity)
     monkeypatch.setattr(campaign, "_database_key_count", lambda _url: 0)
-    monkeypatch.setattr(campaign, "_source_connection_count", lambda _url: 0)
+    monkeypatch.setattr(
+        campaign, "_wait_for_source_quiescence",
+        lambda _url: {"samples": 2, "consecutive_zero_samples": 2},
+    )
     monkeypatch.setattr(
         campaign.subprocess,
         "run",
@@ -355,11 +358,79 @@ def test_clone_requires_quiescent_source_and_preserves_identity(
     assert clone.endswith("/memphant_p1t6_19367bc7_deadbeef_fast")
     assert identities == ["memphant_scratch_1_2", "memphant_p1t6_19367bc7_deadbeef_fast"]
     assert calls[0][0] == "createdb" and "--template=memphant_scratch_1_2" in calls[0]
-    with pytest.raises(RuntimeError, match="zero active connections"):
-        monkeypatch.setattr(campaign, "_source_connection_count", lambda _url: 1)
+    with pytest.raises(RuntimeError, match="persistent source session"):
+        monkeypatch.setattr(
+            campaign, "_wait_for_source_quiescence",
+            lambda _url: (_ for _ in ()).throw(
+                RuntimeError("persistent source session")
+            ),
+        )
         campaign._clone_case_source(
             source, "memphant_p1t6_19367bc7_deadbeef_sonnet", expected
         )
+
+
+def test_source_quiescence_wait_accepts_transient_session_after_two_zero_samples(
+    monkeypatch,
+) -> None:
+    campaign = _load()
+    samples = [
+        [{"backend_type": "client backend", "state": "idle", "application_name": "psql"}],
+        [],
+        [],
+    ]
+    monkeypatch.setattr(
+        campaign, "_source_connection_diagnostics", lambda _url: samples.pop(0)
+    )
+    monkeypatch.setattr(campaign.time, "sleep", lambda _seconds: None)
+
+    proof = campaign._wait_for_source_quiescence(
+        "postgres://bench:secret@127.0.0.1:5432/memphant_scratch_1_2",
+        timeout_seconds=1,
+        sample_interval_seconds=0,
+    )
+
+    assert proof["sample_count"] == 3
+    assert proof["consecutive_zero_samples"] == 2
+    assert proof["observed_connections"] == [{
+        "backend_type": "client backend", "state": "idle", "application_name": "psql",
+    }]
+
+
+def test_source_quiescence_wait_fails_closed_on_persistent_session(
+    monkeypatch,
+) -> None:
+    campaign = _load()
+    diagnostic = [{
+        "backend_type": "client backend", "state": "idle",
+        "application_name": "persistent-client",
+    }]
+    monkeypatch.setattr(
+        campaign, "_source_connection_diagnostics", lambda _url: diagnostic
+    )
+
+    with pytest.raises(RuntimeError, match="persistent-client"):
+        campaign._wait_for_source_quiescence(
+            "postgres://bench:secret@127.0.0.1:5432/memphant_scratch_1_2",
+            timeout_seconds=0,
+            sample_interval_seconds=0,
+        )
+
+
+def test_source_quiescence_samples_use_separate_admin_transactions(monkeypatch) -> None:
+    campaign = _load()
+    monkeypatch.setenv("MEMPHANT_SCRATCH_ACTIVE", "1")
+    calls = []
+    monkeypatch.setattr(
+        campaign, "_psql_json",
+        lambda url, sql: calls.append((url, sql)) or [],
+    )
+    source = "postgres://bench:secret@127.0.0.1:5432/memphant_scratch_1_2"
+
+    assert campaign._source_connection_diagnostics(source) == []
+    assert campaign._source_connection_diagnostics(source) == []
+    assert len(calls) == 2
+    assert all(url.endswith("/postgres") for url, _sql in calls)
 
 
 def test_arm_clone_cleanup_is_forceful_and_name_bounded(monkeypatch) -> None:
@@ -443,6 +514,15 @@ def test_exact_no_model_wrapper_forwards_registered_absolute_inputs(
     assert command[command.index("--directory") + 1] == str(directory)
     assert command[command.index("--materialized") + 1] == str(materialized)
     assert command[command.index("--case-id") + 1] == "19367bc7"
+    resume_output = tmp_path / "resume-proof"
+    resume_output.mkdir()
+    campaign.run_no_model_verifier_with_scratch(
+        resume_output,
+        "postgres://bench:secret@127.0.0.1:5432/memphant",
+        fixture="exact", directory=directory, materialized=materialized,
+        case_id="19367bc7", resume=True,
+    )
+    assert "--resume" in calls[1]
 
 
 def test_exact_no_model_fixture_binds_registered_case_order_and_fast_config(
@@ -521,6 +601,148 @@ def test_exact_no_model_classification_requires_frozen_500_670_pairing() -> None
         {"name": "tiny", "case_id": "00000000"},
         {"pairing": {"trajectory_count": 1, "resource_count": 1}},
     ) == "no_model_clone_mechanics_smoke_not_authorization"
+
+
+def test_exact_no_model_resume_skips_construction_dump_and_reset(
+    tmp_path: Path, monkeypatch
+) -> None:
+    campaign = _load()
+    source = "postgres://bench:secret@127.0.0.1:5432/memphant_scratch_1_2"
+    output = tmp_path / "existing"
+    output.mkdir()
+    trajectory_ids = [f"trajectory-{index:03d}" for index in range(500)]
+    data = {
+        "name": "exact", "case_id": "19367bc7", "input_sha256": "a" * 64,
+        "trajectory_ids": trajectory_ids, "trajectories": [],
+        "question": "question", "memory_params": {"mode": "fast"},
+    }
+    construction = {"pairing": {
+        "trajectory_count": 500, "resource_count": 670,
+        "worker": {"completed_sources": 670},
+        "retains": [{"trajectory_id": item} for item in trajectory_ids],
+    }}
+    manifest = {
+        "logical_identity": {"sha256": "b" * 64},
+        "construction_duration_ms": 123,
+    }
+    incident = {"classification": "p1_t6_exact_pre_clone_quiescence_failure"}
+    monkeypatch.setenv("MEMPHANT_SCRATCH_ACTIVE", "1")
+    monkeypatch.setenv("MEMPHANT_TEST_DATABASE_URL", source)
+    monkeypatch.setattr(campaign, "_assert_no_model_environment", lambda: None)
+    monkeypatch.setattr(campaign, "_no_model_fixture", lambda *_args: data)
+    monkeypatch.setattr(campaign, "_resolve_archive_tools", lambda _url: {
+        "server_major": 17, "pg_dump": {"binary": "/pg_dump"},
+        "pg_restore": {"binary": "/pg_restore"},
+    })
+    monkeypatch.setattr(campaign, "_fingerprint", lambda path: {
+        "path": str(path), "bytes": 1, "sha256": "c" * 64,
+    })
+    monkeypatch.setattr(campaign, "_database_schema_identity", lambda _url: {
+        "sha256": "d" * 64,
+    })
+    monkeypatch.setattr(campaign, "_database_exists", lambda _url: False)
+    for name in ("_construct_no_model_source", "_dump_case_bank", "_reset_case_source"):
+        monkeypatch.setattr(
+            campaign, name,
+            lambda *_args, _name=name, **_kwargs: pytest.fail(
+                f"resume called {_name}"
+            ),
+        )
+    monkeypatch.setattr(
+        campaign, "_load_no_model_recovery",
+        lambda *_args: (construction, manifest, incident),
+    )
+    restored = []
+    monkeypatch.setattr(
+        campaign, "_restore_case_bank",
+        lambda *_args, **_kwargs: restored.append(True) or (_ for _ in ()).throw(
+            RuntimeError("stop after recovery restore")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="stop after recovery restore"):
+        campaign.run_no_model_verifier(
+            output, fixture="exact", directory=tmp_path,
+            materialized=tmp_path, case_id="19367bc7", resume=True,
+        )
+    assert restored == [True]
+
+
+def test_exact_no_model_resume_holds_case_lease_for_entire_controller(
+    tmp_path: Path, monkeypatch
+) -> None:
+    campaign = _load()
+    output = tmp_path / "existing"
+    output.mkdir()
+    held = []
+
+    def locked(*_args, **_kwargs):
+        with pytest.raises(RuntimeError, match="case is already active"):
+            with campaign._case_lease(output, "19367bc7"):
+                pass
+        held.append(True)
+        return {"complete": True}
+
+    monkeypatch.setattr(campaign, "_run_no_model_verifier_locked", locked)
+    assert campaign.run_no_model_verifier(
+        output, fixture="exact", directory=tmp_path,
+        materialized=tmp_path, case_id="19367bc7", resume=True,
+    ) == {"complete": True}
+    assert held == [True]
+
+
+def test_exact_no_model_recovery_rejects_arm_artifact_or_clone(
+    tmp_path: Path, monkeypatch
+) -> None:
+    campaign = _load()
+    source = "postgres://bench:secret@127.0.0.1:5432/memphant_scratch_1_2"
+    output = tmp_path / "existing"
+    (output / "arms").mkdir(parents=True)
+    with pytest.raises(RuntimeError, match="arm artifact"):
+        campaign._require_no_model_recovery_start(source, output, "19367bc7")
+    (output / "arms").rmdir()
+    monkeypatch.setattr(campaign, "_database_exists", lambda _url: True)
+    with pytest.raises(RuntimeError, match="unexpected arm clone"):
+        campaign._require_no_model_recovery_start(source, output, "19367bc7")
+
+
+def test_exact_no_model_recovery_rejects_wrong_bank_fixture(
+    tmp_path: Path, monkeypatch
+) -> None:
+    campaign = _load()
+    output = tmp_path / "existing"
+    bank = output / "case-bank"
+    bank.mkdir(parents=True)
+    construction_path = output / "construction-proof.json"
+    campaign.atomic_write_json(construction_path, {"pairing": {}})
+    incident = {
+        "classification": "p1_t6_exact_pre_clone_quiescence_failure",
+        "case_id": "19367bc7",
+        "archive_sha256": "a" * 64,
+        "manifest_sha256": "b" * 64,
+        "construction_proof_sha256": "c" * 64,
+        "external_dispatches": 0,
+        "initial_attempt": {"restores": 1},
+    }
+    campaign.atomic_write_json(output / "RECOVERY-INCIDENT.json", incident)
+    monkeypatch.setattr(campaign, "_load_case_bank", lambda _bank: ({
+        "case_contract": {"case_id": "wrong-case"},
+        "construction": {"pairing": {}},
+        "archive_sha256": "a" * 64,
+        "database_schema_identity": {"sha256": "d" * 64},
+        "postgres": {"binary": "/pg_dump"},
+        "postgres_major": 17,
+    }, bank / ("a" * 64 + ".dump")))
+
+    with pytest.raises(RuntimeError, match="bank contract drift"):
+        campaign._load_no_model_recovery(
+            output,
+            {"name": "exact", "case_id": "19367bc7"},
+            {"case_id": "19367bc7"},
+            {"server_major": 17, "pg_dump": {"binary": "/pg_dump"},
+             "pg_restore": {"binary": "/pg_restore"}},
+            {"sha256": "d" * 64},
+        )
 
 
 def test_no_model_verifier_builds_banks_restores_queries_and_cleans_two_clones(

@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "classification": "p1_t6_exact_pre_clone_quiescence_failure",
+  "measured_commit": "29c9eb53556139bdb1d651f3c79716586ab04cfd",
+  "controller_sha256": "719504687dd49ec046d6057fbdc73366dcff61a54ccd5b4b2c7cb35a3406b116",
+  "campaign_manifest_sha256": "0cbc32d51b8ec665d9c1b4ac7dcdc8dec1f975ad63b830501846b797e9bdda6a",
+  "case_id": "19367bc7",
+  "failure_stage": "after_verified_restore_before_first_clone",
+  "failure_evidence": {
+    "durably_captured_exception": true,
+    "durably_captured_restore_return": true,
+    "source": "captured outer controller traceback",
+    "sanitized_trace_excerpt": "_restore_case_bank returned; run_no_model_verifier called _clone_case_source; _clone_case_source line 568 raised RuntimeError: P1-T6 source must have zero active connections before clone",
+    "sanitized_trace_excerpt_sha256": "0c4c116138859d00987f7c25ca8fe8652edd13d4ad08480f1a1be4acf9adad97"
+  },
+  "initial_attempt": {
+    "constructions": 1,
+    "dumps": 1,
+    "resets": 1,
+    "restores": 1,
+    "restore_status": "returned_before_captured_clone_exception",
+    "clones": 0,
+    "query_only_recalls": 0,
+    "external_dispatches": 0,
+    "outcome": "pre_clone_quiescence_failure"
+  },
+  "bank": {
+    "archive_sha256": "7977b0942b90e9dcb8e772bf722ef1cf0b4a3a6f165b279a6fc5e6c23dfbca4a",
+    "manifest_sha256": "37881e7d0fa80e1c72701056b6b7c7e414651df0d2025cfd98df6c30d6a97751",
+    "construction_proof_file_sha256": "e8402063fbe0b5d9e6727c938a92befcc82da437c02c0eb42490911e14d548dc",
+    "construction_proof_sha256": "e626bdeb9d2c7bb2aa12daa711237bd8b627df7ccf13bdfabf663d27fd491029",
+    "logical_identity_sha256": "bcb4d3c9df832db892246d15fd426de7ff75502137181b91388d8f3bf914903c",
+    "case_contract_sha256": "46db32eb64e2925a9f8d247503a57061b34bb1d73f1ccb031fa15099f802422b",
+    "input_inventory_sha256": "eca6bbb10460feed772a8c86da3fc755e4a5fe9ccba3d33fb8b7b6e4a2d775b9",
+    "memory_params_sha256": "941d433c839e964093843f846a26ef59eac68b5c093a8402328e0380c9f95fd0",
+    "adapter_sha256": "56c2a7264112e012f9376178cc2ef3383d70705f21255d4182e92bf62f8e206c",
+    "preserve_bytes": true
+  },
+  "pre_recovery_inventory": {
+    "case-bank/7977b0942b90e9dcb8e772bf722ef1cf0b4a3a6f165b279a6fc5e6c23dfbca4a.dump": "7977b0942b90e9dcb8e772bf722ef1cf0b4a3a6f165b279a6fc5e6c23dfbca4a",
+    "case-bank/manifest.json": "37881e7d0fa80e1c72701056b6b7c7e414651df0d2025cfd98df6c30d6a97751",
+    "construction-proof.json": "e8402063fbe0b5d9e6727c938a92befcc82da437c02c0eb42490911e14d548dc",
+    "construction/server.stderr": "27d9e09201b7f6db758167f670634d3ef97e269f4b85feb448ede932726aa4b4",
+    "construction/server.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "construction/worker.stderr": "059bdb08ef56b91b306382093246567bebafbf964ef758e5f5c5a4ef4dcdde8e",
+    "construction/worker.stdout": "bbb046f9ff622a6ca702c8928d2055f68e7c5616afd3b9d9bdee0a8b7a123ac6"
+  },
+  "diagnostic_archive_only_pg17_replay": {
+    "persistent_source_sessions": 0,
+    "external_dispatches": 0,
+    "authorization_evidence": false
+  },
+  "recovery": {
+    "same_sealed_bank_required": true,
+    "reconstruction_allowed": false,
+    "redump_allowed": false,
+    "executed": false
+  },
+  "external_dispatches": 0,
+  "authorization": false
+}
