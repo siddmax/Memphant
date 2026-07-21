@@ -582,6 +582,38 @@ def test_run_campaign_uses_one_scratch_lifecycle_per_case(
     assert [command[command.index("--case-id") + 1] for command in case_commands] == manifest["run_order"]["case_order"]
 
 
+def test_run_campaign_rejects_remote_base_before_tools_or_helpers(
+    tmp_path: Path, monkeypatch
+) -> None:
+    campaign = _load()
+    manifest = campaign.load_campaign_manifest()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "router-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "judge-secret")
+    reached = []
+    monkeypatch.setattr(
+        campaign, "_resolve_archive_tools",
+        lambda _url: reached.append("resolver") or pytest.fail("resolver reached"),
+    )
+    monkeypatch.setattr(
+        campaign, "preflight",
+        lambda *_args: reached.append("preflight") or pytest.fail("preflight reached"),
+    )
+    monkeypatch.setattr(
+        campaign.subprocess, "run",
+        lambda *_args, **_kwargs: reached.append("subprocess") or pytest.fail("subprocess reached"),
+    )
+    monkeypatch.setattr(
+        campaign.subprocess, "Popen",
+        lambda *_args, **_kwargs: reached.append("helper") or pytest.fail("helper reached"),
+    )
+    with pytest.raises(RuntimeError, match="plain local PostgreSQL"):
+        campaign.run_campaign(
+            tmp_path, tmp_path, tmp_path / "output",
+            "postgres://bench:secret@db.example.com:5432/memphant", manifest,
+        )
+    assert reached == []
+
+
 def test_archive_tools_resolve_matching_major_before_construction(monkeypatch) -> None:
     campaign = _load()
     source = "postgres://bench:secret@127.0.0.1:5432/memphant_scratch_1_2"

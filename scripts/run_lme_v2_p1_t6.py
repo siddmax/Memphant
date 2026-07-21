@@ -3147,6 +3147,7 @@ def run_row(directory: Path, materialized: Path, output: Path, row: dict, manife
 
 
 def run_campaign(directory: Path, materialized: Path, output: Path, base_database_url: str, manifest: dict) -> dict:
+    _local_database_parts(base_database_url)
     directory, materialized, output = _resolve_execution_paths(
         directory, materialized, output
     )
