@@ -531,6 +531,317 @@ def test_source_maintenance_progress_uses_pg17_columns_and_separate_transactions
     )
 
 
+def test_no_model_clone_hashes_retained_proof_after_phase_redaction(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    campaign = _load()
+    before_digest = []
+
+    class Memory:
+        def __init__(self, _params):
+            pass
+
+        def insert(self, _trajectory):
+            pass
+
+        def set_query_context(self, **_kwargs):
+            pass
+
+        def query(self, _question):
+            return "context"
+
+        def post_query_hook(self, **_kwargs):
+            proof = tmp_path / "arms/fast/adapter.json"
+            campaign.atomic_write_json(proof, {
+                "contract": {"binaries": {
+                    "cli": {"path": "/release/memphant-cli"},
+                    "server": {"path": "/release/memphant-server"},
+                    "worker": {"path": "/release/memphant-worker"},
+                }},
+                "pairing": {"query_only": True},
+                "query": {"query_only": True},
+            })
+            before_digest.append(campaign.sha256_file(proof))
+            return {
+                "construction_proof_sha256": "a" * 64,
+                "context_sha256": "b" * 64,
+                "recall_duration_ms": 1,
+            }
+
+    def phase(_url, proof_dir, _run_id, action):
+        proof_dir.mkdir(parents=True)
+        result = action(types.SimpleNamespace(MemphantMemory=Memory))
+        proof = next(proof_dir.glob("*.json"))
+        proof.write_bytes(proof.read_bytes().replace(b"memphant", b"[REDACTED]"))
+        return result
+
+    monkeypatch.setattr(campaign, "_run_no_model_adapter_phase", phase)
+    result = campaign._run_no_model_clone_query(
+        "postgres://bench:secret@localhost:5432/memphant_p1t6_19367bc7_deadbeef_fast",
+        tmp_path,
+        "fast",
+        {
+            "case_id": "19367bc7",
+            "memory_params": {},
+            "trajectories": [{}],
+            "question": "question",
+        },
+        tmp_path / "construction-proof.json",
+    )
+    retained = next((tmp_path / "arms/fast").glob("*.json"))
+    assert result["adapter_proof_sha256"] == campaign.sha256_file(retained)
+    assert result["adapter_proof_sha256"] != before_digest[0]
+    assert retained.read_text().count("[REDACTED]") == 3
+
+
+def _write_no_model_hash_repair_fixture(campaign, tmp_path: Path, monkeypatch):
+    root = tmp_path / "p1-t6"
+    output = root / "exact-hash-repair-target"
+    output.mkdir(parents=True)
+    campaign.atomic_write_json(output / "RECOVERY-INCIDENT.json", {"incident": True})
+    campaign.atomic_write_json(
+        output / "FIRST-RECOVERY-FAILURE.json", {"failure": True}
+    )
+    construction_core = {
+        "schema_version": 1,
+        "pairing": {"trajectory_count": 500, "resource_count": 670},
+    }
+    construction = {
+        **construction_core,
+        "construction_proof_sha256": campaign.canonical_sha256(construction_core),
+    }
+    contract = {"case_id": "19367bc7"}
+    logical_core = {"tables": {}, "sequences": {}}
+    logical = {**logical_core, "sha256": campaign.canonical_sha256(logical_core)}
+    archive_body = b"sealed-bank"
+    archive_sha = hashlib.sha256(archive_body).hexdigest()
+    bank = output / "case-bank"
+    bank.mkdir()
+    (bank / f"{archive_sha}.dump").write_bytes(archive_body)
+    manifest = {
+        "format_version": campaign.BANK_FORMAT_VERSION,
+        "construction": construction,
+        "construction_proof_sha256": construction["construction_proof_sha256"],
+        "construction_duration_ms": 1,
+        "case_contract": contract,
+        "case_contract_sha256": campaign.canonical_sha256(contract),
+        "logical_identity": logical,
+        "postgres": {"major": 17, "server_major": 17},
+        "postgres_major": 17,
+        "archive": f"{archive_sha}.dump",
+        "archive_sha256": archive_sha,
+        "excluded_tables": list(campaign.BANK_EXCLUDED_TABLES),
+    }
+    campaign.atomic_write_json(bank / "manifest.json", manifest)
+    campaign.atomic_write_json(output / "construction-proof.json", construction)
+    retained = {}
+    retained_paths = {}
+    for arm in ("fast", "sonnet"):
+        relative = f"arms/{arm}/adapter.json"
+        path = output / relative
+        campaign.atomic_write_json(path, {
+            "contract": {"binaries": {
+                "cli": {"path": "/release/[REDACTED]-cli"},
+                "server": {"path": "/release/[REDACTED]-server"},
+                "worker": {"path": "/release/[REDACTED]-worker"},
+            }},
+            "pairing": {"query_only": True},
+            "query": {"query_only": True},
+        })
+        retained[arm] = campaign.sha256_file(path)
+        retained_paths[arm] = {"path": relative, "sha256": retained[arm]}
+    original_inventory = campaign.artifact_hashes(output)
+    old_hashes = {"fast": "1" * 64, "sonnet": "2" * 64}
+    proof = {
+        "schema_version": 1,
+        "classification": "original-classification",
+        "git_commit": "a" * 40,
+        "controller": {"path": "/controller", "bytes": 123, "sha256": "b" * 64},
+        "fixture": {"name": "exact", "case_id": "19367bc7"},
+        "archive": {
+            "sha256": archive_sha,
+            "manifest_sha256": campaign.sha256_file(bank / "manifest.json"),
+            "seal": campaign._case_bank_seal(bank / "manifest.json"),
+        },
+        "recovery": {
+            "incident_sha256": campaign.sha256_file(
+                output / "RECOVERY-INCIDENT.json"
+            ),
+            "first_recovery_failure_sha256": campaign.sha256_file(
+                output / "FIRST-RECOVERY-FAILURE.json"
+            ),
+        },
+        "arms": [
+            {"arm": arm, "adapter_proof_sha256": old_hashes[arm], "evidence": arm}
+            for arm in ("fast", "sonnet")
+        ],
+        "artifact_hashes": original_inventory,
+        "unchanged_evidence": {"value": 7},
+    }
+    proof["proof_sha256"] = campaign.canonical_sha256(proof)
+    campaign.atomic_write_json(output / "PROOF.json", proof)
+    original_bytes = (output / "PROOF.json").read_bytes()
+    target = {
+        "basename": output.name,
+        "case_id": "19367bc7",
+        "proof_file_sha256": hashlib.sha256(original_bytes).hexdigest(),
+        "proof_sha256": proof["proof_sha256"],
+        "classification": proof["classification"],
+        "execution_git_commit": proof["git_commit"],
+        "execution_controller": {
+            "bytes": proof["controller"]["bytes"],
+            "sha256": proof["controller"]["sha256"],
+        },
+        "old_explicit_hashes": old_hashes,
+        "retained_artifacts": retained_paths,
+        "original_artifact_count": len(original_inventory),
+    }
+    monkeypatch.setattr(campaign, "NO_MODEL_HASH_REPAIR_ROOT", root)
+    monkeypatch.setattr(campaign, "NO_MODEL_HASH_REPAIR_TARGET", target)
+    monkeypatch.setattr(
+        campaign, "_repair_executor_provenance",
+        lambda: {
+            "git_commit": "c" * 40,
+            "controller": {"path": "/repair", "bytes": 456, "sha256": "d" * 64},
+        },
+    )
+    return output, proof, original_bytes, original_inventory, retained
+
+
+def test_no_model_hash_repair_is_lineage_preserving_and_idempotent(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    campaign = _load()
+    output, original, original_bytes, original_inventory, retained = (
+        _write_no_model_hash_repair_fixture(campaign, tmp_path, monkeypatch)
+    )
+    audit = campaign.repair_no_model_proof_hashes(output)
+    predecessor = output / "PROOF.pre-hash-repair.json"
+    record_path = output / "PROOF-HASH-REPAIR.json"
+    repaired = json.loads((output / "PROOF.json").read_text())
+    record = json.loads(record_path.read_text())
+
+    assert predecessor.read_bytes() == original_bytes
+    assert record["operations"] == {
+        "database_connections": 0,
+        "restores": 0,
+        "clones": 0,
+        "model_calls": 0,
+        "external_dispatches": 0,
+    }
+    assert record["root_cause_evidence"]["secret_values_recorded"] is False
+    assert all(
+        len(paths) == 3
+        for paths in record["root_cause_evidence"]["redacted_binary_path_fields"].values()
+    )
+    assert repaired["classification"] == campaign.NO_MODEL_HASH_REPAIRED_CLASSIFICATION
+    assert {
+        arm["arm"]: arm["adapter_proof_sha256"] for arm in repaired["arms"]
+    } == retained
+    assert repaired["artifact_hashes"] == campaign.artifact_hashes(
+        output, exclude={"PROOF.json"}
+    )
+    assert repaired["proof_sha256"] == campaign.canonical_sha256({
+        key: value for key, value in repaired.items() if key != "proof_sha256"
+    })
+    assert all(repaired["artifact_hashes"][path] == digest
+               for path, digest in original_inventory.items())
+    unchanged = set(original) - {
+        "classification", "arms", "artifact_hashes", "proof_sha256",
+    }
+    assert all(repaired[key] == original[key] for key in unchanged)
+    assert audit["database_connections"] == audit["model_calls"] == audit["paid_calls"] == 0
+
+    completed_hashes = campaign.artifact_hashes(output)
+    with pytest.raises(RuntimeError, match="already repaired"):
+        campaign.repair_no_model_proof_hashes(output)
+    assert campaign.artifact_hashes(output) == completed_hashes
+
+
+@pytest.mark.parametrize("stop_after", ["predecessor", "record"])
+def test_no_model_hash_repair_resumes_append_only_crash_states(
+    tmp_path: Path, monkeypatch, stop_after: str,
+) -> None:
+    campaign = _load()
+    output, _original, original_bytes, _inventory, _retained = (
+        _write_no_model_hash_repair_fixture(campaign, tmp_path, monkeypatch)
+    )
+    with pytest.raises(RuntimeError, match=f"stop after hash repair {stop_after}"):
+        campaign.repair_no_model_proof_hashes(output, _stop_after=stop_after)
+    assert (output / "PROOF.json").read_bytes() == original_bytes
+    assert (output / "PROOF.pre-hash-repair.json").read_bytes() == original_bytes
+    if stop_after == "predecessor":
+        assert not (output / "PROOF-HASH-REPAIR.json").exists()
+    else:
+        record_hash = campaign.sha256_file(output / "PROOF-HASH-REPAIR.json")
+
+    campaign.repair_no_model_proof_hashes(output)
+    if stop_after == "record":
+        assert campaign.sha256_file(output / "PROOF-HASH-REPAIR.json") == record_hash
+    assert json.loads((output / "PROOF.json").read_text())[
+        "classification"
+    ] == campaign.NO_MODEL_HASH_REPAIRED_CLASSIFICATION
+
+
+def test_no_model_hash_repair_rejects_target_extra_symlink_and_sidecar_tamper(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    campaign = _load()
+    output, *_ = _write_no_model_hash_repair_fixture(campaign, tmp_path, monkeypatch)
+    wrong = output.with_name("wrong-target")
+    wrong.mkdir()
+    with pytest.raises(RuntimeError, match="target root or basename"):
+        campaign.repair_no_model_proof_hashes(wrong)
+
+    extra = output / "unexpected.txt"
+    extra.write_text("drift")
+    with pytest.raises(RuntimeError, match="artifact inventory drift"):
+        campaign.repair_no_model_proof_hashes(output)
+    extra.unlink()
+
+    symlink = output / "unexpected-link"
+    symlink.symlink_to(output / "PROOF.json")
+    with pytest.raises(RuntimeError, match="symlinked artifacts"):
+        campaign.repair_no_model_proof_hashes(output)
+    symlink.unlink()
+
+    campaign.repair_no_model_proof_hashes(output)
+    record_path = output / "PROOF-HASH-REPAIR.json"
+    record = json.loads(record_path.read_text())
+    record["root_cause"] = "tampered"
+    campaign.atomic_write_json(record_path, record)
+    with pytest.raises(RuntimeError, match="record drift"):
+        campaign.repair_no_model_proof_hashes(output)
+
+
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        ["--base-database-url", "postgres://localhost/forbidden"],
+        ["--fixture", "exact"],
+    ],
+)
+def test_no_model_hash_repair_cli_accepts_only_output(
+    tmp_path: Path, monkeypatch, extra_args: list[str],
+) -> None:
+    campaign = _load()
+    monkeypatch.setattr(
+        campaign, "repair_no_model_proof_hashes",
+        lambda _output: pytest.fail("invalid repair CLI reached repair helper"),
+    )
+    monkeypatch.setattr(
+        sys, "argv",
+        [
+            "run_lme_v2_p1_t6.py",
+            "repair-no-model-proof-hashes",
+            "--output", str(tmp_path),
+            *extra_args,
+        ],
+    )
+    with pytest.raises(RuntimeError, match="accepts only --output"):
+        campaign.main()
+
+
 def test_arm_clone_cleanup_is_forceful_and_name_bounded(monkeypatch) -> None:
     campaign = _load()
     calls = []

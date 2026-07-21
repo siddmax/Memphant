@@ -84,6 +84,37 @@ ARM_DATABASE_PATTERN = re.compile(
 )
 SCRATCH_DATABASE_PATTERN = re.compile(r"memphant_scratch_[0-9]+_[0-9]+")
 NO_MODEL_CONFIGURATION_MARKERS = ("OPENROUTER", "OPENAI", "MEMPHANT_DEEP_")
+NO_MODEL_HASH_REPAIR_ROOT = ROOT / "docs/build-log/artifacts/p1-t6"
+NO_MODEL_HASH_REPAIR_TARGET = {
+    "basename": "no-model-exact-29c9eb53",
+    "case_id": "19367bc7",
+    "proof_file_sha256": "4b0b9472dee0561db5338db9fce2e5a4feb818b5f8a06734563e436ae83a832e",
+    "proof_sha256": "b929bff1103deb59ba9c4d5a7f395325044c8fd802df9eb6d9f7f8f9544ba900",
+    "classification": "no_model_exact_case_second_recovery_authorization_candidate",
+    "execution_git_commit": "2cfa81e60304f2dfa7c8e2dafd9c7f906b937ded",
+    "execution_controller": {
+        "bytes": 213014,
+        "sha256": "56f666cd2526c9cc9d92f252e2d3ca2bd981b97dbd9b9a03e51bfab220705131",
+    },
+    "old_explicit_hashes": {
+        "fast": "87ed90c86efafdc63dad089a11e070df45abcc024a20da9de7c99ae52135b13e",
+        "sonnet": "5e9c9a48602689f921b1dd2ea216fe391a563d9202308a63724f0b23855c99bb",
+    },
+    "retained_artifacts": {
+        "fast": {
+            "path": "arms/fast/no-model-19367bc7-fast.803f6da6c0f44be3b3420ce3cb1172dc.json",
+            "sha256": "4b96109558bf8c326323c11d615f65c1a4301b53b3483356af454adc7d79c616",
+        },
+        "sonnet": {
+            "path": "arms/sonnet/no-model-19367bc7-sonnet.79f88c4b6c304dc988c58935d2cc4d8e.json",
+            "sha256": "0a44ce350acb12609a1c0bf266a6f573c0c872e417c1455b6b4f1ea289a13951",
+        },
+    },
+    "original_artifact_count": 16,
+}
+NO_MODEL_HASH_REPAIRED_CLASSIFICATION = (
+    "no_model_exact_case_second_recovery_hash_repaired_authorization_candidate"
+)
 
 
 def require(condition: bool, message: str) -> None:
@@ -1220,7 +1251,6 @@ def _run_no_model_clone_query(
             "query_only": True,
             "verification_recall_mode": "fast",
             "construction_proof_sha256": metadata["construction_proof_sha256"],
-            "adapter_proof_sha256": sha256_file(paths[0]),
             "context_sha256": metadata["context_sha256"],
             "construction_work": {"retains": 0, "worker_drains": 0},
             "timing_ms": {"recall": metadata["recall_duration_ms"]},
@@ -1229,6 +1259,10 @@ def _run_no_model_clone_query(
     result = _run_no_model_adapter_phase(
         clone_url, proof_dir, f"p1-t6-no-model-{arm}", query
     )
+    retained_paths = list(proof_dir.glob("*.json"))
+    require(len(retained_paths) == 1,
+            "no-model clone retained an invalid adapter proof count")
+    result["adapter_proof_sha256"] = sha256_file(retained_paths[0])
     result["timing_ms"]["total"] = int(round((time.perf_counter() - started) * 1000))
     return result
 
@@ -1761,6 +1795,397 @@ def run_no_model_verifier(
             output, fixture=fixture, directory=directory,
             materialized=materialized, case_id=case_id, resume=True,
         )
+
+
+def _repair_executor_provenance() -> dict[str, object]:
+    controller = Path(__file__).resolve()
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=ROOT,
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    committed = subprocess.run(
+        ["git", "show", f"{commit}:scripts/run_lme_v2_p1_t6.py"], cwd=ROOT,
+        capture_output=True, check=False,
+    )
+    require(
+        re.fullmatch(r"[0-9a-f]{40}", commit) is not None
+        and committed.returncode == 0
+        and hashlib.sha256(committed.stdout).hexdigest() == sha256_file(controller),
+        "hash repair controller is not the committed executor",
+    )
+    return {"git_commit": commit, "controller": _fingerprint(controller)}
+
+
+def _atomic_create_bytes(path: Path, body: bytes) -> None:
+    require(not path.exists(), f"immutable hash repair artifact already exists: {path.name}")
+    temporary = path.with_name(path.name + ".tmp")
+    require(not temporary.exists(), f"stale hash repair temporary: {temporary.name}")
+    with temporary.open("xb") as handle:
+        handle.write(body)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+
+
+def _no_model_redaction_paths(adapter_proof: dict[str, object]) -> list[str]:
+    found: list[str] = []
+
+    def visit(value: object, path: tuple[str, ...]) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                visit(item, (*path, str(key)))
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                visit(item, (*path, str(index)))
+        elif isinstance(value, str) and "[REDACTED]" in value:
+            found.append(".".join(path))
+
+    visit(adapter_proof, ())
+    expected = [
+        f"contract.binaries.{binary}.path"
+        for binary in ("cli", "server", "worker")
+    ]
+    require(found == expected,
+            "retained adapter proof redaction footprint drift")
+    return found
+
+
+def _validate_original_no_model_hash_repair(
+    output: Path, proof_bytes: bytes,
+) -> tuple[dict[str, object], dict[str, list[str]]]:
+    target = NO_MODEL_HASH_REPAIR_TARGET
+    require(hashlib.sha256(proof_bytes).hexdigest() == target["proof_file_sha256"],
+            "hash repair original proof file drift")
+    proof = json.loads(proof_bytes)
+    require(isinstance(proof, dict), "hash repair original proof is invalid")
+    core = {key: value for key, value in proof.items() if key != "proof_sha256"}
+    require(
+        proof.get("proof_sha256") == target["proof_sha256"]
+        == canonical_sha256(core),
+        "hash repair original canonical proof drift",
+    )
+    controller = proof.get("controller")
+    fixture = proof.get("fixture")
+    require(
+        proof.get("classification") == target["classification"]
+        and proof.get("git_commit") == target["execution_git_commit"]
+        and isinstance(controller, dict)
+        and controller.get("bytes") == target["execution_controller"]["bytes"]
+        and controller.get("sha256") == target["execution_controller"]["sha256"]
+        and isinstance(fixture, dict)
+        and fixture.get("name") == "exact"
+        and fixture.get("case_id") == target["case_id"],
+        "hash repair exact execution tuple drift",
+    )
+    inventory = proof.get("artifact_hashes")
+    require(
+        isinstance(inventory, dict)
+        and len(inventory) == target["original_artifact_count"]
+        and artifact_hashes(output, exclude={
+            "PROOF.json", "PROOF.pre-hash-repair.json", "PROOF-HASH-REPAIR.json",
+        }) == inventory,
+        "hash repair original artifact inventory drift",
+    )
+    manifest, _archive = _load_case_bank(output / "case-bank")
+    seal = _case_bank_seal(output / "case-bank/manifest.json")
+    archive = proof.get("archive")
+    construction_path = output / "construction-proof.json"
+    require(
+        isinstance(archive, dict)
+        and archive.get("sha256") == manifest.get("archive_sha256")
+        and archive.get("manifest_sha256")
+        == sha256_file(output / "case-bank/manifest.json")
+        and archive.get("seal") == seal
+        and construction_path.is_file()
+        and json.loads(construction_path.read_text()) == manifest.get("construction"),
+        "hash repair case-bank seal or construction lineage drift",
+    )
+    recovery = proof.get("recovery")
+    require(
+        isinstance(recovery, dict)
+        and recovery.get("incident_sha256")
+        == sha256_file(output / "RECOVERY-INCIDENT.json")
+        == inventory.get("RECOVERY-INCIDENT.json")
+        and recovery.get("first_recovery_failure_sha256")
+        == sha256_file(output / "FIRST-RECOVERY-FAILURE.json")
+        == inventory.get("FIRST-RECOVERY-FAILURE.json"),
+        "hash repair recovery lineage drift",
+    )
+    arms = proof.get("arms")
+    require(
+        isinstance(arms, list) and len(arms) == 2
+        and [arm.get("arm") for arm in arms if isinstance(arm, dict)]
+        == ["fast", "sonnet"],
+        "hash repair arm ordering drift",
+    )
+    redactions: dict[str, list[str]] = {}
+    for arm in arms:
+        name = arm["arm"]
+        retained = target["retained_artifacts"][name]
+        retained_path = output / retained["path"]
+        require(
+            arm.get("adapter_proof_sha256")
+            == target["old_explicit_hashes"][name]
+            and inventory.get(retained["path"]) == retained["sha256"]
+            and retained_path.is_file()
+            and sha256_file(retained_path) == retained["sha256"]
+            and retained["sha256"] != target["old_explicit_hashes"][name],
+            f"hash repair {name} adapter proof binding drift",
+        )
+        retained_proof = json.loads(retained_path.read_text())
+        require(isinstance(retained_proof, dict),
+                f"hash repair {name} retained adapter proof is invalid")
+        redactions[name] = _no_model_redaction_paths(retained_proof)
+    return proof, redactions
+
+
+def _no_model_hash_repair_record(
+    original: dict[str, object],
+    redactions: dict[str, list[str]],
+    executor: dict[str, object],
+) -> dict[str, object]:
+    target = NO_MODEL_HASH_REPAIR_TARGET
+    core = {
+        "schema_version": 1,
+        "classification": "p1_t6_no_model_adapter_hash_lineage_preserving_supersession",
+        "original_proof": {
+            "path": "PROOF.pre-hash-repair.json",
+            "file_sha256": target["proof_file_sha256"],
+            "canonical_sha256": target["proof_sha256"],
+            "classification": target["classification"],
+            "execution_git_commit": target["execution_git_commit"],
+            "execution_controller": target["execution_controller"],
+        },
+        "old_explicit_adapter_proof_sha256": target["old_explicit_hashes"],
+        "retained_adapter_proofs": target["retained_artifacts"],
+        "root_cause": (
+            "adapter proof hashes were captured inside the adapter action before "
+            "the phase-final redaction rewrote the retained proof bytes"
+        ),
+        "root_cause_evidence": {
+            "redacted_binary_path_fields": redactions,
+            "redacted_fields_per_arm": 3,
+            "secret_values_recorded": False,
+        },
+        "original_artifact_inventory_sha256": canonical_sha256(
+            original["artifact_hashes"]
+        ),
+        "case_bank_seal": original["archive"]["seal"],
+        "recovery_lineage": {
+            "incident_sha256": original["recovery"]["incident_sha256"],
+            "first_recovery_failure_sha256": original["recovery"][
+                "first_recovery_failure_sha256"
+            ],
+        },
+        "repair_executor": executor,
+        "operations": {
+            "database_connections": 0,
+            "restores": 0,
+            "clones": 0,
+            "model_calls": 0,
+            "external_dispatches": 0,
+        },
+        "supersession": {
+            "mode": "lineage_preserving",
+            "old_classification": target["classification"],
+            "new_classification": NO_MODEL_HASH_REPAIRED_CLASSIFICATION,
+            "allowed_proof_changes": [
+                "classification",
+                "arms.fast.adapter_proof_sha256",
+                "arms.sonnet.adapter_proof_sha256",
+                "artifact_hashes",
+                "hash_repair",
+                "proof_sha256",
+            ],
+        },
+    }
+    return {**core, "record_sha256": canonical_sha256(core)}
+
+
+def _validate_no_model_hash_repair_record(
+    record: object,
+    original: dict[str, object],
+    redactions: dict[str, list[str]],
+) -> dict[str, object]:
+    require(isinstance(record, dict), "hash repair record is invalid")
+    executor = record.get("repair_executor")
+    require(
+        isinstance(executor, dict)
+        and re.fullmatch(r"[0-9a-f]{40}", str(executor.get("git_commit", "")))
+        is not None
+        and isinstance(executor.get("controller"), dict)
+        and isinstance(executor["controller"].get("bytes"), int)
+        and re.fullmatch(
+            r"[0-9a-f]{64}", str(executor["controller"].get("sha256", ""))
+        ) is not None,
+        "hash repair executor provenance drift",
+    )
+    require(
+        record == _no_model_hash_repair_record(original, redactions, executor),
+        "hash repair record drift",
+    )
+    return executor
+
+
+def _repaired_no_model_proof(
+    original: dict[str, object],
+    record: dict[str, object],
+    inventory: dict[str, str],
+    record_file_sha256: str,
+) -> dict[str, object]:
+    repaired = json.loads(json.dumps(original))
+    repaired["classification"] = NO_MODEL_HASH_REPAIRED_CLASSIFICATION
+    for arm in repaired["arms"]:
+        arm["adapter_proof_sha256"] = NO_MODEL_HASH_REPAIR_TARGET[
+            "retained_artifacts"
+        ][arm["arm"]]["sha256"]
+    repaired["artifact_hashes"] = inventory
+    repaired["hash_repair"] = {
+        "mode": "lineage_preserving_supersession",
+        "predecessor": {
+            "path": "PROOF.pre-hash-repair.json",
+            "sha256": NO_MODEL_HASH_REPAIR_TARGET["proof_file_sha256"],
+        },
+        "record": {
+            "path": "PROOF-HASH-REPAIR.json",
+            "sha256": record_file_sha256,
+            "record_sha256": record["record_sha256"],
+        },
+        "repair_executor": record["repair_executor"],
+    }
+    core = {key: value for key, value in repaired.items() if key != "proof_sha256"}
+    repaired["proof_sha256"] = canonical_sha256(core)
+    return repaired
+
+
+def _require_no_model_hash_repair_allowlist(
+    original: dict[str, object], repaired: dict[str, object],
+) -> None:
+    unchanged = set(original) - {
+        "classification", "arms", "artifact_hashes", "proof_sha256",
+    }
+    require(
+        all(repaired.get(key) == original.get(key) for key in unchanged)
+        and set(repaired) == set(original) | {"hash_repair"},
+        "hash repair changed a non-allowlisted proof field",
+    )
+    require(
+        len(original["arms"]) == len(repaired["arms"]) == 2,
+        "hash repair arm count drift",
+    )
+    for before, after in zip(original["arms"], repaired["arms"], strict=True):
+        before_copy = dict(before)
+        after_copy = dict(after)
+        before_copy.pop("adapter_proof_sha256", None)
+        after_copy.pop("adapter_proof_sha256", None)
+        require(before_copy == after_copy,
+                "hash repair changed non-hash arm evidence")
+
+
+def repair_no_model_proof_hashes(
+    output: Path,
+    *,
+    _stop_after: str | None = None,
+) -> dict[str, object]:
+    require(_stop_after in {None, "predecessor", "record"},
+            "invalid internal hash repair stop point")
+    target_output = NO_MODEL_HASH_REPAIR_ROOT / NO_MODEL_HASH_REPAIR_TARGET["basename"]
+    require(
+        output.is_dir() and not output.is_symlink()
+        and output.name == NO_MODEL_HASH_REPAIR_TARGET["basename"]
+        and output.resolve() == target_output.resolve(),
+        "hash repair target root or basename mismatch",
+    )
+    require(
+        all(not path.is_symlink() for path in output.rglob("*")),
+        "hash repair rejects symlinked artifacts",
+    )
+    lock_fd = os.open(output, os.O_RDONLY)
+    try:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise RuntimeError("hash repair target is already active") from error
+        proof_path = output / "PROOF.json"
+        predecessor_path = output / "PROOF.pre-hash-repair.json"
+        record_path = output / "PROOF-HASH-REPAIR.json"
+        require(proof_path.is_file(), "hash repair current proof is missing")
+        require(not record_path.exists() or predecessor_path.exists(),
+                "hash repair sidecars are in an impossible order")
+        current = json.loads(proof_path.read_text())
+        if current.get("classification") == NO_MODEL_HASH_REPAIRED_CLASSIFICATION:
+            require(predecessor_path.is_file() and record_path.is_file(),
+                    "completed hash repair lost its immutable sidecars")
+            original, redactions = _validate_original_no_model_hash_repair(
+                output, predecessor_path.read_bytes()
+            )
+            record = json.loads(record_path.read_text())
+            _validate_no_model_hash_repair_record(record, original, redactions)
+            inventory = artifact_hashes(output, exclude={"PROOF.json"})
+            expected = _repaired_no_model_proof(
+                original, record, inventory, sha256_file(record_path)
+            )
+            require(current == expected,
+                    "completed hash repair proof or sidecar drift")
+            raise RuntimeError("no-model proof hashes are already repaired")
+
+        original_bytes = proof_path.read_bytes()
+        original, redactions = _validate_original_no_model_hash_repair(
+            output, original_bytes
+        )
+        if predecessor_path.exists():
+            require(
+                predecessor_path.is_file()
+                and predecessor_path.read_bytes() == original_bytes,
+                "hash repair predecessor drift",
+            )
+        else:
+            _atomic_create_bytes(predecessor_path, original_bytes)
+        if _stop_after == "predecessor":
+            raise RuntimeError("injected stop after hash repair predecessor")
+
+        if record_path.exists():
+            require(record_path.is_file(), "hash repair record path is invalid")
+            record = json.loads(record_path.read_text())
+            _validate_no_model_hash_repair_record(record, original, redactions)
+        else:
+            record = _no_model_hash_repair_record(
+                original, redactions, _repair_executor_provenance()
+            )
+            atomic_write_json(record_path, record)
+        if _stop_after == "record":
+            raise RuntimeError("injected stop after hash repair record")
+
+        record_file_sha256 = sha256_file(record_path)
+        inventory = artifact_hashes(output, exclude={"PROOF.json"})
+        require(
+            len(inventory) == NO_MODEL_HASH_REPAIR_TARGET["original_artifact_count"] + 2
+            and all(
+                inventory.get(path) == digest
+                for path, digest in original["artifact_hashes"].items()
+            )
+            and inventory.get("PROOF.pre-hash-repair.json")
+            == NO_MODEL_HASH_REPAIR_TARGET["proof_file_sha256"]
+            and inventory.get("PROOF-HASH-REPAIR.json") == record_file_sha256,
+            "hash repair final artifact inventory drift",
+        )
+        repaired = _repaired_no_model_proof(
+            original, record, inventory, record_file_sha256
+        )
+        _require_no_model_hash_repair_allowlist(original, repaired)
+        atomic_write_json(proof_path, repaired)
+        return {
+            "classification": repaired["classification"],
+            "proof_sha256": repaired["proof_sha256"],
+            "predecessor_sha256": sha256_file(predecessor_path),
+            "repair_record_sha256": record_file_sha256,
+            "database_connections": 0,
+            "model_calls": 0,
+            "paid_calls": 0,
+        }
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
 
 
 def run_no_model_verifier_with_scratch(
@@ -4676,6 +5101,7 @@ def main() -> int:
             "verify-selection", "acquire", "materialize", "preflight", "run",
             "aggregate", "_context-preflight", "_reader-route-preflight", "_run-row",
             "_run-case", "verify-no-model", "_verify-no-model",
+            "repair-no-model-proof-hashes",
         ),
     )
     parser.add_argument("--directory", type=Path)
@@ -4685,7 +5111,7 @@ def main() -> int:
     parser.add_argument("--base-database-url")
     parser.add_argument("--row-id")
     parser.add_argument("--case-id")
-    parser.add_argument("--fixture", choices=("tiny", "exact"), default="tiny")
+    parser.add_argument("--fixture", choices=("tiny", "exact"))
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
     manifest = load_campaign_manifest()
@@ -4722,7 +5148,7 @@ def main() -> int:
     elif args.command == "_verify-no-model":
         require(args.output is not None, "_verify-no-model requires output")
         audit = run_no_model_verifier(
-            args.output.resolve(), fixture=args.fixture,
+            args.output.resolve(), fixture=args.fixture or "tiny",
             directory=args.directory, materialized=args.materialized,
             case_id=args.case_id, resume=args.resume,
         )
@@ -4730,10 +5156,25 @@ def main() -> int:
         require(args.output is not None and args.base_database_url,
                 "verify-no-model requires output and base-database-url")
         audit = run_no_model_verifier_with_scratch(
-            args.output.resolve(), args.base_database_url, fixture=args.fixture,
+            args.output.resolve(), args.base_database_url,
+            fixture=args.fixture or "tiny",
             directory=args.directory, materialized=args.materialized,
             case_id=args.case_id, resume=args.resume,
         )
+    elif args.command == "repair-no-model-proof-hashes":
+        require(
+            args.output is not None
+            and args.directory is None
+            and args.questions is None
+            and args.materialized is None
+            and args.base_database_url is None
+            and args.row_id is None
+            and args.case_id is None
+            and args.fixture is None
+            and not args.resume,
+            "repair-no-model-proof-hashes accepts only --output",
+        )
+        audit = repair_no_model_proof_hashes(args.output)
     elif args.command == "run":
         require(args.directory and args.output and args.materialized and args.base_database_url,
                 "run requires directory, output, materialized, and base-database-url")
@@ -4757,6 +5198,7 @@ def main() -> int:
     if args.command in {
         "verify-selection", "acquire", "materialize", "preflight",
         "_context-preflight", "verify-no-model", "_verify-no-model",
+        "repair-no-model-proof-hashes",
     }:
         envelope["paid_calls"] = 0
     elif args.command == "_reader-route-preflight":
