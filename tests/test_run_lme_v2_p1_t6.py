@@ -3518,6 +3518,28 @@ def test_aggregate_requires_24_distinct_adapter_instances(tmp_path: Path) -> Non
         campaign.aggregate_campaign(tmp_path, manifest)
 
 
+@pytest.mark.parametrize("outcome", ["success", "operational_failure"])
+def test_aggregate_authenticates_executed_mode_for_every_memory_proof(
+    tmp_path: Path, outcome: str,
+) -> None:
+    campaign = _load()
+    manifest = campaign.load_campaign_manifest()
+    rows = campaign.expanded_run_order(manifest)
+    _write_synthetic_success_campaign(campaign, tmp_path, manifest, rows)
+    row = rows[0]
+    memory_path = tmp_path / row["row_id"] / "memory-proofs/proof.json"
+    memory = json.loads(memory_path.read_text())
+    memory["public"]["trace"]["mode_executed"] = "deep"
+    memory["query"]["trace_sha256"] = campaign.canonical_sha256(
+        memory["public"]["trace"]
+    )
+    _rewrite_synthetic_memory_binding(
+        campaign, tmp_path, rows, row, memory, outcome=outcome
+    )
+    with pytest.raises(RuntimeError, match="trace isolation or mode"):
+        campaign.aggregate_campaign(tmp_path, manifest)
+
+
 def test_construction_attempt_reuses_only_its_exact_completed_bank(
     tmp_path: Path,
 ) -> None:
@@ -3600,6 +3622,33 @@ def test_aggregate_rejects_preserved_incomplete_case_bank(tmp_path: Path) -> Non
     preserved.mkdir(parents=True)
     (preserved / "manifest.json").write_text("{}\n")
     with pytest.raises(RuntimeError, match="preserved incomplete case banks"):
+        campaign.aggregate_campaign(tmp_path, manifest)
+
+
+def test_aggregate_rejects_unregistered_case_construction_history(
+    tmp_path: Path,
+) -> None:
+    campaign = _load()
+    manifest = campaign.load_campaign_manifest()
+    rows = campaign.expanded_run_order(manifest)
+    _write_synthetic_success_campaign(campaign, tmp_path, manifest, rows)
+    unexpected = tmp_path / "case-construction" / "deadbeef" / "attempt-0001"
+    campaign.atomic_write_json(unexpected / "attempt.json", {
+        "schema_version": 1,
+        "attempt_id": "attempt-0001",
+        "case_id": "deadbeef",
+        "classification": "free_local_construction",
+        "complete": False,
+    })
+    campaign.atomic_write_json(unexpected / "complete.json", {
+        "schema_version": 1,
+        "attempt_id": "attempt-0001",
+        "case_id": "deadbeef",
+        "construction_proof_sha256": "f" * 64,
+        "construction_duration_ms": 1,
+        "complete": True,
+    })
+    with pytest.raises(RuntimeError, match="construction case inventory"):
         campaign.aggregate_campaign(tmp_path, manifest)
 
 

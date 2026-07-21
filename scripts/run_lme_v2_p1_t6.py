@@ -5452,7 +5452,8 @@ def _validate_query_only_memory_proof(
         and trace.get("tenant_id") == isolation["tenant_id"]
         and trace.get("scope_id") == isolation["scope_id"]
         and trace.get("actor_id") == isolation["actor_id"]
-        and trace.get("mode_requested") == expected_mode,
+        and trace.get("mode_requested") == expected_mode
+        and trace.get("mode_executed") == expected_mode,
         "row memory trace isolation or mode drift",
     )
     require(
@@ -5596,6 +5597,19 @@ def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
         not incomplete_root.exists()
         or (incomplete_root.is_dir() and not any(incomplete_root.iterdir())),
         "P1-T6 aggregate found preserved incomplete case banks",
+    )
+    construction_root = output / "case-construction"
+    construction_entries = (
+        list(construction_root.iterdir()) if construction_root.is_dir() else []
+    )
+    require(
+        construction_root.is_dir()
+        and not construction_root.is_symlink()
+        and all(entry.is_dir() and not entry.is_symlink()
+                for entry in construction_entries)
+        and {entry.name for entry in construction_entries}
+        == set(manifest["run_order"]["case_order"]),
+        "P1-T6 construction case inventory differs from the registered cases",
     )
     case_bank_seals = _validate_retired_case_banks(output, rows)
     require(len(case_bank_seals) == 12,
