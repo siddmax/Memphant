@@ -9,6 +9,14 @@ MemPhant is the public Apache-2.0 memory substrate repo. Treat `docs/superpowers
 - Keep mirrored MemPhant spec files drift-free when a private Syndai checkout is available.
 - Never commit secrets. Use `.env.example` for local variable names only.
 
+## Sister Project and Secrets
+
+- Syndai is MemPhant's private sister project. Until MemPhant has a separate Doppler project, the `syndai` Doppler project is the canonical secret source for MemPhant private integration and explicitly authorized live or paid benchmark work.
+- For local development and benchmark work, wrap only the secret-consuming command with `doppler run --project syndai --config dev -- ...`; use `--config prod` only when the task explicitly targets production. Always pass the project and config because linked worktrees do not inherit Syndai's directory binding.
+- CI, unit and integration tests, provider lint, no-model verification, and ordinary local development must remain secret-free and must not be wrapped in Doppler.
+- Never print, download, copy, or persist Doppler values into this repo, `.env` files, logs, artifacts, shell output, or commits.
+- Shared Doppler does not imply shared database authority: MemPhant tests and benchmarks must continue using local or ephemeral scratch Postgres and must never target a Syndai production database unless the user explicitly authorizes that exact operation.
+
 ## Database Rules
 
 - MemPhant-owned database objects must live in the `memphant` schema.
