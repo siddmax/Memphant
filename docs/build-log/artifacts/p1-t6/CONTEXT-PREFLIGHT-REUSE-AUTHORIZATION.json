@@ -1,0 +1,121 @@
+{
+  "schema_version": "memphant.p1_t6.context_preflight_reuse.v1",
+  "created_at": "2026-07-21T11:05:23Z",
+  "decision": "reuse_static_context_size_predicate_only",
+  "paid_calls": 0,
+  "database_connections": 0,
+  "constructions": 0,
+  "reason": "The current exact no-model Fast and Sonnet artifacts reproduce the same query, context, and runtime token estimate as the prior official-reader context proof. Reconstructing the 670-resource case would not add information.",
+  "current_exact_proof": {
+    "path": "docs/build-log/artifacts/p1-t6/no-model-exact-29c9eb53/PROOF.json",
+    "sha256": "3b52a77d435c37be35e392af28b5f2d9e57e7ead36a7b808763f7aecf0a24dd3",
+    "classification": "no_model_exact_case_second_recovery_hash_repaired_authorization_candidate",
+    "fast_artifact": {
+      "path": "docs/build-log/artifacts/p1-t6/no-model-exact-29c9eb53/arms/fast/no-model-19367bc7-fast.803f6da6c0f44be3b3420ce3cb1172dc.json",
+      "sha256": "4b96109558bf8c326323c11d615f65c1a4301b53b3483356af454adc7d79c616",
+      "query_sha256": "a44fe8a4b1e5e24011cfaffa47806346860feb9226bd786480cf8064906f001c",
+      "context_sha256": "f5bc63b4e68759956cba28fc99ca6c01875365ded84cc050c009ab050dd4be3a",
+      "runtime_token_estimate": 32757
+    },
+    "sonnet_query_only_artifact": {
+      "path": "docs/build-log/artifacts/p1-t6/no-model-exact-29c9eb53/arms/sonnet/no-model-19367bc7-sonnet.79f88c4b6c304dc988c58935d2cc4d8e.json",
+      "sha256": "0a44ce350acb12609a1c0bf266a6f573c0c872e417c1455b6b4f1ea289a13951",
+      "query_sha256": "a44fe8a4b1e5e24011cfaffa47806346860feb9226bd786480cf8064906f001c",
+      "context_sha256": "f5bc63b4e68759956cba28fc99ca6c01875365ded84cc050c009ab050dd4be3a",
+      "runtime_token_estimate": 32757
+    }
+  },
+  "official_reader_context_proof": {
+    "path": "docs/build-log/artifacts/p1-t6/live-release-context-1f5b57cf/PROOF.json",
+    "sha256": "ae9f3ec5618c12ed6c0e7a35e7b6302485f036621b8137937632aebeca80d794",
+    "memory_proof_path": "docs/build-log/artifacts/p1-t6/live-release-context-1f5b57cf/memory-proofs/19367bc7.1663e945c00f4a8093e76a127721c27f.json",
+    "memory_proof_sha256": "3856cace7ab8e796459a64af844e623ec92bda82764027bc26baa5b3c8088203",
+    "query_sha256": "a44fe8a4b1e5e24011cfaffa47806346860feb9226bd786480cf8064906f001c",
+    "context_sha256": "f5bc63b4e68759956cba28fc99ca6c01875365ded84cc050c009ab050dd4be3a",
+    "runtime_token_estimate": 32757,
+    "exact_reader_tokens": 23564,
+    "budget_tokens": 32768,
+    "untruncated": true
+  },
+  "current_pinned_inputs": {
+    "campaign_manifest_path": "benchmarks/manifests/longmemeval_v2.p1_t6.json",
+    "campaign_manifest_sha256": "0cbc32d51b8ec665d9c1b4ac7dcdc8dec1f975ad63b830501846b797e9bdda6a",
+    "official_code_commit": "be15ea6e995462f3391c1a610892df3f67dfa7bd",
+    "dataset_revision": "f152293e235517d504809563c833d7190b8c713b",
+    "materialization_summary_path": "docs/build-log/artifacts/p1-t6/MATERIALIZATION-SUMMARY.json",
+    "materialization_summary_sha256": "9419bc740be5cf1bf310039c0fb8888f8fdfa737f49e2908dc97cc243f32a3c6",
+    "materialization_proof_sha256": "35a696fef3a2efc217ed4a3c02eb87f50b8edc6c3439fb649f7c32c07a1f2b59",
+    "pairing_proofs_path": "docs/build-log/artifacts/p1-t6/PAIRING-PROOFS.json",
+    "pairing_proofs_sha256": "79f84306da7820a07fc8596a154dd921c5d4a93429dd3633141eeaf9c200717d",
+    "no_paid_preflight_verified_at": "2026-07-21T11:01:00Z"
+  },
+  "current_runtime_binding": {
+    "git_commit": "e9d117308a7c3e01e5e30bc6a802ee8f8fbe7641",
+    "controller": {
+      "path": "scripts/run_lme_v2_p1_t6.py",
+      "bytes": 264131,
+      "sha256": "63ca11d657650d0020d10a0eaf2ca7e3f73deb26e50c85bd64aa91d470d9e417",
+      "full_file_matches_exact_proof": false,
+      "exact_proof_commit": "2cfa81e60304f2dfa7c8e2dafd9c7f906b937ded",
+      "context_relevant_functions_ast_sha256": {
+        "_context_contract_audit": "133dcab0cfa2014d1aab80ac500c8e19e2166c69470dafae4fa96db4034ef51a",
+        "_load_selected_trajectories": "6a4600ed38c378ec23d1cac790ff9705bbb445dd5c85a5742b1a2fcd0dbb5933",
+        "run_context_preflight": "a0c5bc3f607bf8f81ff438b2ce5cdc81668a9fd06221662559f3ea1b3258447d"
+      },
+      "context_relevant_functions_match_exact_proof_commit": true
+    },
+    "adapter": {
+      "path": "benchmarks/longmemeval_v2/memphant_memory.py",
+      "bytes": 42222,
+      "sha256": "56c2a7264112e012f9376178cc2ef3383d70705f21255d4182e92bf62f8e206c",
+      "matches_exact_construction_contract": true
+    },
+    "binaries": {
+      "cli": {
+        "bytes": 5705024,
+        "sha256": "a8da5a706613654cfe743a55ea93b5c99702962067052503985c1c6dd1af3c0d"
+      },
+      "server": {
+        "bytes": 40225808,
+        "sha256": "126644b9647ad1b48c8e3c64d53a4140a3411be609b861e434bd5bc3531730c9"
+      },
+      "worker": {
+        "bytes": 35968672,
+        "sha256": "006387c20558aa42422acef65335760e20f1b182c0e6fd002e87b9c400d8e24e"
+      }
+    },
+    "binaries_match_exact_proof": true
+  },
+  "saved_work": {
+    "scope": "standalone_context_preflight_only",
+    "avoided_redundant_context_preflight_resource_retentions": 670,
+    "avoided_redundant_context_preflight_trajectory_replay": 500,
+    "avoided_prior_observed_context_preflight_worker_and_recall_ms": 4151155,
+    "archive_or_proof_mutation": false
+  },
+  "live_execution_obligation": {
+    "case_banks_to_construct": 12,
+    "cross_root_bank_import_authorized": false,
+    "existing_no_model_bank_reused_by_live_run": false,
+    "existing_untracked_dump_is_portable_campaign_input": false,
+    "rule": "The live runner must construct all 12 case banks normally inside its fresh immutable output root. This authorization does not copy, point to, import, or otherwise reuse the no-model archive."
+  },
+  "valid_only_if": [
+    "every bound file SHA-256 remains unchanged",
+    "the campaign manifest and pinned official code remain unchanged",
+    "the selected first case remains 19367bc7",
+    "the current exact Fast and Sonnet query-only artifacts retain identical query and context hashes",
+    "the runtime memory budget remains 32768 tokens",
+    "the current adapter and server, worker, and CLI identities remain exactly equal to the identities recorded above and in the exact construction contract",
+    "the current context-relevant controller functions retain the recorded AST identities"
+  ],
+  "still_required_immediately_before_dispatch": [
+    "both approved credentials are present",
+    "live endpoint inventory satisfies the frozen reader and selected Sonnet contracts",
+    "a fresh immutable output root is absent before creation",
+    "the controller resolves PostgreSQL 17 archive tools and a healthy local scratch base",
+    "every per-case source and arm cleanup predicate passes"
+  ],
+  "fallback": "If any static context-size reuse predicate drifts, stop and run the registered no-provider context preflight in a fresh scratch database before dispatch. Never import the old bank as a fallback.",
+  "claim_boundary": "This authorizes reuse of the static context-size predicate only. It authorizes no archive import, paid call, benchmark row, larger confirmation, ledger change, push, or public claim."
+}
