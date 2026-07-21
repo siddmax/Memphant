@@ -1,0 +1,105 @@
+{
+  "schema_version": "memphant.p1_t6.pre_dispatch_efficiency_checkpoint.v1",
+  "created_at": "2026-07-21T10:54:40Z",
+  "decision": "bounded_n12_is_the_next_information_efficient_gate",
+  "authorization_commit": "038a8699e414abbe8c1428e602881553804ed620",
+  "necessity": {
+    "question": "Does explicit Sonnet Deep recall beat paired Fast recall while meeting the registered user latency, cost, reliability, and no-truncation thresholds?",
+    "why_now": "The build-once controller, exact 670-resource no-model proof, independent review, and full repository gate are complete. No larger campaign question can be answered responsibly before this feasibility result.",
+    "smallest_registered_sample": 12,
+    "why_not_smaller": "The answer-blind n=12 manifest is already frozen across both domains and five abilities; reducing it now would change the registered gate and discard required coverage.",
+    "why_not_larger": "n=100-300 and full-500 add substantial construction, model, reader, and judge cost before basic UX feasibility is known. They are explicitly unauthorized."
+  },
+  "frozen_inputs": {
+    "campaign_manifest_path": "benchmarks/manifests/longmemeval_v2.p1_t6.json",
+    "campaign_manifest_sha256": "0cbc32d51b8ec665d9c1b4ac7dcdc8dec1f975ad63b830501846b797e9bdda6a",
+    "selection_sha256": "d7762dbaffff7acfe779162d4993c8c09ef0440e3c1a25e0d3408127d73e25fa",
+    "expanded_run_order_sha256": "59f7ff5cc04a6ecd1b17b69565e51a71ad1b814bfa1345698a10ad766796ad1e",
+    "run_order_contract_sha256": "68d101847b268a252610737bfbff2d6cb099bf460c7c90ab12ba375f3053582d",
+    "pre_execution_amendment_path": "docs/build-log/artifacts/p1-t6/PRE-EXECUTION-AMENDMENT-11.md",
+    "pre_execution_amendment_sha256": "fc97f14fe9002bf049a4b3386cf4d14a9df83c824a5e8dfa1635730f0593d882",
+    "selected_deep_arm": "sonnet",
+    "selected_model": "anthropic/claude-sonnet-5-20260630",
+    "selected_config_sha256": "22730027f29f7daa15b7b8905878ce6d9f45ee49491db415960f431da72bcf75",
+    "inactive_arms": [
+      "luna",
+      "sol"
+    ]
+  },
+  "controller_verification": {
+    "command": "python3 scripts/run_lme_v2_p1_t6.py verify-selection",
+    "verified": true,
+    "paid_calls": 0,
+    "cases": 12,
+    "constructions": 12,
+    "answer_rows": 24,
+    "arms": 2
+  },
+  "reusable_work": {
+    "per_case": "construct one immutable pre-query database bank, then clone the same bank into Fast and Sonnet query-only arms",
+    "maximum_constructions": 12,
+    "avoided_constructions_vs_per_arm_rebuild": 12,
+    "exact_670_resource_validation_reused": true,
+    "exact_670_resource_validation_rebuilt": false,
+    "completed_billable_rows_may_be_rerun": false
+  },
+  "expected_information_gain": {
+    "primary": "paired official mean Sonnet-minus-Fast score delta over 12 cases",
+    "decision_value": "determines whether explicit Deep is accurate, responsive, and inexpensive enough to justify a separately preregistered confirmation",
+    "ux_predicates": {
+      "paired_mean_score_delta": "strictly_positive",
+      "wins_vs_losses": "wins_exceed_losses",
+      "deep_query_latency_p50_seconds_max": 45,
+      "deep_query_latency_p95_and_max_seconds_max": 90,
+      "hard_timeout_seconds": 120,
+      "mean_settled_deep_cost_usd_max": 0.1,
+      "p95_and_max_settled_deep_cost_usd_max": 0.2,
+      "per_row_hard_liability_usd": 0.3,
+      "reader_context_truncations": 0
+    }
+  },
+  "hard_maxima": {
+    "cases": 12,
+    "constructions": 12,
+    "answer_rows": 24,
+    "deep_dispatches": 12,
+    "preexisting_liability_micro_usd": 323684,
+    "fresh_deep_reserve_micro_usd": 3600000,
+    "fresh_reader_and_judge_reserve_micro_usd": 2097600,
+    "cumulative_worst_case_liability_micro_usd": 6021284,
+    "campaign_hard_ceiling_micro_usd": 6250000,
+    "headroom_micro_usd": 228716
+  },
+  "pre_dispatch_stop_predicates": [
+    "stop if any hard maximum drifts upward",
+    "stop if the manifest, selection, run order, model, provider, prompt, config, or liability binding drifts",
+    "stop if all 12 materialized case contracts and pairing proofs are not complete",
+    "stop if the just-in-time endpoint inventory, credentials, packaged binaries, context preflight, or cleanup preflight fails",
+    "stop if the output root is not fresh and immutable",
+    "stop if any model dispatch would occur before its reservation and proof are durable"
+  ],
+  "execution_stop_predicates": [
+    "preserve and stop on any failed pair, cap, infrastructure, security, write, settlement, or proof predicate",
+    "never rerun a completed billable row",
+    "stop after the registered Sonnet decision; do not run Luna or Sol",
+    "if Sonnet is infeasible, preserve the negative artifact and stop P1-T6",
+    "if Sonnet is feasible, authorize only preparation of a separate n=100-300 confirmation manifest"
+  ],
+  "just_in_time_work_deferred_until_dispatch": {
+    "reason": "Endpoint availability and provider routing are time-sensitive; upstream acquisition, materialization, endpoint inventory, credentials, context, and packaged-binary preflight should run once immediately before dispatch rather than be repeated early.",
+    "required_command_family": "scripts/run_lme_v2_p1_t6.py preflight plus registered context, reader-route, and endpoint checks",
+    "dispatch_ready_now": false,
+    "paid_dispatch_authorized_now": false
+  },
+  "larger_run_policy": {
+    "n100_to_n300": "later and only after n=12 passes; requires fresh answer-blind preregistration, paired confidence procedure, spend ceiling, and fixed or adaptive stopping rule",
+    "full_500": "later in campaign order after P1-T6 confirmation, P1-T1, and SWE-ContextBench Lite",
+    "method": "Use information-aware selection and sequential stopping for larger confirmations; do not brute-force model grids.",
+    "research": [
+      "https://arxiv.org/abs/2601.20251",
+      "https://arxiv.org/abs/2607.08522",
+      "https://arxiv.org/abs/2601.13885"
+    ]
+  },
+  "claim_boundary": "This checkpoint is a development control. It is not a P1-T6 pass, SOTA claim, default routing decision, ledger promotion, merge, push, or authority for n=100-300 or full-500 execution."
+}
