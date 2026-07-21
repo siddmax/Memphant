@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "attempt": "run-129928d8",
+  "classification": "first_pair_sonnet_invalid_output_and_controller_fail_stop_violation",
+  "invalidated_at": "2026-07-21T16:40:51Z",
+  "measured_commit": "b0260d40f8a8499f29981e1b04a3b5274c2eb9ad",
+  "preserved_evidence": {
+    "pre_append_inventory_files": 71,
+    "pre_append_inventory_sha256": "f1c19bd91caf9acd580e9a1e1a313f9f1a3e78fb578eab84c011f17c0e86e137",
+    "pre_execution_proof_sha256": "a5143cb4c5b7653c339318a3553df670e852ff599184c4f0eec273ed86e60019",
+    "frozen_run_order_sha256": "8cd6bf79625016e764622f7687a289da351b3765ab805b1a7accf0fc192eb9a1",
+    "fast_row_proof_sha256": "029bb1149a2d9413b1a0f94058f634e89e8675cdefbc249de3f5bb233f5b4b07",
+    "sonnet_row_proof_sha256": "28d3fa70c02ab8b389298d2529a36fd5dd7f90ad6be0aa23f7fa1ea8c26e0d1c",
+    "deep_generation_receipts_sha256": "3bce70c9206563561efbf6b0ba7cc1163254a560a0d361c92ae095b7e355e7e1",
+    "completed_rows": [
+      "0001-19367bc7-fast",
+      "0002-19367bc7-sonnet"
+    ],
+    "eligible_aggregate_rows": 0
+  },
+  "case_one": {
+    "question_id": "19367bc7",
+    "trajectory_count": 500,
+    "resource_count": 670,
+    "construction_attempts": 1,
+    "worker_completed_sources": 670,
+    "worker_failures": 0,
+    "bank_clones": 2,
+    "fast_operational": true,
+    "sonnet_operational": false,
+    "sonnet_deep_status": "partial",
+    "sonnet_deep_stop_reason": "invalid_output",
+    "sonnet_tool_iterations": 0,
+    "sonnet_generation_ids": [
+      "gen-1784651469-osOiY2qwbWDV4ve3IxU6"
+    ],
+    "claim_boundary": "The build-once and clone contract succeeded, but the failed Deep treatment makes the pair ineligible for P1-T6 aggregation or promotion."
+  },
+  "provider_receipt_reconciliation": {
+    "generation_id": "gen-1784651469-osOiY2qwbWDV4ve3IxU6",
+    "provider_name": "Azure",
+    "model": "anthropic/claude-sonnet-5-20260630",
+    "http_status": 200,
+    "finish_reason": "tool_calls",
+    "native_finish_reason": "tool_use",
+    "tokens_prompt": 512,
+    "tokens_completion": 22,
+    "total_cost_micros": 3380,
+    "provider_liability_settled": true,
+    "runtime_receipt_contract_status": "invalid",
+    "runtime_receipt_contract_reason": "The immutable Deep response still carried its pre-reconciliation reservation because the production provider did not settle within its five-second window. The later exact generation receipt resolves external liability but does not make the treatment operational or mutate the archived row."
+  },
+  "external_dispatch_audit": {
+    "deep_dispatches": 1,
+    "deep_settled_micros": 3380,
+    "deep_unsettled_upper_bound_micros": 0,
+    "reader_dispatches": 2,
+    "reader_settled_micros": 4878,
+    "reader_unsettled_upper_bound_micros": 0,
+    "judge_dispatches": 0,
+    "new_root_settled_micros": 8258,
+    "new_root_unsettled_upper_bound_micros": 0,
+    "prior_campaign_settled_micros": 7542,
+    "prior_campaign_unsettled_upper_bound_micros": 316142,
+    "cumulative_settled_micros": 15800,
+    "cumulative_unsettled_upper_bound_micros": 316142,
+    "cumulative_liability_micros": 331942
+  },
+  "fail_stop_audit": {
+    "registered_predicate": "stop on any failed pair",
+    "controller_behavior": "The first case subprocess returned success after archiving an operational_failure Sonnet row, so the parent opened the second case instead of stopping.",
+    "operator_action": "SIGINT was sent to the exact parent controller after validating its command line.",
+    "second_case_id": "21f3228c",
+    "second_case_attempt_marker_created": true,
+    "second_case_resources_archived": 0,
+    "second_case_model_dispatches": 0,
+    "same_root_resume_authorized": false
+  },
+  "cleanup_audit": {
+    "campaign_processes_remaining": 0,
+    "scratch_or_clone_databases_remaining": 0,
+    "first_case_archive_retired": true
+  },
+  "retry_decision": {
+    "same_output_root_replay_authorized": false,
+    "fresh_output_root_authorized": false,
+    "required_before_any_new_paid_dispatch": [
+      "identify the exact production stream/parser incompatibility without rebuilding a benchmark case",
+      "make post-response generation receipts settle external liability without rewriting immutable runtime evidence",
+      "make the parent controller stop before the next case on any non-operational row",
+      "add regression tests for both accounting and fail-stop behavior",
+      "update the cumulative liability contract from 323684 to 331942 micro-dollars",
+      "commit a fresh answer-blind amendment and pass the narrow no-paid gates"
+    ]
+  },
+  "claim_boundary": "This root is immutable diagnostic evidence only. It is not a P1-T6 score, pass, SOTA claim, product-default decision, or authority to replay any completed billable row."
+}
