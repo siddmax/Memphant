@@ -530,6 +530,9 @@ def test_no_model_verifier_builds_banks_restores_queries_and_cleans_two_clones(
     }
     assert {arm["verification_recall_mode"] for arm in proof["arms"]} == {"fast"}
     assert proof["cleanup"]["orphan_clone_count"] == 0
+    assert proof["archive"]["sha256"] == campaign.sha256_file(
+        output / "case-bank" / ("a" * 64 + ".dump")
+    )
     assert source not in json.dumps(proof)
     assert "secret" not in json.dumps(proof)
 

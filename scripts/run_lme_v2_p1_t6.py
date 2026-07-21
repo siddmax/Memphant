@@ -1184,7 +1184,9 @@ def run_no_model_verifier(
             "no-model source gained an API key")
     require(_job_state_counts(source_url) == (0, 0, 0),
             "no-model source contains transient jobs")
-    _redact_secrets(output, _row_secret_values("", "", source_url))
+    # Server/worker text logs are redacted by each adapter phase. The custom
+    # dump and its manifest are content-addressed evidence, never text-redact
+    # them after sealing; pg_dump does not archive its connection string.
     artifacts = artifact_hashes(output)
     core = {
         "schema_version": 1,
