@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "attempt": "run-e511c817",
+  "invalidated_at": "2026-07-21T18:21:02Z",
+  "measured_commit": "7840c7b03f8cbc4f06ded6ecab0c7292b5df3747",
+  "classification": "first_pair_sonnet_invalid_output_with_controller_fail_stop_pass",
+  "claim_boundary": "This root is immutable diagnostic evidence only. It is not a P1-T6 score, pass, SOTA claim, product-default decision, or authority to replay any completed billable row.",
+  "case_one": {
+    "question_id": "19367bc7",
+    "trajectory_count": 500,
+    "resource_count": 670,
+    "construction_attempts": 1,
+    "bank_clones": 2,
+    "worker_completed_sources": 670,
+    "worker_failures": 0,
+    "fast_operational": true,
+    "sonnet_operational": false,
+    "sonnet_deep_status": "partial",
+    "sonnet_deep_stop_reason": "invalid_output",
+    "sonnet_tool_iterations": 0,
+    "sonnet_generation_ids": [
+      "gen-1784657686-Drl2nZD1KSBb7RClNC7a"
+    ],
+    "claim_boundary": "The build-once and clone contract succeeded, but the failed Deep treatment makes the pair ineligible for P1-T6 aggregation or promotion."
+  },
+  "provider_receipt_reconciliation": {
+    "generation_id": "gen-1784657686-Drl2nZD1KSBb7RClNC7a",
+    "http_status": 200,
+    "model": "anthropic/claude-sonnet-5-20260630",
+    "provider_name": "Azure",
+    "finish_reason": "tool_calls",
+    "native_finish_reason": "tool_use",
+    "tokens_prompt": 512,
+    "tokens_completion": 22,
+    "total_cost_micros": 3380,
+    "provider_liability_settled": true,
+    "runtime_receipt_contract_status": "settled",
+    "runtime_receipt_contract_reason": "The runtime settled the accepted generation inside its original reservation using the exact generation receipt. Settlement resolves external liability but does not make the treatment operational."
+  },
+  "external_dispatch_audit": {
+    "reader_dispatches": 2,
+    "deep_dispatches": 1,
+    "judge_dispatches": 0,
+    "reader_settled_micros": 5028,
+    "reader_unsettled_upper_bound_micros": 0,
+    "deep_settled_micros": 3380,
+    "deep_unsettled_upper_bound_micros": 0,
+    "new_root_settled_micros": 8408,
+    "new_root_unsettled_upper_bound_micros": 0,
+    "prior_campaign_settled_micros": 17420,
+    "prior_campaign_unsettled_upper_bound_micros": 316142,
+    "cumulative_settled_micros": 25828,
+    "cumulative_unsettled_upper_bound_micros": 316142,
+    "cumulative_liability_micros": 341970
+  },
+  "fail_stop_audit": {
+    "registered_predicate": "stop on the first failed pair before opening the next case",
+    "controller_behavior": "The first case subprocess exited nonzero after retiring its archive, and the parent exited nonzero without opening the second case.",
+    "controller_contract_passed": true,
+    "operator_interruption_required": false,
+    "second_case_attempt_marker_created": false,
+    "second_case_model_dispatches": 0,
+    "second_case_resources_archived": 0,
+    "same_root_resume_authorized": false
+  },
+  "cleanup_audit": {
+    "campaign_processes_remaining": 0,
+    "scratch_or_clone_databases_remaining": 0,
+    "first_case_archive_retired": true
+  },
+  "preserved_evidence": {
+    "completed_rows": [
+      "0001-19367bc7-fast",
+      "0002-19367bc7-sonnet"
+    ],
+    "eligible_aggregate_rows": 0,
+    "pre_append_inventory_files": 67,
+    "pre_append_inventory_sha256": "ef7e0c0278b32b58df0e87ef793ba2151e709a1dc76203b9d411c3072e986a05",
+    "pre_execution_proof_sha256": "fc6859684cea063e5a8cfb0a178e758396223b5fe267672c6af6e3245cbabf5b",
+    "frozen_run_order_sha256": "8cd6bf79625016e764622f7687a289da351b3765ab805b1a7accf0fc192eb9a1",
+    "fast_row_proof_sha256": "969b0b66eb57b7d373679fd2490ca5a843d4a438a996dd638bce5adb4150e6cb",
+    "sonnet_row_proof_sha256": "cb13d7fb367dc99ed50fe1f85481fafc50ad873c189a22a496f6b44b1f9cd691",
+    "deep_generation_receipts_sha256": "3adecd056a94823ba4a295379fed8b1a45b4fe4e6b9c3b3aa6b08a7ea0ad655a"
+  },
+  "root_cause_status": {
+    "confirmed": false,
+    "known_boundary": "OpenRouter and Azure completed one tool call, but the strict runtime rejected the response before tool iteration one. The archived generation endpoint does not retain the SSE chunks needed to identify the failed parser predicate.",
+    "official_contract_evidence": "OpenRouter documents exactly one final streaming usage chunk before DONE and a generation ID response header; the current parser intends to validate that contract fail closed.",
+    "required_next_evidence": "One answer-free, zero-database, single-dispatch structural diagnostic using the production prompt and production tool schema, with no raw content or tool arguments persisted."
+  },
+  "retry_decision": {
+    "same_output_root_replay_authorized": false,
+    "fresh_output_root_authorized": false,
+    "required_before_any_new_campaign_dispatch": [
+      "identify the exact live stream/parser incompatibility without rebuilding a benchmark case",
+      "add a fixture-driven regression test that reproduces the rejected valid stream",
+      "fix only the proven protocol root cause and keep fail-closed route, usage, and tool validation",
+      "pass the narrow no-paid gates and update cumulative liability",
+      "commit a fresh answer-blind amendment and authorization"
+    ]
+  }
+}

@@ -1,0 +1,146 @@
+[
+  {
+    "arm": "fast",
+    "question_id": "19367bc7",
+    "row_id": "0001-19367bc7-fast",
+    "sequence": 1
+  },
+  {
+    "arm": "sonnet",
+    "question_id": "19367bc7",
+    "row_id": "0002-19367bc7-sonnet",
+    "sequence": 2
+  },
+  {
+    "arm": "fast",
+    "question_id": "21f3228c",
+    "row_id": "0003-21f3228c-fast",
+    "sequence": 3
+  },
+  {
+    "arm": "sonnet",
+    "question_id": "21f3228c",
+    "row_id": "0004-21f3228c-sonnet",
+    "sequence": 4
+  },
+  {
+    "arm": "fast",
+    "question_id": "2c45ecbb",
+    "row_id": "0005-2c45ecbb-fast",
+    "sequence": 5
+  },
+  {
+    "arm": "sonnet",
+    "question_id": "2c45ecbb",
+    "row_id": "0006-2c45ecbb-sonnet",
+    "sequence": 6
+  },
+  {
+    "arm": "fast",
+    "question_id": "52dd33bb",
+    "row_id": "0007-52dd33bb-fast",
+    "sequence": 7
+  },
+  {
+    "arm": "sonnet",
+    "question_id": "52dd33bb",
+    "row_id": "0008-52dd33bb-sonnet",
+    "sequence": 8
+  },
+  {
+    "arm": "fast",
+    "question_id": "658fa827",
+    "row_id": "0009-658fa827-fast",
+    "sequence": 9
+  },
+  {
+    "arm": "sonnet",
+    "question_id": "658fa827",
+    "row_id": "0010-658fa827-sonnet",
+    "sequence": 10
+  },
+  {
+    "arm": "fast",
+    "question_id": "6fdda2fc",
+    "row_id": "0011-6fdda2fc-fast",
+    "sequence": 11
+  },
+  {
+    "arm": "sonnet",
+    "question_id": "6fdda2fc",
+    "row_id": "0012-6fdda2fc-sonnet",
+    "sequence": 12
+  },
+  {
+    "arm": "fast",
+    "question_id": "86fa86eb",
+    "row_id": "0013-86fa86eb-fast",
+    "sequence": 13
+  },
+  {
+    "arm": "sonnet",
+    "question_id": "86fa86eb",
+    "row_id": "0014-86fa86eb-sonnet",
+    "sequence": 14
+  },
+  {
+    "arm": "fast",
+    "question_id": "8e21c6e5",
+    "row_id": "0015-8e21c6e5-fast",
+    "sequence": 15
+  },
+  {
+    "arm": "sonnet",
+    "question_id": "8e21c6e5",
+    "row_id": "0016-8e21c6e5-sonnet",
+    "sequence": 16
+  },
+  {
+    "arm": "fast",
+    "question_id": "aedd338d",
+    "row_id": "0017-aedd338d-fast",
+    "sequence": 17
+  },
+  {
+    "arm": "sonnet",
+    "question_id": "aedd338d",
+    "row_id": "0018-aedd338d-sonnet",
+    "sequence": 18
+  },
+  {
+    "arm": "fast",
+    "question_id": "b05cf470",
+    "row_id": "0019-b05cf470-fast",
+    "sequence": 19
+  },
+  {
+    "arm": "sonnet",
+    "question_id": "b05cf470",
+    "row_id": "0020-b05cf470-sonnet",
+    "sequence": 20
+  },
+  {
+    "arm": "fast",
+    "question_id": "dae9f7e9",
+    "row_id": "0021-dae9f7e9-fast",
+    "sequence": 21
+  },
+  {
+    "arm": "sonnet",
+    "question_id": "dae9f7e9",
+    "row_id": "0022-dae9f7e9-sonnet",
+    "sequence": 22
+  },
+  {
+    "arm": "fast",
+    "question_id": "f2b221fd",
+    "row_id": "0023-f2b221fd-fast",
+    "sequence": 23
+  },
+  {
+    "arm": "sonnet",
+    "question_id": "f2b221fd",
+    "row_id": "0024-f2b221fd-sonnet",
+    "sequence": 24
+  }
+]
