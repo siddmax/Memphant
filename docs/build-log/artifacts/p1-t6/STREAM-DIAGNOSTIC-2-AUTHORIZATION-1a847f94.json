@@ -1,0 +1,43 @@
+{
+  "schema_version": "memphant.p1_t6.stream_diagnostic_authorization.v2",
+  "created_at": "2026-07-21T18:21:02Z",
+  "decision": "authorize_one_production_schema_sonnet_stream_diagnostic",
+  "source_failure": "docs/build-log/artifacts/p1-t6/run-e511c817/INVALIDATION-PROOF.json",
+  "necessity": "The settled production generation completed one tool call, but the runtime returned invalid_output before tool iteration one. The generation endpoint proves tool use but does not retain the SSE chunks needed to distinguish a valid provider variant from a strict-parser defect.",
+  "expected_information_gain": "Identify the first exact parser predicate rejected by a current Azure Sonnet stream while avoiding another 670-resource construction and keeping the eventual fix fixture-driven.",
+  "scope": {
+    "model": "anthropic/claude-sonnet-5-20260630",
+    "provider": "azure",
+    "provider_dispatches_max": 1,
+    "completion_tokens_max": 64,
+    "diagnostic_max_liability_micros": 5000,
+    "preexisting_cumulative_liability_micros": 341970,
+    "post_diagnostic_cumulative_max_liability_micros": 346970,
+    "campaign_hard_ceiling_micros": 6250000,
+    "benchmark_cases": 0,
+    "resource_constructions": 0,
+    "database_connections": 0
+  },
+  "production_parity": {
+    "system_prompt": "config/deep-recall-v1.txt",
+    "tool_schema": "the five production Deep tools with their exact JSON schemas",
+    "request_model": "the exact dated campaign model",
+    "response_model": "the registered canonical stream model",
+    "routing": "the campaign Azure-only ZDR and data-deny policy",
+    "synthetic_difference": "The user query is answer-free and no workspace contents are sent or executed."
+  },
+  "data_policy": {
+    "prompt": "synthetic and answer-free",
+    "capture": "SSE event keys, value types, counts, lengths, route metadata, finish reason, usage presence, and the first failed parser predicate only",
+    "raw_content_or_tool_arguments_persisted": false,
+    "secret_values_emitted_or_persisted": false
+  },
+  "stop_predicates": [
+    "never retry the diagnostic",
+    "stop after the first provider response regardless of outcome",
+    "settle the one generation ID by read-only receipt polling",
+    "do not start a benchmark construction or fresh campaign root",
+    "do not patch until the structural evidence identifies a root cause"
+  ],
+  "claim_boundary": "This is a bounded protocol diagnostic, not benchmark evidence, model evaluation, or authority for another P1-T6 run."
+}
