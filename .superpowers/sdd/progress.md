@@ -147,3 +147,17 @@
 - Stopped diagnostic root `run-408363c9` remains immutable and ineligible
 - T6 status: open until all n=12 evidence and aggregate predicates pass
 - Paid model/database calls: none
+
+## Corrected P1-T6 Task 6 Step 1 - efficient just-in-time preflight
+
+- Status: completed and approved; paid execution remains credential-gated
+- Pre-dispatch checkpoint commit: `e9d117308a7c3e01e5e30bc6a802ee8f8fbe7641`
+- Context-reuse authorization commit: `7f935ad1b4e72599a63f6b5bf85936b5e854c463`
+- Brief: `.superpowers/sdd/task-6-brief.md`
+- Reports: `.superpowers/sdd/task-6-preflight-report.md`, `.superpowers/sdd/task-6-preflight-fix-report.md`
+- Review package: `.superpowers/sdd/review-e9d11730..7f935ad1.diff`
+- Reviewer: `/root/t6_n12_preflight_review`
+- Final review: approved; static 23,564/32,768-token context proof reused because current exact Fast/Sonnet query and context hashes, adapter, relevant controller AST, and server/worker/CLI identities match
+- Live-run rule: construct all 12 case banks normally in the fresh output root; no cross-root import or dependency on the ignored exact dump
+- No-paid JIT preflight: frozen 12/24/12 bounds, 1.2 GB pinned acquisition, 12 materialized cases/pairing proofs, official harness environment, PostgreSQL 17.10 tools, release binaries, disk, and current endpoint inventory verified
+- Remaining prerequisite: `OPENROUTER_API_KEY` is absent; `OPENAI_API_KEY` is present. No provider/model/database call was made
