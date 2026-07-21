@@ -196,12 +196,17 @@ session. Preserve that attempt and its incident inventory immutably. Authorize
 exactly one fresh-scratch recovery from the sealed bank only after independent
 review of the recovery controller. The recovery may perform zero constructions,
 zero dumps, one restore, two local Fast query-only clone checks, and zero model
-dispatches. Cumulative truthful counts are one construction, one dump, two
-restores, two clones, and two local queries. The recovery must hold a nonblocking
+dispatches. A separate archive-only diagnosis already performed zero
+constructions, zero dumps, one restore, zero clones, zero queries, and zero model
+dispatches; it is diagnostic only and cannot authorize execution. Cumulative
+truthful counts after recovery are one construction, one dump, three restores,
+two clones, and two local queries. The recovery must hold a nonblocking
 exclusive output/case lease; validate the exact fixture, controller lineage,
 construction proof, archive/manifest/contract/logical hashes, PostgreSQL tools,
-fresh schema, source key/job state, and pre-recovery inventory; reject an existing
-final proof, any arm artifact, or any unexpected clone. Before each template clone,
+fresh schema, source key/job state, and pre-recovery inventory; revalidate the
+incident, original inventory, construction proof, and bank seal byte-for-byte
+immediately before emitting the final proof; reject an existing final proof, any
+arm artifact, or any unexpected clone. Before each template clone,
 require two consecutive zero-session observations from separate admin-database
 transactions with a bounded timeout and no intervening source query. Never
 terminate a session, redump, reconstruct, or automatically retry. Stop on any
