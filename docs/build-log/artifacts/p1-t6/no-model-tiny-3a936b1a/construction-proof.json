@@ -1,0 +1,66 @@
+{
+  "construction_proof_sha256": "441c9168695175217c0ecde3030784ab4ca76fe590d1802d4879aadae44ef281",
+  "contract": {
+    "adapter_sha256": "56c2a7264112e012f9376178cc2ef3383d70705f21255d4182e92bf62f8e206c",
+    "binaries": {
+      "cli": {
+        "bytes": 5705024,
+        "path": "/Users/sidsharma/.codex/worktrees/Memphant/p1-deep-mode/target/release/memphant-cli",
+        "sha256": "a8da5a706613654cfe743a55ea93b5c99702962067052503985c1c6dd1af3c0d"
+      },
+      "server": {
+        "bytes": 40225808,
+        "path": "/Users/sidsharma/.codex/worktrees/Memphant/p1-deep-mode/target/release/memphant-server",
+        "sha256": "126644b9647ad1b48c8e3c64d53a4140a3411be609b861e434bd5bc3531730c9"
+      },
+      "worker": {
+        "bytes": 35968672,
+        "path": "/Users/sidsharma/.codex/worktrees/Memphant/p1-deep-mode/target/release/memphant-worker",
+        "sha256": "006387c20558aa42422acef65335760e20f1b182c0e6fd002e87b9c400d8e24e"
+      }
+    },
+    "construction_params_sha256": "4d1241c11389a2a095de0490500ddeed96783c8d479e9a25a4ed76b98c8e488c"
+  },
+  "isolation": {
+    "context": {
+      "actor_id": "019f8384-9d0f-7543-b4d2-197c7308be99",
+      "agent_node_id": "019f8384-9d11-7931-953b-2d73472a1345",
+      "scope_id": "019f8384-9d10-7f50-9362-62571a68c6c3",
+      "subject_generation": 0,
+      "subject_id": "019f8384-9d0e-74e3-8c96-4fd5f518763b"
+    },
+    "instance_id": "1bb32ea7e9e6439b9ff39a1169b992d3",
+    "tenant_id": "015e8960-bb8d-4a4f-9838-b39be1f1d8f3"
+  },
+  "pairing": {
+    "resource_count": 1,
+    "retains": [
+      {
+        "canonical_body_bytes": 216,
+        "canonical_body_sha256": "592fb362e8b99550821cafbef5ef7d5ecbc5f324dc8a5d3b3f9cf0ece3b15e3d",
+        "fragments": [
+          {
+            "body_bytes": 241,
+            "fragment_index": 1,
+            "idempotency_key_sha256": "787c365da3db5f08ae91d4591d3d046d6bf98e2e148358b8b7d343a84acdba34",
+            "request_sha256": "16db4e0288097e94c3d7203661566f4265acb0bd2e6fdd633c15b8d9e83f6123",
+            "resource_body_sha256": "6320105fb1b3c7485f9d5df9290d0d7eb4cd39484a8edddadd0a1e6bae4bd5d4",
+            "resource_id": "019f8384-9d1c-7e31-a84c-0d845cfec409",
+            "response_sha256": "e8cf6a262ad156f7ee7b42d9fe19a429643efc1ac281b60478c96a73ac608854",
+            "serialized_request_bytes": 830
+          }
+        ],
+        "state_count": 1,
+        "trajectory_id": "fixture-trajectory",
+        "trajectory_sha256": "81fed08b42186c19ebd6bfa0b5bdb685373851a33cf05380c6cdbd99830c36ab"
+      }
+    ],
+    "trajectory_count": 1,
+    "worker": {
+      "completed_sources": 1,
+      "stderr_sha256": "4285243e4f7b1be38e8c1bdf7b2b51d21c87ca7b1342a477a533b1e18df56e8d",
+      "stdout_sha256": "6851a75f95b0bfbc0ccc29312a0074e1612598895b98eb12a3fa2fca0666b3ec"
+    }
+  },
+  "schema_version": 1
+}

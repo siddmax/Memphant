@@ -1,0 +1,11 @@
+{
+  "classification": "invalid_no_model_smoke_artifact",
+  "invalidated": true,
+  "measured_commit": "76ee5d76d36dc9731224ae099acb0e739e462e02",
+  "reason": "The controller's final generic text-redaction pass traversed the content-addressed custom dump after sealing it, so the archived bytes no longer matched the frozen archive SHA-256.",
+  "root_proof_file_sha256": "69aab3876ef6d71fbe76456cde1461c0fd89ec348320a7833f84d7f92ff3b4b0",
+  "claimed_archive_sha256": "ea535a96830c02e7276428f93e698ddc4a97b304e862d088e90abe81d2fc40a4",
+  "actual_archive_sha256": "f4d73db79737866a1b7de6db0db692f5c4dc5e018f713e8ea8b956a243fa08f3",
+  "superseded_by": "../no-model-tiny-3a936b1a/PROOF.json",
+  "authorization": false
+}

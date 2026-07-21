@@ -1,0 +1,161 @@
+{
+  "archive": {
+    "manifest_sha256": "bb18552465789ecd9533f8fae8293f96669751a8bf195e111ac1c3d6a9347df8",
+    "seal": {
+      "archive_sha256": "5e9ac3c0a533cdc64b9ff1f5516a6c2525622c2cde8686b5e955bdce30c81de5",
+      "case_contract_sha256": "e123ac904d54fac88f813b251b53acd9b6ea5640b0b8738819c2535335a8f0fc",
+      "construction_proof_sha256": "441c9168695175217c0ecde3030784ab4ca76fe590d1802d4879aadae44ef281",
+      "logical_identity_sha256": "c317137c2dae2a900660c21f86eb84cfd6f0e821fefaa16a6cea20405bf558f6",
+      "manifest_sha256": "bb18552465789ecd9533f8fae8293f96669751a8bf195e111ac1c3d6a9347df8",
+      "seal_sha256": "c5c7e79c20a499c7c43a363f29459b90350c8c417b6b430e5eff0b3f09254b3d"
+    },
+    "sha256": "5e9ac3c0a533cdc64b9ff1f5516a6c2525622c2cde8686b5e955bdce30c81de5"
+  },
+  "archive_tools": {
+    "pg_dump": {
+      "binary": "/opt/homebrew/opt/postgresql@17/bin/pg_dump",
+      "major": 17,
+      "server_major": 17,
+      "version": "pg_dump (PostgreSQL) 17.10 (Homebrew)"
+    },
+    "pg_restore": {
+      "binary": "/opt/homebrew/opt/postgresql@17/bin/pg_restore",
+      "major": 17,
+      "server_major": 17,
+      "version": "pg_restore (PostgreSQL) 17.10 (Homebrew)"
+    },
+    "server_major": 17
+  },
+  "arms": [
+    {
+      "adapter_proof_sha256": "7223e93bbabbcd081dc475b2c918186fe4d99a8233ab1129f08155689fc0bbc0",
+      "api_key_count": 1,
+      "arm": "fast",
+      "clone_database": "memphant_p1t6_00000000_0236499d_fast",
+      "construction_proof_sha256": "441c9168695175217c0ecde3030784ab4ca76fe590d1802d4879aadae44ef281",
+      "construction_work": {
+        "retains": 0,
+        "worker_drains": 0
+      },
+      "context_sha256": "5e497a8604a774347f8ed63037e1135cea3045fa0c9b7ff6258b1c6ac72dff5a",
+      "job_state": {
+        "dead": 0,
+        "pending": 0,
+        "total": 0
+      },
+      "post_query_logical_identity_sha256": "c317137c2dae2a900660c21f86eb84cfd6f0e821fefaa16a6cea20405bf558f6",
+      "pre_query_logical_identity_sha256": "c317137c2dae2a900660c21f86eb84cfd6f0e821fefaa16a6cea20405bf558f6",
+      "query_only": true,
+      "timing_ms": {
+        "recall": 44,
+        "total": 2276
+      },
+      "verification_recall_mode": "fast"
+    },
+    {
+      "adapter_proof_sha256": "12ec605d62176442a8a8010204d8a0f950c15c71843e1908317e8082afe7286a",
+      "api_key_count": 1,
+      "arm": "sonnet",
+      "clone_database": "memphant_p1t6_00000000_0236499d_sonnet",
+      "construction_proof_sha256": "441c9168695175217c0ecde3030784ab4ca76fe590d1802d4879aadae44ef281",
+      "construction_work": {
+        "retains": 0,
+        "worker_drains": 0
+      },
+      "context_sha256": "5e497a8604a774347f8ed63037e1135cea3045fa0c9b7ff6258b1c6ac72dff5a",
+      "job_state": {
+        "dead": 0,
+        "pending": 0,
+        "total": 0
+      },
+      "post_query_logical_identity_sha256": "c317137c2dae2a900660c21f86eb84cfd6f0e821fefaa16a6cea20405bf558f6",
+      "pre_query_logical_identity_sha256": "c317137c2dae2a900660c21f86eb84cfd6f0e821fefaa16a6cea20405bf558f6",
+      "query_only": true,
+      "timing_ms": {
+        "recall": 43,
+        "total": 2272
+      },
+      "verification_recall_mode": "fast"
+    }
+  ],
+  "artifact_hashes": {
+    "arms/fast/no-model-00000000-fast.3a41eb3912194a22a5ba96666539aee4.json": "b46b9604d3683390826b4f718fdb09bdcb19203f6d07123abf1b407ebf2a48df",
+    "arms/fast/server.stderr": "27d9e09201b7f6db758167f670634d3ef97e269f4b85feb448ede932726aa4b4",
+    "arms/fast/server.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arms/sonnet/no-model-00000000-sonnet.eb5a000ff11e48c6bf979266b635119c.json": "ef9bc8db7b2bb135d6d85392e5c5c68b105436e6fdd0b58ef4dd8beeb5566de8",
+    "arms/sonnet/server.stderr": "27d9e09201b7f6db758167f670634d3ef97e269f4b85feb448ede932726aa4b4",
+    "arms/sonnet/server.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "case-bank/5e9ac3c0a533cdc64b9ff1f5516a6c2525622c2cde8686b5e955bdce30c81de5.dump": "5e9ac3c0a533cdc64b9ff1f5516a6c2525622c2cde8686b5e955bdce30c81de5",
+    "case-bank/manifest.json": "bb18552465789ecd9533f8fae8293f96669751a8bf195e111ac1c3d6a9347df8",
+    "construction-proof.json": "f9e5eaaafe83f15f876ef1b93470e8885181062dca0862d92fbde7fd2bff0c42",
+    "construction/server.stderr": "27d9e09201b7f6db758167f670634d3ef97e269f4b85feb448ede932726aa4b4",
+    "construction/server.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "construction/worker.stderr": "059bdb08ef56b91b306382093246567bebafbf964ef758e5f5c5a4ef4dcdde8e",
+    "construction/worker.stdout": "78e17e9cd2295b3a6742478d767062fbad418b93516212658305ffde6d05150e"
+  },
+  "binaries": {
+    "cli": {
+      "bytes": 5705024,
+      "path": "/Users/sidsharma/.codex/worktrees/Memphant/p1-deep-mode/target/release/memphant-cli",
+      "sha256": "a8da5a706613654cfe743a55ea93b5c99702962067052503985c1c6dd1af3c0d"
+    },
+    "server": {
+      "bytes": 40225808,
+      "path": "/Users/sidsharma/.codex/worktrees/Memphant/p1-deep-mode/target/release/memphant-server",
+      "sha256": "126644b9647ad1b48c8e3c64d53a4140a3411be609b861e434bd5bc3531730c9"
+    },
+    "worker": {
+      "bytes": 35968672,
+      "path": "/Users/sidsharma/.codex/worktrees/Memphant/p1-deep-mode/target/release/memphant-worker",
+      "sha256": "006387c20558aa42422acef65335760e20f1b182c0e6fd002e87b9c400d8e24e"
+    }
+  },
+  "classification": "no_model_clone_mechanics_smoke_not_authorization",
+  "cleanup": {
+    "force_drop_verified": true,
+    "orphan_clone_count": 0,
+    "source_api_key_count": 0,
+    "source_job_state": {
+      "dead": 0,
+      "pending": 0,
+      "total": 0
+    }
+  },
+  "construction_proof_sha256": "441c9168695175217c0ecde3030784ab4ca76fe590d1802d4879aadae44ef281",
+  "controller": {
+    "bytes": 189974,
+    "path": "/Users/sidsharma/.codex/worktrees/Memphant/p1-deep-mode/scripts/run_lme_v2_p1_t6.py",
+    "sha256": "9b22eb9a88558e0c689d0cb4935e76ed3cc002903e00340df343c32b16da12d6"
+  },
+  "counts": {
+    "clones": 2,
+    "constructions": 1,
+    "dumps": 1,
+    "query_only_recalls": 2,
+    "restores": 1
+  },
+  "database_schema_identity": {
+    "extensions_and_migrations_sha256": "4795061ca642d29e8f64c9f493040b88dd61df36f62cd297489554f585b76be3",
+    "schema_sha256": "53bdcf96b48b490835dab657afc2c990275a887bad7711913f81bb405bbef6e9",
+    "sha256": "585d95c8f0038943be726b5c09778d19711138e97fd8e95c6c29a29b8afe6ee4"
+  },
+  "external_dispatch": {
+    "configured": false,
+    "deep_enabled": false,
+    "dispatches": 0
+  },
+  "fixture": {
+    "case_id": "00000000",
+    "input_sha256": "740b8768b5b3b8352fd50ea1a9c2410c44951a3ab01302e82848ecb0a151d7f2",
+    "name": "tiny"
+  },
+  "git_commit": "3a936b1a9773c2288b97a647ceaf0326f3e23234",
+  "logical_identity_sha256": "c317137c2dae2a900660c21f86eb84cfd6f0e821fefaa16a6cea20405bf558f6",
+  "proof_sha256": "7d8bbd1560cc6fac6fb60472f8495d97b306c61ab844e3a5a6aae3317eaa42ad",
+  "schema_version": 1,
+  "source_database_identity": "memphant_scratch_31278_1784617932",
+  "timing_ms": {
+    "construction": 940,
+    "total": 13915
+  }
+}

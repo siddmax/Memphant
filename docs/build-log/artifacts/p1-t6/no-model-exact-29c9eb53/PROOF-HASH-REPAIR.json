@@ -1,0 +1,125 @@
+{
+  "case_bank_seal": {
+    "archive_sha256": "7977b0942b90e9dcb8e772bf722ef1cf0b4a3a6f165b279a6fc5e6c23dfbca4a",
+    "case_contract_sha256": "46db32eb64e2925a9f8d247503a57061b34bb1d73f1ccb031fa15099f802422b",
+    "construction_proof_sha256": "e626bdeb9d2c7bb2aa12daa711237bd8b627df7ccf13bdfabf663d27fd491029",
+    "logical_identity_sha256": "bcb4d3c9df832db892246d15fd426de7ff75502137181b91388d8f3bf914903c",
+    "manifest_sha256": "37881e7d0fa80e1c72701056b6b7c7e414651df0d2025cfd98df6c30d6a97751",
+    "seal_sha256": "d4486ed2d975c9e7f41d46fb3493469ee99aed59993c945a309d5712057cf7d1"
+  },
+  "classification": "p1_t6_no_model_adapter_hash_lineage_preserving_supersession",
+  "old_explicit_adapter_proof_sha256": {
+    "fast": "87ed90c86efafdc63dad089a11e070df45abcc024a20da9de7c99ae52135b13e",
+    "sonnet": "5e9c9a48602689f921b1dd2ea216fe391a563d9202308a63724f0b23855c99bb"
+  },
+  "operations": {
+    "clones": 0,
+    "database_connections": 0,
+    "external_dispatches": 0,
+    "model_calls": 0,
+    "restores": 0
+  },
+  "original_artifact_inventory_sha256": "eb619b56538f5179e2f55a0b3a74487186ba0f9bf517da84b25b4ae2bca9d7c8",
+  "original_proof": {
+    "canonical_sha256": "b929bff1103deb59ba9c4d5a7f395325044c8fd802df9eb6d9f7f8f9544ba900",
+    "classification": "no_model_exact_case_second_recovery_authorization_candidate",
+    "execution_controller": {
+      "bytes": 213014,
+      "sha256": "56f666cd2526c9cc9d92f252e2d3ca2bd981b97dbd9b9a03e51bfab220705131"
+    },
+    "execution_git_commit": "2cfa81e60304f2dfa7c8e2dafd9c7f906b937ded",
+    "file_sha256": "4b0b9472dee0561db5338db9fce2e5a4feb818b5f8a06734563e436ae83a832e",
+    "path": "PROOF.pre-hash-repair.json"
+  },
+  "record_sha256": "78341634cc677f199e419a6768bc8f592d3bb23aeeae4666da9cc0bc3ee3a276",
+  "recovery_lineage": {
+    "first_recovery_failure_sha256": "e21d7c8246a88342b204e987e983c45f146e4a78a4f9a3e56867fa05296df905",
+    "incident_sha256": "1255da889ac2c3f291043d0465fdeaefc2b0c347767373c94d33e4e21267df44"
+  },
+  "repair_executor": {
+    "controller": {
+      "bytes": 250613,
+      "path": "/Users/sidsharma/.codex/worktrees/Memphant/p1-deep-mode/scripts/run_lme_v2_p1_t6.py",
+      "sha256": "43fa0b8e809aa6bde8220a2f982bb6f525830af50902ecdde6b3a2999abb6d2f"
+    },
+    "git_commit": "6c549751c16dbe89f39430bbde1221d860d58d86"
+  },
+  "retained_adapter_proofs": {
+    "fast": {
+      "path": "arms/fast/no-model-19367bc7-fast.803f6da6c0f44be3b3420ce3cb1172dc.json",
+      "sha256": "4b96109558bf8c326323c11d615f65c1a4301b53b3483356af454adc7d79c616"
+    },
+    "sonnet": {
+      "path": "arms/sonnet/no-model-19367bc7-sonnet.79f88c4b6c304dc988c58935d2cc4d8e.json",
+      "sha256": "0a44ce350acb12609a1c0bf266a6f573c0c872e417c1455b6b4f1ea289a13951"
+    }
+  },
+  "root_cause": "adapter proof hashes were captured inside the adapter action before the phase-final redaction rewrote the retained proof bytes",
+  "root_cause_evidence": {
+    "reconstructed_pre_redaction_sha256": {
+      "fast": "87ed90c86efafdc63dad089a11e070df45abcc024a20da9de7c99ae52135b13e",
+      "sonnet": "5e9c9a48602689f921b1dd2ea216fe391a563d9202308a63724f0b23855c99bb"
+    },
+    "redacted_binary_path_fields": {
+      "fast": [
+        "contract.binaries.cli.path",
+        "contract.binaries.server.path",
+        "contract.binaries.worker.path"
+      ],
+      "sonnet": [
+        "contract.binaries.cli.path",
+        "contract.binaries.server.path",
+        "contract.binaries.worker.path"
+      ]
+    },
+    "redacted_fields_per_arm": 3,
+    "secret_values_recorded": false,
+    "semantic_revalidation": {
+      "bank_excluded_tables": [
+        "memphant.schema_migrations",
+        "memphant.api_key",
+        "memphant.event_outbox",
+        "memphant.job_state",
+        "memphant.retrieval_trace",
+        "memphant.review_event",
+        "memphant.review_event_unit"
+      ],
+      "cleanup_verified": true,
+      "external_dispatches": 0,
+      "ledger": {
+        "clones": 2,
+        "constructions": 1,
+        "dumps": 1,
+        "query_only_recalls": 2,
+        "restores": 4
+      },
+      "ordered_unique_retains": 500,
+      "query_only_fast_arms": [
+        "fast",
+        "sonnet"
+      ],
+      "recovery_lineage_verified": true,
+      "resource_count": 670,
+      "secret_scan": {
+        "binary_archive_policy": "pg_dump_custom_format_hash_bound_not_text_scanned",
+        "binary_archives_hash_bound": 1,
+        "text_artifacts_scanned": 16
+      },
+      "trajectory_count": 500
+    }
+  },
+  "schema_version": 1,
+  "supersession": {
+    "allowed_proof_changes": [
+      "classification",
+      "arms.fast.adapter_proof_sha256",
+      "arms.sonnet.adapter_proof_sha256",
+      "artifact_hashes",
+      "hash_repair",
+      "proof_sha256"
+    ],
+    "mode": "lineage_preserving",
+    "new_classification": "no_model_exact_case_second_recovery_hash_repaired_authorization_candidate",
+    "old_classification": "no_model_exact_case_second_recovery_authorization_candidate"
+  }
+}

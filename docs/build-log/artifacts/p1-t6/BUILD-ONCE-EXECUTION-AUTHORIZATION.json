@@ -1,0 +1,154 @@
+{
+  "schema_version": "memphant.p1_t6.build_once_execution_authorization.v1",
+  "created_at": "2026-07-21T10:51:27Z",
+  "decision": "authorize_task_6_step_1_efficiency_checkpoint_only",
+  "measured_commit": "c80b96a64056649be00f2adaeebd98757891e3bf",
+  "scope": {
+    "authorized_next_action": "archive_pre_dispatch_efficiency_checkpoint",
+    "paid_dispatch_authorized": false,
+    "construction_authorized": false,
+    "full_case_run_authorized": false,
+    "n100_to_n300_confirmation_authorized": false,
+    "full_500_authorized": false,
+    "push_authorized": false
+  },
+  "exact_case_no_model_proof": {
+    "case_id": "19367bc7",
+    "trajectory_count": 500,
+    "resource_count": 670,
+    "classification": "no_model_exact_case_second_recovery_hash_repaired_authorization_candidate",
+    "proof_path": "docs/build-log/artifacts/p1-t6/no-model-exact-29c9eb53/PROOF.json",
+    "proof_file_sha256": "3b52a77d435c37be35e392af28b5f2d9e57e7ead36a7b808763f7aecf0a24dd3",
+    "proof_canonical_sha256": "24af61789fa96bd7b692ff5999b1ee7c60764ebd9cc74eb0a1f0107e6917ba2c",
+    "predecessor_path": "docs/build-log/artifacts/p1-t6/no-model-exact-29c9eb53/PROOF.pre-hash-repair.json",
+    "predecessor_file_sha256": "4b0b9472dee0561db5338db9fce2e5a4feb818b5f8a06734563e436ae83a832e",
+    "predecessor_canonical_sha256": "b929bff1103deb59ba9c4d5a7f395325044c8fd802df9eb6d9f7f8f9544ba900",
+    "repair_record_path": "docs/build-log/artifacts/p1-t6/no-model-exact-29c9eb53/PROOF-HASH-REPAIR.json",
+    "repair_record_file_sha256": "ce9886ec1fef9e2bc23fe0d5ca4689df6bc1dc1281267c6adb8b64d016959d64",
+    "repair_record_canonical_sha256": "78341634cc677f199e419a6768bc8f592d3bb23aeeae4666da9cc0bc3ee3a276",
+    "cumulative_operations": {
+      "constructions": 1,
+      "dumps": 1,
+      "restores": 4,
+      "clones": 2,
+      "local_queries": 2,
+      "paid_calls": 0
+    },
+    "idempotent_reverification": {
+      "verified": true,
+      "reused": true,
+      "database_connections": 0,
+      "model_calls": 0
+    }
+  },
+  "large_archive_storage": {
+    "path": "docs/build-log/artifacts/p1-t6/no-model-exact-29c9eb53/case-bank/7977b0942b90e9dcb8e772bf722ef1cf0b4a3a6f165b279a6fc5e6c23dfbca4a.dump",
+    "sha256": "7977b0942b90e9dcb8e772bf722ef1cf0b4a3a6f165b279a6fc5e6c23dfbca4a",
+    "size_bytes": 177797151,
+    "git_tracked": false,
+    "policy": "preserve_as_local_immutable_content_addressed_blob; commit manifests, proofs, and attestations",
+    "rationale": "GitHub blocks ordinary Git objects larger than 100 MiB. Provenance remains verifiable through the bound digest and production attestations without putting the bulk database archive in source history.",
+    "research": [
+      "https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-large-files-on-github",
+      "https://slsa.dev/spec/v1.2/provenance",
+      "https://github.com/in-toto/attestation"
+    ]
+  },
+  "independent_review": {
+    "task_1_through_4": "approved",
+    "reviewed_commit": "c80b96a64056649be00f2adaeebd98757891e3bf",
+    "critical_findings_open": 0,
+    "important_findings_open": 0,
+    "review_fixes": [
+      "authenticate aggregate arm proofs against construction and runtime contracts",
+      "enforce exactly one construction attempt and bind its completed bank",
+      "require requested and executed trace modes to match",
+      "reject unexpected or symlinked case-construction children"
+    ]
+  },
+  "full_repository_gate": {
+    "measured_commit": "c80b96a64056649be00f2adaeebd98757891e3bf",
+    "result": "passed",
+    "checks": [
+      {
+        "command": "python3 -m pytest tests/ spikes/python-retain/test_spike.py -q",
+        "result": "695 passed, 12 skipped"
+      },
+      {
+        "command": "MEMPHANT_PRIVATE_SPEC_DIR=<private-spec-mirror>/docs/superpowers/specs/memphant python3 scripts/check_spec_drift.py",
+        "result": "passed",
+        "mirror_commit": "d1f4d419518eb944922c3ed9f7ed7dda83427169"
+      },
+      {
+        "command": "cargo fmt --check",
+        "result": "passed"
+      },
+      {
+        "command": "cargo clippy --all-targets --all-features -- -D warnings",
+        "result": "passed"
+      },
+      {
+        "command": "cargo test --all-targets --all-features",
+        "result": "passed"
+      },
+      {
+        "command": "cargo test --doc",
+        "result": "passed"
+      },
+      {
+        "command": "bash scripts/with_scratch_db.sh postgres://memphant:memphant@localhost:5432/memphant MEMPHANT_TEST_DATABASE_URL cargo test -p memphant-store-postgres -p memphant-worker -- --ignored --test-threads=1",
+        "result": "67 passed"
+      },
+      {
+        "command": "cargo run -p memphant-cli -- db lint --provider plain-postgres",
+        "result": "clean"
+      },
+      {
+        "command": "cargo run -p memphant-cli -- db lint --provider supabase",
+        "result": "clean"
+      },
+      {
+        "command": "cargo run -p memphant-cli -- db lint --provider neon",
+        "result": "clean"
+      },
+      {
+        "command": "python3 scripts/apply_memphant_migrations.py --database-url postgres://memphant.invalid/memphant --dry-run",
+        "result": "passed"
+      },
+      {
+        "command": "DATABASE_URL=postgres://memphant:memphant@localhost:5432/memphant bash scripts/e2e_probe.sh",
+        "result": "all checks passed"
+      }
+    ]
+  },
+  "task_6_step_1_required_bounds": {
+    "cases": 12,
+    "maximum_constructions": 12,
+    "maximum_answer_rows": 24,
+    "maximum_deep_dispatches": 12,
+    "maximum_cumulative_liability_micro_usd": 6021284,
+    "reusable_work_per_case": "one immutable pre-query construction cloned into Fast and Sonnet arms",
+    "expected_information_gain": "registered paired Sonnet-minus-Fast feasibility result",
+    "stop_before_dispatch_if": [
+      "any maximum drifts upward",
+      "manifest, selection, run order, or liability binding is incomplete",
+      "cleanup or zero-write proof cannot be established"
+    ],
+    "stop_after_sonnet_if": [
+      "any required pair or proof is missing",
+      "any cap, infrastructure, security, write, or settlement predicate fails",
+      "Sonnet fails any registered accuracy, latency, cost, or no-truncation predicate"
+    ],
+    "inactive_arms": [
+      "Luna",
+      "Sol"
+    ],
+    "larger_run_policy": "No larger run is authorized. A passing n=12 feasibility screen may only authorize a separately preregistered n=100-300 confirmation with an efficiency-aware stopping or selection method. Full-500 remains later in campaign order.",
+    "research": [
+      "https://arxiv.org/abs/2601.20251",
+      "https://arxiv.org/abs/2607.08522",
+      "https://arxiv.org/abs/2601.13885"
+    ]
+  },
+  "claim_boundary": "This is development authorization evidence only. It is not a P1-T6 pass, leaderboard result, SOTA claim, product-default change, ledger promotion, merge, or push authorization."
+}
