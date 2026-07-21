@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import http.client
 import io
 import json
@@ -8,6 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import types
+import urllib.parse
 
 import pytest
 
@@ -172,6 +174,346 @@ def test_completed_rows_are_never_overwritten(tmp_path: Path) -> None:
     (row_dir / "row-proof.json").write_text("{}\n")
     with pytest.raises(RuntimeError, match="immutable row already exists"):
         campaign.require_new_row_dir(row_dir)
+
+
+def test_case_bank_contract_is_local_key_free_and_content_addressed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    campaign = _load()
+    database_url = "postgres://bench:secret@127.0.0.1:5432/memphant_scratch_1_2"
+    construction = {
+        "schema_version": 1,
+        "contract": {"adapter_sha256": "a" * 64, "binaries": {}},
+        "isolation": {"tenant_id": "tenant"},
+        "pairing": {
+            "resource_count": 2,
+            "worker": {"completed_sources": 2},
+            "retains": [{"trajectory_id": "trajectory"}],
+        },
+    }
+    construction["construction_proof_sha256"] = campaign.canonical_sha256(
+        construction
+    )
+    case_contract = {"question_id": "19367bc7", "materialization_sha256": "m" * 64}
+    monkeypatch.setenv("MEMPHANT_SCRATCH_ACTIVE", "1")
+    monkeypatch.setattr(
+        campaign,
+        "_postgres_tool_identity",
+        lambda *_args: {"binary": "/usr/bin/pg_dump", "version": "PostgreSQL 18", "major": 18, "server_major": 18},
+    )
+    monkeypatch.setattr(
+        campaign,
+        "_database_schema_identity",
+        lambda _url: {"schema_sha256": "s" * 64, "extensions_and_migrations_sha256": "e" * 64, "sha256": "d" * 64},
+    )
+    monkeypatch.setattr(
+        campaign,
+        "_database_bank_identity",
+        lambda _url: {"tables": {"resource": {"rows": 2, "sha256": "r" * 64}}, "sha256": "l" * 64},
+    )
+    monkeypatch.setattr(campaign, "_database_key_count", lambda _url: 0)
+    monkeypatch.setattr(campaign, "_job_state_counts", lambda _url: (0, 0, 0))
+
+    commands = []
+
+    def run(command, **_kwargs):
+        commands.append(command)
+        destination = next(item.split("=", 1)[1] for item in command if item.startswith("--file="))
+        Path(destination).write_bytes(b"frozen-bank")
+        return campaign.subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(campaign.subprocess, "run", run)
+    manifest = campaign._dump_case_bank(
+        database_url, tmp_path / "bank", construction, case_contract
+    )
+    archive = tmp_path / "bank" / manifest["archive"]
+    assert archive.name == f"{campaign.sha256_file(archive)}.dump"
+    assert manifest["archive_sha256"] == campaign.sha256_file(archive)
+    assert manifest["excluded_tables"] == list(campaign.BANK_EXCLUDED_TABLES)
+    serialized = json.dumps(manifest)
+    assert "secret" not in serialized and database_url not in serialized
+    assert {
+        item.removeprefix("--exclude-table-data=")
+        for item in commands[0]
+        if item.startswith("--exclude-table-data=")
+    } == set(campaign.BANK_EXCLUDED_TABLES)
+
+
+def test_clone_requires_quiescent_source_and_preserves_identity(
+    monkeypatch,
+) -> None:
+    campaign = _load()
+    source = "postgres://bench:secret@localhost:5432/memphant_scratch_1_2"
+    expected = {"tables": {}, "sha256": "f" * 64}
+    identities = []
+    calls = []
+    monkeypatch.setenv("MEMPHANT_SCRATCH_ACTIVE", "1")
+
+    def identity(url):
+        identities.append(urllib.parse.urlsplit(url).path.rsplit("/", 1)[-1])
+        return expected
+
+    monkeypatch.setattr(campaign, "_database_bank_identity", identity)
+    monkeypatch.setattr(campaign, "_database_key_count", lambda _url: 0)
+    monkeypatch.setattr(campaign, "_source_connection_count", lambda _url: 0)
+    monkeypatch.setattr(
+        campaign.subprocess,
+        "run",
+        lambda command, **_kwargs: (
+            calls.append(command)
+            or campaign.subprocess.CompletedProcess(command, 0, "", "")
+        ),
+    )
+    clone = campaign._clone_case_source(
+        source, "memphant_p1t6_19367bc7_deadbeef_fast", expected
+    )
+    assert clone.endswith("/memphant_p1t6_19367bc7_deadbeef_fast")
+    assert identities == ["memphant_scratch_1_2", "memphant_p1t6_19367bc7_deadbeef_fast"]
+    assert calls[0][0] == "createdb" and "--template=memphant_scratch_1_2" in calls[0]
+    with pytest.raises(RuntimeError, match="zero active connections"):
+        monkeypatch.setattr(campaign, "_source_connection_count", lambda _url: 1)
+        campaign._clone_case_source(
+            source, "memphant_p1t6_19367bc7_deadbeef_sonnet", expected
+        )
+
+
+def test_arm_clone_cleanup_is_forceful_and_name_bounded(monkeypatch) -> None:
+    campaign = _load()
+    calls = []
+    monkeypatch.setattr(
+        campaign.subprocess,
+        "run",
+        lambda command, **_kwargs: (
+            calls.append(command)
+            or campaign.subprocess.CompletedProcess(command, 0, "", "")
+        ),
+    )
+    campaign._drop_local_database(
+        "postgres://bench:secret@127.0.0.1:5432/memphant_p1t6_19367bc7_deadbeef_sonnet"
+    )
+    assert calls == [[
+        "dropdb", "--force",
+        "--maintenance-db=postgres://bench:secret@127.0.0.1:5432/postgres",
+        "memphant_p1t6_19367bc7_deadbeef_sonnet",
+    ]]
+    with pytest.raises(RuntimeError, match="P1-T6 arm database name"):
+        campaign._drop_local_database(
+            "postgres://bench:secret@127.0.0.1:5432/memphant"
+        )
+
+
+def test_archive_state_fails_closed_after_first_completed_row(tmp_path: Path) -> None:
+    campaign = _load()
+    bank = tmp_path / "bank"
+    bank.mkdir()
+    campaign.atomic_write_json(bank / "manifest.json", {
+        "archive": "a" * 64 + ".dump", "archive_sha256": "a" * 64,
+    })
+    with pytest.raises(RuntimeError, match="completed billable row.*archive"):
+        campaign._verify_case_archive_resume(bank, completed_rows=1)
+    assert campaign._verify_case_archive_resume(bank, completed_rows=2) is None
+
+
+def test_run_case_builds_once_restores_then_runs_two_key_local_clones(
+    tmp_path: Path, monkeypatch
+) -> None:
+    campaign = _load()
+    manifest = campaign.load_campaign_manifest()
+    case_id = manifest["run_order"]["case_order"][0]
+    output = tmp_path / "root"
+    output.mkdir()
+    source_url = "postgres://bench:secret@127.0.0.1:5432/memphant_scratch_1_2"
+    monkeypatch.setenv("MEMPHANT_SCRATCH_ACTIVE", "1")
+    monkeypatch.setenv("MEMPHANT_TEST_DATABASE_URL", source_url)
+    events = []
+    construction = {
+        "construction_proof_sha256": "c" * 64,
+        "isolation": {"tenant_id": "tenant"},
+        "pairing": {"resource_count": 2, "worker": {"completed_sources": 2}},
+    }
+    logical = {"tables": {}, "sha256": "l" * 64}
+
+    def construct(*_args):
+        events.append("construct")
+        return construction
+
+    def dump(_url, bank, proof, _contract):
+        events.append("dump")
+        bank.mkdir(parents=True, exist_ok=True)
+        archive_body = b"archive"
+        digest = hashlib.sha256(archive_body).hexdigest()
+        (bank / (digest + ".dump")).write_bytes(archive_body)
+        campaign.atomic_write_json(bank / "construction-proof.json", proof)
+        result = {
+            "format_version": campaign.BANK_FORMAT_VERSION,
+            "archive": digest + ".dump", "archive_sha256": digest,
+            "logical_identity": logical,
+        }
+        campaign.atomic_write_json(bank / "manifest.json", result)
+        return result
+
+    def restore(_url, _bank, _contract):
+        events.append("restore")
+        return {
+            "logical_identity": logical,
+            "archive": json.loads((tmp_path / "root/case-banks" / case_id / "manifest.json").read_text())["archive"],
+            "archive_sha256": json.loads((tmp_path / "root/case-banks" / case_id / "manifest.json").read_text())["archive_sha256"],
+        }
+
+    def clone(_url, name, expected):
+        events.append(("clone", name, expected["sha256"]))
+        return source_url.rsplit("/", 1)[0] + "/" + name
+
+    def execute(_directory, _materialized, root, row, _manifest):
+        events.append((
+            "execute", row["arm"],
+            campaign.os.environ["MEMPHANT_LME_PREBUILT_PROOF"],
+            campaign.os.environ["MEMPHANT_TEST_DATABASE_URL"],
+        ))
+        row_dir = root / row["row_id"]
+        row_dir.mkdir()
+        campaign.atomic_write_json(row_dir / "row-proof.json", {
+            "complete": True, "row": row, "query_only": True,
+        })
+
+    monkeypatch.setattr(campaign, "_recover_orphan_clones", lambda *_args: events.append("recover"))
+    monkeypatch.setattr(campaign, "_case_bank_contract", lambda *_args: {"question_id": case_id})
+    monkeypatch.setattr(campaign, "_construct_case_source", construct)
+    monkeypatch.setattr(campaign, "_dump_case_bank", dump)
+    monkeypatch.setattr(campaign, "_reset_case_source", lambda _url: events.append("reset"))
+    monkeypatch.setattr(campaign, "_restore_case_bank", restore)
+    monkeypatch.setattr(campaign, "_clone_case_source", clone)
+    monkeypatch.setattr(campaign, "_execute_case_row", execute)
+    monkeypatch.setattr(campaign, "_database_key_count", lambda url: 0 if url == source_url else 1)
+    monkeypatch.setattr(campaign, "_drop_local_database", lambda url: events.append(("drop", url)))
+
+    result = campaign._run_case(tmp_path, tmp_path, output, case_id, manifest)
+    assert events[:4] == ["recover", "construct", "dump", "reset"]
+    assert events[4] == "restore"
+    clones = [event for event in events if isinstance(event, tuple) and event[0] == "clone"]
+    assert [event[1].rsplit("_", 1)[-1] for event in clones] == ["fast", "sonnet"]
+    assert clones[0][1] != clones[1][1]
+    executes = [event for event in events if isinstance(event, tuple) and event[0] == "execute"]
+    assert [event[1] for event in executes] == ["fast", "sonnet"]
+    assert all(event[2].endswith("construction-proof.json") for event in executes)
+    assert executes[0][3] != executes[1][3]
+    assert len([event for event in events if isinstance(event, tuple) and event[0] == "drop"]) == 2
+    assert result == {"case_id": case_id, "constructed": True, "completed_rows": 2}
+
+
+def test_run_case_reuses_archive_after_interruption_and_drops_failed_clone(
+    tmp_path: Path, monkeypatch
+) -> None:
+    campaign = _load()
+    manifest = campaign.load_campaign_manifest()
+    case_id = manifest["run_order"]["case_order"][0]
+    output = tmp_path / "root"
+    output.mkdir()
+    rows = [row for row in campaign.expanded_run_order(manifest) if row["question_id"] == case_id]
+    completed = output / rows[0]["row_id"]
+    completed.mkdir()
+    campaign.atomic_write_json(completed / "row-proof.json", {"complete": True, "row": rows[0]})
+    source_url = "postgres://bench:secret@127.0.0.1:5432/memphant_scratch_1_2"
+    monkeypatch.setenv("MEMPHANT_SCRATCH_ACTIVE", "1")
+    monkeypatch.setenv("MEMPHANT_TEST_DATABASE_URL", source_url)
+    bank = output / "case-banks" / case_id
+    bank.mkdir(parents=True)
+    archive_body = b"archive"
+    archive_digest = hashlib.sha256(archive_body).hexdigest()
+    archive = bank / (archive_digest + ".dump")
+    archive.write_bytes(archive_body)
+    construction = {"schema_version": 1}
+    construction["construction_proof_sha256"] = campaign.canonical_sha256(
+        construction
+    )
+    logical = {"tables": {}, "sequences": {}}
+    logical["sha256"] = campaign.canonical_sha256({
+        "tables": logical["tables"], "sequences": logical["sequences"],
+    })
+    case_contract = {"question_id": case_id}
+    campaign.atomic_write_json(bank / "construction-proof.json", construction)
+    campaign.atomic_write_json(bank / "manifest.json", {
+        "format_version": campaign.BANK_FORMAT_VERSION,
+        "archive": archive.name,
+        "archive_sha256": campaign.sha256_file(archive),
+        "excluded_tables": list(campaign.BANK_EXCLUDED_TABLES),
+        "construction": construction,
+        "construction_proof_sha256": construction["construction_proof_sha256"],
+        "case_contract": case_contract,
+        "case_contract_sha256": campaign.canonical_sha256(case_contract),
+        "postgres": {"major": 18, "server_major": 18},
+        "postgres_major": 18,
+        "logical_identity": logical,
+    })
+    events = []
+    monkeypatch.setattr(campaign, "_recover_orphan_clones", lambda *_args: events.append("recover"))
+    monkeypatch.setattr(campaign, "_case_bank_contract", lambda *_args: {"question_id": case_id})
+    monkeypatch.setattr(campaign, "_construct_case_source", lambda *_args: pytest.fail("archive resume rebuilt construction"))
+    monkeypatch.setattr(campaign, "_dump_case_bank", lambda *_args: pytest.fail("archive resume redumped construction"))
+    monkeypatch.setattr(campaign, "_restore_case_bank", lambda *_args: events.append("restore") or json.loads((bank / "manifest.json").read_text()))
+    monkeypatch.setattr(campaign, "_clone_case_source", lambda _url, name, _identity: source_url.rsplit("/", 1)[0] + "/" + name)
+    monkeypatch.setattr(campaign, "_database_key_count", lambda url: 0 if url == source_url else 1)
+    monkeypatch.setattr(campaign, "_drop_local_database", lambda url: events.append(("drop", url)))
+    monkeypatch.setattr(campaign, "_execute_case_row", lambda *_args: (_ for _ in ()).throw(RuntimeError("synthetic row failure")))
+    with pytest.raises(RuntimeError, match="synthetic row failure"):
+        campaign._run_case(tmp_path, tmp_path, output, case_id, manifest)
+    assert events[0:2] == ["recover", "restore"]
+    assert len([event for event in events if isinstance(event, tuple) and event[0] == "drop"]) == 1
+
+
+def test_run_campaign_uses_one_scratch_lifecycle_per_case(
+    tmp_path: Path, monkeypatch
+) -> None:
+    campaign = _load()
+    manifest = campaign.load_campaign_manifest()
+    directory = tmp_path / "dataset"
+    materialized = tmp_path / "materialized"
+    output = tmp_path / "root"
+    directory.mkdir()
+    materialized.mkdir()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "router-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "judge-secret")
+    monkeypatch.setattr(campaign, "preflight", lambda *_args: {
+        "materialization": {"cases": {
+            case_id: {"case_id": case_id}
+            for case_id in manifest["run_order"]["case_order"]
+        }},
+        "python": {"packages_sha256": "p" * 64},
+    })
+    monkeypatch.setattr(campaign, "verify_endpoint_inventory", lambda _manifest: {})
+    monkeypatch.setattr(
+        campaign,
+        "_fingerprint",
+        lambda path: {"path": str(path), "bytes": 1, "sha256": "f" * 64},
+    )
+    run_calls = []
+
+    def run(command, **_kwargs):
+        run_calls.append(command)
+        if command[:3] == ["git", "rev-parse", "HEAD"]:
+            return campaign.subprocess.CompletedProcess(command, 0, "commit", "")
+        return campaign.subprocess.CompletedProcess(command, 0, "", "")
+
+    case_commands = []
+
+    class Process:
+        def __init__(self, command, **_kwargs):
+            case_commands.append(command)
+            self.pid = 4321
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(campaign.subprocess, "run", run)
+    monkeypatch.setattr(campaign.subprocess, "Popen", Process)
+    result = campaign.run_campaign(
+        directory, materialized, output,
+        "postgres://bench:secret@127.0.0.1:5432/memphant", manifest,
+    )
+    assert result["rows"] == 24
+    assert len(case_commands) == 12
+    assert all("_run-case" in command and "_run-row" not in command for command in case_commands)
+    assert [command[command.index("--case-id") + 1] for command in case_commands] == manifest["run_order"]["case_order"]
 
 
 def test_execution_paths_are_absolute_before_official_cwd_changes(

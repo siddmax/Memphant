@@ -14,6 +14,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import socket
@@ -67,6 +68,20 @@ SAFE_ENVIRONMENT_KEYS = (
     "SSL_CERT_DIR", "SSL_CERT_FILE", "TMPDIR", "TZ",
 )
 PRODUCTION_BINARY_PROFILE = "release"
+BANK_FORMAT_VERSION = 1
+BANK_EXCLUDED_TABLES = (
+    "memphant.schema_migrations",
+    "memphant.api_key",
+    "memphant.event_outbox",
+    "memphant.job_state",
+    "memphant.retrieval_trace",
+    "memphant.review_event",
+    "memphant.review_event_unit",
+)
+ARM_DATABASE_PATTERN = re.compile(
+    r"memphant_p1t6_[0-9a-f]{8}_[0-9a-f]{8}_(?:fast|sonnet)"
+)
+SCRATCH_DATABASE_PATTERN = re.compile(r"memphant_scratch_[0-9]+_[0-9]+")
 
 
 def require(condition: bool, message: str) -> None:
@@ -90,6 +105,787 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _local_database_parts(database_url: str) -> tuple[urllib.parse.SplitResult, str]:
+    parsed = urllib.parse.urlsplit(database_url)
+    database_name = parsed.path.removeprefix("/")
+    require(
+        parsed.scheme in {"postgres", "postgresql"}
+        and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+        and bool(database_name)
+        and "/" not in database_name
+        and not parsed.query
+        and not parsed.fragment,
+        "P1-T6 requires a plain local PostgreSQL database URL",
+    )
+    return parsed, database_name
+
+
+def _database_url_with_name(database_url: str, database_name: str) -> str:
+    parsed, _ = _local_database_parts(database_url)
+    require(re.fullmatch(r"[a-z0-9_]+", database_name) is not None,
+            "unsafe local PostgreSQL database name")
+    return urllib.parse.urlunsplit(parsed._replace(path="/" + database_name))
+
+
+def _require_scratch_source(database_url: str) -> str:
+    _, database_name = _local_database_parts(database_url)
+    require(
+        os.environ.get("MEMPHANT_SCRATCH_ACTIVE") == "1"
+        and SCRATCH_DATABASE_PATTERN.fullmatch(database_name) is not None,
+        "P1-T6 source must be a fresh migrated scratch database",
+    )
+    return database_name
+
+
+def _require_arm_database(database_url: str) -> str:
+    _, database_name = _local_database_parts(database_url)
+    require(
+        ARM_DATABASE_PATTERN.fullmatch(database_name) is not None,
+        "invalid P1-T6 arm database name",
+    )
+    return database_name
+
+
+def _psql_json(database_url: str, sql: str) -> list[dict[str, object]]:
+    completed = subprocess.run(
+        [
+            "psql", "--no-psqlrc", "--set", "ON_ERROR_STOP=1", "--quiet",
+            "--tuples-only", "--no-align", "--dbname", database_url,
+            "--command",
+            f"select coalesce(json_agg(row_to_json(q)), '[]'::json) from ({sql}) q;",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    require(completed.returncode == 0,
+            "P1-T6 PostgreSQL identity query failed: " + completed.stderr.strip())
+    try:
+        value = json.loads(completed.stdout.strip())
+    except json.JSONDecodeError as error:
+        raise RuntimeError("P1-T6 PostgreSQL identity query returned invalid JSON") from error
+    require(isinstance(value, list) and all(isinstance(row, dict) for row in value),
+            "P1-T6 PostgreSQL identity query returned malformed JSON")
+    return value
+
+
+def _postgres_tool_identity(binary: str, database_url: str) -> dict[str, object]:
+    try:
+        completed = subprocess.run(
+            [binary, "--version"], cwd=ROOT, text=True, capture_output=True,
+            check=False, timeout=10,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(f"PostgreSQL tool did not start: {binary}") from error
+    match = re.search(r"PostgreSQL\) (\d+)(?:\.|$)", completed.stdout)
+    require(completed.returncode == 0 and match is not None,
+            f"cannot identify PostgreSQL tool: {binary}")
+    server_major = _psql_json(
+        database_url,
+        "select (current_setting('server_version_num')::int / 10000)::int as major",
+    )[0]["major"]
+    identity = {
+        "binary": shutil.which(binary) or str(Path(binary).resolve()),
+        "version": completed.stdout.strip(),
+        "major": int(match.group(1)),
+        "server_major": server_major,
+    }
+    require(identity["major"] == server_major,
+            f"PostgreSQL tool major {identity['major']} does not match server major {server_major}")
+    return identity
+
+
+def _database_schema_identity(database_url: str) -> dict[str, object]:
+    scripts_path = str(ROOT / "scripts")
+    if scripts_path not in sys.path:
+        sys.path.insert(0, scripts_path)
+    import gate_common
+    return gate_common.database_schema_identity(
+        database_url,
+        "select 'migration:' || version from memphant.schema_migrations",
+    )
+
+
+def _database_bank_identity(database_url: str) -> dict[str, object]:
+    excluded = {table.rsplit(".", 1)[1] for table in BANK_EXCLUDED_TABLES}
+    tables = [
+        str(row["tablename"])
+        for row in _psql_json(
+            database_url,
+            "select tablename from pg_tables where schemaname = 'memphant' order by tablename",
+        )
+        if row["tablename"] not in excluded
+    ]
+    identity: dict[str, object] = {"tables": {}, "sequences": {}}
+    table_identity = identity["tables"]
+    assert isinstance(table_identity, dict)
+    for table in tables:
+        require(re.fullmatch(r"[a-z_]+", table) is not None,
+                "P1-T6 bank table identity is unsafe")
+        completed = subprocess.run(
+            [
+                "psql", "--no-psqlrc", "--set", "ON_ERROR_STOP=1", "--quiet",
+                "--tuples-only", "--no-align", "--dbname", database_url,
+                "--command",
+                f'copy (select row_to_json(t)::text from memphant."{table}" t '
+                "order by row_to_json(t)::text) to stdout",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            check=False,
+        )
+        require(completed.returncode == 0,
+                f"P1-T6 bank logical identity failed for {table}: "
+                + completed.stderr.decode(errors="replace").strip())
+        table_identity[table] = {
+            "rows": len(completed.stdout.splitlines()),
+            "sha256": hashlib.sha256(completed.stdout).hexdigest(),
+        }
+    sequence_identity = identity["sequences"]
+    assert isinstance(sequence_identity, dict)
+    sequences = [
+        str(row["sequencename"])
+        for row in _psql_json(
+            database_url,
+            "select sequencename from pg_sequences where schemaname = 'memphant' "
+            "order by sequencename",
+        )
+    ]
+    for sequence in sequences:
+        require(re.fullmatch(r"[a-z_]+", sequence) is not None,
+                "P1-T6 bank sequence identity is unsafe")
+        row = _psql_json(
+            database_url,
+            f'select last_value::text, is_called from memphant."{sequence}"',
+        )[0]
+        sequence_identity[sequence] = row
+    identity["sha256"] = canonical_sha256({
+        "tables": table_identity,
+        "sequences": sequence_identity,
+    })
+    return identity
+
+
+def _database_key_count(database_url: str) -> int:
+    return int(_psql_json(database_url, "select count(*)::int as count from memphant.api_key")[0]["count"])
+
+
+def _job_state_counts(database_url: str) -> tuple[int, int, int]:
+    row = _psql_json(
+        database_url,
+        "select count(*) filter (where state in ('queued','running'))::int as pending, "
+        "count(*) filter (where state = 'dead')::int as dead, count(*)::int as total "
+        "from memphant.job_state",
+    )[0]
+    return int(row["pending"]), int(row["dead"]), int(row["total"])
+
+
+def _run_postgres_command(command: list[str], label: str) -> None:
+    completed = subprocess.run(
+        command, cwd=ROOT, text=True, capture_output=True, check=False
+    )
+    require(completed.returncode == 0,
+            f"P1-T6 case bank {label} failed: {completed.stderr.strip()}")
+
+
+def _dump_case_bank(
+    database_url: str,
+    bank_dir: Path,
+    construction_proof: dict[str, object],
+    case_contract: dict[str, object],
+    *,
+    pg_dump_bin: str = "pg_dump",
+) -> dict[str, object]:
+    _require_scratch_source(database_url)
+    construction_core = {
+        key: value for key, value in construction_proof.items()
+        if key != "construction_proof_sha256"
+    }
+    require(
+        construction_proof.get("construction_proof_sha256")
+        == canonical_sha256(construction_core),
+        "construction proof sha256 mismatch",
+    )
+    pairing = construction_proof.get("pairing")
+    require(isinstance(pairing, dict), "construction proof pairing is missing")
+    worker = pairing.get("worker")
+    resource_count = pairing.get("resource_count")
+    require(
+        isinstance(worker, dict)
+        and isinstance(resource_count, int)
+        and resource_count > 0
+        and worker.get("completed_sources") == resource_count,
+        "construction worker did not complete every resource",
+    )
+    pending_jobs, dead_jobs, _total_jobs = _job_state_counts(database_url)
+    require((pending_jobs, dead_jobs) == (0, 0),
+            "construction left queued, running, or dead job state")
+    require(_database_key_count(database_url) == 0,
+            "construction source must be key-free before archive")
+    tool = _postgres_tool_identity(pg_dump_bin, database_url)
+    schema_identity = _database_schema_identity(database_url)
+    logical_identity = _database_bank_identity(database_url)
+    bank_dir.mkdir(parents=True, exist_ok=True)
+    require(not (bank_dir / "manifest.json").exists() and not any(bank_dir.glob("*.dump")),
+            "P1-T6 case bank directory is not empty")
+    temporary = bank_dir / ".case-bank.dump.tmp"
+    command = [
+        pg_dump_bin, "--format=custom", "--data-only", "--schema=memphant",
+        "--no-owner", "--no-acl", f"--file={temporary}",
+    ]
+    command.extend(f"--exclude-table-data={table}" for table in BANK_EXCLUDED_TABLES)
+    command.append(database_url)
+    try:
+        _run_postgres_command(command, "dump")
+        digest = sha256_file(temporary)
+        archive = bank_dir / f"{digest}.dump"
+        temporary.replace(archive)
+        manifest = {
+            "format_version": BANK_FORMAT_VERSION,
+            "case_contract": case_contract,
+            "case_contract_sha256": canonical_sha256(case_contract),
+            "construction": construction_proof,
+            "construction_proof_sha256": construction_proof.get("construction_proof_sha256"),
+            "resource_count": resource_count,
+            "postgres": tool,
+            "postgres_major": tool["major"],
+            "database_schema_identity": schema_identity,
+            "logical_identity": logical_identity,
+            "excluded_tables": list(BANK_EXCLUDED_TABLES),
+            "archive": archive.name,
+            "archive_sha256": digest,
+        }
+        require(database_url not in json.dumps(manifest),
+                "case bank manifest contains a database credential")
+        atomic_write_json(bank_dir / "manifest.json", manifest)
+        return manifest
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _load_case_bank(bank_dir: Path) -> tuple[dict[str, object], Path]:
+    manifest_path = bank_dir / "manifest.json"
+    require(manifest_path.is_file(), "P1-T6 case bank manifest is missing")
+    manifest = json.loads(manifest_path.read_text())
+    require(manifest.get("format_version") == BANK_FORMAT_VERSION,
+            "P1-T6 case bank format is unsupported")
+    construction = manifest.get("construction")
+    require(isinstance(construction, dict),
+            "P1-T6 case bank construction proof is missing")
+    construction_core = {
+        key: value for key, value in construction.items()
+        if key != "construction_proof_sha256"
+    }
+    require(
+        construction.get("construction_proof_sha256")
+        == canonical_sha256(construction_core)
+        == manifest.get("construction_proof_sha256"),
+        "P1-T6 case bank construction proof drift",
+    )
+    case_contract = manifest.get("case_contract")
+    require(
+        isinstance(case_contract, dict)
+        and manifest.get("case_contract_sha256") == canonical_sha256(case_contract),
+        "P1-T6 case bank case contract drift",
+    )
+    logical_identity = manifest.get("logical_identity")
+    require(
+        isinstance(logical_identity, dict)
+        and isinstance(logical_identity.get("tables"), dict)
+        and isinstance(logical_identity.get("sequences"), dict)
+        and logical_identity.get("sha256") == canonical_sha256({
+            "tables": logical_identity["tables"],
+            "sequences": logical_identity["sequences"],
+        }),
+        "P1-T6 case bank logical identity drift",
+    )
+    postgres = manifest.get("postgres")
+    require(
+        isinstance(postgres, dict)
+        and isinstance(manifest.get("postgres_major"), int)
+        and postgres.get("major") == manifest.get("postgres_major")
+        and postgres.get("server_major") == manifest.get("postgres_major"),
+        "P1-T6 case bank PostgreSQL identity drift",
+    )
+    digest = manifest.get("archive_sha256")
+    require(isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) is not None,
+            "P1-T6 case bank archive hash is malformed")
+    archive = bank_dir / f"{digest}.dump"
+    require(manifest.get("archive") == archive.name,
+            "P1-T6 case bank archive name mismatch")
+    require(archive.is_file() and sha256_file(archive) == digest,
+            "P1-T6 case bank archive hash mismatch")
+    require(manifest.get("excluded_tables") == list(BANK_EXCLUDED_TABLES),
+            "P1-T6 case bank exclusions drift")
+    return manifest, archive
+
+
+def _restore_case_bank(
+    database_url: str,
+    bank_dir: Path,
+    case_contract: dict[str, object],
+    *,
+    pg_restore_bin: str = "pg_restore",
+) -> dict[str, object]:
+    _require_scratch_source(database_url)
+    manifest, archive = _load_case_bank(bank_dir)
+    require(
+        manifest.get("case_contract") == case_contract
+        and manifest.get("case_contract_sha256") == canonical_sha256(case_contract),
+        "P1-T6 case bank contract drift",
+    )
+    require(_database_schema_identity(database_url) == manifest.get("database_schema_identity"),
+            "P1-T6 case bank schema identity mismatch")
+    empty_identity = _database_bank_identity(database_url)
+    require(sum(int(value["rows"]) for value in empty_identity["tables"].values()) == 0,
+            "P1-T6 restore source is not a fresh migrated database")
+    tool = _postgres_tool_identity(pg_restore_bin, database_url)
+    require(tool["major"] == manifest.get("postgres_major"),
+            "P1-T6 case bank PostgreSQL archive major mismatch")
+    _run_postgres_command(
+        [
+            pg_restore_bin, "--data-only", "--single-transaction", "--exit-on-error",
+            "--no-owner", "--no-acl", f"--dbname={database_url}", str(archive),
+        ],
+        "restore",
+    )
+    require(_database_bank_identity(database_url) == manifest.get("logical_identity"),
+            "P1-T6 restored logical identity mismatch")
+    require(_database_key_count(database_url) == 0,
+            "P1-T6 restored source is not key-free")
+    require(_job_state_counts(database_url) == (0, 0, 0),
+            "P1-T6 restored source contains transient jobs")
+    return manifest
+
+
+def _source_connection_count(database_url: str) -> int:
+    source_name = _require_scratch_source(database_url)
+    admin_url = _database_url_with_name(database_url, "postgres")
+    return int(_psql_json(
+        admin_url,
+        "select count(*)::int as count from pg_stat_activity where datname = "
+        + "'" + source_name + "'",
+    )[0]["count"])
+
+
+def _drop_local_database(database_url: str) -> None:
+    database_name = _require_arm_database(database_url)
+    admin_url = _database_url_with_name(database_url, "postgres")
+    _run_postgres_command(
+        ["dropdb", "--force", f"--maintenance-db={admin_url}", database_name],
+        "force-drop",
+    )
+
+
+def _clone_case_source(
+    source_database_url: str,
+    clone_name: str,
+    expected_logical_identity: dict[str, object],
+) -> str:
+    source_name = _require_scratch_source(source_database_url)
+    clone_url = _database_url_with_name(source_database_url, clone_name)
+    _require_arm_database(clone_url)
+    require(_database_key_count(source_database_url) == 0,
+            "P1-T6 source must remain key-free before clone")
+    require(_database_bank_identity(source_database_url) == expected_logical_identity,
+            "P1-T6 source logical identity drift before clone")
+    require(_source_connection_count(source_database_url) == 0,
+            "P1-T6 source must have zero active connections before clone")
+    admin_url = _database_url_with_name(source_database_url, "postgres")
+    _run_postgres_command(
+        ["createdb", f"--maintenance-db={admin_url}", f"--template={source_name}", clone_name],
+        "template clone",
+    )
+    try:
+        require(_database_bank_identity(clone_url) == expected_logical_identity,
+                "P1-T6 arm clone logical identity mismatch")
+        require(_database_key_count(clone_url) == 0,
+                "P1-T6 arm clone unexpectedly contains an API key")
+        return clone_url
+    except BaseException:
+        _drop_local_database(clone_url)
+        raise
+
+
+def _verify_case_archive_resume(bank_dir: Path, *, completed_rows: int) -> None:
+    require(completed_rows in {0, 1, 2}, "invalid P1-T6 completed-row count")
+    manifest_path = bank_dir / "manifest.json"
+    if completed_rows == 2:
+        require(manifest_path.is_file(), "completed P1-T6 pair lost its bank manifest")
+        return
+    try:
+        _load_case_bank(bank_dir)
+    except (OSError, RuntimeError, ValueError) as error:
+        if completed_rows:
+            raise RuntimeError(
+                "completed billable row has a missing or changed construction archive"
+            ) from error
+        raise
+
+
+def _preserve_incomplete_bank(output: Path, bank_dir: Path, case_id: str) -> None:
+    if not bank_dir.exists():
+        return
+    if not any(bank_dir.iterdir()):
+        bank_dir.rmdir()
+        return
+    destination_root = output / "incomplete-case-banks"
+    destination_root.mkdir(exist_ok=True)
+    destination = destination_root / f"{case_id}-{time.time_ns()}-{os.getpid()}"
+    require(not destination.exists(), "P1-T6 incomplete bank destination collided")
+    os.replace(bank_dir, destination)
+
+
+def _retire_case_archive(
+    bank_dir: Path, output: Path, rows: list[dict]
+) -> None:
+    manifest_path = bank_dir / "manifest.json"
+    require(manifest_path.is_file(), "completed P1-T6 pair lost its bank manifest")
+    manifest = json.loads(manifest_path.read_text())
+    retirement_path = bank_dir / "archive-retirement.json"
+    expected = {
+        "archive_sha256": manifest.get("archive_sha256"),
+        "manifest_sha256": sha256_file(manifest_path),
+        "reason": "both_immutable_arm_rows_complete",
+        "row_proof_sha256": {
+            row["arm"]: sha256_file(output / row["row_id"] / "row-proof.json")
+            for row in rows
+        },
+    }
+    archive = bank_dir / str(manifest.get("archive", ""))
+    if archive.is_file():
+        require(sha256_file(archive) == manifest.get("archive_sha256"),
+                "completed P1-T6 pair archive changed before retirement")
+        if retirement_path.exists():
+            require(json.loads(retirement_path.read_text()) == expected,
+                    "completed P1-T6 pair retirement proof drift")
+        else:
+            atomic_write_json(retirement_path, expected)
+        archive.unlink()
+    else:
+        require(
+            retirement_path.is_file()
+            and json.loads(retirement_path.read_text()) == expected,
+            "completed P1-T6 pair lost its archive without a valid retirement proof",
+        )
+
+
+def _database_exists(database_url: str) -> bool:
+    database_name = _require_arm_database(database_url)
+    admin_url = _database_url_with_name(database_url, "postgres")
+    rows = _psql_json(
+        admin_url,
+        "select exists(select 1 from pg_database where datname = '"
+        + database_name + "') as exists",
+    )
+    return bool(rows[0]["exists"])
+
+
+def _case_clone_names(output: Path, case_id: str) -> dict[str, str]:
+    require(re.fullmatch(r"[0-9a-f]{8}", case_id) is not None,
+            "P1-T6 case id is invalid")
+    run_hash = canonical_sha256({"output": str(output.resolve())})[:8]
+    return {
+        arm: f"memphant_p1t6_{case_id}_{run_hash}_{arm}"
+        for arm in ("fast", "sonnet")
+    }
+
+
+def _recover_orphan_clones(source_database_url: str, clone_names: dict[str, str]) -> None:
+    _require_scratch_source(source_database_url)
+    require(set(clone_names) == {"fast", "sonnet"},
+            "P1-T6 orphan recovery arm set drift")
+    for arm in ("fast", "sonnet"):
+        clone_url = _database_url_with_name(source_database_url, clone_names[arm])
+        _require_arm_database(clone_url)
+        if _database_exists(clone_url):
+            _drop_local_database(clone_url)
+
+
+def _clear_source_api_keys(database_url: str) -> None:
+    _require_scratch_source(database_url)
+    _run_postgres_command(
+        [
+            "psql", "--no-psqlrc", "--set", "ON_ERROR_STOP=1", "--quiet",
+            "--dbname", database_url, "--command", "delete from memphant.api_key",
+        ],
+        "clear transient construction keys",
+    )
+    require(_database_key_count(database_url) == 0,
+            "P1-T6 source API key cleanup failed")
+
+
+def _reset_case_source(database_url: str) -> None:
+    _require_scratch_source(database_url)
+    tables = [
+        str(row["tablename"])
+        for row in _psql_json(
+            database_url,
+            "select tablename from pg_tables where schemaname = 'memphant' "
+            "and tablename <> 'schema_migrations' order by tablename",
+        )
+    ]
+    require(tables and all(re.fullmatch(r"[a-z_]+", table) for table in tables),
+            "P1-T6 source reset table inventory is unsafe")
+    targets = ", ".join(f'memphant."{table}"' for table in tables)
+    _run_postgres_command(
+        [
+            "psql", "--no-psqlrc", "--set", "ON_ERROR_STOP=1", "--quiet",
+            "--dbname", database_url, "--command",
+            f"truncate table {targets} restart identity cascade",
+        ],
+        "reset source before verified restore",
+    )
+    require(_database_key_count(database_url) == 0,
+            "P1-T6 reset source retained API keys")
+    identity = _database_bank_identity(database_url)
+    require(sum(int(value["rows"]) for value in identity["tables"].values()) == 0,
+            "P1-T6 reset source retained construction rows")
+
+
+def _construct_case_source(
+    directory: Path,
+    materialized: Path,
+    output: Path,
+    case_id: str,
+) -> dict[str, object]:
+    database_url = os.environ.get("MEMPHANT_TEST_DATABASE_URL", "")
+    _require_scratch_source(database_url)
+    case_dir = materialized / case_id
+    haystacks = json.loads((case_dir / "haystack.json").read_text())
+    trajectory_ids = haystacks.get(case_id)
+    require(isinstance(trajectory_ids, list) and trajectory_ids,
+            "P1-T6 case haystack is missing")
+    trajectories = _load_selected_trajectories(
+        directory / "data/trajectories.jsonl", trajectory_ids
+    )
+    binaries = {name: _binary_path(name) for name in ("server", "worker", "cli")}
+    construction_root = output / "case-construction" / case_id
+    construction_root.mkdir(parents=True, exist_ok=True)
+    proof_dir = Path(tempfile.mkdtemp(prefix="attempt-", dir=construction_root))
+    atomic_write_json(proof_dir / "attempt.json", {
+        "case_id": case_id,
+        "classification": "free_local_construction",
+        "complete": False,
+    })
+    port = _free_port()
+    server_url = f"http://127.0.0.1:{port}"
+    server_environment = _clean_environment({
+        "MEMPHANT_APP_DATABASE_URL": database_url,
+        "MEMPHANT_AUTHN_DATABASE_URL": database_url,
+        "MEMPHANT_BIND": f"127.0.0.1:{port}",
+        "MEMPHANT_RESOURCE_CHUNKS": "on",
+        "MEMPHANT_STRUCTURED_STATE": "off",
+        "MEMPHANT_DEEP": "off",
+    })
+    with (proof_dir / "server.stdout").open("wb") as stdout, (
+        proof_dir / "server.stderr"
+    ).open("wb") as stderr:
+        server = subprocess.Popen(
+            [str(binaries["server"])], env=server_environment,
+            stdout=stdout, stderr=stderr,
+        )
+    try:
+        _wait_health(server_url, server)
+        scripts_path = str(ROOT / "scripts")
+        adapter_path = str(ROOT / "benchmarks/longmemeval_v2")
+        for path in (scripts_path, adapter_path, str(directory / "official")):
+            if path not in sys.path:
+                sys.path.insert(0, path)
+        import memphant_memory
+        adapter_environment = {
+            "MEMPHANT_LME_SERVER_URL": server_url,
+            "MEMPHANT_CLI_BIN": str(binaries["cli"]),
+            "MEMPHANT_LME_SERVER_BIN": str(binaries["server"]),
+            "MEMPHANT_LME_WORKER_BIN": str(binaries["worker"]),
+            "MEMPHANT_LME_PROOF_DIR": str(proof_dir),
+            "MEMPHANT_LME_RUN_ID": f"p1-t6-build-{case_id}",
+        }
+        with _temporary_environment(adapter_environment):
+            config = json.loads((case_dir / "memory.fast.json").read_text())
+            memory = memphant_memory.MemphantMemory(config["memory_params"])
+            for trajectory_id in trajectory_ids:
+                memory.insert(trajectories[trajectory_id])
+            construction_proof = memory.prepare()
+    finally:
+        _terminate_and_reap(server)
+        _clear_source_api_keys(database_url)
+        _redact_secrets(proof_dir, _row_secret_values("", "", database_url))
+    pending_jobs, dead_jobs, _total_jobs = _job_state_counts(database_url)
+    require((pending_jobs, dead_jobs) == (0, 0),
+            "P1-T6 construction did not drain all jobs")
+    atomic_write_json(proof_dir / "complete.json", {
+        "case_id": case_id,
+        "construction_proof_sha256": construction_proof["construction_proof_sha256"],
+        "complete": True,
+    })
+    return construction_proof
+
+
+def _case_bank_contract(
+    materialized: Path, output: Path, case_id: str, manifest: dict
+) -> dict[str, object]:
+    root_proof = json.loads((output / "pre-execution-proof.json").read_text())
+    case_materialization = root_proof["materialization"]["cases"][case_id]
+    case_dir = materialized / case_id
+    return {
+        "question_id": case_id,
+        "materialization": case_materialization,
+        "materialization_sha256": canonical_sha256(case_materialization),
+        "memory_config_sha256": sha256_file(case_dir / "memory.fast.json"),
+        "adapter_sha256": sha256_file(
+            ROOT / "benchmarks/longmemeval_v2/memphant_memory.py"
+        ),
+        "compiler": {
+            "resource_chunks": "on",
+            "structured_state": "off",
+            "deep_during_construction": "off",
+        },
+        "binaries": root_proof["binaries"],
+        "manifest_sha256": sha256_file(CAMPAIGN_MANIFEST),
+        "selected_deep_arm": manifest["protocol"]["selected_deep_arm"],
+    }
+
+
+def _execute_case_row(
+    directory: Path,
+    materialized: Path,
+    output: Path,
+    row: dict,
+    manifest: dict,
+) -> dict:
+    ledger = output / "spend-ledger"
+    ledger.mkdir(exist_ok=True)
+    ledger_row = ledger / f"{row['sequence']:04d}.json"
+    reservation = _reservation(row, manifest)
+    if ledger_row.exists():
+        require(json.loads(ledger_row.read_text()) == reservation,
+                "P1-T6 row reservation drift")
+    else:
+        atomic_write_json(ledger_row, reservation)
+    staging = output / (".staging-" + row["row_id"])
+    if staging.exists():
+        attempt_path = staging / "attempt.json"
+        require(attempt_path.is_file(), "P1-T6 orphan staging lacks attempt marker")
+        attempt = json.loads(attempt_path.read_text())
+        require(not _pid_alive(attempt.get("child_pid")),
+                f"row attempt is still active: {row['row_id']}")
+        atomic_write_json(staging / "failure.json", {
+            "row": row,
+            "reason": "orphaned_attempt_recovered_without_replay",
+            "retry_authorized": False,
+        })
+        proof = _write_row_proof(
+            staging, row, ledger_row, "operational_failure",
+            {"failure_reason": "orphaned_attempt"}, orphaned=True,
+        )
+        os.replace(staging, output / row["row_id"])
+        return proof
+    staging.mkdir()
+    atomic_write_json(staging / "attempt.json", {
+        "row": row,
+        "dispatch_started": True,
+        "coordinator_pid": os.getpid(),
+        "child_pid": None,
+        "reservation_sha256": sha256_file(ledger_row),
+    })
+    return run_row(directory, materialized, output, row, manifest)
+
+
+def _run_case(
+    directory: Path,
+    materialized: Path,
+    output: Path,
+    case_id: str,
+    manifest: dict,
+) -> dict[str, object]:
+    source_url = os.environ.get("MEMPHANT_TEST_DATABASE_URL", "")
+    _require_scratch_source(source_url)
+    rows = [
+        row for row in expanded_run_order(manifest)
+        if row["question_id"] == case_id
+    ]
+    require([row["arm"] for row in rows] == ["fast", "sonnet"],
+            "P1-T6 case arm order drift")
+    clone_names = _case_clone_names(output, case_id)
+    _recover_orphan_clones(source_url, clone_names)
+    completed = []
+    for row in rows:
+        row_proof_path = output / row["row_id"] / "row-proof.json"
+        if row_proof_path.is_file():
+            proof = json.loads(row_proof_path.read_text())
+            require(proof.get("complete") is True and proof.get("row") == row,
+                    "completed P1-T6 row proof drift")
+            completed.append(row)
+    bank_dir = output / "case-banks" / case_id
+    if len(completed) == 2:
+        _retire_case_archive(bank_dir, output, rows)
+        return {"case_id": case_id, "constructed": False, "completed_rows": 2}
+    case_contract = _case_bank_contract(materialized, output, case_id, manifest)
+    bank_ready = False
+    if (bank_dir / "manifest.json").is_file():
+        try:
+            _load_case_bank(bank_dir)
+            bank_ready = True
+        except (OSError, RuntimeError, ValueError):
+            if completed:
+                _verify_case_archive_resume(bank_dir, completed_rows=len(completed))
+            _preserve_incomplete_bank(output, bank_dir, case_id)
+    elif bank_dir.exists():
+        require(not completed,
+                "completed billable row has a missing construction archive")
+        _preserve_incomplete_bank(output, bank_dir, case_id)
+    constructed = not bank_ready
+    if constructed:
+        require(not completed,
+                "completed billable row has a missing construction archive")
+        construction_proof = _construct_case_source(
+            directory, materialized, output, case_id
+        )
+        bank_dir.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(bank_dir / "construction-proof.json", construction_proof)
+        _dump_case_bank(source_url, bank_dir, construction_proof, case_contract)
+        _reset_case_source(source_url)
+    else:
+        _verify_case_archive_resume(bank_dir, completed_rows=len(completed))
+    bank_manifest = _restore_case_bank(
+        source_url, bank_dir, case_contract
+    )
+    construction_path = bank_dir / "construction-proof.json"
+    require(construction_path.is_file(), "P1-T6 construction proof is missing")
+    require(
+        json.loads(construction_path.read_text())
+        == bank_manifest.get("construction", json.loads(construction_path.read_text())),
+        "P1-T6 construction proof drift",
+    )
+    logical_identity = bank_manifest["logical_identity"]
+    require(_database_key_count(source_url) == 0,
+            "P1-T6 restored source must remain key-free")
+    for row in rows:
+        if row in completed:
+            continue
+        clone_url = _clone_case_source(
+            source_url, clone_names[row["arm"]], logical_identity
+        )
+        try:
+            with _temporary_environment({
+                "MEMPHANT_TEST_DATABASE_URL": clone_url,
+                "MEMPHANT_LME_PREBUILT_PROOF": str(construction_path.resolve()),
+            }):
+                _execute_case_row(directory, materialized, output, row, manifest)
+            require(_database_key_count(clone_url) == 1,
+                    "query-only arm must mint exactly one clone-local API key")
+        finally:
+            _drop_local_database(clone_url)
+        require(_database_key_count(source_url) == 0,
+                "P1-T6 source gained an API key during arm execution")
+    require(all((output / row["row_id"] / "row-proof.json").is_file() for row in rows),
+            "P1-T6 case did not finalize both row proofs")
+    _retire_case_archive(bank_dir, output, rows)
+    return {"case_id": case_id, "constructed": constructed, "completed_rows": 2}
 
 
 def _binary_path(name: str) -> Path:
@@ -2039,6 +2835,9 @@ def run_row(directory: Path, materialized: Path, output: Path, row: dict, manife
             "LME_READER_PROXY_KEY": "loopback-route-bound",
             "LME_JUDGE_PROXY_KEY": "loopback-route-bound",
         })
+        prebuilt_proof = os.environ.get("MEMPHANT_LME_PREBUILT_PROOF", "")
+        require(prebuilt_proof, "P1-T6 row requires a frozen construction proof")
+        child_env["MEMPHANT_LME_PREBUILT_PROOF"] = prebuilt_proof
         sys.path.insert(0, str(ROOT / "scripts"))
         import run_longmemeval_v2 as official_adapter
         command = official_adapter.memphant_harness_command(
@@ -2191,56 +2990,30 @@ def run_campaign(directory: Path, materialized: Path, output: Path, base_databas
         atomic_write_json(order_path, rows)
     ledger = output / "spend-ledger"
     ledger.mkdir(exist_ok=True)
+    reservations = [_reservation(row, manifest) for row in rows]
+    preexisting_liability = manifest["campaign_spend"]["preexisting_liability"][
+        "total_micros"
+    ]
+    require(
+        preexisting_liability
+        + sum(int(reservation["max_liability_micros"]) for reservation in reservations)
+        <= usd_to_micros(manifest["campaign_spend"]["hard_ceiling_usd"]),
+        "campaign spend ceiling cannot reserve the frozen run order",
+    )
     for row in rows:
         ledger_row = ledger / f"{row['sequence']:04d}.json"
         expected_reservation = _reservation(row, manifest)
-        if (output / row["row_id"]).is_dir():
-            require(json.loads((output / row["row_id"] / "row-proof.json").read_text())["complete"] is True,
-                    "completed row proof drift")
-            require(json.loads(ledger_row.read_text()) == expected_reservation,
-                    "completed row reservation drift")
-            require((output / row["row_id"] / "spend-settlement.json").is_file(),
-                    "completed row lacks settlement")
-            continue
-        staging = output / (".staging-" + row["row_id"])
-        if staging.exists():
-            attempt_path = staging / "attempt.json"
-            if not attempt_path.exists():
-                require(not any(staging.iterdir()), "unmarked staging contains ambiguous evidence")
-                staging.rmdir()
-            else:
-                attempt = json.loads(attempt_path.read_text())
-                require(not _pid_alive(attempt.get("child_pid")),
-                        f"row attempt is still active: {row['row_id']}")
-                atomic_write_json(staging / "failure.json", {
-                    "row": row, "reason": "orphaned_attempt_recovered_without_replay",
-                    "retry_authorized": False,
-                })
-                _write_row_proof(staging, row, ledger_row, "operational_failure",
-                                 {"failure_reason": "orphaned_attempt"}, orphaned=True)
-                os.replace(staging, output / row["row_id"])
-                continue
-        prior = sum(json.loads(path.read_text())["max_liability_micros"] for path in ledger.glob("*.json"))
-        preexisting_liability = manifest["campaign_spend"]["preexisting_liability"][
-            "total_micros"
-        ]
         if ledger_row.exists():
             require(json.loads(ledger_row.read_text()) == expected_reservation,
-                    "orphaned pre-dispatch reservation drift")
+                    "frozen row reservation drift")
         else:
-            require(preexisting_liability + prior + expected_reservation["max_liability_micros"]
-                    <= usd_to_micros(manifest["campaign_spend"]["hard_ceiling_usd"]),
-                    "campaign spend ceiling reached before dispatch")
             atomic_write_json(ledger_row, expected_reservation)
-        staging.mkdir()
-        attempt = {"row": row, "dispatch_started": True, "coordinator_pid": os.getpid(),
-                   "child_pid": None, "reservation_sha256": sha256_file(ledger_row)}
-        atomic_write_json(staging / "attempt.json", attempt)
+    for case_id in manifest["run_order"]["case_order"]:
         command = [
             "/bin/bash", str(SCRATCH_HELPER),
-            base_database_url, "MEMPHANT_TEST_DATABASE_URL", sys.executable, __file__, "_run-row",
+            base_database_url, "MEMPHANT_TEST_DATABASE_URL", sys.executable, __file__, "_run-case",
             "--directory", str(directory), "--output", str(output),
-            "--materialized", str(materialized), "--row-id", row["row_id"],
+            "--materialized", str(materialized), "--case-id", case_id,
         ]
         process = subprocess.Popen(
             command,
@@ -2252,22 +3025,8 @@ def run_campaign(directory: Path, materialized: Path, output: Path, base_databas
             }),
             start_new_session=True,
         )
-        attempt["child_pid"] = process.pid
-        if staging.exists():
-            atomic_write_json(staging / "attempt.json", attempt)
         returncode = _wait_and_reap_on_interrupt(process)
-        final_dir = output / row["row_id"]
-        if returncode != 0:
-            require(staging.is_dir(), "failed row lost its staging evidence")
-            atomic_write_json(staging / "failure.json", {
-                "row": row, "reason": "row_process_failed", "exit_code": returncode,
-                "retry_authorized": False,
-            })
-            _write_row_proof(staging, row, ledger_row, "operational_failure",
-                             {"failure_reason": "row_process_failed", "row_process_exit_code": returncode},
-                             orphaned=True)
-            os.replace(staging, final_dir)
-        require(final_dir.is_dir(), f"row process did not finalize evidence: {row['row_id']}")
+        require(returncode == 0, f"P1-T6 case process failed: {case_id}")
     return {"rows": len(rows), "output": str(output)}
 
 
@@ -2524,6 +3283,7 @@ def main() -> int:
         choices=(
             "verify-selection", "acquire", "materialize", "preflight", "run",
             "aggregate", "_context-preflight", "_reader-route-preflight", "_run-row",
+            "_run-case",
         ),
     )
     parser.add_argument("--directory", type=Path)
@@ -2532,6 +3292,7 @@ def main() -> int:
     parser.add_argument("--materialized", type=Path)
     parser.add_argument("--base-database-url")
     parser.add_argument("--row-id")
+    parser.add_argument("--case-id")
     args = parser.parse_args()
     manifest = load_campaign_manifest()
     if args.command == "verify-selection":
@@ -2556,6 +3317,14 @@ def main() -> int:
         row = next((item for item in expanded_run_order(manifest) if item["row_id"] == args.row_id), None)
         require(row is not None, "unknown row id")
         audit = run_row(args.directory, args.materialized, args.output, row, manifest)
+    elif args.command == "_run-case":
+        require(args.directory and args.output and args.materialized and args.case_id,
+                "_run-case requires directory, output, materialized, and case-id")
+        require(args.case_id in manifest["run_order"]["case_order"], "unknown case id")
+        audit = _run_case(
+            args.directory.resolve(), args.materialized.resolve(), args.output.resolve(),
+            args.case_id, manifest,
+        )
     elif args.command == "run":
         require(args.directory and args.output and args.materialized and args.base_database_url,
                 "run requires directory, output, materialized, and base-database-url")
