@@ -3319,6 +3319,35 @@ def _validate_query_only_memory_proof(
         and pairing.get("query_only") is True,
         "archived memory proof is not query-only",
     )
+    def contains_construction_metric(value: object, path: str = "") -> bool:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                normalized = "_".join(filter(None, (path, str(key).lower())))
+                if (
+                    any(phase in normalized for phase in ("construction", "insert", "worker"))
+                    and any(metric in normalized for metric in ("duration", "latency", "cost", "spend"))
+                ) or contains_construction_metric(item, normalized):
+                    return True
+        elif isinstance(value, list):
+            return any(contains_construction_metric(item, path) for item in value)
+        return False
+
+    require(
+        not contains_construction_metric(query)
+        and not contains_construction_metric(pairing),
+        "arm query timing mixes construction with recall; construction timing or cost is forbidden",
+    )
+    query_fields = {
+        "question_id", "query_sha256", "query_image_present",
+        "native_query_hash", "recall_request_sha256", "recall_response_sha256",
+        "trace_id", "trace_sha256", "context_sha256", "recall_duration_ms",
+        "construction_proof_sha256", "query_only",
+    }
+    require(
+        {"recall_duration_ms", "construction_proof_sha256", "query_only"}
+        <= set(query) <= query_fields,
+        "archived memory query shape is invalid",
+    )
     expected_construction_hash = bank_manifest["construction_proof_sha256"]
     require(
         query.get("construction_proof_sha256") == expected_construction_hash
@@ -3327,17 +3356,17 @@ def _validate_query_only_memory_proof(
         "row memory construction proof does not match its case bank",
     )
     construction = bank_manifest["construction"]
+    require("retains" not in pairing,
+            "query-only arm contains construction work")
     require(
-        "retains" not in pairing
-        and pairing.get("worker") == construction["pairing"]["worker"],
-        "query-only arm contains construction work",
-    )
-    require(
-        not {
-            "construction_duration_ms", "construction_cost_micros",
-            "insert_duration_ms", "worker_duration_ms",
-        }.intersection(query),
-        "arm query timing mixes construction with recall",
+        pairing == {
+            "trajectory_count": construction["pairing"]["trajectory_count"],
+            "resource_count": construction["pairing"]["resource_count"],
+            "worker": construction["pairing"]["worker"],
+            "construction_proof_sha256": expected_construction_hash,
+            "query_only": True,
+        },
+        "query-only arm pairing differs from construction",
     )
 
 

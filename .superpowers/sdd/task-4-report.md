@@ -28,7 +28,7 @@ security, settlement, and positive-delta predicates are unchanged.
 ## TDD evidence
 
 - Red: `python3 -m pytest tests/test_run_lme_v2_p1_t6.py -q` -> 58 passed, 7 failed before aggregate enforcement
-- Green: `python3 -m pytest tests/test_run_lme_v2_p1_t6.py -q` -> 68 passed
+- Green: `python3 -m pytest tests/test_run_lme_v2_p1_t6.py -q` -> 72 passed
 - Adapter regression: `python3 -m pytest tests/test_public_benchmark_adapters.py -q` -> 15 passed, 1 intentional packaged integration skip
 - `git diff --check` -> passed
 
@@ -44,3 +44,16 @@ The build-once implementation is approved through Task 3 and now has complete
 aggregate contract coverage. P1-T6 remains open pending independent Task 4
 review, the no-model Task 5 integration proof, and a passing immutable n=12
 execution. No larger or paid run is authorized by these tests.
+
+## Review fix
+
+Closed the reviewer-identified fail-closed gap in query-only pairing evidence.
+The validator now accepts only the archived Task 2 query field allowlist and
+the exact five-field query-only pairing object. Trajectory count, resource
+count, worker proof, and construction hash must equal the sealed construction
+pairing; retains and recursively nested construction/insert/worker timing or
+cost fields are rejected before outcome scoring.
+
+- Red: focused success/failure drift regression -> 4 failed
+- Green: full focused suite -> 72 passed
+- Successful and operational-failure rows both reject count drift and pairing-local construction duration

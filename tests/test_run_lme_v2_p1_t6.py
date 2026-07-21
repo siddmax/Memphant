@@ -1665,6 +1665,40 @@ def test_aggregate_validates_memory_proof_on_operational_failure(
         campaign.aggregate_campaign(tmp_path, manifest)
 
 
+@pytest.mark.parametrize("outcome", ["success", "operational_failure"])
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ({"resource_count": 669}, "pairing differs from construction"),
+        ({"construction_duration_ms": 1}, "construction timing or cost"),
+    ],
+)
+def test_aggregate_rejects_pairing_drift_for_success_and_failure_rows(
+    tmp_path: Path, outcome: str, mutation: dict, message: str
+) -> None:
+    campaign = _load()
+    manifest = campaign.load_campaign_manifest()
+    rows = campaign.expanded_run_order(manifest)
+    _write_synthetic_success_campaign(campaign, tmp_path, manifest, rows)
+    row = rows[0]
+    row_dir = tmp_path / row["row_id"]
+    memory_path = row_dir / "memory-proofs/proof.json"
+    memory = json.loads(memory_path.read_text())
+    memory["pairing"].update(mutation)
+    campaign.atomic_write_json(memory_path, memory)
+    proof_path = row_dir / "row-proof.json"
+    proof = json.loads(proof_path.read_text())
+    proof["outcome"] = outcome
+    proof["memory_proof_sha256"] = campaign.sha256_file(memory_path)
+    proof["artifact_hashes"] = campaign.artifact_hashes(
+        row_dir, exclude={"row-proof.json"}
+    )
+    campaign.atomic_write_json(proof_path, proof)
+    _refresh_synthetic_case_bank_retirements(campaign, tmp_path, rows)
+    with pytest.raises(RuntimeError, match=message):
+        campaign.aggregate_campaign(tmp_path, manifest)
+
+
 def test_aggregate_requires_12_unique_constructions_and_24_clone_databases(
     tmp_path: Path,
 ) -> None:

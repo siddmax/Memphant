@@ -133,7 +133,7 @@
 
 ## Corrected P1-T6 Task 4 - build-once aggregate evidence
 
-- Status: implemented; focused verification green; independent review pending
+- Status: reviewer P1 fixed with focused verification green; re-review pending
 - Base: `0c67c13ad50177973ca62fc7fda7da88391c6949`
 - Brief: `.superpowers/sdd/task-4-brief.md`
 - Report: `.superpowers/sdd/task-4-report.md`
