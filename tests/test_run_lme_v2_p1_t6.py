@@ -370,7 +370,7 @@ def test_resume_keeps_initial_inventory_evidence_when_material_contract_is_stabl
         "python_environment": {"packages_sha256": "p"},
         "environment_contract_sha256": "j",
         "binary_profile": "release",
-        "preexisting_campaign_liability": {"total_micros": 307608},
+        "preexisting_campaign_liability": {"total_micros": 320666},
     }
     frozen = {**common, "endpoint_hashes": {
         "reader": {"inventory_sha256": "old", "material_contract_sha256": "stable"}
@@ -403,14 +403,14 @@ def test_fresh_reservations_plus_prior_attempts_stay_below_campaign_ceiling() ->
     assert fresh == 14_995_200
     assert prior == {
         "settled_micros": 4_524,
-        "unsettled_upper_bound_micros": 303_084,
-        "total_micros": 307_608,
+        "unsettled_upper_bound_micros": 316_142,
+        "total_micros": 320_666,
         "proofs": prior["proofs"],
     }
-    assert fresh + prior["total_micros"] == 15_302_808
+    assert fresh + prior["total_micros"] == 15_315_866
     assert campaign.usd_to_micros(
         manifest["campaign_spend"]["hard_ceiling_usd"]
-    ) - fresh - prior["total_micros"] == 197_192
+    ) - fresh - prior["total_micros"] == 184_134
 
 
 def test_settled_proxy_cost_must_fit_its_pre_dispatch_reservation() -> None:
@@ -1112,6 +1112,174 @@ def test_reader_proxy_archives_upstream_rejection_without_hiding_status(
         "code": 404,
     }
     assert audit["response_sha256"] == campaign.hashlib.sha256(rejected).hexdigest()
+
+
+def test_reader_proxy_retries_explicit_pre_generation_429_with_bounded_backoff(
+    tmp_path: Path, monkeypatch
+) -> None:
+    campaign = _load()
+    rejected = b'{"error":{"message":"Provider returned error","code":429}}'
+    accepted = b'{"id":"gen-1","model":"qwen/qwen3.5-9b","choices":[]}'
+    calls = []
+    sleeps = []
+
+    class Opener:
+        def open(self, request, timeout=None):
+            calls.append(timeout)
+            if len(calls) == 1:
+                raise campaign.urllib.error.HTTPError(
+                    request.full_url,
+                    429,
+                    "Too Many Requests",
+                    {"Retry-After": "2"},
+                    io.BytesIO(rejected),
+                )
+            return _FakeResponse(accepted)
+
+    monkeypatch.setattr(campaign.urllib.request, "build_opener", lambda *_args: Opener())
+    monkeypatch.setattr(campaign.time, "sleep", sleeps.append)
+    server, base = campaign._reader_proxy(
+        "secret", tmp_path / "reader.json", campaign.load_campaign_manifest()
+    )
+    try:
+        connection = http.client.HTTPConnection(base.removeprefix("http://"))
+        connection.request(
+            "POST", "/chat/completions",
+            body=json.dumps({"model": "Qwen/Qwen3.5-9B", "messages": []}),
+            headers={"content-type": "application/json"},
+        )
+        response = connection.getresponse()
+        assert response.status == 200
+        assert response.read() == accepted
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+    audit = json.loads((tmp_path / "reader.json").read_text())
+    assert calls == [600, 600]
+    assert sleeps == [2]
+    assert audit["dispatch_count"] == 2
+    assert audit["audit_status"] == "receipt_pending"
+    assert audit["generation_id"] == "gen-1"
+    assert audit["pre_generation_rejections"] == [{
+        "attempt": 1,
+        "generation_id": None,
+        "response_sha256": campaign.hashlib.sha256(rejected).hexdigest(),
+        "retry_after_seconds": 2,
+        "status": 429,
+    }]
+
+
+def test_reader_proxy_never_retries_rejection_with_generation_id(
+    tmp_path: Path, monkeypatch
+) -> None:
+    campaign = _load()
+    rejected = b'{"error":{"message":"Provider returned error","code":429}}'
+    calls = []
+
+    class Opener:
+        def open(self, request, timeout=None):
+            calls.append(timeout)
+            raise campaign.urllib.error.HTTPError(
+                request.full_url,
+                429,
+                "Too Many Requests",
+                {"Retry-After": "2", "X-Generation-Id": "gen-possibly-billed"},
+                io.BytesIO(rejected),
+            )
+
+    monkeypatch.setattr(campaign.urllib.request, "build_opener", lambda *_args: Opener())
+    monkeypatch.setattr(
+        campaign.time, "sleep",
+        lambda _seconds: (_ for _ in ()).throw(AssertionError("paid rejection replayed")),
+    )
+    server, base = campaign._reader_proxy(
+        "secret", tmp_path / "reader.json", campaign.load_campaign_manifest()
+    )
+    try:
+        connection = http.client.HTTPConnection(base.removeprefix("http://"))
+        connection.request(
+            "POST", "/chat/completions",
+            body=json.dumps({"model": "Qwen/Qwen3.5-9B", "messages": []}),
+            headers={"content-type": "application/json"},
+        )
+        response = connection.getresponse()
+        assert response.status == 429
+        assert response.read() == rejected
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+    audit = json.loads((tmp_path / "reader.json").read_text())
+    assert calls == [600]
+    assert audit["dispatch_count"] == 1
+    assert audit["audit_status"] == "rejected"
+    assert audit["pre_generation_rejections"] == [{
+        "attempt": 1,
+        "generation_id": "gen-possibly-billed",
+        "response_sha256": campaign.hashlib.sha256(rejected).hexdigest(),
+        "retry_after_seconds": None,
+        "status": 429,
+    }]
+
+
+def test_reader_proxy_exhausts_bounded_pre_generation_503_retries(
+    tmp_path: Path, monkeypatch
+) -> None:
+    campaign = _load()
+    rejected = b'{"error":{"message":"No available provider","code":503}}'
+    calls = []
+    sleeps = []
+
+    class Opener:
+        def open(self, request, timeout=None):
+            calls.append(timeout)
+            raise campaign.urllib.error.HTTPError(
+                request.full_url,
+                503,
+                "Service Unavailable",
+                {},
+                io.BytesIO(rejected),
+            )
+
+    monkeypatch.setattr(campaign.urllib.request, "build_opener", lambda *_args: Opener())
+    monkeypatch.setattr(campaign.time, "sleep", sleeps.append)
+    server, base = campaign._reader_proxy(
+        "secret", tmp_path / "reader.json", campaign.load_campaign_manifest()
+    )
+    try:
+        connection = http.client.HTTPConnection(base.removeprefix("http://"))
+        connection.request(
+            "POST", "/chat/completions",
+            body=json.dumps({"model": "Qwen/Qwen3.5-9B", "messages": []}),
+            headers={"content-type": "application/json"},
+        )
+        response = connection.getresponse()
+        assert response.status == 503
+        assert response.read() == rejected
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+    audit = json.loads((tmp_path / "reader.json").read_text())
+    assert calls == [600, 600, 600]
+    assert sleeps == [5, 15]
+    assert audit["dispatch_count"] == 3
+    assert audit["audit_status"] == "rejected"
+    assert [row["status"] for row in audit["pre_generation_rejections"]] == [503, 503, 503]
+    assert [row["retry_after_seconds"] for row in audit["pre_generation_rejections"]] == [
+        5, 15, None,
+    ]
+
+
+def test_reader_retry_delay_honors_numeric_header_with_default_and_cap() -> None:
+    campaign = _load()
+    contract = campaign.load_campaign_manifest()["protocol"]["reader"]
+    assert campaign._reader_retry_delay_seconds("2", 0, contract) == 2
+    assert campaign._reader_retry_delay_seconds(None, 0, contract) == 5
+    assert campaign._reader_retry_delay_seconds("not-a-delay", 1, contract) == 15
+    assert campaign._reader_retry_delay_seconds("0", 0, contract) == 1
+    assert campaign._reader_retry_delay_seconds("600", 1, contract) == 60
 
 
 def test_reader_proxy_archives_transport_unknown_without_replay(

@@ -54,6 +54,9 @@
       "settlement_models": ["qwen/qwen3.5-9b","qwen/qwen3.5-9b-20260310"],
       "provider": "deepinfra",
       "upstream_timeout_seconds": 600,
+      "pre_generation_retry_attempts": 2,
+      "pre_generation_retry_delays_seconds": [5,15],
+      "retry_after_max_seconds": 60,
       "receipt_reconciliation_attempts": 60,
       "receipt_reconciliation_delay_seconds": 1,
       "quantization": "bf16",
@@ -78,6 +81,6 @@
     "expansion": "case-major Cartesian product; one-based monotonically increasing sequence"
   },
   "failure_treatment": "Any unavailable, provider-error, invalid-output, capped, partial, missing/unsettled/unaccounted proof, truncation, security/write failure, or missing pair scores zero and is operationally infeasible; completed billable rows are immutable.",
-  "campaign_spend": {"hard_ceiling_usd":15.5,"deep_max_liability_usd":10.8,"reader_and_judge_reserve_usd":4.1952,"reader_and_judge_max_liability_micros_per_row":87400,"preexisting_liability":{"settled_micros":4524,"unsettled_upper_bound_micros":303084,"total_micros":307608,"proofs":{"first_invalid_root":"docs/build-log/artifacts/p1-t6/run-ee1575a6/INVALIDATION-PROOF.json","first_settled_diagnostic":"docs/build-log/artifacts/p1-t6/diagnostic-ee1575a6-reader-route/PROOF.json","settled_reader_route_probe":"docs/build-log/artifacts/p1-t6/live-reader-route-05e2bf66/PROOF.json","recall_timeout_invalid_root":"docs/build-log/artifacts/p1-t6/run-9a0ef780/INVALIDATION-PROOF.json","deep_route_invalid_root":"docs/build-log/artifacts/p1-t6/run-3ae5833f/INVALIDATION-PROOF.json","settled_deep_route_diagnostic":"docs/build-log/artifacts/p1-t6/live-deep-route-diagnostic-3ae5833f/PROOF.json"}},"stop_before_dispatch_if_remaining_liability_exceeds_reserve":true},
+  "campaign_spend": {"hard_ceiling_usd":15.5,"deep_max_liability_usd":10.8,"reader_and_judge_reserve_usd":4.1952,"reader_and_judge_max_liability_micros_per_row":87400,"preexisting_liability":{"settled_micros":4524,"unsettled_upper_bound_micros":316142,"total_micros":320666,"proofs":{"first_invalid_root":"docs/build-log/artifacts/p1-t6/run-ee1575a6/INVALIDATION-PROOF.json","first_settled_diagnostic":"docs/build-log/artifacts/p1-t6/diagnostic-ee1575a6-reader-route/PROOF.json","settled_reader_route_probe":"docs/build-log/artifacts/p1-t6/live-reader-route-05e2bf66/PROOF.json","recall_timeout_invalid_root":"docs/build-log/artifacts/p1-t6/run-9a0ef780/INVALIDATION-PROOF.json","deep_route_invalid_root":"docs/build-log/artifacts/p1-t6/run-3ae5833f/INVALIDATION-PROOF.json","settled_deep_route_diagnostic":"docs/build-log/artifacts/p1-t6/live-deep-route-diagnostic-3ae5833f/PROOF.json","reader_rate_limit_invalid_root":"docs/build-log/artifacts/p1-t6/run-b8dbf0a7/INVALIDATION-PROOF.json"}},"stop_before_dispatch_if_remaining_liability_exceeds_reserve":true},
   "feasibility_predicates": {"complete_pairs":12,"mean_score_delta":"strictly_positive","wins":"greater_than_losses","latency_ms":{"p50_max":45000,"p95_max":90000,"max":90000,"hard_cap_not_reached":true},"settled_cost_usd":{"mean_max":0.10,"p95_max":0.20,"max":0.20,"hidden_or_unsettled":false},"memory_context_truncations":0}
 }

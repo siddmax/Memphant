@@ -459,8 +459,8 @@ def verify_campaign_manifest(manifest: dict) -> dict[str, int]:
     require(spend["hard_ceiling_usd"] == 15.5, "campaign spend ceiling drift")
     preexisting = spend["preexisting_liability"]
     require(preexisting["settled_micros"] == 4524
-            and preexisting["unsettled_upper_bound_micros"] == 303084
-            and preexisting["total_micros"] == 307608,
+            and preexisting["unsettled_upper_bound_micros"] == 316142
+            and preexisting["total_micros"] == 320666,
             "preexisting campaign liability drift")
     require(preexisting["settled_micros"] + preexisting["unsettled_upper_bound_micros"]
             == preexisting["total_micros"], "preexisting liability sum drift")
@@ -486,6 +486,10 @@ def verify_campaign_manifest(manifest: dict) -> dict[str, int]:
     reader = manifest["protocol"]["reader"]
     require(reader["upstream_timeout_seconds"] == 600,
             "reader upstream timeout drift")
+    require(reader["pre_generation_retry_attempts"] == 2
+            and reader["pre_generation_retry_delays_seconds"] == [5, 15]
+            and reader["retry_after_max_seconds"] == 60,
+            "reader pre-generation retry contract drift")
     require(reader["receipt_reconciliation_attempts"] == 60
             and reader["receipt_reconciliation_delay_seconds"] == 1,
             "reader receipt reconciliation drift")
@@ -995,6 +999,23 @@ def _reader_route_probe_request() -> dict[str, object]:
     }
 
 
+def _reader_retry_delay_seconds(
+    retry_after: str | None, retry_index: int, contract: dict
+) -> int:
+    delays = contract["pre_generation_retry_delays_seconds"]
+    require(0 <= retry_index < len(delays), "reader retry index is out of range")
+    fallback = int(delays[retry_index])
+    cap = int(contract["retry_after_max_seconds"])
+    require(0 < fallback <= cap, "reader retry fallback is out of range")
+    if retry_after is None:
+        return fallback
+    try:
+        parsed = int(retry_after.strip())
+    except (AttributeError, TypeError, ValueError):
+        return fallback
+    return min(max(parsed, 1), cap)
+
+
 def _reader_proxy(api_key: str, audit_path: Path, manifest: dict) -> tuple[ThreadingHTTPServer, str]:
     contract = manifest["protocol"]["reader"]
     policy = contract["provider_policy"]
@@ -1032,12 +1053,13 @@ def _reader_proxy(api_key: str, audit_path: Path, manifest: dict) -> tuple[Threa
                 require(max_liability <= manifest["campaign_spend"]["reader_and_judge_max_liability_micros_per_row"],
                         "reader request exceeds row spend reserve")
                 audit = {
-                    "audit_status": "pending", "dispatch_count": 1,
+                    "audit_status": "pending", "dispatch_count": 0,
                     "request_contract_sha256": hashlib.sha256(upstream_body).hexdigest(),
                     "provider_policy_sha256": canonical_sha256(policy),
                     "input_token_upper_bound": input_upper_bound,
                     "completion_token_upper_bound": completion_upper_bound,
                     "max_liability_micros": max_liability,
+                    "pre_generation_rejections": [],
                 }
                 atomic_write_json(audit_path, audit)
                 upstream_request = urllib.request.Request(
@@ -1046,68 +1068,101 @@ def _reader_proxy(api_key: str, audit_path: Path, manifest: dict) -> tuple[Threa
                     method="POST",
                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                 )
-                try:
-                    with _direct_opener().open(
-                        upstream_request, timeout=contract["upstream_timeout_seconds"]
-                    ) as response:
-                        response_body = response.read()
-                        status = response.status
-                except urllib.error.HTTPError as error:
-                    response_body = error.read()
-                    status = error.code
-                    try:
-                        parsed_error = json.loads(response_body)
-                    except (TypeError, ValueError):
-                        parsed_error = None
-                    audit.update({
-                        "audit_status": "rejected",
-                        "upstream_status": status,
-                        "upstream_error": (
-                            parsed_error.get("error")
-                            if isinstance(parsed_error, dict)
-                            else {"type": "non_json_upstream_rejection"}
-                        ),
-                        "response_sha256": hashlib.sha256(response_body).hexdigest(),
-                    })
+                max_attempts = 1 + int(contract["pre_generation_retry_attempts"])
+                for attempt in range(1, max_attempts + 1):
+                    audit["dispatch_count"] = attempt
+                    audit["audit_status"] = "pending"
                     atomic_write_json(audit_path, audit)
-                except (
-                    TimeoutError,
-                    urllib.error.URLError,
-                    ConnectionError,
-                    http.client.HTTPException,
-                ):
-                    status = 504
-                    response_body = canonical_bytes({"error": {
-                        "message": "reader upstream transport outcome is unresolved",
-                        "type": "reader_route_transport",
-                    }})
-                    audit.update({
-                        "audit_status": "transport_unknown",
-                        "audit_error": "reader_upstream_transport_failure",
-                        "response_sha256": hashlib.sha256(response_body).hexdigest(),
-                    })
-                    atomic_write_json(audit_path, audit)
-                else:
                     try:
-                        parsed = json.loads(response_body)
-                        require(parsed.get("model") in contract["settlement_models"],
-                                "reader response model drift")
-                        generation_id = parsed.get("id")
-                        require(isinstance(generation_id, str) and generation_id,
-                                "reader omitted generation id")
-                    except Exception:
-                        audit.update({
-                            "audit_status": "invalid",
-                            "audit_error": "reader_response_contract_invalid",
-                            "response_sha256": hashlib.sha256(response_body).hexdigest(),
-                        })
-                    else:
-                        audit.update({
-                            "audit_status": "receipt_pending",
+                        with _direct_opener().open(
+                            upstream_request, timeout=contract["upstream_timeout_seconds"]
+                        ) as response:
+                            response_body = response.read()
+                            status = response.status
+                    except urllib.error.HTTPError as error:
+                        response_body = error.read()
+                        status = error.code
+                        generation_id = error.headers.get("X-Generation-Id")
+                        generation_id = (
+                            generation_id.strip()
+                            if isinstance(generation_id, str) and generation_id.strip()
+                            else None
+                        )
+                        retryable = status in {429, 503} and generation_id is None
+                        retry_delay = None
+                        if retryable and attempt < max_attempts:
+                            retry_delay = _reader_retry_delay_seconds(
+                                error.headers.get("Retry-After"), attempt - 1, contract
+                            )
+                        rejection = {
+                            "attempt": attempt,
+                            "status": status,
                             "generation_id": generation_id,
                             "response_sha256": hashlib.sha256(response_body).hexdigest(),
+                            "retry_after_seconds": retry_delay,
+                        }
+                        audit["pre_generation_rejections"].append(rejection)
+                        if retry_delay is not None:
+                            audit["audit_status"] = "retry_wait"
+                            atomic_write_json(audit_path, audit)
+                            time.sleep(retry_delay)
+                            continue
+                        try:
+                            parsed_error = json.loads(response_body)
+                        except (TypeError, ValueError):
+                            parsed_error = None
+                        audit.update({
+                            "audit_status": "rejected",
+                            "upstream_status": status,
+                            "upstream_error": (
+                                parsed_error.get("error")
+                                if isinstance(parsed_error, dict)
+                                else {"type": "non_json_upstream_rejection"}
+                            ),
+                            "response_sha256": hashlib.sha256(response_body).hexdigest(),
                         })
-                    atomic_write_json(audit_path, audit)
+                        atomic_write_json(audit_path, audit)
+                        break
+                    except (
+                        TimeoutError,
+                        urllib.error.URLError,
+                        ConnectionError,
+                        http.client.HTTPException,
+                    ):
+                        status = 504
+                        response_body = canonical_bytes({"error": {
+                            "message": "reader upstream transport outcome is unresolved",
+                            "type": "reader_route_transport",
+                        }})
+                        audit.update({
+                            "audit_status": "transport_unknown",
+                            "audit_error": "reader_upstream_transport_failure",
+                            "response_sha256": hashlib.sha256(response_body).hexdigest(),
+                        })
+                        atomic_write_json(audit_path, audit)
+                        break
+                    else:
+                        try:
+                            parsed = json.loads(response_body)
+                            require(parsed.get("model") in contract["settlement_models"],
+                                    "reader response model drift")
+                            generation_id = parsed.get("id")
+                            require(isinstance(generation_id, str) and generation_id,
+                                    "reader omitted generation id")
+                        except Exception:
+                            audit.update({
+                                "audit_status": "invalid",
+                                "audit_error": "reader_response_contract_invalid",
+                                "response_sha256": hashlib.sha256(response_body).hexdigest(),
+                            })
+                        else:
+                            audit.update({
+                                "audit_status": "receipt_pending",
+                                "generation_id": generation_id,
+                                "response_sha256": hashlib.sha256(response_body).hexdigest(),
+                            })
+                        atomic_write_json(audit_path, audit)
+                        break
             except Exception:
                 if response_body is None:
                     response_body = canonical_bytes({"error": {
