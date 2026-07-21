@@ -41,6 +41,30 @@ def _write_synthetic_root(campaign, output: Path, manifest: dict) -> None:
         name: campaign._fingerprint(campaign._binary_path(name))
         for name in ("server", "worker", "cli")
     }
+    cases = {}
+    for case in manifest["selection"]["cases"]:
+        case_id = case["id"]
+        memory_contracts = {
+            mode: {
+                "config_sha256": campaign.canonical_sha256({
+                    "case_id": case_id, "mode": mode,
+                }),
+                "memory_params_sha256": campaign.canonical_sha256({
+                    "case_id": case_id, "mode": mode,
+                }),
+                "top_k": 5,
+                "budget_tokens": 4096,
+                "mode": mode,
+                "recall_request_timeout_seconds": 600,
+            }
+            for mode in ("fast", "deep")
+        }
+        cases[case_id] = {
+            "synthetic": case_id,
+            "fast_config_sha256": memory_contracts["fast"]["config_sha256"],
+            "deep_config_sha256": memory_contracts["deep"]["config_sha256"],
+            "memory_contracts": memory_contracts,
+        }
     campaign.atomic_write_json(output / "pre-execution-proof.json", {
         "manifest_sha256": campaign.sha256_file(campaign.CAMPAIGN_MANIFEST),
         "endpoint_hashes": {}, "run_order_sha256": campaign.canonical_sha256(
@@ -63,22 +87,42 @@ def _write_synthetic_root(campaign, output: Path, manifest: dict) -> None:
             name: candidate["config_sha256"]
             for name, candidate in manifest["protocol"]["deep_candidates"].items()
         },
+        "selected_deep_arm": manifest["protocol"]["selected_deep_arm"],
+        "memory_adapter_sha256": campaign.sha256_file(
+            campaign.ROOT / "benchmarks/longmemeval_v2/memphant_memory.py"
+        ),
         "python_environment": {"synthetic": True},
         "environment_contract_sha256": campaign.canonical_sha256(
             campaign._clean_environment()
         ),
-        "materialization": {"proof_sha256": "a" * 64, "cases": {
-            case["id"]: {"synthetic": case["id"]} for case in manifest["selection"]["cases"]
-        }},
+        "materialization": {"proof_sha256": "a" * 64, "cases": cases},
     })
 
 
 def _write_synthetic_case_banks(campaign, output: Path, rows: list[dict]) -> None:
+    root = json.loads((output / "pre-execution-proof.json").read_text())
     for case_id in sorted({row["question_id"] for row in rows}):
         bank = output / "case-banks" / case_id
         bank.mkdir(parents=True)
+        context = {
+            "subject_id": f"subject-{case_id}",
+            "scope_id": f"scope-{case_id}",
+            "actor_id": f"actor-{case_id}",
+            "agent_node_id": f"node-{case_id}",
+            "subject_generation": 0,
+        }
         construction = {
             "schema_version": 1,
+            "contract": {
+                "adapter_sha256": root["memory_adapter_sha256"],
+                "construction_params_sha256": "b" * 64,
+                "binaries": root["binaries"],
+            },
+            "isolation": {
+                "tenant_id": f"tenant-{case_id}",
+                "instance_id": f"construction-{case_id}",
+                "context": context,
+            },
             "pairing": {
                 "trajectory_count": 500,
                 "resource_count": 670,
@@ -93,17 +137,48 @@ def _write_synthetic_case_banks(campaign, output: Path, rows: list[dict]) -> Non
         construction["construction_proof_sha256"] = campaign.canonical_sha256(
             construction
         )
+        materialization = root["materialization"]["cases"][case_id]
+        memory_contracts = materialization["memory_contracts"]
+        case_contract = {
+            "question_id": case_id,
+            "materialization": materialization,
+            "materialization_sha256": campaign.canonical_sha256(materialization),
+            "memory_contracts": memory_contracts,
+            "adapter_sha256": root["memory_adapter_sha256"],
+            "binaries": root["binaries"],
+            "manifest_sha256": campaign.sha256_file(campaign.CAMPAIGN_MANIFEST),
+            "selected_deep_arm": "sonnet",
+        }
         manifest = {
             "archive_sha256": "a" * 64,
             "logical_identity": {"sha256": "e" * 64},
+            "case_contract": case_contract,
+            "case_contract_sha256": campaign.canonical_sha256(case_contract),
             "construction": construction,
             "construction_proof_sha256": construction[
                 "construction_proof_sha256"
             ],
             "construction_duration_ms": 10_000,
-            "case_contract_sha256": "f" * 64,
         }
         campaign.atomic_write_json(bank / "manifest.json", manifest)
+        attempt = output / "case-construction" / case_id / "attempt-0001"
+        campaign.atomic_write_json(attempt / "attempt.json", {
+            "schema_version": 1,
+            "attempt_id": "attempt-0001",
+            "case_id": case_id,
+            "classification": "free_local_construction",
+            "complete": False,
+        })
+        campaign.atomic_write_json(attempt / "complete.json", {
+            "schema_version": 1,
+            "attempt_id": "attempt-0001",
+            "case_id": case_id,
+            "construction_proof_sha256": construction[
+                "construction_proof_sha256"
+            ],
+            "construction_duration_ms": manifest["construction_duration_ms"],
+            "complete": True,
+        })
         seal = campaign._case_bank_seal(bank / "manifest.json")
         row_hashes = {}
         for row in [item for item in rows if item["question_id"] == case_id]:
@@ -2169,6 +2244,16 @@ def test_run_case_reuses_archive_after_interruption_and_drops_failed_clone(
         "postgres_major": 18,
         "logical_identity": logical,
     })
+    attempt = output / "case-construction" / case_id / "attempt-0001"
+    campaign.atomic_write_json(attempt / "attempt.json", {
+        "schema_version": 1, "attempt_id": "attempt-0001", "case_id": case_id,
+        "classification": "free_local_construction", "complete": False,
+    })
+    campaign.atomic_write_json(attempt / "complete.json", {
+        "schema_version": 1, "attempt_id": "attempt-0001", "case_id": case_id,
+        "construction_proof_sha256": construction["construction_proof_sha256"],
+        "construction_duration_ms": 12_345, "complete": True,
+    })
     bank_seal = campaign._case_bank_seal(bank / "manifest.json")
     campaign.atomic_write_json(completed / "case-bank-seal.json", bank_seal)
     completed_proof = json.loads((completed / "row-proof.json").read_text())
@@ -2560,6 +2645,8 @@ def test_resume_keeps_initial_inventory_evidence_when_material_contract_is_stabl
         "binary_profile": "release",
         "archive_tools": {"server_major": 17},
         "preexisting_campaign_liability": {"total_micros": 320666},
+        "selected_deep_arm": "sonnet",
+        "memory_adapter_sha256": "adapter",
     }
     frozen = {**common, "endpoint_hashes": {
         "reader": {"inventory_sha256": "old", "material_contract_sha256": "stable"}
@@ -3083,6 +3170,133 @@ def test_synthetic_all_failure_aggregate_is_complete_and_zero_scored(tmp_path: P
     )
 
 
+def _synthetic_campaign_memory(
+    campaign, row: dict, manifest: dict, bank: dict,
+) -> dict:
+    case_id = row["question_id"]
+    mode = "fast" if row["arm"] == "fast" else "deep"
+    instance_id = f"{row['sequence']:032x}"
+    trace_id = f"trace-{row['row_id']}"
+    construction = bank["construction"]
+    context = construction["isolation"]["context"]
+    item = {
+        "unit_id": f"unit-{row['row_id']}",
+        "body": f"context for {row['row_id']}",
+        "kind": "document",
+        "derived_by": "fixture",
+        "inclusion_reason": "ranked",
+        "citation_episode_id": None,
+        "citation_resource_id": f"resource-{row['row_id']}",
+        "derived_from_unit_ids": [],
+        "suppression_labels": [],
+    }
+    citation = {
+        "unit_id": item["unit_id"],
+        "episode_id": item["citation_episode_id"],
+        "resource_id": item["citation_resource_id"],
+        "derived_from_unit_ids": item["derived_from_unit_ids"],
+    }
+    deep = None
+    trace = {
+        "id": trace_id,
+        "tenant_id": construction["isolation"]["tenant_id"],
+        "scope_id": context["scope_id"],
+        "actor_id": context["actor_id"],
+        "query_hash": campaign.canonical_sha256({"question_id": case_id}),
+        "mode_requested": mode,
+        "mode_executed": mode,
+        "context_items": [item],
+        "citations": [citation],
+        "deep": None,
+    }
+    if mode == "deep":
+        candidate = manifest["protocol"]["deep_candidates"][row["arm"]]
+        deep = {
+            "status": "completed", "stop_reason": "completed",
+            "generation_ids": [f"generation-{row['row_id']}"],
+            "usage": {
+                "context_tokens": 10, "spend_micros": 1000,
+                "unsettled_spend_micros_upper_bound": 0,
+                "unsettled_context_tokens_upper_bound": 0,
+            },
+        }
+        trace.update({
+            "deep": deep, "l4_model": candidate["model"],
+            "l4_provider": "azure", "l4_observed_provider": "Azure",
+            "l4_observed_model": candidate["model"],
+            "l4_prompt_hash": manifest["protocol"]["deep_prompt_sha256"],
+            "l4_config_hash": candidate["config_sha256"],
+        })
+    response = {
+        "trace_id": trace_id,
+        "items": [item],
+        "citations": [citation],
+        "degraded": False,
+        "deep": deep,
+    }
+    memory_contract = bank["case_contract"]["memory_contracts"][mode]
+    before = {
+        "resource": {"rows": 670, "content_md5": "resource"},
+        "retrieval_trace": {"rows": 0, "content_md5": "before"},
+    }
+    after = {
+        "resource": dict(before["resource"]),
+        "retrieval_trace": {"rows": 1, "content_md5": "after"},
+    }
+    return {
+        "contract": {
+            "adapter_sha256": construction["contract"]["adapter_sha256"],
+            "memory_params_sha256": memory_contract["memory_params_sha256"],
+            "top_k": memory_contract["top_k"],
+            "budget_tokens": memory_contract["budget_tokens"],
+            "mode": mode,
+            "recall_request_timeout_seconds": memory_contract[
+                "recall_request_timeout_seconds"
+            ],
+            "binaries": construction["contract"]["binaries"],
+            "gold_fields_consumed": [],
+        },
+        "isolation": {
+            "tenant_id": construction["isolation"]["tenant_id"],
+            "scope_id": context["scope_id"],
+            "actor_id": context["actor_id"],
+            "instance_id": instance_id,
+        },
+        "public": {"recall_response": response, "trace": trace},
+        "recall_mutation_proof": {
+            "before": before, "after": after,
+            "changed_tables": ["retrieval_trace"],
+            "allowed_audit_rows_added": 1,
+            "corpus_policy_job_tables_unchanged": True,
+        },
+        "query": {
+            "question_id": case_id,
+            "query_sha256": campaign.canonical_sha256({"question": case_id}),
+            "query_image_present": False,
+            "native_query_hash": trace["query_hash"],
+            "recall_request_sha256": campaign.canonical_sha256({
+                "question_id": case_id, "mode": mode,
+            }),
+            "recall_response_sha256": campaign.canonical_sha256(response),
+            "trace_id": trace_id,
+            "trace_sha256": campaign.canonical_sha256(trace),
+            "context_sha256": campaign.canonical_sha256([
+                {"type": "text", "value": item["body"]},
+            ]),
+            "recall_duration_ms": 1000,
+            "construction_proof_sha256": bank["construction_proof_sha256"],
+            "query_only": True,
+        },
+        "pairing": {
+            "trajectory_count": 500,
+            "resource_count": 670,
+            "worker": construction["pairing"]["worker"],
+            "construction_proof_sha256": bank["construction_proof_sha256"],
+            "query_only": True,
+        },
+    }
+
+
 def _write_synthetic_success_campaign(
     campaign, tmp_path: Path, manifest: dict, rows: list[dict]
 ) -> None:
@@ -3178,13 +3392,7 @@ def _write_synthetic_success_campaign(
             (tmp_path / "case-banks" / row["question_id"] / "manifest.json").read_text()
         )
         memory_path = tmp_path / row["row_id"] / "memory-proofs/proof.json"
-        memory = json.loads(memory_path.read_text())
-        memory["query"]["construction_proof_sha256"] = bank[
-            "construction_proof_sha256"
-        ]
-        memory["pairing"]["construction_proof_sha256"] = bank[
-            "construction_proof_sha256"
-        ]
+        memory = _synthetic_campaign_memory(campaign, row, manifest, bank)
         campaign.atomic_write_json(memory_path, memory)
         row_dir = tmp_path / row["row_id"]
         proof_path = row_dir / "row-proof.json"
@@ -3209,6 +3417,190 @@ def test_synthetic_success_aggregate_applies_registered_ranking(tmp_path: Path) 
     assert set(aggregate["candidates"]) == {"sonnet"}
     assert aggregate["advance_to_separate_confirmation"] == ["sonnet"]
     assert aggregate["decision"] == "confirmation_manifest_required"
+
+
+def _rewrite_synthetic_memory_binding(
+    campaign, output: Path, rows: list[dict], row: dict, memory: dict,
+    *, outcome: str = "success",
+) -> None:
+    row_dir = output / row["row_id"]
+    memory_path = row_dir / "memory-proofs/proof.json"
+    campaign.atomic_write_json(memory_path, memory)
+    proof_path = row_dir / "row-proof.json"
+    proof = json.loads(proof_path.read_text())
+    proof["outcome"] = outcome
+    proof["operational"] = outcome == "success"
+    proof["memory_proof_sha256"] = campaign.sha256_file(memory_path)
+    proof["artifact_hashes"] = campaign.artifact_hashes(
+        row_dir, exclude={"row-proof.json"}
+    )
+    campaign.atomic_write_json(proof_path, proof)
+    _refresh_synthetic_case_bank_retirements(campaign, output, rows)
+
+
+@pytest.mark.parametrize("outcome", ["success", "operational_failure"])
+@pytest.mark.parametrize(
+    "tamper,message",
+    [
+        ("tenant", "isolation"),
+        ("context", "isolation"),
+        ("adapter", "adapter or binary contract"),
+        ("mode", "row memory contract"),
+        ("question", "question binding"),
+        ("trace", "trace and response binding"),
+        ("citations", "citation and context binding"),
+        ("mutation", "allowed mutation contract"),
+    ],
+)
+def test_aggregate_authenticates_memory_proof_for_success_and_failure_rows(
+    tmp_path: Path, outcome: str, tamper: str, message: str,
+) -> None:
+    campaign = _load()
+    manifest = campaign.load_campaign_manifest()
+    rows = campaign.expanded_run_order(manifest)
+    _write_synthetic_success_campaign(campaign, tmp_path, manifest, rows)
+    row = rows[0]
+    memory_path = tmp_path / row["row_id"] / "memory-proofs/proof.json"
+    memory = json.loads(memory_path.read_text())
+    if tamper == "tenant":
+        memory["isolation"]["tenant_id"] = "wrong-tenant"
+        memory["public"]["trace"]["tenant_id"] = "wrong-tenant"
+    elif tamper == "context":
+        memory["isolation"]["scope_id"] = "wrong-scope"
+        memory["public"]["trace"]["scope_id"] = "wrong-scope"
+    elif tamper == "adapter":
+        memory["contract"]["adapter_sha256"] = "f" * 64
+    elif tamper == "mode":
+        memory["contract"]["mode"] = "deep"
+        memory["public"]["trace"]["mode_requested"] = "deep"
+    elif tamper == "question":
+        memory["query"]["question_id"] = "wrong-question"
+    elif tamper == "trace":
+        memory["public"]["trace"]["id"] = "wrong-trace"
+    elif tamper == "citations":
+        forged = [{
+            "unit_id": "forged", "episode_id": None,
+            "resource_id": "forged", "derived_from_unit_ids": [],
+        }]
+        memory["public"]["trace"]["citations"] = forged
+        memory["public"]["recall_response"]["citations"] = forged
+    else:
+        memory["recall_mutation_proof"]["changed_tables"] = []
+    memory["query"]["trace_id"] = memory["public"]["trace"]["id"]
+    memory["query"]["trace_sha256"] = campaign.canonical_sha256(
+        memory["public"]["trace"]
+    )
+    memory["query"]["recall_response_sha256"] = campaign.canonical_sha256(
+        memory["public"]["recall_response"]
+    )
+    _rewrite_synthetic_memory_binding(
+        campaign, tmp_path, rows, row, memory, outcome=outcome
+    )
+    with pytest.raises(RuntimeError, match=message):
+        campaign.aggregate_campaign(tmp_path, manifest)
+
+
+def test_aggregate_requires_24_distinct_adapter_instances(tmp_path: Path) -> None:
+    campaign = _load()
+    manifest = campaign.load_campaign_manifest()
+    rows = campaign.expanded_run_order(manifest)
+    _write_synthetic_success_campaign(campaign, tmp_path, manifest, rows)
+    first = json.loads(
+        (tmp_path / rows[0]["row_id"] / "memory-proofs/proof.json").read_text()
+    )
+    second_path = tmp_path / rows[1]["row_id"] / "memory-proofs/proof.json"
+    second = json.loads(second_path.read_text())
+    second["isolation"]["instance_id"] = first["isolation"]["instance_id"]
+    _rewrite_synthetic_memory_binding(
+        campaign, tmp_path, rows, rows[1], second
+    )
+    with pytest.raises(RuntimeError, match="24 distinct adapter instance"):
+        campaign.aggregate_campaign(tmp_path, manifest)
+
+
+def test_construction_attempt_reuses_only_its_exact_completed_bank(
+    tmp_path: Path,
+) -> None:
+    campaign = _load()
+    manifest = campaign.load_campaign_manifest()
+    rows = campaign.expanded_run_order(manifest)
+    _write_synthetic_success_campaign(campaign, tmp_path, manifest, rows)
+    case_id = rows[0]["question_id"]
+    bank = json.loads(
+        (tmp_path / "case-banks" / case_id / "manifest.json").read_text()
+    )
+    assert campaign._validate_case_construction_attempts(
+        tmp_path, case_id, bank, allow_new=False
+    ) == "reuse"
+    with pytest.raises(RuntimeError, match="completed construction attempt.*bank"):
+        campaign._validate_case_construction_attempts(
+            tmp_path, case_id, None, allow_new=False
+        )
+    forged = json.loads(json.dumps(bank))
+    forged["construction_duration_ms"] += 1
+    with pytest.raises(RuntimeError, match="completed construction attempt.*bank"):
+        campaign._validate_case_construction_attempts(
+            tmp_path, case_id, forged, allow_new=False
+        )
+
+
+def test_construction_attempt_fails_closed_when_prior_attempt_is_incomplete(
+    tmp_path: Path,
+) -> None:
+    campaign = _load()
+    manifest = campaign.load_campaign_manifest()
+    rows = campaign.expanded_run_order(manifest)
+    _write_synthetic_success_campaign(campaign, tmp_path, manifest, rows)
+    case_id = rows[0]["question_id"]
+    attempt = tmp_path / "case-construction" / case_id / "attempt-0001"
+    (attempt / "complete.json").unlink()
+    bank = json.loads(
+        (tmp_path / "case-banks" / case_id / "manifest.json").read_text()
+    )
+    with pytest.raises(RuntimeError, match="incomplete construction attempt"):
+        campaign._validate_case_construction_attempts(
+            tmp_path, case_id, bank, allow_new=True
+        )
+
+
+def test_construction_attempt_fails_closed_on_extra_completed_attempt(
+    tmp_path: Path,
+) -> None:
+    campaign = _load()
+    manifest = campaign.load_campaign_manifest()
+    rows = campaign.expanded_run_order(manifest)
+    _write_synthetic_success_campaign(campaign, tmp_path, manifest, rows)
+    case_id = rows[0]["question_id"]
+    attempt = tmp_path / "case-construction" / case_id / "attempt-0002"
+    campaign.atomic_write_json(attempt / "attempt.json", {
+        "schema_version": 1, "attempt_id": "attempt-0002", "case_id": case_id,
+        "classification": "free_local_construction", "complete": False,
+    })
+    bank = json.loads(
+        (tmp_path / "case-banks" / case_id / "manifest.json").read_text()
+    )
+    campaign.atomic_write_json(attempt / "complete.json", {
+        "schema_version": 1, "attempt_id": "attempt-0002", "case_id": case_id,
+        "construction_proof_sha256": bank["construction_proof_sha256"],
+        "construction_duration_ms": bank["construction_duration_ms"],
+        "complete": True,
+    })
+    with pytest.raises(RuntimeError, match="exactly one construction attempt"):
+        campaign._validate_case_construction_attempts(
+            tmp_path, case_id, bank, allow_new=False
+        )
+
+
+def test_aggregate_rejects_preserved_incomplete_case_bank(tmp_path: Path) -> None:
+    campaign = _load()
+    manifest = campaign.load_campaign_manifest()
+    rows = campaign.expanded_run_order(manifest)
+    _write_synthetic_success_campaign(campaign, tmp_path, manifest, rows)
+    preserved = tmp_path / "incomplete-case-banks" / "preserved-attempt"
+    preserved.mkdir(parents=True)
+    (preserved / "manifest.json").write_text("{}\n")
+    with pytest.raises(RuntimeError, match="preserved incomplete case banks"):
+        campaign.aggregate_campaign(tmp_path, manifest)
 
 
 @pytest.mark.parametrize(
@@ -3403,6 +3795,15 @@ def test_aggregate_rejects_reused_construction_proof_across_cases(
         "construction_proof_sha256"
     ]
     campaign.atomic_write_json(second_manifest_path, second_manifest)
+    second_attempt = (
+        tmp_path / "case-construction" / second_case
+        / "attempt-0001" / "complete.json"
+    )
+    second_complete = json.loads(second_attempt.read_text())
+    second_complete["construction_proof_sha256"] = first_manifest[
+        "construction_proof_sha256"
+    ]
+    campaign.atomic_write_json(second_attempt, second_complete)
     seal = campaign._case_bank_seal(second_manifest_path)
     for row in [item for item in rows if item["question_id"] == second_case]:
         row_dir = tmp_path / row["row_id"]

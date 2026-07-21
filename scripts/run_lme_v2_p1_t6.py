@@ -808,19 +808,6 @@ def _validate_completed_case_row(
     return proof
 
 
-def _preserve_incomplete_bank(output: Path, bank_dir: Path, case_id: str) -> None:
-    if not bank_dir.exists():
-        return
-    if not any(bank_dir.iterdir()):
-        bank_dir.rmdir()
-        return
-    destination_root = output / "incomplete-case-banks"
-    destination_root.mkdir(exist_ok=True)
-    destination = destination_root / f"{case_id}-{time.time_ns()}-{os.getpid()}"
-    require(not destination.exists(), "P1-T6 incomplete bank destination collided")
-    os.replace(bank_dir, destination)
-
-
 def _retire_case_archive(
     bank_dir: Path, output: Path, rows: list[dict]
 ) -> None:
@@ -939,6 +926,68 @@ def _reset_case_source(database_url: str) -> None:
             "P1-T6 reset source retained construction rows")
 
 
+def _validate_case_construction_attempts(
+    output: Path,
+    case_id: str,
+    bank_manifest: dict[str, object] | None,
+    *,
+    allow_new: bool,
+) -> str:
+    require(re.fullmatch(r"[0-9a-f]{8}", case_id) is not None,
+            "P1-T6 construction attempt case id is invalid")
+    construction_root = output / "case-construction" / case_id
+    if not construction_root.exists():
+        require(allow_new, "P1-T6 complete construction attempt is missing")
+        return "new"
+    require(construction_root.is_dir(),
+            "P1-T6 construction attempt root is invalid")
+    attempts = sorted(construction_root.iterdir())
+    if not attempts:
+        require(allow_new, "P1-T6 complete construction attempt is missing")
+        return "new"
+    require(
+        len(attempts) == 1
+        and attempts[0].is_dir()
+        and attempts[0].name == "attempt-0001",
+        "P1-T6 requires exactly one construction attempt per case",
+    )
+    attempt_dir = attempts[0]
+    marker_path = attempt_dir / "attempt.json"
+    require(marker_path.is_file(), "P1-T6 construction attempt marker is missing")
+    marker = json.loads(marker_path.read_text())
+    require(
+        marker == {
+            "schema_version": 1,
+            "attempt_id": "attempt-0001",
+            "case_id": case_id,
+            "classification": "free_local_construction",
+            "complete": False,
+        },
+        "P1-T6 construction attempt marker drift",
+    )
+    complete_path = attempt_dir / "complete.json"
+    require(complete_path.is_file(),
+            "P1-T6 incomplete construction attempt requires explicit amendment")
+    complete = json.loads(complete_path.read_text())
+    require(
+        isinstance(bank_manifest, dict)
+        and complete == {
+            "schema_version": 1,
+            "attempt_id": "attempt-0001",
+            "case_id": case_id,
+            "construction_proof_sha256": bank_manifest.get(
+                "construction_proof_sha256"
+            ),
+            "construction_duration_ms": bank_manifest.get(
+                "construction_duration_ms"
+            ),
+            "complete": True,
+        },
+        "P1-T6 completed construction attempt does not bind its bank",
+    )
+    return "reuse"
+
+
 def _construct_case_source(
     directory: Path,
     materialized: Path,
@@ -957,9 +1006,18 @@ def _construct_case_source(
     )
     binaries = {name: _binary_path(name) for name in ("server", "worker", "cli")}
     construction_root = output / "case-construction" / case_id
+    require(
+        _validate_case_construction_attempts(
+            output, case_id, None, allow_new=True
+        ) == "new",
+        "P1-T6 construction attempt unexpectedly requires reuse",
+    )
     construction_root.mkdir(parents=True, exist_ok=True)
-    proof_dir = Path(tempfile.mkdtemp(prefix="attempt-", dir=construction_root))
+    proof_dir = construction_root / "attempt-0001"
+    proof_dir.mkdir()
     atomic_write_json(proof_dir / "attempt.json", {
+        "schema_version": 1,
+        "attempt_id": "attempt-0001",
         "case_id": case_id,
         "classification": "free_local_construction",
         "complete": False,
@@ -1015,6 +1073,8 @@ def _construct_case_source(
         (time.perf_counter() - construction_started) * 1000
     ))
     atomic_write_json(proof_dir / "complete.json", {
+        "schema_version": 1,
+        "attempt_id": "attempt-0001",
         "case_id": case_id,
         "construction_proof_sha256": construction_proof["construction_proof_sha256"],
         "construction_duration_ms": construction_duration_ms,
@@ -2675,17 +2735,48 @@ def run_no_model_verifier_with_scratch(
     return envelope["audit"]
 
 
+def _frozen_memory_contracts(
+    case_dir: Path, case_id: str
+) -> dict[str, dict[str, object]]:
+    memory_contracts = {}
+    for mode in ("fast", "deep"):
+        config_path = case_dir / f"memory.{mode}.json"
+        config = json.loads(config_path.read_text())
+        params = config.get("memory_params")
+        require(
+            config.get("memory_type") == "memphant"
+            and isinstance(params, dict)
+            and params.get("mode") == mode
+            and isinstance(params.get("top_k"), int)
+            and isinstance(params.get("budget_tokens"), int),
+            f"P1-T6 memory contract drift: {case_id}/{mode}",
+        )
+        memory_contracts[mode] = {
+            "config_sha256": sha256_file(config_path),
+            "memory_params_sha256": canonical_sha256(params),
+            "top_k": params["top_k"],
+            "budget_tokens": params["budget_tokens"],
+            "mode": mode,
+            "recall_request_timeout_seconds": 600,
+        }
+    return memory_contracts
+
+
 def _case_bank_contract(
     materialized: Path, output: Path, case_id: str, manifest: dict
 ) -> dict[str, object]:
     root_proof = json.loads((output / "pre-execution-proof.json").read_text())
     case_materialization = root_proof["materialization"]["cases"][case_id]
-    case_dir = materialized / case_id
+    memory_contracts = _frozen_memory_contracts(materialized / case_id, case_id)
+    require(
+        memory_contracts == case_materialization.get("memory_contracts"),
+        f"P1-T6 frozen memory contract drift: {case_id}",
+    )
     return {
         "question_id": case_id,
         "materialization": case_materialization,
         "materialization_sha256": canonical_sha256(case_materialization),
-        "memory_config_sha256": sha256_file(case_dir / "memory.fast.json"),
+        "memory_contracts": memory_contracts,
         "adapter_sha256": sha256_file(
             ROOT / "benchmarks/longmemeval_v2/memphant_memory.py"
         ),
@@ -2787,23 +2878,38 @@ def _run_case_locked(
             completed.append(row)
     bank_dir = output / "case-banks" / case_id
     if len(completed) == 2:
+        manifest_path = bank_dir / "manifest.json"
+        require(manifest_path.is_file(),
+                "completed P1-T6 pair lost its bank manifest")
+        _validate_case_construction_attempts(
+            output, case_id, json.loads(manifest_path.read_text()),
+            allow_new=False,
+        )
         _retire_case_archive(bank_dir, output, rows)
         return {"case_id": case_id, "constructed": False, "completed_rows": 2}
     case_contract = _case_bank_contract(materialized, output, case_id, manifest)
     bank_ready = False
+    bank_manifest = None
     if (bank_dir / "manifest.json").is_file():
         try:
-            _load_case_bank(bank_dir)
+            bank_manifest, _archive = _load_case_bank(bank_dir)
             bank_ready = True
         except (OSError, RuntimeError, ValueError):
-            if completed:
-                _verify_case_archive_resume(bank_dir, completed_rows=len(completed))
-            _preserve_incomplete_bank(output, bank_dir, case_id)
+            bank_ready = False
     elif bank_dir.exists():
-        require(not completed,
-                "completed billable row has a missing construction archive")
-        _preserve_incomplete_bank(output, bank_dir, case_id)
-    constructed = not bank_ready
+        bank_ready = False
+    attempt_state = _validate_case_construction_attempts(
+        output, case_id, bank_manifest, allow_new=True
+    )
+    if attempt_state == "new":
+        require(
+            not bank_dir.exists(),
+            "P1-T6 unaccounted case bank exists without a construction attempt",
+        )
+    else:
+        require(bank_ready,
+                "P1-T6 completed construction attempt requires its verified bank")
+    constructed = attempt_state == "new"
     if constructed:
         require(not completed,
                 "completed billable row has a missing construction archive")
@@ -3619,7 +3725,7 @@ def verify_materialization(directory: Path, materialized: Path, manifest: dict) 
     }
     require(set(archived_pairs) == {case["id"] for case in manifest["selection"]["cases"]},
             "archived pairing set drift")
-    case_contracts: dict[str, dict[str, str]] = {}
+    case_contracts: dict[str, dict[str, object]] = {}
     trajectory_hashes: dict[str, str] = {}
     for case in manifest["selection"]["cases"]:
         question_id = case["id"]
@@ -3643,9 +3749,7 @@ def verify_materialization(directory: Path, materialized: Path, manifest: dict) 
             prior = trajectory_hashes.setdefault(item["trajectory_id"], item["row_sha256"])
             require(prior == item["row_sha256"],
                     f"cross-case trajectory hash drift: {item['trajectory_id']}")
-        for mode in ("fast", "deep"):
-            config = json.loads((case_dir / f"memory.{mode}.json").read_text())
-            require(config["memory_params"]["mode"] == mode, f"memory mode drift: {question_id}/{mode}")
+        memory_contracts = _frozen_memory_contracts(case_dir, question_id)
         archived = archived_pairs[question_id]
         require(sha256_file(pairing_path) == archived["pairing_sha256"],
                 f"archived pairing proof drift: {question_id}")
@@ -3658,6 +3762,7 @@ def verify_materialization(directory: Path, materialized: Path, manifest: dict) 
             "pairing_sha256": archived["pairing_sha256"],
             "fast_config_sha256": sha256_file(case_dir / "memory.fast.json"),
             "deep_config_sha256": sha256_file(case_dir / "memory.deep.json"),
+            "memory_contracts": memory_contracts,
         }
     found: set[str] = set()
     with (directory / "data/trajectories.jsonl").open(encoding="utf-8") as handle:
@@ -3674,7 +3779,7 @@ def verify_materialization(directory: Path, materialized: Path, manifest: dict) 
     return {"proof_sha256": proof_hash, "cases": case_contracts}
 
 
-def verify_case_materialization(case_dir: Path, contract: dict[str, str]) -> None:
+def verify_case_materialization(case_dir: Path, contract: dict[str, object]) -> None:
     for relative, key in (
         ("questions.json", "questions_sha256"), ("haystack.json", "haystack_sha256"),
         ("pairing.json", "pairing_sha256"), ("memory.fast.json", "fast_config_sha256"),
@@ -4419,6 +4524,8 @@ def verify_resume_contract(frozen: dict, current: dict) -> None:
         "binary_profile",
         "archive_tools",
         "preexisting_campaign_liability",
+        "selected_deep_arm",
+        "memory_adapter_sha256",
     ):
         require(frozen[field] == current[field], f"campaign resume contract drift: {field}")
     require({key: value["material_contract_sha256"] for key, value in frozen["endpoint_hashes"].items()}
@@ -4988,6 +5095,10 @@ def run_campaign(directory: Path, materialized: Path, output: Path, base_databas
             name: candidate["config_sha256"]
             for name, candidate in manifest["protocol"]["deep_candidates"].items()
         },
+        "selected_deep_arm": manifest["protocol"]["selected_deep_arm"],
+        "memory_adapter_sha256": sha256_file(
+            ROOT / "benchmarks/longmemeval_v2/memphant_memory.py"
+        ),
         "python_environment": preflight_proof["python"],
         "environment_contract_sha256": canonical_sha256(_clean_environment()),
         "preexisting_campaign_liability": manifest["campaign_spend"][
@@ -5103,7 +5214,10 @@ def _validate_retired_case_banks(
 
 def _validate_query_only_memory_proof(
     memory: dict[str, object], bank_manifest: dict[str, object],
-    *, require_no_model_fast: bool = False,
+    *,
+    require_no_model_fast: bool = False,
+    row: dict[str, object] | None = None,
+    root_proof: dict[str, object] | None = None,
 ) -> None:
     query = memory.get("query")
     pairing = memory.get("pairing")
@@ -5227,6 +5341,191 @@ def _validate_query_only_memory_proof(
         },
         "query-only arm pairing differs from construction",
     )
+    if row is None:
+        require(root_proof is None,
+                "row memory expected context is incomplete")
+        return
+    require(isinstance(root_proof, dict),
+            "row memory expected context is incomplete")
+    require(
+        set(query) == query_fields,
+        "row memory query shape is invalid",
+    )
+    case_id = row.get("question_id")
+    arm = row.get("arm")
+    expected_mode = "fast" if arm == "fast" else "deep"
+    case_contract = bank_manifest.get("case_contract")
+    construction_contract = construction.get("contract")
+    construction_isolation = construction.get("isolation")
+    construction_context = (
+        construction_isolation.get("context")
+        if isinstance(construction_isolation, dict) else None
+    )
+    frozen_materialization = (
+        root_proof.get("materialization", {}).get("cases", {}).get(case_id)
+        if isinstance(root_proof.get("materialization"), dict) else None
+    )
+    memory_contracts = (
+        case_contract.get("memory_contracts")
+        if isinstance(case_contract, dict) else None
+    )
+    expected_memory_contract = (
+        memory_contracts.get(expected_mode)
+        if isinstance(memory_contracts, dict) else None
+    )
+    require(
+        isinstance(case_contract, dict)
+        and isinstance(frozen_materialization, dict)
+        and bank_manifest.get("case_contract_sha256")
+        == canonical_sha256(case_contract)
+        and case_contract.get("question_id") == case_id
+        and case_contract.get("materialization") == frozen_materialization
+        and case_contract.get("materialization_sha256")
+        == canonical_sha256(frozen_materialization)
+        and case_contract.get("binaries") == root_proof.get("binaries")
+        and case_contract.get("manifest_sha256")
+        == root_proof.get("manifest_sha256")
+        and case_contract.get("selected_deep_arm")
+        == root_proof.get("selected_deep_arm")
+        and case_contract.get("adapter_sha256")
+        == root_proof.get("memory_adapter_sha256")
+        and isinstance(memory_contracts, dict)
+        and set(memory_contracts) == {"fast", "deep"}
+        and memory_contracts == frozen_materialization.get("memory_contracts")
+        and isinstance(expected_memory_contract, dict)
+        and expected_memory_contract.get("config_sha256")
+        == frozen_materialization.get(f"{expected_mode}_config_sha256"),
+        "row memory frozen case contract drift",
+    )
+    contract_fields = {
+        "adapter_sha256", "memory_params_sha256", "top_k", "budget_tokens",
+        "mode", "recall_request_timeout_seconds", "binaries",
+        "gold_fields_consumed",
+    }
+    require(
+        isinstance(contract, dict)
+        and set(contract) == contract_fields
+        and isinstance(construction_contract, dict)
+        and contract.get("adapter_sha256")
+        == construction_contract.get("adapter_sha256")
+        == case_contract.get("adapter_sha256")
+        and contract.get("binaries")
+        == construction_contract.get("binaries")
+        == case_contract.get("binaries")
+        == root_proof.get("binaries"),
+        "row memory adapter or binary contract drift",
+    )
+    require(
+        contract.get("memory_params_sha256")
+        == expected_memory_contract.get("memory_params_sha256")
+        and contract.get("top_k") == expected_memory_contract.get("top_k")
+        and contract.get("budget_tokens")
+        == expected_memory_contract.get("budget_tokens")
+        and contract.get("mode") == expected_memory_contract.get("mode")
+        == expected_mode
+        and contract.get("recall_request_timeout_seconds")
+        == expected_memory_contract.get("recall_request_timeout_seconds")
+        and contract.get("gold_fields_consumed") == [],
+        "row memory contract drift",
+    )
+    isolation = memory.get("isolation")
+    require(
+        isinstance(isolation, dict)
+        and set(isolation) == {
+            "tenant_id", "scope_id", "actor_id", "instance_id",
+        }
+        and isinstance(construction_isolation, dict)
+        and isinstance(construction_context, dict)
+        and isolation.get("tenant_id") == construction_isolation.get("tenant_id")
+        and isolation.get("scope_id") == construction_context.get("scope_id")
+        and isolation.get("actor_id") == construction_context.get("actor_id")
+        and isinstance(isolation.get("instance_id"), str)
+        and isolation["instance_id"]
+        and isolation["instance_id"] != construction_isolation.get("instance_id"),
+        "row memory isolation drift",
+    )
+    require(
+        isinstance(public, dict)
+        and set(public) == {"recall_response", "trace"}
+        and isinstance(trace, dict)
+        and isinstance(response, dict)
+        and trace.get("tenant_id") == isolation["tenant_id"]
+        and trace.get("scope_id") == isolation["scope_id"]
+        and trace.get("actor_id") == isolation["actor_id"]
+        and trace.get("mode_requested") == expected_mode,
+        "row memory trace isolation or mode drift",
+    )
+    require(
+        query.get("question_id") == case_id,
+        "row memory question binding drift",
+    )
+    require(
+        isinstance(trace.get("id"), str)
+        and trace["id"]
+        and response.get("trace_id") == trace["id"]
+        and query.get("trace_id") == trace["id"]
+        and query.get("trace_sha256") == canonical_sha256(trace)
+        and query.get("recall_response_sha256") == canonical_sha256(response)
+        and query.get("native_query_hash") == trace.get("query_hash"),
+        "row memory trace and response binding drift",
+    )
+    hash_fields = {
+        "query_sha256", "recall_request_sha256", "recall_response_sha256",
+        "trace_sha256", "context_sha256", "construction_proof_sha256",
+    }
+    require(
+        all(
+            isinstance(query.get(field), str)
+            and re.fullmatch(r"[0-9a-f]{64}", query[field]) is not None
+            for field in hash_fields
+        )
+        and isinstance(query.get("query_image_present"), bool)
+        and isinstance(query.get("recall_duration_ms"), int)
+        and query["recall_duration_ms"] >= 0,
+        "row memory query evidence is malformed",
+    )
+    items = response.get("items")
+    citations = response.get("citations")
+    require(
+        isinstance(items, list)
+        and all(isinstance(item, dict) and isinstance(item.get("body"), str)
+                for item in items)
+        and trace.get("context_items") == items
+        and isinstance(citations, list)
+        and trace.get("citations") == citations,
+        "row memory citation and context binding drift",
+    )
+    expected_citations = [
+        {
+            "unit_id": item.get("unit_id"),
+            "episode_id": item.get("citation_episode_id"),
+            "resource_id": item.get("citation_resource_id"),
+            "derived_from_unit_ids": item.get("derived_from_unit_ids", []),
+        }
+        for item in items
+        if (
+            item.get("citation_episode_id") is not None
+            or item.get("citation_resource_id") is not None
+            or item.get("derived_from_unit_ids", [])
+        )
+    ]
+    memory_context = [
+        {"type": "text", "value": item["body"]} for item in items
+    ]
+    require(
+        citations == expected_citations
+        and query.get("context_sha256") == canonical_sha256(memory_context),
+        "row memory citation and context binding drift",
+    )
+    _validate_no_model_recall_mutation(memory)
+    expected_deep_config = (
+        None if expected_mode == "fast"
+        else root_proof.get("deep_config_hashes", {}).get(arm)
+    )
+    require(
+        trace.get("l4_config_hash") == expected_deep_config,
+        "row memory frozen Deep config hash drift",
+    )
 
 
 def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
@@ -5246,6 +5545,16 @@ def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
         name: candidate["config_sha256"]
         for name, candidate in manifest["protocol"]["deep_candidates"].items()
     }, "frozen Deep runtime config hashes drifted")
+    require(
+        root_proof.get("selected_deep_arm")
+        == manifest["protocol"]["selected_deep_arm"],
+        "frozen selected Deep arm drifted",
+    )
+    require(
+        root_proof.get("memory_adapter_sha256")
+        == sha256_file(ROOT / "benchmarks/longmemeval_v2/memphant_memory.py"),
+        "frozen memory adapter changed after execution freeze",
+    )
     require(
         root_proof.get("binary_profile") == PRODUCTION_BINARY_PROFILE,
         "campaign did not freeze production release binaries",
@@ -5282,6 +5591,12 @@ def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
         and not (observed_directories - expected_row_ids - auxiliary_directories),
         "missing or extra finalized rows",
     )
+    incomplete_root = output / "incomplete-case-banks"
+    require(
+        not incomplete_root.exists()
+        or (incomplete_root.is_dir() and not any(incomplete_root.iterdir())),
+        "P1-T6 aggregate found preserved incomplete case banks",
+    )
     case_bank_seals = _validate_retired_case_banks(output, rows)
     require(len(case_bank_seals) == 12,
             "P1-T6 aggregate requires exactly 12 retired case banks")
@@ -5312,6 +5627,9 @@ def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
         construction_hashes.append(construction_hash)
         construction_durations.append(duration)
         case_bank_manifests[case_id] = bank_manifest
+        _validate_case_construction_attempts(
+            output, case_id, bank_manifest, allow_new=False
+        )
     require(len(set(construction_hashes)) == 12,
             "P1-T6 aggregate requires exactly 12 unique construction proofs")
     reservation_paths = sorted((output / "spend-ledger").glob("*.json"))
@@ -5340,6 +5658,8 @@ def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
             "settled plus outstanding campaign liability exceeds hard ceiling")
     records: dict[tuple[str, str], dict[str, object]] = {}
     clone_database_identities: set[str] = set()
+    adapter_instance_identities: set[str] = set()
+    memory_proof_count = 0
     for row in rows:
         row_dir = output / row["row_id"]
         proof = json.loads((row_dir / "row-proof.json").read_text())
@@ -5393,10 +5713,13 @@ def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
         require(len(memory_paths) <= 1, "row archives multiple memory proofs")
         memory = None
         if memory_paths:
+            memory_proof_count += 1
             memory = json.loads(memory_paths[0].read_text())
             _validate_query_only_memory_proof(
-                memory, case_bank_manifests[row["question_id"]]
+                memory, case_bank_manifests[row["question_id"]],
+                row=row, root_proof=root_proof,
             )
+            adapter_instance_identities.add(memory["isolation"]["instance_id"])
             if proof.get("memory_proof_sha256") is not None:
                 require(
                     sha256_file(memory_paths[0]) == proof["memory_proof_sha256"],
@@ -5463,6 +5786,11 @@ def aggregate_campaign(output: Path, manifest: dict) -> dict[str, object]:
 
     require(len(clone_database_identities) == 24,
             "P1-T6 aggregate requires 24 distinct clone database identities")
+    require(
+        len(adapter_instance_identities) == memory_proof_count,
+        "P1-T6 aggregate requires 24 distinct adapter instance identities "
+        "when all rows archive memory proofs",
+    )
 
     selected_deep_arm = manifest["protocol"]["selected_deep_arm"]
     candidates: dict[str, dict[str, object]] = {}
