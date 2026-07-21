@@ -1,0 +1,12 @@
+{
+  "child_pid": 93937,
+  "coordinator_pid": 26127,
+  "dispatch_started": true,
+  "reservation_sha256": "9de95d11fb020c0173ef63a3d1ecc078569100420ea82a752c11cf1aba2c8964",
+  "row": {
+    "arm": "sonnet",
+    "question_id": "19367bc7",
+    "row_id": "0002-19367bc7-sonnet",
+    "sequence": 2
+  }
+}

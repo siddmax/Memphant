@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "attempt": "run-408363c9",
+  "classification": "operator_stopped_after_fast_canary_to_remove_redundant_construction",
+  "invalidated_at": "2026-07-20",
+  "measured_commit": "408363c9d0a0cf010cb73979c1d3428ecc6eb65e",
+  "preserved_evidence": {
+    "pre_append_inventory_files": 26,
+    "pre_append_inventory_sha256": "0e510c3e3d4b726bf1ceee6e595c83921efdd98bb32af4da4f7ed8f34e55bf65",
+    "pre_execution_proof_sha256": "9582e4ddb763ad4f77e4e6c36c8709d64c36954329611759f404988cde3ea2e4",
+    "frozen_run_order_sha256": "89917f248be4aff9a49fdb2ecbeb9f6d8e1d8efb869c90ebba1075619768a792",
+    "finalized_rows": [
+      "0001-19367bc7-fast"
+    ],
+    "interrupted_staging_rows": [
+      ".staging-0002-19367bc7-sonnet"
+    ],
+    "fast_row_proof_sha256": "4655b5e431c48110acd3a5375c0110046f7ec610cbc70eb5d6c427c1fbe24e14",
+    "fast_memory_proof_sha256": "0d0230830fc83185f197e9d0534df410cb59932918dc6280e2a7eef9618c0a1e",
+    "fast_official_score_sha256": "4ed8c65badd8772d171a7b1b7ff97d7e243c72fcac86a49a731d83c9ee644e62"
+  },
+  "successful_fast_canary": {
+    "question_id": "19367bc7",
+    "trajectory_count": 500,
+    "resource_count": 670,
+    "worker_completed_sources": 670,
+    "worker_failures": 0,
+    "recall_duration_ms": 66250,
+    "degraded": false,
+    "returned_context_items": 1,
+    "exact_qwen_context_tokens": 23564,
+    "memory_context_truncated": false,
+    "official_response": "UNKNOWN",
+    "official_gold": "User",
+    "official_score": 0.0,
+    "claim_boundary": "Valid diagnostic Fast evidence inside a protocol-superseded root; not paired T6 promotion evidence, a product SLO, or a public benchmark claim."
+  },
+  "host_scheduling": {
+    "reversible_process_group_pauses": 6,
+    "pause_stage": "local construction before recall or provider dispatch",
+    "latency_policy": "The official wrapper duration includes cold construction and deliberate host-yield pauses. The adapter recall_duration_ms remains the query-path measurement."
+  },
+  "stop_reason": {
+    "stage": "sonnet_memory_construction_before_recall",
+    "completed_sources_at_pause": 378,
+    "queued_sources_at_pause": 290,
+    "running_sources_at_pause": 2,
+    "reason": "The frozen root rebuilt the same 670-resource case independently for Fast plus three Deep candidates. The governing plan requires one exact Fast/Deep treatment pair per case, so continuing the 48-row model-selection screen would add latency and cost without being required for the T6 feasibility decision."
+  },
+  "external_dispatch_audit": {
+    "reader_dispatches": 1,
+    "reader_generation_id": "gen-1784608548-hJ4JErHX7VjgpeNGejpC",
+    "reader_provider": "DeepInfra",
+    "reader_route_sha256": "6a651cc896d590ec62f4f4a5554df8b100e03566781f63f77349265a5f9cdaa7",
+    "reader_settlement_sha256": "26ae041298f1ad3d0c21d21d8f60db6eb6be4b9827c9bfd5f5cf661dec1c6f1d",
+    "reader_settled_micros": 3018,
+    "reader_unsettled_upper_bound_micros": 0,
+    "judge_dispatches": 0,
+    "deep_dispatches": 0,
+    "interrupted_sonnet_external_dispatches": 0,
+    "interrupted_sonnet_reservation_micros": 387400,
+    "conclusion": "The Sonnet reservation is an internal pre-dispatch ceiling, not provider liability. No Deep generation was accepted or billed."
+  },
+  "cleanup_audit": {
+    "campaign_processes_remaining": 0,
+    "scratch_databases_remaining": 0
+  },
+  "retry_decision": {
+    "same_output_root_replay_authorized": false,
+    "fresh_output_root_authorized": false,
+    "authorization_requirements": [
+      "freeze a new single-candidate paired manifest before observing treatment output",
+      "construct each case once and clone the immutable pre-query database into distinct Fast and Deep scratch databases",
+      "prove identical pre-query corpus and policy state across each pair",
+      "preserve this root as diagnostic-only evidence"
+    ]
+  }
+}
