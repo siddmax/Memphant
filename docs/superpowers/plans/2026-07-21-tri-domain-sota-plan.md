@@ -41,6 +41,19 @@ except where §6 amends the evidence ceremony). Owner priorities:
    filesystem paradigm. Our Rust/Postgres/verbs substrate is ahead on
    governance and behind on distribution. The distribution wedge (§4.3) is no
    longer optional polish.
+6. **Three foundations are unproven and must not be treated as built**
+   (independent review, 2026-07-21, grounded in the T6 artifacts + STATUS):
+   (a) **Deep has never produced one valid live pair** — every attempt aborted,
+   the latest on pair 1 (`invalid_output`, 0 tool iterations). The A0
+   mock-provider test passes while the real Azure provider still fails, so a
+   mock test is NOT the Deep gate. (b) **The run-owned-Postgres controller
+   does not exist** — §6.3 describes it as work to do, yet every paid lane
+   depends on it; it is the true Week-0 critical-path item, not a footnote.
+   (c) **The docs lever is latency-dead against a 4× deficit** — MemPhant
+   currently loses docs retrieval 0.050 vs Syndai 0.217 (CI excludes zero) and
+   the +0.158 rerank is retired at 13 s/query; rank-compression is hoped-for,
+   unbuilt. These reorder the schedule (§8): **free gates and the infra
+   controller come first; no paid rung opens until they are green.**
 
 ## 2. Answers to the open questions (authoritative)
 
@@ -124,7 +137,26 @@ authority.
   Deep pass-through (the market's honest model per web-research); no
   graph-tier tax because there is no graph.
 
-## 3. Phase A — Prove T6 (this week; free → $10)
+## Phase 0 — The real critical path (Week 0; free; gates everything paid)
+
+Independent review established that every paid lane secretly depends on these,
+and none exist today. Nothing paid opens until all three are green.
+
+- **P0.1 — Run-owned Postgres controller** (§6.3 made real). The campaign
+  controller supervises its own dedicated container/`pg_ctl` lifecycle and
+  never shares the desktop Docker lifecycle that killed run-65981e4f. This is
+  the fix for the failure mode that has recurred across the whole campaign.
+- **P0.2 — Code-enforced PG-liveness preflight** (Amendment 14 prose → code):
+  a `select 1` against the base DB before any billable row, so a vanished
+  container fails at row 0, not mid-root. (Already drafted; lands here.)
+- **P0.3 — Live-provider Deep smoke (1 question, ≤$0.30).** The A0 mock test
+  proves the *pipeline* changes the answer set; it does NOT prove the real
+  Azure provider emits valid tool calls — the exact thing that aborted every
+  prior run. One live question through the real provider must return a
+  parseable, settled Deep result before A2 is authorized. If it fails, Deep is
+  a provider-parser bug to fix, and the paid A/D lanes stay closed.
+
+## 3. Phase A — Prove T6 (after Phase 0; free → $10)
 
 Ascending evidence rungs; each is a kill-switch for the next. Sources: tests
 team (rungs), devil's advocate (free-first discipline), codebase team (wiring).
@@ -135,21 +167,32 @@ team (rungs), devil's advocate (free-first discipline), codebase team (wiring).
   proves Deep changes the answer set** — this is the first artifact that does.
   Also: encode the PG-liveness preflight in the runner (Amendment 14 made it
   prose; make it code) and add a Deep leg to `e2e_probe.sh`.
-- **A1 (free): Fast-miss trace classification.** Classify the ~74 Fast-miss
-  dev questions: gold-present-but-unpacked vs gold-absent-from-pool. This
-  decides whether Deep or packing/ordering is the binding lever — the ledgers
-  suggest utilization (oracle 0.916 vs 0.584) and Deep only helps the
-  gold-absent class. **If ≥70 % is present-but-unpacked, Phase A pivots to
-  rung-7 packing and Deep drops to diagnostic status.**
+- **A1 (free): Fast-miss trace classification — VERDICT BINDS THE WHOLE
+  BENCHMARK LANE, not just Phase A.** Classify the ~74 Fast-miss dev questions:
+  gold-present-but-unpacked vs gold-absent-from-pool. STATUS's own oracle-gap
+  data (baseline QA 0.433, oracle ceiling only 0.584 — a +0.331 *unclosed*
+  utilization gap) predicts most misses are present-but-unpacked, which Deep
+  (a recall-depth lever) cannot fix. **If ≥70 % is present-but-unpacked: Deep
+  drops to diagnostic status, the packing/ordering lever (rung 7) becomes the
+  center of gravity, and D1/D3 (LME-V2, full-500) are DEFERRED — not run in
+  parallel — because they chase recall depth when the bottleneck is
+  utilization.** This is the cheapest single de-risk in the plan; it can
+  invalidate half the benchmark roadmap for $0.
 - **A2 (~$1–2.5 realistic, ≤$5.70 cap): the authorized n=12** on
   run-d2f4fcb3, babysat, on a run-owned Postgres (dedicated container, not
   the shared Docker Desktop lifecycle that killed run-65981e4f). Preregistered
   pass predicates already frozen (mean delta > 0, wins > losses, p50 ≤ 45 s,
   mean cost ≤ $0.10).
-- **A3 (≤$9): bench-lme Deep wiring** — the ~10-line change installing the
-  deep provider in `bench_lme.rs` (mirror the cross-rerank wiring), then n=30
-  paired fast-vs-deep on LME-S targeted at Fast-miss questions. Fastest
-  paired-CI diagnostic per dollar.
+- **A3 (≤$9): bench-lme Deep wiring.** CORRECTION (review #3): this is NOT a
+  ~10-line change. `bench_lme.rs` maps `RecallMode::Deep` to a label string
+  only (line ~1089); there is no deep-provider install, no per-question async
+  billable dispatch, no settlement/cancellation plumbing in the bench path.
+  Cross-rerank is synchronous and in-process; Deep is async, billable,
+  cancellable, externally settled. First do a **free zero-call mock-provider
+  spike** of the dispatch+settlement into bench_lme behind a flag; only if that
+  drops in cleanly commit the paid n=30 paired fast-vs-deep on LME-S targeted
+  at Fast-miss questions. If the settlement plumbing resists, rescope — do not
+  let A3 silently consume the cutover's week.
 - **A4 (only after A2+A3 pass): preregister n≈100 — not 300** (most of the CI
   width at one-third of the ~200 CPU-hour construction bill); de-pin the
   controller's 12/24 constants; parallel construction across scratch DBs.
@@ -163,9 +206,13 @@ team verdict). Each item carries an n=12-style falsification gate.
    external evidence lines). Reflect worker maintains a versioned,
    date-annotated observation generation per scope; served tri-surface: chat
    prefix + Deep workspace file 0 + .md projection header. Unbound from T6
-   (devil's advocate is right that the everyday-UX lever must not queue behind
-   the flakiest gate). Gate: n=12 from the displacement/reader failure
-   classes; ≥+2 net flips.
+   (the everyday-UX lever must not queue behind the flakiest gate). **SCOPE
+   CORRECTION (review): this is NET-NEW feature work, not "activation."**
+   `scope_block` exists only as a table name in the Postgres schema — no verb,
+   no read path, no write path. The 1-week estimate must budget for building
+   the verb + recall injection + reflect-worker generation swap, not just
+   flipping a flag. Gate: n=12 from the displacement/reader failure classes;
+   ≥+2 net flips.
 2. **B2 — File plane as projection** (experimental P4): extend the dormant
    `compile` CLI; unit-id+hash footers; hash-detected human edits re-ingested
    via admission control. Gate: 4-edit-class round-trip + compile∘sync∘compile
@@ -199,9 +246,19 @@ team verdict). Each item carries an n=12-style falsification gate.
 
 Source: Syndai team. **Production corpora are near-empty** (knowledge 0/0,
 files 0, facts 2, episodic 252; only `coding_execution_attempt_events` is real
-at 64k rows/72 MB). The cutover is pipeline-vs-pipeline on goldens, not a data
-migration — and the free re-embed window (OpenAI-1536 → local modernbert) is
-open only while tables are empty. **Slices 0, 1, 3 do not wait for Phase A.**
+at 64k rows/72 MB). **CORRECTION (review #4): "empty" means UNMEASURABLE, not
+"easy."** Syndai spec 07 §158 is explicit — the adapter risk is event-ingest
+throughput (10⁴–10⁵ events), not store size, and "a trace comparison against
+an empty table proves nothing." A cutover can be contract-green and
+recall-blind at the same time (the exact silent-fallback failure C0 fixes). So
+the acceptance bar must be set BEFORE cutting: **C3 (64k coding events, real
+volume) runs BEFORE C1**, so a volume-matched adversarial golden exists to
+measure recall parity against. Where volume can't be bootstrapped, state
+honestly that the slice is *correctness-only* and defer recall-quality to when
+volume exists — never let "identical Conversations tab" stand in for retrieval
+parity. The free re-embed window (OpenAI-1536 → local modernbert) is open only
+while tables are empty. **Slices 0/3 do not wait for Phase A; C1 waits on C3's
+golden.**
 
 - **C0 — Rails**: rebuild the Syndai adapter against the strict landed
   contract (it currently sends `tenant_id`/`allowed_scope_ids` → 422 → silent
@@ -222,10 +279,16 @@ open only while tables are empty. **Slices 0, 1, 3 do not wait for Phase A.**
   head-to-head (~$1–5) before any reader spend, then the full pre-registered
   bar: **k=10 comparable-volume CI-clean win inside the 1.5 s ceiling** (the
   +0.142 flip stays asterisked at 14× volume and is not cutover evidence).
-  Rank-compressed rerank (§2.Q4) is the named lever. Also implement the four
-  spec-28 fixture families as executable `syndai-trace-compare` fixtures
-  (free, 1–2 days) — they are currently spec prose, and they are the actual
-  cutover-safety net.
+  Rank-compressed rerank (§2.Q4) is the named lever — **but review #8 flags it
+  as likely dead-on-arrival: MemPhant currently loses docs retrieval 0.050 vs
+  Syndai 0.217 (CI excludes zero) and the winning rerank is latency-retired at
+  13 s.** Run the FREE kill-gate first: (a) count retired-run flips reproducible
+  in top-16 (<60 % → don't build), AND (b) does rank-compressed rerank close
+  ≥half the 0.050→0.217 gap on the pinned 4,870-section corpus? If either
+  fails, **drop C2 from the roadmap now** rather than gating it to Week 3+ — the
+  honest base rate is "won't win this quarter." Also implement the four spec-28
+  fixture families as executable `syndai-trace-compare` fixtures (free, 1–2
+  days) — currently spec prose, and the actual cutover-safety net.
 - **Cost wins on cutover**: Jina API + OpenAI embedding egress eliminated
   (privacy win doubles as cost win); local embeddings free.
 
@@ -239,8 +302,15 @@ fabricate.
 
 **Changed**:
 1. Spend safety moves to **provider-side spend-capped keys** per campaign
-   (hard guarantee) + the in-run $0.30/recall cap. Micro-dollar liability
-   amendments are retired.
+   (hard guarantee) + the in-run $0.30/recall cap. **The AMENDMENT CEREMONY is
+   retired; the SETTLEMENT ACCOUNTING is kept** (review #7). Spend-capped keys
+   cap *total* spend but do not reconcile *per-run settlement* — and per-run
+   settlement is exactly what has been failing (unsettled upper bound ran ~12×
+   settled because runs abort mid-flight leaving reservations open). Keep the
+   settle-on-abort receipt the invalidation proofs already compute
+   (`deep_settled_micros`); retire only the per-failure amendment paperwork.
+   An SOTA evidence trail needs "this aborted pair cost $Y, here's the receipt,"
+   which a spend cap alone does not give.
 2. **Infra faults are not evidence events.** Zero-billable-call infrastructure
    failures (vanished container, port squat) get code-enforced preflights and
    a retry without an amendment. Amendments are for *contract* changes only.
@@ -262,7 +332,11 @@ fabricate.
 2. **D2 — ForgetEval** (1,385 cases, MIT): mutation-time correct/forget/mark
    is *our architecture* — inscribe-time-only systems score 0 % on intent-aware
    deletion; mutation-time hooks reach 78–85 %. Second empty instrument;
-   uniquely aligned; nobody else has the verbs.
+   uniquely aligned; nobody else has the verbs. **PRECONDITION (review): the
+   verbs exist; mutation *correctness* does not yet** — STATUS Task-4 is open
+   with a documented history of stateless-identity guesses causing zero-match
+   invalidations while stale facts stayed active. Verify mutation correctness
+   on the existing Memora trajectories BEFORE claiming a ForgetEval slot.
 3. **D3 — LME-S full-500**: the internal "SOTA-language" unlock. The whole
    chain exists (fetch → bench-lme → reader → official scorer); pre-commit its
    config; run when A-ladder and reader budget line up. Add the same-harness
@@ -280,24 +354,40 @@ fabricate.
 
 ## 8. Ordering summary & kill-switches
 
+**Schedule REORDERED (review #6): the cutover is the spine, so it goes first;
+paid benchmark work fills idle capacity and never precedes it.** The prior
+draft front-loaded a Deep-reliability fight (14 prior failures) for an empty
+leaderboard while pushing first user value to Week 2 — incoherent against
+"best UX above all." Corrected:
+
 ```
-Week 1:  A0+A1 (free) ─┬─ A2 n=12 ($2.5) ─ A3 n=30 deep diag ($9)
-                       ├─ B1 observation block (n=12 gate)
-                       ├─ B5 deletions + B6 CI legs
-                       └─ C0 rails + C2-prep corpus re-pin (free)
-Week 2:  C1 episodic slice ── C3 coding backfill
-         B2 file-plane projection ── B3 memory-tool handler
-         D1 LME-V2 50Q pilot (kill-switch) ── D2 ForgetEval adapter
-Week 3+: C2 docs slice iff k=10 bar won (rank-compressed rerank lever)
-         A4 n≈100 iff A2+A3 passed ── D3 full-500 + Evalrank re-runs
-         D4 SWE-CB reference harness (post-C3)
+Week 0:  P0.1 run-owned Postgres controller ─ P0.2 liveness preflight ─
+         P0.3 live-provider Deep smoke   (ALL free; gate everything paid)
+         A0 buried-evidence test (free) ─ A1 Fast-miss classification (free)
+            ↑ A1 verdict decides whether the paid benchmark lane opens AT ALL
+
+Week 1:  C0 rails ─ C3 coding backfill+golden ─ C1 episodic slice   ← THE SPINE
+         B5 deletions ─ B6 CI legs (free, unblock CI honesty)
+         C2-prep corpus re-pin (free) ─ C2 free rerank pre-check (can kill C2)
+         [only if P0.3 + A1 green:] A2 n=12 ($2.5)
+
+Week 2:  B1 observation block (net-new; n=12 gate) ─ B2 file-plane projection
+         B3 memory-tool handler (distribution wedge — OpenViking pressure)
+         [only if A2 green:] A3 mock spike → paid n=30 ── A4 n≈100
+         [only if A1 said depth-bound:] D1 LME-V2 50Q pilot ─ D2 ForgetEval
+            (D2 needs mutation-correctness verified first)
+
+Week 3+: C2 docs slice IFF free pre-check passed AND k=10 bar won
+         D3 full-500 + Evalrank re-runs ─ D4 SWE-CB reference (post-C3)
 ```
 
-Kill-switches: A1 ≥70 % present-but-unpacked → pivot A to packing; D1 pilot
-below floors → withdraw submission, keep dev evidence; C2 bar unmet after
-rank-compression → docs cutover deferred honestly, k=50 offered to Syndai as
-an async-surface config only; B-gates failing → delete the lever, keep the
-negative artifact.
+Kill-switches (cheap, fire early): **A1 ≥70 % present-but-unpacked → Deep goes
+diagnostic, D1/D3 DEFERRED, packing becomes the center of gravity;** P0.3 live
+smoke fails → paid lanes stay closed, fix the provider parser first; **C2 free
+pre-check <60 % flips reproducible in top-16 OR rerank doesn't close half the
+0.050→0.217 deficit → drop C2 from the roadmap now, don't gate it;** D1 pilot
+below floors → withdraw submission, keep dev evidence; B-gates failing → delete
+the lever, keep the negative artifact.
 
 ## 9. What we are explicitly NOT doing
 
@@ -307,3 +397,27 @@ English-hardcoded lexical machinery; unverifiable README benchmark claims;
 Supabase Storage before its trigger; n=300 before n≈100; BEAM 1M (operator
 surface failed verification); building any new memory architecture — every
 lever in this plan activates something that already exists.
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | issues_folded | 8 findings, 3 critical gaps, all folded into the plan |
+| Outside Voice | Claude subagent | Independent 2nd opinion | 1 | issues_found | Read the T6 artifacts; found Deep-never-valid, schedule-vs-verdict incoherence, docs-lever-dead |
+
+**OUTSIDE VOICE (Claude subagent):** independent review grounded in STATUS.md, the T6 invalidation proofs, and source. Eight findings; the load-bearing ones (all folded):
+1. Deep has produced zero valid live pairs — mock A0 passes while the real provider aborts → added **Phase 0 P0.3 live-provider Deep smoke** as the gate before any paid rung.
+2. 72.5/48.5 are third-party in-paper baselines, not MemPhant-transferable; 0.584 oracle-utilization ceiling is a packing problem Deep can't fix → **A1 verdict now binds the whole benchmark lane** (can defer D1/D3 for $0).
+3. A3 bench-lme Deep wiring is not ~10 lines (async billable settlement) → rescoped to a free mock spike first.
+4. "Empty corpora = easy" is really "unmeasurable" → **C3 (real volume) now precedes C1**; correctness-only cutover stated honestly.
+5. Week-1 lanes weren't independent — all paid work depends on a run-owned Postgres controller that doesn't exist → **promoted to Phase 0 P0.1**.
+6. Schedule contradicted the verdict (benchmarks first, cutover second) → **reordered: cutover is Week 1, paid benchmarks fill idle capacity**.
+7. Retiring liability ceremony also retired settlement accounting → keep settle-on-abort receipts, retire only the amendment paperwork.
+8. Docs lever (C2) is latency-dead against a 4× deficit → **free kill-gate added; drop C2 now if it fails** rather than gating to Week 3+.
+Plus: B1 observation block is net-new (scope_block is a bare table name), not "activation"; D2 ForgetEval needs mutation-correctness verified first.
+
+**CROSS-MODEL TENSION:** The outside voice argues the schedule should put the cutover strictly first and treat benchmarks as pure idle-fill; the original synthesis treated them as co-equal parallel tracks. Resolved toward the outside voice (cutover is the spine per owner's "best UX above all"), while keeping the two *free* benchmark gates (A0/A1) in Week 0 because they can invalidate the paid roadmap at zero cost — that is not "benchmark-first," it is "cheapest-kill-first."
+
+**VERDICT:** ENG review complete, all findings folded. Plan is internally consistent: free gates + infra controller first, cutover as the spine, paid benchmark work gated behind cheap kill-switches. Ready to implement Phase 0.
+
+NO UNRESOLVED DECISIONS
