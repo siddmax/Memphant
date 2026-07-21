@@ -1981,26 +1981,42 @@ def _validate_no_model_no_secrets(
     inventory: dict[str, str],
     *,
     additional_text: dict[str, bytes] | None = None,
-) -> int:
+) -> dict[str, object]:
     credential = re.compile(
         rb"(?i)(?:postgres(?:ql)?://[^\s\"']*:[^\s\"'@]+@|"
-        rb"(?:openai|openrouter)_api_key[\"'\s:=]+[A-Za-z0-9_-]{8,}|"
-        rb"sk-[A-Za-z0-9_-]{16,})"
+        rb"(?:[a-z][a-z0-9_]{0,63}_)?api_key"
+        rb"[\"'\s:=]+[A-Za-z0-9_.-]{8,}|"
+        rb"authorization[\"'\s:=]+bearer\s+[A-Za-z0-9._-]{8,}|"
+        rb"sk-(?:ant-|proj-)?[A-Za-z0-9_-]{16,})"
     )
-    scanned = 0
-    for relative in inventory:
+    text_scanned = 0
+    binary_archives = 0
+    for relative, expected_sha256 in inventory.items():
         path = output / relative
         if path.suffix == ".dump":
+            with path.open("rb") as stream:
+                magic = stream.read(5)
+            require(magic == b"PGDMP",
+                    f"hash repair dump is not a custom-format archive: {relative}")
+            require(sha256_file(path) == expected_sha256,
+                    f"hash repair dump hash drift: {relative}")
+            binary_archives += 1
             continue
         body = path.read_bytes()
         require(credential.search(body) is None,
                 f"hash repair secret scan failed: {relative}")
-        scanned += 1
+        text_scanned += 1
     for label, body in (additional_text or {}).items():
         require(credential.search(body) is None,
                 f"hash repair secret scan failed: {label}")
-        scanned += 1
-    return scanned
+        text_scanned += 1
+    return {
+        "text_artifacts_scanned": text_scanned,
+        "binary_archives_hash_bound": binary_archives,
+        "binary_archive_policy": (
+            "pg_dump_custom_format_hash_bound_not_text_scanned"
+        ),
+    }
 
 
 def _validate_completed_no_model_semantics(
@@ -2087,15 +2103,83 @@ def _validate_completed_no_model_semantics(
         "completed no-model cleanup, identity, or dispatch drift",
     )
     arms = proof.get("arms")
-    require(isinstance(arms, list), "completed no-model arms are missing")
+    require(
+        isinstance(arms, list)
+        and len(arms) == 2
+        and all(isinstance(arm, dict) for arm in arms)
+        and {arm.get("arm") for arm in arms} == {"fast", "sonnet"},
+        "completed no-model arms are missing",
+    )
+    construction_isolation = construction.get("isolation")
+    construction_context = (
+        construction_isolation.get("context")
+        if isinstance(construction_isolation, dict) else None
+    )
+    require(
+        isinstance(construction_isolation, dict)
+        and isinstance(construction_context, dict),
+        "completed no-model construction isolation is missing",
+    )
     clone_names = set()
+    instance_ids = set()
+    shared_contexts = set()
+    shared_query_evidence: dict[str, set[str]] = {
+        field: set() for field in (
+            "query_sha256", "recall_request_sha256", "context_sha256",
+        )
+    }
+    response_hashes = set()
     for arm in arms:
         name = arm["arm"]
         retained = NO_MODEL_HASH_REPAIR_TARGET["retained_artifacts"][name]
         memory = json.loads((output / retained["path"]).read_text())
-        _validate_query_only_memory_proof(memory, manifest)
+        _validate_query_only_memory_proof(
+            memory, manifest, require_no_model_fast=True
+        )
         _validate_no_model_recall_mutation(memory)
         query = memory["query"]
+        isolation = memory.get("isolation")
+        public = memory.get("public")
+        trace = public.get("trace") if isinstance(public, dict) else None
+        require(
+            isinstance(isolation, dict)
+            and set(isolation) == {
+                "tenant_id", "scope_id", "actor_id", "instance_id",
+            }
+            and all(
+                isinstance(isolation.get(field), str) and isolation[field]
+                for field in isolation
+            )
+            and isinstance(trace, dict)
+            and trace.get("tenant_id") == isolation["tenant_id"]
+            and trace.get("scope_id") == isolation["scope_id"]
+            and trace.get("actor_id") == isolation["actor_id"]
+            and isolation["tenant_id"] == construction_isolation.get("tenant_id")
+            and isolation["scope_id"] == construction_context.get("scope_id")
+            and isolation["actor_id"] == construction_context.get("actor_id")
+            and isolation["instance_id"]
+            != construction_isolation.get("instance_id"),
+            f"completed no-model {name} isolation or construction context drift",
+        )
+        instance_ids.add(isolation["instance_id"])
+        shared_contexts.add((
+            isolation["tenant_id"], isolation["scope_id"], isolation["actor_id"],
+        ))
+        for field, values in shared_query_evidence.items():
+            value = query.get(field)
+            require(
+                isinstance(value, str)
+                and re.fullmatch(r"[0-9a-f]{64}", value) is not None,
+                f"completed no-model {name} query evidence hash is malformed",
+            )
+            values.add(value)
+        response_hash = query.get("recall_response_sha256")
+        require(
+            isinstance(response_hash, str)
+            and re.fullmatch(r"[0-9a-f]{64}", response_hash) is not None,
+            f"completed no-model {name} response hash is malformed",
+        )
+        response_hashes.add(response_hash)
         clone = arm.get("clone_database")
         require(
             arm.get("query_only") is True
@@ -2121,6 +2205,18 @@ def _validate_completed_no_model_semantics(
         clone_names.add(clone)
     require(len(clone_names) == 2,
             "completed no-model clone identities are not distinct")
+    require(
+        len(shared_contexts) == 1,
+        "completed no-model arm isolation or construction context drift",
+    )
+    require(len(instance_ids) == 2,
+            "completed no-model instance identities are not distinct")
+    require(
+        all(len(values) == 1 for values in shared_query_evidence.values()),
+        "completed no-model cross-arm query evidence drift",
+    )
+    require(len(response_hashes) == 2,
+            "completed no-model response identities are not distinct")
     scanned = _validate_no_model_no_secrets(
         output,
         proof["artifact_hashes"],
@@ -2138,7 +2234,8 @@ def _validate_completed_no_model_semantics(
         "query_only_fast_arms": ["fast", "sonnet"],
         "cleanup_verified": True,
         "external_dispatches": 0,
-        "secret_scanned_text_artifacts": scanned,
+        "secret_scan": scanned,
+        "bank_excluded_tables": list(BANK_EXCLUDED_TABLES),
         "recovery_lineage_verified": True,
     }
 
@@ -5005,16 +5102,50 @@ def _validate_retired_case_banks(
 
 
 def _validate_query_only_memory_proof(
-    memory: dict[str, object], bank_manifest: dict[str, object]
+    memory: dict[str, object], bank_manifest: dict[str, object],
+    *, require_no_model_fast: bool = False,
 ) -> None:
     query = memory.get("query")
     pairing = memory.get("pairing")
+    contract = memory.get("contract")
+    public = memory.get("public")
+    trace = public.get("trace") if isinstance(public, dict) else None
+    response = public.get("recall_response") if isinstance(public, dict) else None
     require(
         isinstance(query, dict) and isinstance(pairing, dict)
         and query.get("query_only") is True
         and pairing.get("query_only") is True,
         "archived memory proof is not query-only",
     )
+    if require_no_model_fast:
+        require(
+            isinstance(contract, dict)
+            and contract.get("mode") == "fast"
+            and contract.get("gold_fields_consumed") == [],
+            "archived memory fast-only contract drift",
+        )
+        require(
+            isinstance(public, dict)
+            and set(public) == {"trace", "recall_response"}
+            and isinstance(trace, dict)
+            and trace.get("mode_requested") == "fast"
+            and trace.get("mode_executed") == "fast"
+            and trace.get("cost_micros") == 0
+            and "deep" not in trace
+            and trace.get("l4_sandbox_id") is None
+            and trace.get("l4_gathered_evidence_ids") == []
+            and trace.get("degradation") is None
+            and trace.get("escalation_reason") == "none",
+            "archived memory fast-only trace contract drift",
+        )
+        require(
+            isinstance(response, dict)
+            and response.get("degraded") is False
+            and "deep" not in response
+            and isinstance(trace.get("id"), str)
+            and response.get("trace_id") == trace.get("id"),
+            "archived memory fast-only response contract drift",
+        )
 
     def validate_evidence_paths(value: object, path: tuple[str, ...] = ()) -> None:
         if isinstance(value, dict):

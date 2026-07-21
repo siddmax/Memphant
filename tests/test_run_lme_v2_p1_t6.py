@@ -596,30 +596,123 @@ def test_no_model_clone_hashes_retained_proof_after_phase_redaction(
     assert retained.read_text().count("[REDACTED]") == 3
 
 
+def _no_model_memory_proof(
+    campaign, *, arm: str, construction: dict, construction_sha256: str,
+    binaries: dict | None = None,
+) -> dict:
+    instance_id = {"fast": "1" * 32, "sonnet": "2" * 32}[arm]
+    trace_id = {"fast": "trace-fast", "sonnet": "trace-sonnet"}[arm]
+    isolation = {
+        "tenant_id": "tenant-shared",
+        "scope_id": "scope-shared",
+        "actor_id": "actor-shared",
+        "instance_id": instance_id,
+    }
+    return {
+        "contract": {
+            "mode": "fast",
+            "gold_fields_consumed": [],
+            "binaries": binaries or {
+                name: {"path": f"/release/[REDACTED]-{name}"}
+                for name in ("cli", "server", "worker")
+            },
+        },
+        "isolation": isolation,
+        "pairing": {
+            "trajectory_count": 500,
+            "resource_count": 670,
+            "worker": construction["pairing"]["worker"],
+            "construction_proof_sha256": construction_sha256,
+            "query_only": True,
+        },
+        "public": {
+            "trace": {
+                "id": trace_id,
+                "tenant_id": isolation["tenant_id"],
+                "scope_id": isolation["scope_id"],
+                "actor_id": isolation["actor_id"],
+                "mode_requested": "fast",
+                "mode_executed": "fast",
+                "cost_micros": 0,
+                "l4_sandbox_id": None,
+                "l4_gathered_evidence_ids": [],
+                "degradation": None,
+                "escalation_reason": "none",
+            },
+            "recall_response": {"trace_id": trace_id, "degraded": False},
+        },
+        "query": {
+            "question_id": f"no-model-19367bc7-{arm}",
+            "query_sha256": "5" * 64,
+            "recall_request_sha256": "6" * 64,
+            "recall_response_sha256": {"fast": "7" * 64, "sonnet": "8" * 64}[arm],
+            "context_sha256": "9" * 64,
+            "recall_duration_ms": 1,
+            "construction_proof_sha256": construction_sha256,
+            "query_only": True,
+        },
+        "recall_mutation_proof": {
+            "before": {
+                "resource": {"rows": 670, "content_md5": "a"},
+                "retrieval_trace": {"rows": 0, "content_md5": "b"},
+            },
+            "after": {
+                "resource": {"rows": 670, "content_md5": "a"},
+                "retrieval_trace": {"rows": 1, "content_md5": "c"},
+            },
+            "changed_tables": ["retrieval_trace"],
+            "allowed_audit_rows_added": 1,
+            "corpus_policy_job_tables_unchanged": True,
+        },
+    }
+
+
 def _write_no_model_hash_repair_fixture(campaign, tmp_path: Path, monkeypatch):
     root = tmp_path / "p1-t6"
     output = root / "exact-hash-repair-target"
     output.mkdir(parents=True)
-    campaign.atomic_write_json(output / "RECOVERY-INCIDENT.json", {"incident": True})
-    campaign.atomic_write_json(
-        output / "FIRST-RECOVERY-FAILURE.json", {"failure": True}
-    )
+    worker = {
+        "completed_sources": 670,
+        "stdout_sha256": "1" * 64,
+        "stderr_sha256": "2" * 64,
+    }
+    retains = [
+        {"trajectory_id": f"trajectory-{index:03d}"} for index in range(500)
+    ]
     construction_core = {
         "schema_version": 1,
-        "pairing": {"trajectory_count": 500, "resource_count": 670},
+        "pairing": {
+            "trajectory_count": 500,
+            "resource_count": 670,
+            "worker": worker,
+            "retains": retains,
+        },
+        "isolation": {
+            "tenant_id": "tenant-shared",
+            "instance_id": "construction-instance",
+            "context": {
+                "scope_id": "scope-shared", "actor_id": "actor-shared",
+            },
+        },
     }
     construction = {
         **construction_core,
         "construction_proof_sha256": campaign.canonical_sha256(construction_core),
     }
-    contract = {"case_id": "19367bc7"}
+    contract = {
+        "fixture": "exact", "case_id": "19367bc7", "input_sha256": "3" * 64,
+    }
     logical_core = {"tables": {}, "sequences": {}}
     logical = {**logical_core, "sha256": campaign.canonical_sha256(logical_core)}
-    archive_body = b"sealed-bank"
+    archive_body = b"PGDMP\x01\x10synthetic-custom-format-bank"
     archive_sha = hashlib.sha256(archive_body).hexdigest()
     bank = output / "case-bank"
     bank.mkdir()
     (bank / f"{archive_sha}.dump").write_bytes(archive_body)
+    pg_dump = {
+        "binary": "/usr/local/bin/pg_dump", "major": 17, "server_major": 17,
+    }
+    schema = {"schema": "memphant", "sha256": "4" * 64}
     manifest = {
         "format_version": campaign.BANK_FORMAT_VERSION,
         "construction": construction,
@@ -628,7 +721,8 @@ def _write_no_model_hash_repair_fixture(campaign, tmp_path: Path, monkeypatch):
         "case_contract": contract,
         "case_contract_sha256": campaign.canonical_sha256(contract),
         "logical_identity": logical,
-        "postgres": {"major": 17, "server_major": 17},
+        "database_schema_identity": schema,
+        "postgres": pg_dump,
         "postgres_major": 17,
         "archive": f"{archive_sha}.dump",
         "archive_sha256": archive_sha,
@@ -636,6 +730,110 @@ def _write_no_model_hash_repair_fixture(campaign, tmp_path: Path, monkeypatch):
     }
     campaign.atomic_write_json(bank / "manifest.json", manifest)
     campaign.atomic_write_json(output / "construction-proof.json", construction)
+    pre_recovery_inventory = campaign.artifact_hashes(output)
+
+    def committed_controller_sha256(commit: str) -> str:
+        completed = subprocess.run(
+            ["git", "show", f"{commit}:scripts/run_lme_v2_p1_t6.py"],
+            cwd=ROOT, capture_output=True, check=True,
+        )
+        return hashlib.sha256(completed.stdout).hexdigest()
+
+    incident_trace = "synthetic captured pre-clone quiescence failure"
+    incident = {
+        "classification": "p1_t6_exact_pre_clone_quiescence_failure",
+        "case_id": "19367bc7",
+        "external_dispatches": 0,
+        "measured_commit": "29c9eb53556139bdb1d651f3c79716586ab04cfd",
+        "controller_sha256": committed_controller_sha256(
+            "29c9eb53556139bdb1d651f3c79716586ab04cfd"
+        ),
+        "campaign_manifest_sha256": campaign.sha256_file(campaign.CAMPAIGN_MANIFEST),
+        "failure_evidence": {
+            "durably_captured_exception": True,
+            "durably_captured_restore_return": True,
+            "sanitized_trace_excerpt": incident_trace,
+            "sanitized_trace_excerpt_sha256": hashlib.sha256(
+                incident_trace.encode()
+            ).hexdigest(),
+        },
+        "bank": {
+            "archive_sha256": archive_sha,
+            "manifest_sha256": campaign.sha256_file(bank / "manifest.json"),
+            "construction_proof_file_sha256": campaign.sha256_file(
+                output / "construction-proof.json"
+            ),
+            "construction_proof_sha256": construction["construction_proof_sha256"],
+            "logical_identity_sha256": logical["sha256"],
+            "case_contract_sha256": manifest["case_contract_sha256"],
+        },
+        "pre_recovery_inventory": pre_recovery_inventory,
+        "initial_attempt": {
+            "constructions": 1, "dumps": 1, "resets": 1, "restores": 1,
+            "clones": 0, "query_only_recalls": 0, "external_dispatches": 0,
+            "outcome": "pre_clone_quiescence_failure",
+        },
+        "diagnostic_archive_only_pg17_replay": {
+            "constructions": 0, "dumps": 0, "resets": 0, "restores": 1,
+            "clones": 0, "query_only_recalls": 0, "persistent_source_sessions": 0,
+            "external_dispatches": 0,
+            "outcome": "archive_restored_and_source_sessions_queried",
+            "authorization_evidence": False,
+        },
+        "recovery": {
+            "same_sealed_bank_required": True,
+            "reconstruction_allowed": False,
+            "redump_allowed": False,
+            "executed": False,
+        },
+    }
+    campaign.atomic_write_json(output / "RECOVERY-INCIDENT.json", incident)
+    incident_sha = campaign.sha256_file(output / "RECOVERY-INCIDENT.json")
+    failure_trace = "synthetic captured expected autovacuum timeout"
+    first_failure = {
+        "classification": "p1_t6_exact_first_recovery_failure",
+        "producer_commit": "3a85d5189e2c7279692478d0eee7d6b563ea78c5",
+        "producer_controller_sha256": committed_controller_sha256(
+            "3a85d5189e2c7279692478d0eee7d6b563ea78c5"
+        ),
+        "case_id": "19367bc7",
+        "failure_evidence": {
+            "durably_captured_exception": True,
+            "durably_captured_restore_return": True,
+            "sanitized_trace_excerpt": failure_trace,
+            "sanitized_trace_excerpt_sha256": hashlib.sha256(
+                failure_trace.encode()
+            ).hexdigest(),
+        },
+        "source_sessions": [{
+            "backend_type": "autovacuum worker", "state": "active",
+            "application_name": "",
+        }],
+        "attempt": {
+            "constructions": 0, "dumps": 0, "resets": 0, "restores": 1,
+            "clones": 0, "query_only_recalls": 0, "external_dispatches": 0,
+            "outcome": "expected_autovacuum_timeout_pre_clone",
+        },
+        "bank": {
+            "archive_sha256_before": archive_sha,
+            "archive_sha256_after": archive_sha,
+            "manifest_sha256_before": campaign.sha256_file(bank / "manifest.json"),
+            "manifest_sha256_after": campaign.sha256_file(bank / "manifest.json"),
+            "construction_proof_file_sha256_before": campaign.sha256_file(
+                output / "construction-proof.json"
+            ),
+            "construction_proof_file_sha256_after": campaign.sha256_file(
+                output / "construction-proof.json"
+            ),
+        },
+        "prior_incident_sha256": incident_sha,
+        "scratch_cleaned": True,
+        "arm_artifacts": 0,
+        "proof_written": False,
+    }
+    campaign.atomic_write_json(
+        output / "FIRST-RECOVERY-FAILURE.json", first_failure
+    )
     retained = {}
     retained_paths = {}
     execution_binaries = {
@@ -646,15 +844,19 @@ def _write_no_model_hash_repair_fixture(campaign, tmp_path: Path, monkeypatch):
     for arm in ("fast", "sonnet"):
         relative = f"arms/{arm}/adapter.json"
         path = output / relative
-        campaign.atomic_write_json(path, {
-            "contract": {"binaries": {
+        retained_binaries = {
                 "cli": {"path": "/release/[REDACTED]-cli"},
                 "server": {"path": "/release/[REDACTED]-server"},
                 "worker": {"path": "/release/[REDACTED]-worker"},
-            }},
-            "pairing": {"query_only": True},
-            "query": {"query_only": True},
-        })
+        }
+        campaign.atomic_write_json(
+            path,
+            _no_model_memory_proof(
+                campaign, arm=arm, construction=construction,
+                construction_sha256=construction["construction_proof_sha256"],
+                binaries=retained_binaries,
+            ),
+        )
         retained[arm] = campaign.sha256_file(path)
         retained_paths[arm] = {"path": relative, "sha256": retained[arm]}
         old_hashes[arm] = hashlib.sha256(
@@ -662,6 +864,21 @@ def _write_no_model_hash_repair_fixture(campaign, tmp_path: Path, monkeypatch):
                 json.loads(path.read_text()), execution_binaries
             )
         ).hexdigest()
+    accounting = campaign._no_model_attempt_accounting(
+        True, incident, first_failure
+    )
+    accounting["recovery"]["incident_sha256"] = incident_sha
+    accounting["recovery"]["first_recovery_failure_sha256"] = (
+        campaign.sha256_file(output / "FIRST-RECOVERY-FAILURE.json")
+    )
+    archive_tools = {
+        "server_major": 17,
+        "pg_dump": pg_dump,
+        "pg_restore": {
+            "binary": "/usr/local/bin/pg_restore", "major": 17,
+            "server_major": 17,
+        },
+    }
     original_inventory = campaign.artifact_hashes(output)
     proof = {
         "schema_version": 1,
@@ -669,22 +886,57 @@ def _write_no_model_hash_repair_fixture(campaign, tmp_path: Path, monkeypatch):
         "git_commit": "a" * 40,
         "controller": {"path": "/controller", "bytes": 123, "sha256": "b" * 64},
         "binaries": execution_binaries,
-        "fixture": {"name": "exact", "case_id": "19367bc7"},
+        "fixture": {
+            "name": "exact", "case_id": "19367bc7", "input_sha256": "3" * 64,
+        },
+        "archive_tools": archive_tools,
+        "database_schema_identity": schema,
+        **accounting,
+        "construction_proof_sha256": construction["construction_proof_sha256"],
+        "logical_identity_sha256": logical["sha256"],
+        "cleanup": {
+            "source_api_key_count": 0,
+            "source_job_state": {"pending": 0, "dead": 0, "total": 0},
+            "orphan_clone_count": 0,
+            "force_drop_verified": True,
+        },
+        "external_dispatch": {
+            "configured": False, "dispatches": 0, "deep_enabled": False,
+        },
         "archive": {
             "sha256": archive_sha,
             "manifest_sha256": campaign.sha256_file(bank / "manifest.json"),
             "seal": campaign._case_bank_seal(bank / "manifest.json"),
         },
-        "recovery": {
-            "incident_sha256": campaign.sha256_file(
-                output / "RECOVERY-INCIDENT.json"
-            ),
-            "first_recovery_failure_sha256": campaign.sha256_file(
-                output / "FIRST-RECOVERY-FAILURE.json"
-            ),
-        },
         "arms": [
-            {"arm": arm, "adapter_proof_sha256": old_hashes[arm], "evidence": arm}
+            {
+                "arm": arm,
+                "adapter_proof_sha256": old_hashes[arm],
+                "query_only": True,
+                "verification_recall_mode": "fast",
+                "construction_work": {"retains": 0, "worker_drains": 0},
+                "construction_proof_sha256": construction[
+                    "construction_proof_sha256"
+                ],
+                "context_sha256": "9" * 64,
+                "timing_ms": {"recall": 1},
+                "pre_query_logical_identity_sha256": logical["sha256"],
+                "post_query_logical_identity_sha256": logical["sha256"],
+                "api_key_count": 1,
+                "job_state": {"pending": 0, "dead": 0, "total": 0},
+                "clone_database": f"memphant_p1t6_19367bc7_deadbeef_{arm}",
+                "source_quiescence": {
+                    "policy": "only_exact_autovacuum_worker_may_wait",
+                    "timeout_seconds": 180.0,
+                    "sample_interval_seconds": 1.0,
+                    "sample_count": 2,
+                    "consecutive_zero_samples": 2,
+                    "unexpected_sessions": [],
+                    "terminated_sessions": 0,
+                    "observed_connections": [],
+                    "observed_progress": [],
+                },
+            }
             for arm in ("fast", "sonnet")
         ],
         "artifact_hashes": original_inventory,
@@ -710,10 +962,6 @@ def _write_no_model_hash_repair_fixture(campaign, tmp_path: Path, monkeypatch):
     }
     monkeypatch.setattr(campaign, "NO_MODEL_HASH_REPAIR_ROOT", root)
     monkeypatch.setattr(campaign, "NO_MODEL_HASH_REPAIR_TARGET", target)
-    monkeypatch.setattr(
-        campaign, "_validate_completed_no_model_semantics",
-        lambda *_args: {"synthetic_semantics": "verified"},
-    )
     monkeypatch.setattr(
         campaign, "_committed_controller_fingerprint",
         lambda commit: (
@@ -758,6 +1006,9 @@ def test_no_model_hash_repair_is_lineage_preserving_and_idempotent(
         "external_dispatches": 0,
     }
     assert record["root_cause_evidence"]["secret_values_recorded"] is False
+    assert record["root_cause_evidence"]["semantic_revalidation"][
+        "bank_excluded_tables"
+    ] == list(campaign.BANK_EXCLUDED_TABLES)
     assert all(
         len(paths) == 3
         for paths in record["root_cause_evidence"]["redacted_binary_path_fields"].values()
@@ -958,17 +1209,86 @@ def test_no_model_hash_repair_lock_and_external_helpers_are_unreachable(
     assert audit["database_connections"] == audit["model_calls"] == 0
 
 
+@pytest.mark.parametrize("secret", [
+    "postgres://user:password@example.invalid/db",
+    "ANTHROPIC_API_KEY=anthropic-secret-value",
+    "AZURE_OPENAI_API_KEY=azure-secret-value",
+    "PROVIDER_API_KEY=provider-secret-value",
+    "COHERE_API_KEY=cohere-secret-value",
+    "Authorization: Bearer provider-bearer-token",
+])
 def test_no_model_hash_repair_secret_scan_fails_closed(
-    tmp_path: Path,
+    tmp_path: Path, secret: str,
 ) -> None:
     campaign = _load()
     safe = tmp_path / "safe.json"
     safe.write_text('{"value":"[REDACTED]"}\n')
     inventory = {"safe.json": campaign.sha256_file(safe)}
-    assert campaign._validate_no_model_no_secrets(tmp_path, inventory) == 1
-    safe.write_text('{"value":"postgres://user:password@example.invalid/db"}\n')
+    assert campaign._validate_no_model_no_secrets(tmp_path, inventory) == {
+        "text_artifacts_scanned": 1,
+        "binary_archives_hash_bound": 0,
+        "binary_archive_policy": "pg_dump_custom_format_hash_bound_not_text_scanned",
+    }
+    safe.write_text(json.dumps({"value": secret}) + "\n")
     with pytest.raises(RuntimeError, match="secret scan failed"):
         campaign._validate_no_model_no_secrets(tmp_path, inventory)
+
+
+def test_no_model_hash_repair_validates_pg_dump_magic_without_decoding(
+    tmp_path: Path,
+) -> None:
+    campaign = _load()
+    archive = tmp_path / "bank.dump"
+    archive.write_bytes(b"PGDMP\x01\x10synthetic-custom-format")
+    inventory = {"bank.dump": campaign.sha256_file(archive)}
+    assert campaign._validate_no_model_no_secrets(tmp_path, inventory)[
+        "binary_archives_hash_bound"
+    ] == 1
+    archive.write_bytes(b"not-a-custom-format-dump")
+    with pytest.raises(RuntimeError, match="custom-format archive"):
+        campaign._validate_no_model_no_secrets(tmp_path, inventory)
+
+
+@pytest.mark.parametrize(
+    "tamper,message",
+    [
+        (("contract", "mode", "deep"), "fast-only contract"),
+        (("contract", "gold_fields_consumed", ["answer"]), "fast-only contract"),
+        (("public", "trace", "mode_executed", "deep"), "trace contract"),
+        (("public", "trace", "cost_micros", 1), "trace contract"),
+        (("public", "trace", "deep", True), "trace contract"),
+        (("public", "trace", "l4_sandbox_id", "sandbox"), "trace contract"),
+        (("public", "recall_response", "degraded", True), "response contract"),
+        (("public", "recall_response", "deep", True), "response contract"),
+    ],
+)
+def test_query_only_memory_proof_rejects_non_fast_or_deep_evidence(
+    tamper: tuple, message: str,
+) -> None:
+    campaign = _load()
+    worker = {"completed_sources": 670, "stdout_sha256": "1" * 64,
+              "stderr_sha256": "2" * 64}
+    construction = {"pairing": {
+        "trajectory_count": 500, "resource_count": 670, "worker": worker,
+    }}
+    construction_sha = "3" * 64
+    manifest = {
+        "construction": construction,
+        "construction_proof_sha256": construction_sha,
+    }
+    memory = _no_model_memory_proof(
+        campaign, arm="fast", construction=construction,
+        construction_sha256=construction_sha,
+    )
+    *path, value = tamper
+    target = memory
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    with pytest.raises(RuntimeError, match=message):
+        campaign._validate_query_only_memory_proof(
+            memory, manifest, require_no_model_fast=True
+        )
 
 
 @pytest.mark.parametrize(
@@ -979,6 +1299,10 @@ def test_no_model_hash_repair_secret_scan_fails_closed(
         ("cleanup", "cleanup, identity, or dispatch drift"),
         ("dispatch", "cleanup, identity, or dispatch drift"),
         ("quiescence", "quiescence proof drift"),
+        ("tenant", "isolation or construction context drift"),
+        ("instance", "instance identities are not distinct"),
+        ("query_hash", "cross-arm query evidence drift"),
+        ("response_hash", "response identities are not distinct"),
     ],
 )
 def test_completed_no_model_semantics_rejects_authorization_field_tamper(
@@ -997,12 +1321,21 @@ def test_completed_no_model_semantics_rejects_authorization_field_tamper(
         "stderr_sha256": "2" * 64,
     }
     retains = [{"trajectory_id": f"trajectory-{index:03d}"} for index in range(500)]
-    construction = {"pairing": {
-        "trajectory_count": 500,
-        "resource_count": 670,
-        "worker": worker,
-        "retains": retains,
-    }}
+    construction = {
+        "pairing": {
+            "trajectory_count": 500,
+            "resource_count": 670,
+            "worker": worker,
+            "retains": retains,
+        },
+        "isolation": {
+            "tenant_id": "tenant-shared",
+            "instance_id": "construction-instance",
+            "context": {
+                "scope_id": "scope-shared", "actor_id": "actor-shared",
+            },
+        },
+    }
     construction["construction_proof_sha256"] = campaign.canonical_sha256(
         construction
     )
@@ -1038,36 +1371,18 @@ def test_completed_no_model_semantics_rejects_authorization_field_tamper(
     retained = {}
     for arm in ("fast", "sonnet"):
         relative = f"arms/{arm}/adapter.json"
-        campaign.atomic_write_json(output / relative, {
-            "query": {
-                "question_id": f"no-model-19367bc7-{arm}",
-                "context_sha256": "5" * 64,
-                "recall_duration_ms": 1,
-            },
-            "recall_mutation_proof": {
-                "before": {
-                    "resource": {"rows": 670, "content_md5": "a"},
-                    "retrieval_trace": {"rows": 0, "content_md5": "b"},
-                },
-                "after": {
-                    "resource": {"rows": 670, "content_md5": "a"},
-                    "retrieval_trace": {"rows": 1, "content_md5": "c"},
-                },
-                "changed_tables": ["retrieval_trace"],
-                "allowed_audit_rows_added": 1,
-                "corpus_policy_job_tables_unchanged": True,
-            },
-        })
+        campaign.atomic_write_json(
+            output / relative,
+            _no_model_memory_proof(
+                campaign, arm=arm, construction=construction,
+                construction_sha256=construction["construction_proof_sha256"],
+            ),
+        )
         retained[arm] = {"path": relative, "sha256": campaign.sha256_file(output / relative)}
     monkeypatch.setattr(
         campaign, "NO_MODEL_HASH_REPAIR_TARGET",
         {**campaign.NO_MODEL_HASH_REPAIR_TARGET,
          "case_id": "19367bc7", "retained_artifacts": retained},
-    )
-    validated_memory = []
-    monkeypatch.setattr(
-        campaign, "_validate_query_only_memory_proof",
-        lambda memory, bank: validated_memory.append((memory, bank)),
     )
     monkeypatch.setattr(
         campaign, "_load_no_model_recovery",
@@ -1076,7 +1391,11 @@ def test_completed_no_model_semantics_rejects_authorization_field_tamper(
         ),
     )
     monkeypatch.setattr(
-        campaign, "_validate_no_model_no_secrets", lambda *_args, **_kwargs: 4
+        campaign, "_validate_no_model_no_secrets", lambda *_args, **_kwargs: {
+            "text_artifacts_scanned": 4,
+            "binary_archives_hash_bound": 1,
+            "binary_archive_policy": "pg_dump_custom_format_hash_bound_not_text_scanned",
+        }
     )
     proof = {
         "fixture": {"name": "exact", "case_id": "19367bc7", "input_sha256": "3" * 64},
@@ -1099,7 +1418,7 @@ def test_completed_no_model_semantics_rejects_authorization_field_tamper(
             "verification_recall_mode": "fast",
             "construction_work": {"retains": 0, "worker_drains": 0},
             "construction_proof_sha256": construction["construction_proof_sha256"],
-            "context_sha256": "5" * 64,
+            "context_sha256": "9" * 64,
             "timing_ms": {"recall": 1},
             "pre_query_logical_identity_sha256": "4" * 64,
             "post_query_logical_identity_sha256": "4" * 64,
@@ -1122,7 +1441,6 @@ def test_completed_no_model_semantics_rejects_authorization_field_tamper(
     assert campaign._validate_completed_no_model_semantics(
         output, proof, manifest
     )["recovery_lineage_verified"] is True
-    assert len(validated_memory) == 2
     if tamper == "ledger":
         proof["counts"]["restores"] = 3
     elif tamper == "arm_mode":
@@ -1131,10 +1449,23 @@ def test_completed_no_model_semantics_rejects_authorization_field_tamper(
         proof["cleanup"]["orphan_clone_count"] = 1
     elif tamper == "dispatch":
         proof["external_dispatch"]["dispatches"] = 1
-    else:
+    elif tamper == "quiescence":
         proof["arms"][0]["source_quiescence"]["unexpected_sessions"] = [
             {"backend_type": "client backend"}
         ]
+    else:
+        sonnet_path = output / retained["sonnet"]["path"]
+        memory = json.loads(sonnet_path.read_text())
+        if tamper == "tenant":
+            memory["isolation"]["tenant_id"] = "other-tenant"
+            memory["public"]["trace"]["tenant_id"] = "other-tenant"
+        elif tamper == "instance":
+            memory["isolation"]["instance_id"] = "1" * 32
+        elif tamper == "query_hash":
+            memory["query"]["query_sha256"] = "a" * 64
+        else:
+            memory["query"]["recall_response_sha256"] = "7" * 64
+        campaign.atomic_write_json(sonnet_path, memory)
     with pytest.raises(RuntimeError, match=message):
         campaign._validate_completed_no_model_semantics(output, proof, manifest)
 
