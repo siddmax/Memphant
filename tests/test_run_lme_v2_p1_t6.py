@@ -401,6 +401,15 @@ def test_no_model_verifier_rejects_model_configuration_before_scratch_helper(
             tmp_path / "proof",
             "postgres://bench:secret@127.0.0.1:5432/memphant",
         )
+    monkeypatch.delenv("OPENROUTER_API_KEY")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="absolute directory and materialized"):
+        campaign.run_no_model_verifier_with_scratch(
+            tmp_path / "proof",
+            "postgres://bench:secret@127.0.0.1:5432/memphant",
+            fixture="exact", directory=Path("dataset"),
+            materialized=Path("materialized"), case_id="19367bc7",
+        )
 
 
 def test_no_model_verifier_builds_banks_restores_queries_and_cleans_two_clones(

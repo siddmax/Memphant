@@ -1255,6 +1255,8 @@ def run_no_model_verifier_with_scratch(
     if fixture == "exact":
         require(directory is not None and materialized is not None and case_id is not None,
                 "exact no-model fixture requires directory, materialized, and case id")
+        require(directory.is_absolute() and materialized.is_absolute(),
+                "exact no-model fixture requires absolute directory and materialized paths")
         command.extend([
             "--directory", str(directory), "--materialized", str(materialized),
             "--case-id", case_id,
