@@ -550,11 +550,42 @@ def _source_connection_diagnostics(database_url: str) -> list[dict[str, str]]:
     } for row in rows]
 
 
+def _source_maintenance_progress(database_url: str) -> dict[str, list[dict[str, object]]]:
+    source_name = _require_scratch_source(database_url)
+    admin_url = _database_url_with_name(database_url, "postgres")
+    database_filter = "datid = (select oid from pg_database where datname = '" + source_name + "')"
+    vacuum = _psql_json(
+        admin_url,
+        "select coalesce(phase, '') as phase, heap_blks_total, heap_blks_scanned, "
+        "heap_blks_vacuumed, index_vacuum_count, num_dead_tuples, max_dead_tuples "
+        "from pg_stat_progress_vacuum where " + database_filter,
+    )
+    analyze = _psql_json(
+        admin_url,
+        "select coalesce(phase, '') as phase, sample_blks_total, "
+        "sample_blks_scanned, ext_stats_total, ext_stats_computed, "
+        "child_tables_total, child_tables_done from pg_stat_progress_analyze where "
+        + database_filter,
+    )
+
+    def sanitize(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+        return [{
+            key: (
+                re.sub(r"[^A-Za-z0-9_.:/ -]", "?", value)[:64]
+                if isinstance(value, str) else value
+            )
+            for key, value in row.items()
+            if isinstance(value, (str, int, float)) or value is None
+        } for row in rows[:8]]
+
+    return {"vacuum": sanitize(vacuum), "analyze": sanitize(analyze)}
+
+
 def _wait_for_source_quiescence(
     database_url: str,
     *,
-    timeout_seconds: float = 3.0,
-    sample_interval_seconds: float = 0.1,
+    timeout_seconds: float = 180.0,
+    sample_interval_seconds: float = 1.0,
 ) -> dict[str, object]:
     require(timeout_seconds >= 0 and sample_interval_seconds >= 0,
             "source quiescence timing is invalid")
@@ -562,23 +593,48 @@ def _wait_for_source_quiescence(
     consecutive_zero = 0
     sample_count = 0
     observed: list[dict[str, str]] = []
+    observed_progress: list[dict[str, list[dict[str, object]]]] = []
     while True:
         connections = _source_connection_diagnostics(database_url)
         sample_count += 1
         for connection in connections:
             if connection not in observed:
                 observed.append(connection)
+        unexpected = [
+            connection for connection in connections
+            if connection.get("backend_type") != "autovacuum worker"
+        ]
+        if unexpected:
+            raise RuntimeError(
+                "P1-T6 source has an unexpected source session: "
+                + json.dumps(unexpected, sort_keys=True)
+            )
         consecutive_zero = consecutive_zero + 1 if not connections else 0
         if consecutive_zero == 2:
             return {
+                "policy": "only_exact_autovacuum_worker_may_wait",
+                "timeout_seconds": timeout_seconds,
+                "sample_interval_seconds": sample_interval_seconds,
                 "sample_count": sample_count,
                 "consecutive_zero_samples": consecutive_zero,
                 "observed_connections": observed,
+                "observed_progress": observed_progress,
+                "unexpected_sessions": [],
+                "terminated_sessions": 0,
             }
+        if connections:
+            progress = _source_maintenance_progress(database_url)
+            if progress not in observed_progress and len(observed_progress) < 32:
+                observed_progress.append(progress)
         if time.perf_counter() >= deadline:
             raise RuntimeError(
-                "P1-T6 source did not quiesce; persistent source sessions: "
-                + json.dumps(observed, sort_keys=True)
+                "P1-T6 expected autovacuum worker did not quiesce before timeout: "
+                + json.dumps({
+                    "sessions": observed, "progress": observed_progress,
+                    "timeout_seconds": timeout_seconds,
+                    "sample_interval_seconds": sample_interval_seconds,
+                    "terminated_sessions": 0,
+                }, sort_keys=True)
             )
         time.sleep(sample_interval_seconds)
 
@@ -596,7 +652,9 @@ def _clone_case_source(
     source_database_url: str,
     clone_name: str,
     expected_logical_identity: dict[str, object],
-) -> str:
+    *,
+    include_quiescence_proof: bool = False,
+) -> str | tuple[str, dict[str, object]]:
     source_name = _require_scratch_source(source_database_url)
     clone_url = _database_url_with_name(source_database_url, clone_name)
     _require_arm_database(clone_url)
@@ -606,7 +664,7 @@ def _clone_case_source(
             "P1-T6 source logical identity drift before clone")
     # Each sample opens its own admin-database psql transaction. Keep createdb
     # as the next database operation after the second zero sample.
-    _wait_for_source_quiescence(source_database_url)
+    quiescence = _wait_for_source_quiescence(source_database_url)
     admin_url = _database_url_with_name(source_database_url, "postgres")
     _run_postgres_command(
         ["createdb", f"--maintenance-db={admin_url}", f"--template={source_name}", clone_name],
@@ -617,7 +675,7 @@ def _clone_case_source(
                 "P1-T6 arm clone logical identity mismatch")
         require(_database_key_count(clone_url) == 0,
                 "P1-T6 arm clone unexpectedly contains an API key")
-        return clone_url
+        return (clone_url, quiescence) if include_quiescence_proof else clone_url
     except BaseException:
         _drop_local_database(clone_url)
         raise
@@ -1181,7 +1239,8 @@ def _load_no_model_recovery(
     tools: dict[str, object],
     schema: dict[str, object],
 ) -> tuple[
-    dict[str, object], dict[str, object], dict[str, object], dict[str, object]
+    dict[str, object], dict[str, object], dict[str, object],
+    dict[str, object], dict[str, object]
 ]:
     require(fixture.get("name") == "exact",
             "no-model recovery is limited to the exact fixture")
@@ -1200,6 +1259,51 @@ def _load_no_model_recovery(
     manifest, _archive = _load_case_bank(bank_dir)
     require(manifest.get("case_contract") == contract,
             "no-model recovery bank contract drift")
+    failure_path = output / "FIRST-RECOVERY-FAILURE.json"
+    require(failure_path.is_file(), "first no-model recovery failure is missing")
+    first_failure = json.loads(failure_path.read_text())
+    failure_trace = first_failure.get("failure_evidence")
+    failure_attempt = first_failure.get("attempt")
+    failure_bank = first_failure.get("bank")
+    require(
+        first_failure.get("classification") == "p1_t6_exact_first_recovery_failure"
+        and first_failure.get("producer_commit")
+        == "3a85d5189e2c7279692478d0eee7d6b563ea78c5"
+        and first_failure.get("case_id") == fixture.get("case_id")
+        and isinstance(failure_trace, dict)
+        and failure_trace.get("durably_captured_exception") is True
+        and failure_trace.get("durably_captured_restore_return") is True
+        and hashlib.sha256(
+            str(failure_trace.get("sanitized_trace_excerpt", "")).encode()
+        ).hexdigest() == failure_trace.get("sanitized_trace_excerpt_sha256")
+        and first_failure.get("source_sessions") == [{
+            "backend_type": "autovacuum worker", "state": "active",
+            "application_name": "",
+        }]
+        and isinstance(failure_attempt, dict)
+        and failure_attempt == {
+            "constructions": 0, "dumps": 0, "resets": 0, "restores": 1,
+            "clones": 0, "query_only_recalls": 0, "external_dispatches": 0,
+            "outcome": "expected_autovacuum_timeout_pre_clone",
+        }
+        and first_failure.get("scratch_cleaned") is True
+        and first_failure.get("arm_artifacts") == 0
+        and first_failure.get("proof_written") is False,
+        "first no-model recovery failure evidence drift",
+    )
+    failure_producer = subprocess.run(
+        [
+            "git", "show",
+            first_failure["producer_commit"] + ":scripts/run_lme_v2_p1_t6.py",
+        ],
+        cwd=ROOT, capture_output=True, check=False,
+    )
+    require(
+        failure_producer.returncode == 0
+        and hashlib.sha256(failure_producer.stdout).hexdigest()
+        == first_failure.get("producer_controller_sha256"),
+        "first no-model recovery producer drift",
+    )
     construction_path = output / "construction-proof.json"
     require(
         construction_path.is_file()
@@ -1238,6 +1342,19 @@ def _load_no_model_recovery(
         == manifest.get("case_contract_sha256"),
         "no-model recovery incident bank drift",
     )
+    require(
+        isinstance(failure_bank, dict)
+        and failure_bank.get("archive_sha256_before")
+        == failure_bank.get("archive_sha256_after") == manifest.get("archive_sha256")
+        and failure_bank.get("manifest_sha256_before")
+        == failure_bank.get("manifest_sha256_after")
+        == sha256_file(bank_dir / "manifest.json")
+        and failure_bank.get("construction_proof_file_sha256_before")
+        == failure_bank.get("construction_proof_file_sha256_after")
+        == sha256_file(construction_path)
+        and first_failure.get("prior_incident_sha256") == sha256_file(incident_path),
+        "first no-model recovery bank lineage drift",
+    )
     trace = incident.get("failure_evidence")
     require(
         incident.get("measured_commit")
@@ -1270,7 +1387,9 @@ def _load_no_model_recovery(
     lease_path = f"case-leases/{fixture['case_id']}.lock"
     require(
         artifact_hashes(
-            output, exclude={"RECOVERY-INCIDENT.json", lease_path}
+            output, exclude={
+                "RECOVERY-INCIDENT.json", "FIRST-RECOVERY-FAILURE.json", lease_path,
+            }
         ) == inventory,
         "no-model recovery pre-recovery inventory drift",
     )
@@ -1304,10 +1423,11 @@ def _load_no_model_recovery(
     )
     invariants = {
         "incident_sha256": sha256_file(incident_path),
+        "first_recovery_failure_sha256": sha256_file(failure_path),
         "pre_recovery_inventory": dict(inventory),
         "case_bank_seal": _case_bank_seal(bank_dir / "manifest.json"),
     }
-    return construction, manifest, incident, invariants
+    return construction, manifest, incident, first_failure, invariants
 
 
 def _revalidate_no_model_recovery(
@@ -1320,6 +1440,13 @@ def _revalidate_no_model_recovery(
         incident_path.is_file()
         and sha256_file(incident_path) == invariants.get("incident_sha256"),
         "no-model recovery incident drift after arm execution",
+    )
+    failure_path = output / "FIRST-RECOVERY-FAILURE.json"
+    require(
+        failure_path.is_file()
+        and sha256_file(failure_path)
+        == invariants.get("first_recovery_failure_sha256"),
+        "no-model recovery failure lineage drift after arm execution",
     )
     inventory = invariants.get("pre_recovery_inventory")
     require(isinstance(inventory, dict) and inventory,
@@ -1355,7 +1482,9 @@ def _revalidate_no_model_recovery(
 
 
 def _no_model_attempt_accounting(
-    resume: bool, incident: dict[str, object] | None
+    resume: bool,
+    incident: dict[str, object] | None,
+    first_recovery_failure: dict[str, object] | None = None,
 ) -> dict[str, object]:
     if not resume:
         return {
@@ -1371,19 +1500,25 @@ def _no_model_attempt_accounting(
             "recovery": {"resumed": False},
         }
     require(isinstance(incident, dict), "no-model recovery incident is missing")
+    require(isinstance(first_recovery_failure, dict),
+            "first no-model recovery failure is missing")
     initial = incident.get("initial_attempt")
     diagnostic = incident.get("diagnostic_archive_only_pg17_replay")
+    failed_attempt = first_recovery_failure.get("attempt")
     require(isinstance(initial, dict) and isinstance(diagnostic, dict),
             "no-model recovery attempt accounting is missing")
+    require(isinstance(failed_attempt, dict),
+            "first no-model recovery attempt accounting is missing")
     return {
         "counts": {
-            "constructions": 1, "dumps": 1, "restores": 3,
+            "constructions": 1, "dumps": 1, "restores": 4,
             "clones": 2, "query_only_recalls": 2,
         },
         "attempts": {
             "initial": initial,
             "diagnostic": diagnostic,
-            "recovery": {
+            "recovery_1_failed": failed_attempt,
+            "recovery_2": {
                 "constructions": 0, "dumps": 0, "resets": 0,
                 "restores": 1, "clones": 2, "query_only_recalls": 2,
                 "external_dispatches": 0, "outcome": "complete",
@@ -1448,14 +1583,16 @@ def _run_no_model_verifier_locked(
     }
     construction_path = output / "construction-proof.json"
     incident = None
+    first_recovery_failure = None
     recovery_invariants = None
     if resume:
         _require_no_model_recovery_start(source_url, output, str(data["case_id"]))
-        construction, dumped, incident, recovery_invariants = _load_no_model_recovery(
-            output, data, contract, tools, schema
-        )
+        (
+            construction, dumped, incident,
+            first_recovery_failure, recovery_invariants,
+        ) = _load_no_model_recovery(output, data, contract, tools, schema)
         construction_ms = int(dumped["construction_duration_ms"])
-        classification = "no_model_exact_case_recovered_authorization_candidate"
+        classification = "no_model_exact_case_second_recovery_authorization_candidate"
     else:
         construction, construction_ms = _construct_no_model_source(
             source_url, output, data
@@ -1483,7 +1620,10 @@ def _run_no_model_verifier_locked(
     clone_databases = []
     try:
         for arm in ("fast", "sonnet"):
-            clone_url = _clone_case_source(source_url, clone_names[arm], logical)
+            clone_url, quiescence = _clone_case_source(
+                source_url, clone_names[arm], logical,
+                include_quiescence_proof=True,
+            )
             clone_databases.append(clone_names[arm])
             try:
                 arm_proof = _run_no_model_clone_query(
@@ -1515,6 +1655,7 @@ def _run_no_model_verifier_locked(
                     "post_query_logical_identity_sha256": logical["sha256"],
                     "api_key_count": 1,
                     "job_state": {"pending": 0, "dead": 0, "total": 0},
+                    "source_quiescence": quiescence,
                 })
             finally:
                 _drop_local_database(clone_url)
@@ -1543,10 +1684,15 @@ def _run_no_model_verifier_locked(
     # dump and its manifest are content-addressed evidence, never text-redact
     # them after sealing; pg_dump does not archive its connection string.
     artifacts = artifact_hashes(output)
-    accounting = _no_model_attempt_accounting(resume, incident)
+    accounting = _no_model_attempt_accounting(
+        resume, incident, first_recovery_failure
+    )
     if resume:
         accounting["recovery"]["incident_sha256"] = sha256_file(
             output / "RECOVERY-INCIDENT.json"
+        )
+        accounting["recovery"]["first_recovery_failure_sha256"] = sha256_file(
+            output / "FIRST-RECOVERY-FAILURE.json"
         )
     core = {
         "schema_version": 1,

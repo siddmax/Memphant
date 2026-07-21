@@ -332,31 +332,52 @@ def test_clone_requires_quiescent_source_and_preserves_identity(
     expected = {"tables": {}, "sha256": "f" * 64}
     identities = []
     calls = []
+    database_events = []
     monkeypatch.setenv("MEMPHANT_SCRATCH_ACTIVE", "1")
 
     def identity(url):
-        identities.append(urllib.parse.urlsplit(url).path.rsplit("/", 1)[-1])
+        name = urllib.parse.urlsplit(url).path.rsplit("/", 1)[-1]
+        identities.append(name)
+        database_events.append("identity:" + name)
         return expected
 
     monkeypatch.setattr(campaign, "_database_bank_identity", identity)
-    monkeypatch.setattr(campaign, "_database_key_count", lambda _url: 0)
+    monkeypatch.setattr(
+        campaign, "_database_key_count",
+        lambda url: database_events.append(
+            "key:" + urllib.parse.urlsplit(url).path.rsplit("/", 1)[-1]
+        ) or 0,
+    )
     monkeypatch.setattr(
         campaign, "_wait_for_source_quiescence",
-        lambda _url: {"samples": 2, "consecutive_zero_samples": 2},
+        lambda _url: database_events.append("quiescence") or {
+            "sample_count": 2, "consecutive_zero_samples": 2,
+        },
     )
     monkeypatch.setattr(
         campaign.subprocess,
         "run",
         lambda command, **_kwargs: (
             calls.append(command)
+            or database_events.append(command[0])
             or campaign.subprocess.CompletedProcess(command, 0, "", "")
         ),
     )
-    clone = campaign._clone_case_source(
-        source, "memphant_p1t6_19367bc7_deadbeef_fast", expected
+    clone, quiescence = campaign._clone_case_source(
+        source, "memphant_p1t6_19367bc7_deadbeef_fast", expected,
+        include_quiescence_proof=True,
     )
     assert clone.endswith("/memphant_p1t6_19367bc7_deadbeef_fast")
+    assert quiescence == {"sample_count": 2, "consecutive_zero_samples": 2}
     assert identities == ["memphant_scratch_1_2", "memphant_p1t6_19367bc7_deadbeef_fast"]
+    assert database_events == [
+        "key:memphant_scratch_1_2",
+        "identity:memphant_scratch_1_2",
+        "quiescence",
+        "createdb",
+        "identity:memphant_p1t6_19367bc7_deadbeef_fast",
+        "key:memphant_p1t6_19367bc7_deadbeef_fast",
+    ]
     assert calls[0][0] == "createdb" and "--template=memphant_scratch_1_2" in calls[0]
     with pytest.raises(RuntimeError, match="persistent source session"):
         monkeypatch.setattr(
@@ -375,7 +396,7 @@ def test_source_quiescence_wait_accepts_transient_session_after_two_zero_samples
 ) -> None:
     campaign = _load()
     samples = [
-        [{"backend_type": "client backend", "state": "idle", "application_name": "psql"}],
+        [{"backend_type": "autovacuum worker", "state": "active", "application_name": ""}],
         [],
         [],
     ]
@@ -383,6 +404,10 @@ def test_source_quiescence_wait_accepts_transient_session_after_two_zero_samples
         campaign, "_source_connection_diagnostics", lambda _url: samples.pop(0)
     )
     monkeypatch.setattr(campaign.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        campaign, "_source_maintenance_progress",
+        lambda _url: {"vacuum": [{"phase": "scanning heap"}], "analyze": []},
+    )
 
     proof = campaign._wait_for_source_quiescence(
         "postgres://bench:secret@127.0.0.1:5432/memphant_scratch_1_2",
@@ -393,8 +418,11 @@ def test_source_quiescence_wait_accepts_transient_session_after_two_zero_samples
     assert proof["sample_count"] == 3
     assert proof["consecutive_zero_samples"] == 2
     assert proof["observed_connections"] == [{
-        "backend_type": "client backend", "state": "idle", "application_name": "psql",
+        "backend_type": "autovacuum worker", "state": "active", "application_name": "",
     }]
+    assert proof["observed_progress"][0]["vacuum"][0]["phase"] == "scanning heap"
+    assert proof["unexpected_sessions"] == []
+    assert proof["terminated_sessions"] == 0
 
 
 def test_source_quiescence_wait_fails_closed_on_persistent_session(
@@ -409,7 +437,31 @@ def test_source_quiescence_wait_fails_closed_on_persistent_session(
         campaign, "_source_connection_diagnostics", lambda _url: diagnostic
     )
 
-    with pytest.raises(RuntimeError, match="persistent-client"):
+    monkeypatch.setattr(
+        campaign, "_source_maintenance_progress",
+        lambda _url: pytest.fail("unexpected client reached maintenance wait"),
+    )
+    with pytest.raises(RuntimeError, match="unexpected source session.*persistent-client"):
+        campaign._wait_for_source_quiescence(
+            "postgres://bench:secret@127.0.0.1:5432/memphant_scratch_1_2",
+            timeout_seconds=0,
+            sample_interval_seconds=0,
+        )
+
+
+def test_source_quiescence_wait_bounds_expected_autovacuum_with_progress(
+    monkeypatch,
+) -> None:
+    campaign = _load()
+    monkeypatch.setattr(campaign, "_source_connection_diagnostics", lambda _url: [{
+        "backend_type": "autovacuum worker", "state": "active", "application_name": "",
+    }])
+    monkeypatch.setattr(campaign, "_source_maintenance_progress", lambda _url: {
+        "vacuum": [{"phase": "vacuuming indexes", "heap_blks_scanned": 42}],
+        "analyze": [{"phase": "acquiring sample rows", "sample_blks_scanned": 7}],
+    })
+
+    with pytest.raises(RuntimeError, match="expected autovacuum worker.*vacuuming indexes"):
         campaign._wait_for_source_quiescence(
             "postgres://bench:secret@127.0.0.1:5432/memphant_scratch_1_2",
             timeout_seconds=0,
@@ -430,6 +482,25 @@ def test_source_quiescence_samples_use_separate_admin_transactions(monkeypatch) 
     assert campaign._source_connection_diagnostics(source) == []
     assert campaign._source_connection_diagnostics(source) == []
     assert len(calls) == 2
+    assert all(url.endswith("/postgres") for url, _sql in calls)
+
+
+def test_source_maintenance_progress_uses_separate_admin_transactions(monkeypatch) -> None:
+    campaign = _load()
+    monkeypatch.setenv("MEMPHANT_SCRATCH_ACTIVE", "1")
+    calls = []
+    monkeypatch.setattr(
+        campaign, "_psql_json",
+        lambda url, sql: calls.append((url, sql)) or [],
+    )
+    source = "postgres://bench:secret@127.0.0.1:5432/memphant_scratch_1_2"
+
+    assert campaign._source_maintenance_progress(source) == {
+        "vacuum": [], "analyze": [],
+    }
+    assert len(calls) == 2
+    assert "pg_stat_progress_vacuum" in calls[0][1]
+    assert "pg_stat_progress_analyze" in calls[1][1]
     assert all(url.endswith("/postgres") for url, _sql in calls)
 
 
@@ -650,7 +721,10 @@ def test_exact_no_model_resume_skips_construction_dump_and_reset(
         )
     monkeypatch.setattr(
         campaign, "_load_no_model_recovery",
-        lambda *_args: (construction, manifest, incident, {"snapshot": True}),
+        lambda *_args: (
+            construction, manifest, incident,
+            {"attempt": {"restores": 1}}, {"snapshot": True},
+        ),
     )
     restored = []
     monkeypatch.setattr(
@@ -762,11 +836,19 @@ def test_exact_no_model_recovery_counts_diagnostic_restore() -> None:
         },
     }
 
-    accounting = campaign._no_model_attempt_accounting(True, incident)
+    failed_recovery = {"attempt": {
+        "constructions": 0, "dumps": 0, "resets": 0, "restores": 1,
+        "clones": 0, "query_only_recalls": 0, "external_dispatches": 0,
+        "outcome": "expected_autovacuum_timeout_pre_clone",
+    }}
+    accounting = campaign._no_model_attempt_accounting(
+        True, incident, failed_recovery
+    )
 
-    assert accounting["counts"]["restores"] == 3
+    assert accounting["counts"]["restores"] == 4
     assert accounting["attempts"]["diagnostic"]["restores"] == 1
-    assert accounting["attempts"]["recovery"]["restores"] == 1
+    assert accounting["attempts"]["recovery_1_failed"]["restores"] == 1
+    assert accounting["attempts"]["recovery_2"]["restores"] == 1
     assert accounting["recovery"]["repeated_constructions"] == 0
     assert accounting["recovery"]["repeated_dumps"] == 0
 
@@ -775,6 +857,7 @@ def test_exact_no_model_recovery_counts_diagnostic_restore() -> None:
     "relative",
     [
         "RECOVERY-INCIDENT.json",
+        "FIRST-RECOVERY-FAILURE.json",
         "case-bank/manifest.json",
         "case-bank/archive.dump",
         "construction-proof.json",
@@ -787,6 +870,7 @@ def test_exact_no_model_recovery_rejects_invariant_mutation_after_arm(
     output = tmp_path / "recovery"
     paths = [
         "RECOVERY-INCIDENT.json",
+        "FIRST-RECOVERY-FAILURE.json",
         "case-bank/manifest.json",
         "case-bank/archive.dump",
         "construction-proof.json",
@@ -799,8 +883,13 @@ def test_exact_no_model_recovery_rejects_invariant_mutation_after_arm(
         "incident_sha256": campaign.sha256_file(output / "RECOVERY-INCIDENT.json"),
         "pre_recovery_inventory": {
             item: campaign.sha256_file(output / item)
-            for item in paths if item != "RECOVERY-INCIDENT.json"
+            for item in paths if item not in {
+                "RECOVERY-INCIDENT.json", "FIRST-RECOVERY-FAILURE.json"
+            }
         },
+        "first_recovery_failure_sha256": campaign.sha256_file(
+            output / "FIRST-RECOVERY-FAILURE.json"
+        ),
         "case_bank_seal": {"seal_sha256": "a" * 64},
     }
     (output / relative).write_text("mutated-during-arm")
@@ -893,11 +982,22 @@ def test_no_model_verifier_builds_banks_restores_queries_and_cleans_two_clones(
         },
     )
 
-    def clone(_url, name, _identity):
+    def clone(_url, name, _identity, **kwargs):
         events.append(("clone", name))
         clone_url = source.rsplit("/", 1)[0] + "/" + name
         clones.add(clone_url)
-        return clone_url
+        assert kwargs == {"include_quiescence_proof": True}
+        return clone_url, {
+            "policy": "only_exact_autovacuum_worker_may_wait",
+            "timeout_seconds": 180.0,
+            "sample_interval_seconds": 1.0,
+            "sample_count": 2,
+            "consecutive_zero_samples": 2,
+            "observed_connections": [],
+            "observed_progress": [],
+            "unexpected_sessions": [],
+            "terminated_sessions": 0,
+        }
 
     def query(clone_url, *_args):
         arm = clone_url.rsplit("_", 1)[-1]
@@ -938,6 +1038,8 @@ def test_no_model_verifier_builds_banks_restores_queries_and_cleans_two_clones(
         "clones": 2, "query_only_recalls": 2,
     }
     assert {arm["verification_recall_mode"] for arm in proof["arms"]} == {"fast"}
+    assert all(arm["source_quiescence"]["consecutive_zero_samples"] == 2
+               for arm in proof["arms"])
     assert proof["cleanup"]["orphan_clone_count"] == 0
     assert proof["archive"]["sha256"] == campaign.sha256_file(
         output / "case-bank" / ("a" * 64 + ".dump")

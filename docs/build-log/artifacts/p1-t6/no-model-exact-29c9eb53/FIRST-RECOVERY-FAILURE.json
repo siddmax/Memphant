@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "classification": "p1_t6_exact_first_recovery_failure",
+  "producer_commit": "3a85d5189e2c7279692478d0eee7d6b563ea78c5",
+  "producer_controller_sha256": "1686a7bbfa908154c9ff09557f249255df77f39643b89716688f0f78f0945003",
+  "case_id": "19367bc7",
+  "failure_stage": "after_verified_recovery_restore_before_first_clone",
+  "failure_evidence": {
+    "durably_captured_exception": true,
+    "durably_captured_restore_return": true,
+    "sanitized_trace_excerpt": "_restore_case_bank returned; _wait_for_source_quiescence timed out before first _clone_case_source createdb; RuntimeError: P1-T6 source did not quiesce; persistent source sessions: [{\"application_name\":\"\",\"backend_type\":\"autovacuum worker\",\"state\":\"active\"}]",
+    "sanitized_trace_excerpt_sha256": "3e56cedcc7f0ac2499d9c68b01bec01854e7e3af750e7f0f899e20895dc44e0d"
+  },
+  "source_sessions": [
+    {
+      "backend_type": "autovacuum worker",
+      "state": "active",
+      "application_name": ""
+    }
+  ],
+  "attempt": {
+    "constructions": 0,
+    "dumps": 0,
+    "resets": 0,
+    "restores": 1,
+    "clones": 0,
+    "query_only_recalls": 0,
+    "external_dispatches": 0,
+    "outcome": "expected_autovacuum_timeout_pre_clone"
+  },
+  "bank": {
+    "archive_sha256_before": "7977b0942b90e9dcb8e772bf722ef1cf0b4a3a6f165b279a6fc5e6c23dfbca4a",
+    "archive_sha256_after": "7977b0942b90e9dcb8e772bf722ef1cf0b4a3a6f165b279a6fc5e6c23dfbca4a",
+    "manifest_sha256_before": "37881e7d0fa80e1c72701056b6b7c7e414651df0d2025cfd98df6c30d6a97751",
+    "manifest_sha256_after": "37881e7d0fa80e1c72701056b6b7c7e414651df0d2025cfd98df6c30d6a97751",
+    "construction_proof_file_sha256_before": "e8402063fbe0b5d9e6727c938a92befcc82da437c02c0eb42490911e14d548dc",
+    "construction_proof_file_sha256_after": "e8402063fbe0b5d9e6727c938a92befcc82da437c02c0eb42490911e14d548dc"
+  },
+  "prior_incident_sha256": "1255da889ac2c3f291043d0465fdeaefc2b0c347767373c94d33e4e21267df44",
+  "scratch_cleaned": true,
+  "arm_artifacts": 0,
+  "proof_written": false,
+  "authorization": false
+}
