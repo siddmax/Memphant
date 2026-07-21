@@ -239,6 +239,33 @@ recovery, and completed second recovery. A passing proof is classified
 arm's quiescence policy/results, no unexpected or terminated sessions, and zero
 external dispatch.
 
+Offline hash-repair amendment: the completed second-recovery proof passed every
+runtime predicate, but each explicit `arms[].adapter_proof_sha256` was captured
+before the phase-final redactor changed three benign `memphant-*` binary path
+segments in the retained adapter JSON to `[REDACTED]`. The outer artifact inventory
+already binds the retained files, but the explicit hashes do not. Do not rerun a
+restore, clone, query, or model. After independent review, authorize one narrowly
+scoped, zero-DB lineage-preserving proof supersession targeting only root
+`no-model-exact-29c9eb53`, predecessor file SHA
+`4b0b9472dee0561db5338db9fce2e5a4feb818b5f8a06734563e436ae83a832e`,
+canonical SHA `b929bff1103deb59ba9c4d5a7f395325044c8fd802df9eb6d9f7f8f9544ba900`,
+and execution commit `2cfa81e60304f2dfa7c8e2dafd9c7f906b937ded`. Under the
+nonblocking output/case lease, preserve the predecessor exact bytes and create a
+non-cyclic repair record binding predecessor, execution controller, repair
+executor, both old explicit hashes, both retained paths/hashes, the exact
+three-redacted-path root cause per arm, and zero database/model operations. The
+replacement proof must preserve the execution `git_commit` and `controller`, may
+change only classification, the two explicit arm hashes, artifact inventory,
+repair metadata, and canonical hash, and must classify as
+`no_model_exact_case_second_recovery_hash_repaired_authorization_candidate`.
+Its inventory excludes only live `PROOF.json` and includes both predecessor and
+repair record; all original sixteen artifact hashes must remain unchanged. The
+repair must be restart-safe, idempotent only for the already-complete exact result,
+reject symlinks, extra files, out-of-root paths, or any target/sidecar drift, rerun
+all offline semantic/seal/lineage/no-secret/no-dispatch predicates, expose
+`paid_calls=0`, and accept no database or provider arguments. Future arm hashes
+must be computed only after phase-final redaction.
+
 - [ ] **Step 2: Run the focused and full repository gates**
 
 Run the complete `AGENTS.md` verification suite, including scratch PostgreSQL contracts, all provider lints, migration dry-run, and packaged e2e probe. Preserve exact outputs at the measured commit.
