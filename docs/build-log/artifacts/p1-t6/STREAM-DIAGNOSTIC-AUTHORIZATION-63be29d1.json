@@ -1,0 +1,35 @@
+{
+  "schema_version": "memphant.p1_t6.stream_diagnostic_authorization.v1",
+  "created_at": "2026-07-21T16:40:51Z",
+  "decision": "authorize_one_synthetic_sonnet_stream_shape_diagnostic",
+  "source_failure": "docs/build-log/artifacts/p1-t6/run-129928d8/INVALIDATION-PROOF.json",
+  "necessity": "The exact production generation completed with finish_reason tool_calls, but the runtime returned invalid_output before tool iteration one. The archived generation endpoint does not retain the SSE chunk structure needed to identify the failed parser predicate.",
+  "scope": {
+    "provider_dispatches_max": 1,
+    "model": "anthropic/claude-sonnet-5-20260630",
+    "provider": "azure",
+    "benchmark_cases": 0,
+    "database_connections": 0,
+    "resource_constructions": 0,
+    "completion_tokens_max": 64,
+    "diagnostic_max_liability_micros": 5000,
+    "preexisting_cumulative_liability_micros": 331942,
+    "post_diagnostic_cumulative_max_liability_micros": 336942,
+    "campaign_hard_ceiling_micros": 6250000
+  },
+  "data_policy": {
+    "prompt": "synthetic and answer-free",
+    "tools": "synthetic finish tool only",
+    "capture": "SSE structural keys, counts, types, lengths, route metadata, finish reason, and final usage presence only",
+    "raw_content_or_tool_arguments_persisted": false,
+    "secret_values_emitted_or_persisted": false
+  },
+  "stop_predicates": [
+    "never retry the diagnostic",
+    "stop after the first provider response regardless of outcome",
+    "settle the one generation ID by read-only receipt polling",
+    "do not start a benchmark construction or fresh campaign root"
+  ],
+  "expected_information_gain": "Identify the first concrete difference between OpenRouter's current Azure Sonnet SSE and the strict production parser so the fix can be fixture-driven and no paid benchmark row is used for debugging.",
+  "claim_boundary": "This is a bounded protocol diagnostic, not benchmark evidence, model evaluation, or authority for another P1-T6 run."
+}
