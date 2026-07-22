@@ -137,6 +137,30 @@ async fn visible_episode_count(pool: &sqlx::PgPool, reader_tenant: Uuid) -> i64 
     count
 }
 
+/// Under `reader_tenant`'s RLS role, how many episodes belonging to
+/// `other_tenant` are visible. FORCE RLS filters by `current_tenant_id()`, so
+/// even an explicit `tenant_id = other` predicate can see nothing — a leak would
+/// return > 0. Robust to a shared scratch DB (it names the exact other tenant).
+async fn cross_tenant_visible(pool: &sqlx::PgPool, reader_tenant: Uuid, other_tenant: Uuid) -> i64 {
+    let mut tx = pool.begin().await.expect("begin xt read");
+    tx.execute("set local role memphant_app")
+        .await
+        .expect("assume app");
+    sqlx::query("select memphant.bind_tenant($1)")
+        .bind(reader_tenant)
+        .execute(&mut *tx)
+        .await
+        .expect("bind reader tenant");
+    let count: i64 = sqlx::query("select count(*) from memphant.episode where tenant_id = $1")
+        .bind(other_tenant)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("count cross-tenant")
+        .get(0);
+    tx.rollback().await.expect("rollback xt read");
+    count
+}
+
 #[tokio::test]
 #[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
 async fn two_user_episodic_isolation_is_enforced_by_rls_not_app_code() {
@@ -163,32 +187,36 @@ async fn two_user_episodic_isolation_is_enforced_by_rls_not_app_code() {
     seed_episode(&pool, tenant_b).await;
 
     // Each tenant, under the memphant_app policy role, sees exactly its own one
-    // episode and none of the other's — RLS, not an app WHERE clause, enforces
-    // this (the connection carries no `user_id` filter; the query is a bare
-    // `select count(*) from memphant.episode`).
+    // episode — RLS, not an app WHERE clause, enforces this (the connection
+    // carries no `user_id` filter; the query is a bare `select count(*) from
+    // memphant.episode`). Assertions are robust to a shared scratch DB: each
+    // tenant is freshly provisioned and only this test writes to it, so its
+    // RLS-scoped view holds exactly the one episode seeded here — regardless of
+    // how many episodes other tests seeded under other tenants.
     assert_eq!(
         visible_episode_count(&pool, tenant_a).await,
         1,
-        "tenant A must see exactly its own episode"
+        "tenant A sees exactly its own episode under RLS"
     );
     assert_eq!(
         visible_episode_count(&pool, tenant_b).await,
         1,
-        "tenant B must see exactly its own episode"
+        "tenant B sees exactly its own episode under RLS"
     );
 
-    // The leakage assertion: neither tenant can see the OTHER's episode. Since
-    // each sees exactly 1 and there are 2 total, cross-tenant visibility is 0 —
-    // but assert it directly by proving the total-as-owner is 2 while each
-    // tenant-bound view is 1.
-    let total_as_owner: i64 = sqlx::query("select count(*) from memphant.episode")
-        .fetch_one(&pool)
-        .await
-        .expect("owner count")
-        .get(0);
+    // The direct leakage assertion: under tenant A's RLS view, zero of tenant
+    // B's episodes are visible (and vice versa). This is the data-exposure
+    // check — it must not silently pass on a shared DB, so it names the other
+    // tenant's id explicitly rather than relying on a global count.
     assert_eq!(
-        total_as_owner, 2,
-        "both episodes exist (owner/superuser view bypasses RLS)"
+        cross_tenant_visible(&pool, tenant_a, tenant_b).await,
+        0,
+        "tenant A must NOT see tenant B's episodes (cross-tenant leak)"
+    );
+    assert_eq!(
+        cross_tenant_visible(&pool, tenant_b, tenant_a).await,
+        0,
+        "tenant B must NOT see tenant A's episodes (cross-tenant leak)"
     );
 
     pool.close().await;
