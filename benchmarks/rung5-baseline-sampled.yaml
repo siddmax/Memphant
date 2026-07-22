@@ -1,3 +1,0 @@
-id: rung5-baseline-sampled
-cases:
-  - ../examples/evals/golden/temporal_validity_current_office.yaml
