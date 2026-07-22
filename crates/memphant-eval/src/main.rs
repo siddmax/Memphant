@@ -2,9 +2,29 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use memphant_eval::{
-    EvalRunOptions, generate_trace_schema, run_eval_file, run_ops_file, run_profile_file,
-    run_security_file, run_syndai_trace_compare_file, verify_golden_file,
+    EvalReport, EvalRunOptions, generate_trace_schema, run_eval_file, run_ops_file,
+    run_profile_file, run_security_file, run_syndai_trace_compare_file, verify_golden_file,
 };
+
+/// Print the Deep settlement receipt for every case that ran a Deep provider
+/// (P0.3 §6: surface the settle-on-abort receipt to the operator regardless of
+/// pass/fail). No-op when no case ran Deep.
+fn print_deep_settlements(report: &EvalReport) {
+    for case in &report.case_results {
+        if let Some(deep) = &case.deep {
+            println!(
+                "deep_settlement case={} status={:?} stop_reason={:?} settled_micros={} unsettled_upper_bound_micros={} tool_iterations={} wall_time_ms={}",
+                case.id,
+                deep.status,
+                deep.stop_reason,
+                deep.settled_micros,
+                deep.unsettled_micros_upper_bound,
+                deep.tool_iterations,
+                deep.wall_time_ms,
+            );
+        }
+    }
+}
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1).collect::<Vec<_>>();
@@ -148,6 +168,7 @@ fn run_command(args: Vec<String>) -> ExitCode {
                     .map(|path| path.display().to_string())
                     .unwrap_or_else(|| "none".to_string())
             );
+            print_deep_settlements(&report);
             ExitCode::SUCCESS
         }
         Ok(report) => {
@@ -158,6 +179,7 @@ fn run_command(args: Vec<String>) -> ExitCode {
             for case in report.case_results.iter().filter(|case| !case.passed) {
                 eprintln!("case={} error={:?}", case.id, case.error);
             }
+            print_deep_settlements(&report);
             ExitCode::from(1)
         }
         Err(error) => {

@@ -116,11 +116,11 @@ impl DeepRecallProvider for EvalDeepProvider {
 }
 use memphant_types::{
     ActorId, AgentNodeId, ContextualChunk, DeepProviderIdentity, DeepRecallLimits,
-    DeepRecallStatus, DeepRecallStopReason, DeepRecallUsage, ENGINE_VERSION, ForgetRequest,
-    ForgetSelector, LearnedRerankProfile, MarkOutcome, MarkRequest, MemoryEdgeKind, MemoryKind,
-    NewEpisode, NewMemoryEdge, NewMemoryUnit, RecallContextItem, RecallDropReason, RecallMode,
-    RecallRequest, RecallTime, ResolvedMemoryContext, RetrievalTrace, ScopeId, SubjectId,
-    TRACE_SCHEMA_VERSION, TenantId, TraceId, TrustLevel, UnitId, UnitState,
+    DeepRecallStatus, DeepRecallStopReason, DeepRecallSummary, DeepRecallUsage, ENGINE_VERSION,
+    ForgetRequest, ForgetSelector, LearnedRerankProfile, MarkOutcome, MarkRequest, MemoryEdgeKind,
+    MemoryKind, NewEpisode, NewMemoryEdge, NewMemoryUnit, RecallContextItem, RecallDropReason,
+    RecallMode, RecallRequest, RecallTime, ResolvedMemoryContext, RetrievalTrace, ScopeId,
+    SubjectId, TRACE_SCHEMA_VERSION, TenantId, TraceId, TrustLevel, UnitId, UnitState,
 };
 use schemars::schema_for;
 use serde::{Deserialize, Serialize};
@@ -220,6 +220,43 @@ pub struct EvalCaseResult {
     pub missing_trace_stages: Vec<String>,
     pub dropped_mismatches: Vec<String>,
     pub error: Option<String>,
+    /// Deep-recall settlement receipt when this case ran a Deep provider
+    /// (P0.3 §6 settlement accounting). `None` for Fast/Balanced cases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deep: Option<DeepSettlement>,
+}
+
+/// Deep-recall settlement receipt extracted from a case's retrieval trace
+/// (tri-domain-sota-plan §6: keep the settle-on-abort receipt even when a run
+/// aborts). `settled_micros` is the provider-reconciled spend that lands in
+/// trace cost; `unsettled_micros_upper_bound` is the conservative upper bound
+/// that may have been billed but could not be settled before cancellation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeepSettlement {
+    pub status: DeepRecallStatus,
+    pub stop_reason: DeepRecallStopReason,
+    pub settled_micros: u64,
+    pub unsettled_micros_upper_bound: u64,
+    pub tool_iterations: u32,
+    pub wall_time_ms: u64,
+}
+
+/// Extract the Deep settlement receipt from a trace, if the case ran Deep.
+fn deep_settlement(trace: &RetrievalTrace) -> Option<DeepSettlement> {
+    deep_settlement_from_summary(trace.deep.as_ref())
+}
+
+/// Testable core: map a Deep summary (present only for Deep cases) to its
+/// settlement receipt. `None` in ⇒ `None` out (Fast/Balanced never settle).
+fn deep_settlement_from_summary(summary: Option<&DeepRecallSummary>) -> Option<DeepSettlement> {
+    summary.map(|summary| DeepSettlement {
+        status: summary.status,
+        stop_reason: summary.stop_reason,
+        settled_micros: summary.usage.spend_micros,
+        unsettled_micros_upper_bound: summary.usage.unsettled_spend_micros_upper_bound,
+        tool_iterations: summary.usage.tool_iterations,
+        wall_time_ms: summary.usage.wall_time_ms,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2007,6 +2044,11 @@ async fn run_golden_case(
             missing_trace_stages: Vec::new(),
             dropped_mismatches: Vec::new(),
             error: Some(error.to_string()),
+            // A hard failure (e.g. invalid provider output) produces no trace, so
+            // there is no settlement receipt to record here; a Deep recall that
+            // aborts against its caps instead returns a Capped/Partial trace via
+            // the Ok path above, where its settle-on-abort receipt IS captured.
+            deep: None,
         },
     }
 }
@@ -2302,6 +2344,7 @@ async fn run_golden_case_inner(
         missing_trace_stages,
         dropped_mismatches,
         error: None,
+        deep: deep_settlement(&trace),
     })
 }
 
@@ -2995,4 +3038,45 @@ fn runtime() -> EvalResult<tokio::runtime::Runtime> {
         .enable_all()
         .build()
         .map_err(|source| EvalError::Failed(format!("failed to create runtime: {source}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use memphant_types::{DeepRecallLimits, DeepRecallUsage};
+
+    #[test]
+    fn deep_settlement_captures_receipt_and_is_none_for_fast() {
+        // P0.3 §6: a Deep case records its settle-on-abort receipt (settled +
+        // unsettled micros, status, stop reason, tool iterations). Fast/Balanced
+        // cases (no Deep summary) settle nothing.
+        assert_eq!(deep_settlement_from_summary(None), None);
+
+        let summary = DeepRecallSummary {
+            status: DeepRecallStatus::Completed,
+            stop_reason: DeepRecallStopReason::Completed,
+            limits: DeepRecallLimits {
+                wall_time_ms: 120_000,
+                max_tool_iterations: 24,
+                max_context_tokens: 96_000,
+                max_spend_micros: 300_000,
+            },
+            usage: DeepRecallUsage {
+                wall_time_ms: 2_790,
+                tool_iterations: 2,
+                context_tokens: 64,
+                spend_micros: 1_236,
+                unsettled_context_tokens_upper_bound: 0,
+                unsettled_spend_micros_upper_bound: 0,
+            },
+            generation_ids: vec!["gen-1".to_string()],
+        };
+        let settlement = deep_settlement_from_summary(Some(&summary)).expect("deep case settles");
+        assert_eq!(settlement.settled_micros, 1_236);
+        assert_eq!(settlement.unsettled_micros_upper_bound, 0);
+        assert_eq!(settlement.tool_iterations, 2);
+        assert_eq!(settlement.status, DeepRecallStatus::Completed);
+        // The $0.30 cap is 300_000 micros — the receipt is well under it.
+        assert!(settlement.settled_micros <= 300_000);
+    }
 }
