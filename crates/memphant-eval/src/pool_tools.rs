@@ -261,7 +261,10 @@ pub fn rerank_pool_command(args: &[String]) -> Result<(), String> {
             match reranker.rerank(&c.question, &texts) {
                 Ok(scores) => break scores,
                 Err(e) if attempt < 5 => {
-                    let wait = 2_u64.saturating_pow(attempt).saturating_mul(2000).min(30_000);
+                    let wait = 2_u64
+                        .saturating_pow(attempt)
+                        .saturating_mul(2000)
+                        .min(30_000);
                     eprintln!(
                         "rerank-pool: {} attempt {} failed ({e}); backing off {wait}ms",
                         c.qid, attempt
