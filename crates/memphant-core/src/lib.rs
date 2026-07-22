@@ -10140,12 +10140,37 @@ fn mint_compiled_citations(
                     StoreError::Conflict("contextual chunk span is invalid".to_string())
                 })?;
             let quote = source_body.get(start..end).ok_or_else(|| {
-                StoreError::Conflict("contextual chunk span is out of bounds".to_string())
+                StoreError::Conflict(format!(
+                    "contextual chunk span is out of bounds: unit {unit_id} chunk {chunk_id} \
+                     span {start}-{end} but source_body is {body_len} bytes",
+                    unit_id = unit.id.as_uuid(),
+                    chunk_id = chunk.id,
+                    body_len = source_body.len(),
+                ))
             })?;
             if quote != chunk.body {
-                return Err(StoreError::Conflict(
-                    "contextual chunk span does not match its source body".to_string(),
-                ));
+                // This invariant is proven to hold at mint time for both
+                // chunkers (see chunk_span_invariant_repro.rs). A mismatch here
+                // therefore means this compile's `source_body` is NOT the body
+                // the chunk was minted from — a re-compile/retry against changed
+                // state. Capture the divergence so the input is reproducible
+                // instead of being discarded (the diagnostic-dee83e37 gap).
+                let common = quote
+                    .char_indices()
+                    .zip(chunk.body.char_indices())
+                    .take_while(|((_, a), (_, b))| a == b)
+                    .count();
+                return Err(StoreError::Conflict(format!(
+                    "contextual chunk span does not match its source body: unit {unit_id} \
+                     chunk {chunk_id} span {start}-{end}; source_body {sb_len} bytes, \
+                     chunk.body {cb_len} bytes, diverge at char {common}; \
+                     source_slice={quote:?} chunk_body={cb:?}",
+                    unit_id = unit.id.as_uuid(),
+                    chunk_id = chunk.id,
+                    sb_len = source_body.len(),
+                    cb_len = chunk.body.len(),
+                    cb = chunk.body,
+                )));
             }
             citations.push(citation(unit, start, end, quote));
         }

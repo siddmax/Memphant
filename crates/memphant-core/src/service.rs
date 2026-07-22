@@ -2617,6 +2617,13 @@ fn resource_chunk_header(body: &str, uri: &str) -> String {
 /// silently dropping a large document's tail is a correctness and citation
 /// failure. Ingestion adapters should still split large documents into
 /// resource-sized units so retrieval fan-out stays bounded.
+/// Test-only seam: mint resource chunks for an arbitrary body so the span/body
+/// invariant the compiler enforces can be property-tested directly.
+#[doc(hidden)]
+pub fn resource_chunks_for_test(body: &str) -> Vec<ContextualChunk> {
+    resource_contextual_chunks(ResourceId::new(), "test://doc.md", body)
+}
+
 fn resource_contextual_chunks(
     resource_id: ResourceId,
     uri: &str,
