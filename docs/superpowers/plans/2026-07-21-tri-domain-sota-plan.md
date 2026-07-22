@@ -367,11 +367,26 @@ golden.**
   Syndai has no `subject_generation`/`agent_node` concept yet; dogfood default-
   off ⇒ nil blast radius. Proof: `docs/build-log/2026-07-21-c3-coding-backfill.md`,
   commits `d7939105` (SDK) + Syndai `a7f6ceeef`.
-- **C1 — Episodic slice** (first real user value): cut the loader's episodic
-  layer + recall/correct/reinforce/archive/forget to MemPhant; backfill 252
-  rows; bar = hot-path SLO (p50 < 200 ms) + identical Conversations tab +
-  two-user RLS leakage proof (the isolation model swaps from app-filters to
-  tenant-RLS — must be proven, not assumed).
+- **C1 — Episodic slice** (first real user value) ✅ **LANDED correctness-only
+  (2026-07-22)**: the episodic backfill + all three bars are proven MemPhant-side
+  on a schema-faithful synthetic 252-row corpus (prod episodic off-limits, local
+  dev DB verified-wiped — the C3 wall; runner is corpus-source-agnostic and runs
+  on the real rows the moment authorized). **Bar 1 SLO**: HTTP-boundary
+  p50 = 32.6 ms / p95 = 37.2 ms over 200 real `POST /v1/recall` calls on the
+  packaged server + scratch PG (closes STATUS §6; the old `hot_path_slo.rs` was
+  InMemory in-process) + a Rust `PgStore` guard. **Bar 2**: proven on RECALL (not
+  `scope_memory_page`, which has no state filter) per-episode — every visible
+  episode retrievable, no archived/`user_correction` episode ever recallable; both
+  tenants pass (113/114 retrievable, 13/12 excluded). Two real cutover mappings
+  landed: Syndai `source_kind` → MemPhant enum, and the archive→forget /
+  correction-skip backfill disposition. **Bar 3**: two-tenant episodic RLS
+  leakage proven under the real `memphant_app` role (teeth-verified) + an app+GUC
+  probe leg. **Standing note**: the packaged server runs as a superuser
+  (`rolbypassrls=true`), so RLS is the backstop only when prod runs it under
+  `memphant_app`. `reinforce`→`mark`, `archive`→`forget` verb mapping documented.
+  recall-QUALITY parity + live Syndai rewiring deferred (same boundary as C0/C3).
+  Proof: `docs/build-log/2026-07-22-c1-episodic-slice.md` +
+  `docs/build-log/artifacts/c1-episodic/`.
 - **C3 — Coding-continuity backfill** (net-new value, no parity bar) ⚠️
   **MECHANISM LANDED, VOLUME BLOCKED-on-data (2026-07-21)**: the `retain(episode)`
   backfill path + the code-lane runner are now strict-contract-correct
