@@ -296,10 +296,18 @@ def _load_pool(path):
 
 
 def _maxsim(query_tvecs, doc_tvecs):
-    """ColBERT MaxSim: sum over query tokens of the max cosine to any doc token."""
+    """ColBERT MaxSim: sum over query tokens of the max cosine to any doc token.
+    Jina ColBERT vectors are L2-normalized, so cosine == dot product (skip the
+    norm division — the pure-Python hot loop is the bottleneck without numpy)."""
     total = 0.0
     for q in query_tvecs:
-        best = max((cosine(q, d) for d in doc_tvecs), default=0.0)
+        best = 0.0
+        for d in doc_tvecs:
+            s = 0.0
+            for i in range(len(q)):
+                s += q[i] * d[i]
+            if s > best:
+                best = s
         total += best
     return total
 
@@ -574,13 +582,28 @@ def cmd_rerank_api(args):
             t0 = time.perf_counter()
             body = {"query": c["question"], "documents": texts, "model": args.arm,
                     "top_n": len(texts)}
-            req = urllib.request.Request(
-                "https://api.zeroentropy.dev/v1/models/rerank",
-                data=json.dumps(body).encode(),
-                headers={"Authorization": f"Bearer {key}",
-                         "Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=120) as r:
-                d = json.loads(r.read())
+            # Retry 429/5xx with exponential backoff (ZeroEntropy rate-limits a
+            # tight 72-question loop). Failures are NOT cached.
+            d = None
+            for attempt in range(6):
+                req = urllib.request.Request(
+                    "https://api.zeroentropy.dev/v1/models/rerank",
+                    data=json.dumps(body).encode(),
+                    headers={"Authorization": f"Bearer {key}",
+                             "Content-Type": "application/json",
+                             "User-Agent": "curl/8.4.0"})
+                try:
+                    with urllib.request.urlopen(req, timeout=120) as r:
+                        d = json.loads(r.read())
+                    break
+                except urllib.error.HTTPError as e:
+                    if e.code in (429, 500, 502, 503) and attempt < 5:
+                        retry_after = e.headers.get("Retry-After")
+                        wait = float(retry_after) if retry_after and retry_after.isdigit() \
+                            else 2.0 * (2 ** attempt)
+                        time.sleep(min(wait, 30.0))
+                        continue
+                    raise
             ms = (time.perf_counter() - t0) * 1000.0
             res = d.get("results", d.get("data", []))
             scores = {c["docs"][x["index"]]["doc_id"]:
@@ -589,7 +612,7 @@ def cmd_rerank_api(args):
                    "total_tokens": d.get("total_tokens", 0)}
             with open(cpath, "w") as f:
                 json.dump(row, f)
-            time.sleep(0.3)
+            time.sleep(1.0)
         total_tokens += row.get("total_tokens", 0) or 0
         results.append(row)
     with open(args.out, "w") as f:

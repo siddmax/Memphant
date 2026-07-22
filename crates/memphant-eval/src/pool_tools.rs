@@ -227,8 +227,17 @@ pub fn rerank_pool_command(args: &[String]) -> Result<(), String> {
         config.provider, config.model
     );
 
+    // Bench-only throttle between questions (default 0), so a hosted reranker's
+    // per-minute token/rate limit isn't tripped by a tight 72-question loop.
+    let sleep_ms: u64 = std::env::var("POOL_RERANK_SLEEP_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     let mut rows = Vec::new();
-    for c in &cands {
+    for (ci, c) in cands.iter().enumerate() {
+        if sleep_ms > 0 && ci > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
+        }
         // Flatten to (owner doc index, text). Doc granularity = whole text;
         // chunk granularity = each chunk, falling back to text when chunkless.
         let mut owner: Vec<usize> = Vec::new();
@@ -244,10 +253,25 @@ pub fn rerank_pool_command(args: &[String]) -> Result<(), String> {
                 texts.push(d.text.as_str());
             }
         }
+        // Bench resilience: retry a per-question rerank failure (e.g. a hosted
+        // 429) with exponential backoff instead of aborting the whole run.
         let t0 = Instant::now();
-        let scores = reranker
-            .rerank(&c.question, &texts)
-            .map_err(|e| format!("rerank {} failed: {e}", c.qid))?;
+        let mut attempt = 0u32;
+        let scores = loop {
+            match reranker.rerank(&c.question, &texts) {
+                Ok(scores) => break scores,
+                Err(e) if attempt < 5 => {
+                    let wait = 2_u64.saturating_pow(attempt).saturating_mul(2000).min(30_000);
+                    eprintln!(
+                        "rerank-pool: {} attempt {} failed ({e}); backing off {wait}ms",
+                        c.qid, attempt
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(wait));
+                    attempt += 1;
+                }
+                Err(e) => return Err(format!("rerank {} failed after retries: {e}", c.qid)),
+            }
+        };
         let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
         if scores.len() != texts.len() {
             return Err(format!(
