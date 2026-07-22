@@ -419,9 +419,17 @@ def cmd_retrieve(args):
             fused = minmax_convex(sd, sb, args.alpha)
             ranked = sorted(fused, key=lambda k: (-fused[k], k))
         elif args.variant == "v7":
+            # MMR re-selects the top-48 from the dense relevance ranking. Only the
+            # top MMR_PREFIX relevance docs can plausibly enter the top-48, so MMR
+            # runs over that prefix (O(prefix*48), not O(pool^2)); the untouched
+            # tail keeps its relevance order. This is the realistic MMR use and
+            # keeps the pure-Python cost bounded.
+            MMR_PREFIX = 64
             rd, sd = rank_docs_dense(q, vecs, qvec)
             doc_vecs = {}
             for d in q["docs"]:
+                if d["doc_id"] not in rd[:MMR_PREFIX]:
+                    continue
                 best, bv = -math.inf, None
                 for c in d["chunks"]:
                     v = vecs[sha256_text(c)]
@@ -429,7 +437,8 @@ def cmd_retrieve(args):
                     if s > best:
                         best, bv = s, v
                 doc_vecs[d["doc_id"]] = bv
-            ranked = mmr_select(rd, sd, doc_vecs, lam=args.mmr_lambda, k=len(rd))
+            head = mmr_select(rd[:MMR_PREFIX], sd, doc_vecs, lam=args.mmr_lambda, k=48)
+            ranked = head + [d for d in rd if d not in set(head)]
         else:
             raise SystemExit(f"unknown variant {args.variant} (v4/v5 = same code on "
                              "prefix-vectors / context-pool; v6 has its own path)")
