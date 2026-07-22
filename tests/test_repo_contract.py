@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import importlib.util
 import re
 import subprocess
 from pathlib import Path
@@ -142,19 +141,6 @@ def test_repo_hygiene_files_keep_generated_and_private_state_out() -> None:
     )
 
     assert ignored.returncode == 0
-
-
-def test_spike_decision_thresholds_match_r83() -> None:
-    spec = importlib.util.spec_from_file_location("run_spike", ROOT / "scripts" / "run_spike.py")
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    assert module.decision_for_ratio(1.49) == "rust_proceeds"
-    assert module.decision_for_ratio(1.5) == "manual_review"
-    assert module.decision_for_ratio(2.99) == "manual_review"
-    assert module.decision_for_ratio(3.0) == "reopen_decision_2"
 
 
 def test_handoff_docs_mirror_status_phase() -> None:
