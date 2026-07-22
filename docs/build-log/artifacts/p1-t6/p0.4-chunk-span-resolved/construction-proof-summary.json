@@ -1,0 +1,47 @@
+{
+  "construction_proof_sha256": "ab61c945e641a6ae3ec30e5124c97b57f9fecad14e0751d6cb630886029485d0",
+  "contract": {
+    "adapter_sha256": "56c2a7264112e012f9376178cc2ef3383d70705f21255d4182e92bf62f8e206c",
+    "binaries": {
+      "cli": {
+        "bytes": 5705024,
+        "path": "/Users/sidsharma/.codex/worktrees/Memphant/p1-deep-mode/target/release/memphant-cli",
+        "sha256": "368d2087e649a906a218a2445f179ef8e61e1690c5c95e093052e7f2df1be4c4"
+      },
+      "server": {
+        "bytes": 40236608,
+        "path": "/Users/sidsharma/.codex/worktrees/Memphant/p1-deep-mode/target/release/memphant-server",
+        "sha256": "6b5c40b27d7bcba8df5f1c1d3f1796bb3246a8eae372a04533e1871f350e1da7"
+      },
+      "worker": {
+        "bytes": 35963440,
+        "path": "/Users/sidsharma/.codex/worktrees/Memphant/p1-deep-mode/target/release/memphant-worker",
+        "sha256": "604e1447f5b64da1fa82af0c1f0175be04c232a1b8d5d3b75c069589a9780f6b"
+      }
+    },
+    "construction_params_sha256": "4d1241c11389a2a095de0490500ddeed96783c8d479e9a25a4ed76b98c8e488c"
+  },
+  "isolation": {
+    "context": {
+      "actor_id": "019f8773-d8b1-7d02-8749-f4c60b0afee1",
+      "agent_node_id": "019f8773-d8b5-7da0-904a-c54ae258062e",
+      "scope_id": "019f8773-d8b3-7821-b73f-cd8448a943d7",
+      "subject_generation": 0,
+      "subject_id": "019f8773-d8af-7722-8239-babf0bcccf3f"
+    },
+    "instance_id": "7946c566a5cf462394bc9934a0bb5565",
+    "tenant_id": "7ce59299-d7c4-4abf-8c4e-6ebb46e2394a"
+  },
+  "pairing": {
+    "note": "per-retain array omitted from this proof extract; full array is in the sealed case-bank archive (gitignored data)",
+    "resource_count": 670,
+    "retains_len": 500,
+    "trajectory_count": 500,
+    "worker": {
+      "completed_sources": 670,
+      "stderr_sha256": "4285243e4f7b1be38e8c1bdf7b2b51d21c87ca7b1342a477a533b1e18df56e8d",
+      "stdout_sha256": "720b6b1beea31178667088c42bd99331ee62b3592aa672be128eb763e9de6a29"
+    }
+  },
+  "schema_version": 1
+}

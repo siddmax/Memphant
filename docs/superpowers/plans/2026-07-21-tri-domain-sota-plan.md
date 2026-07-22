@@ -171,6 +171,21 @@ and none exist today. Nothing paid opens until all three are green.
   message pins the exact source and the retry/re-compile path gets the real
   fix. This gate protects both the benchmark lane AND the Syndai cutover
   (same ingestion path).
+  **OUTCOME (2026-07-21): RESOLVED — did not recur.** One full exposed
+  ingestion of the pinned LME-V2 dev corpus reached **670/670 sources** through
+  the packaged `MemoryService<PgStore>` runtime with `MEMPHANT_RESOURCE_CHUNKS=on`
+  (the exact failing path) and **zero model calls** (`verify-no-model --fixture
+  exact`, envelope `verified:true / paid_calls:0`). The reflect queue drained
+  monotonically past the old 139/670 abort point to 670/670 with `err=0 dead=0`;
+  worker stderr was clean (`drain completed=670`, no conflict line). No fix was
+  required — the chunkers were already proven correct at mint time and no
+  re-compile/retry path produced the divergence at full scale. Run on a run-owned
+  ephemeral scratch Postgres (P0.1 discipline; source DB force-dropped, zero
+  orphan clones). Proof:
+  `docs/build-log/2026-07-21-p0.4-chunk-span-resolved.md` +
+  `docs/build-log/artifacts/p1-t6/p0.4-chunk-span-resolved/`. This clears the
+  ingestion precondition for the paid lanes (still gated behind the free A1
+  verdict).
 
 ## 3. Phase A — Prove T6 (after Phase 0; free → $10)
 

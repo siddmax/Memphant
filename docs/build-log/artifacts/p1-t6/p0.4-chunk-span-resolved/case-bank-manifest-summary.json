@@ -1,0 +1,141 @@
+{
+  "archive": "f2b080454715cc2ad68ac2673a251fd61a3e92b98349af2360650cecfcab9888.dump",
+  "archive_sha256": "f2b080454715cc2ad68ac2673a251fd61a3e92b98349af2360650cecfcab9888",
+  "case_contract": {
+    "adapter_sha256": "56c2a7264112e012f9376178cc2ef3383d70705f21255d4182e92bf62f8e206c",
+    "case_id": "19367bc7",
+    "classification": "no_model_clone_mechanics",
+    "fixture": "exact",
+    "input_sha256": "eca6bbb10460feed772a8c86da3fc755e4a5fe9ccba3d33fb8b7b6e4a2d775b9",
+    "memory_params_sha256": "941d433c839e964093843f846a26ef59eac68b5c093a8402328e0380c9f95fd0"
+  },
+  "case_contract_sha256": "46db32eb64e2925a9f8d247503a57061b34bb1d73f1ccb031fa15099f802422b",
+  "construction_duration_ms": 2511352,
+  "construction_proof_sha256": "ab61c945e641a6ae3ec30e5124c97b57f9fecad14e0751d6cb630886029485d0",
+  "database_schema_identity": {
+    "extensions_and_migrations_sha256": "4795061ca642d29e8f64c9f493040b88dd61df36f62cd297489554f585b76be3",
+    "schema_sha256": "5aa43bfd38b72fb96ef0980143f475b684094f75eed1bb32220a4b289056d619",
+    "sha256": "20241c63e9c586301164240d9c240e19be51e027464d681bbab1fac32c1dc7b1"
+  },
+  "excluded_tables": [
+    "memphant.schema_migrations",
+    "memphant.api_key",
+    "memphant.event_outbox",
+    "memphant.job_state",
+    "memphant.retrieval_trace",
+    "memphant.review_event",
+    "memphant.review_event_unit"
+  ],
+  "format_version": 1,
+  "logical_identity": {
+    "sequences": {
+      "deletion_generation_id_seq": {
+        "is_called": false,
+        "last_value": "1"
+      },
+      "job_state_queue_order_seq": {
+        "is_called": true,
+        "last_value": "670"
+      }
+    },
+    "sha256": "bf5b0b9064d0a332cb499c6c9c4594a2b8b2b9b848c412f92508b713d949dd2a",
+    "tables": {
+      "actor": {
+        "rows": 1,
+        "sha256": "1feb52d761b859f16d3d8cdc5b2f771e3211c2050ce3f6cdb7ad6d9891499ffe"
+      },
+      "agent_node": {
+        "rows": 1,
+        "sha256": "e65fc73135f29f6e38f9238da83b6a9c17bbb146fb00c1d1312ef36a6b33f4ac"
+      },
+      "belief_observation": {
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "blob_ledger": {
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "citation": {
+        "rows": 381972,
+        "sha256": "3c3ca5c593e91ac49e68224dd23339f4a48132b15456b1e4b11def2923396fdb"
+      },
+      "context_binding": {
+        "rows": 1,
+        "sha256": "6fbc4ca9e0f88de8a4a97fd3ffcc9b03b7ea4fbd4b82c379fc7edc300bd6d990"
+      },
+      "deletion_generation": {
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "embedding": {
+        "rows": 670,
+        "sha256": "4bb4258d80d335e141e2fc1cb48204710ba4e128537aecdf7b1741180616e049"
+      },
+      "embedding_profile": {
+        "rows": 1,
+        "sha256": "fefef5919f747c7e4750b7d0a055de4c2875e1ac25f7625174d199bd6603a894"
+      },
+      "episode": {
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "forgotten_source": {
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "memory_edge": {
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "memory_unit": {
+        "rows": 670,
+        "sha256": "31bc28f6b2a1989fec452c1649be478e5369cea5cffc0841af5a3772538fcef2"
+      },
+      "mutation_ledger": {
+        "rows": 670,
+        "sha256": "76d5384813626d71585c0986e84c9f6c66ab3a06e45cff66f9a9583994135830"
+      },
+      "resource": {
+        "rows": 670,
+        "sha256": "05ca17faf5a8456a3722dabbb42824c46f9c901f55235ae04fc7b59240af5af7"
+      },
+      "scope": {
+        "rows": 1,
+        "sha256": "488293cdcb6d816d0d0d0e22955a02d5e0d59476890ce63468c12bfc29dc952c"
+      },
+      "scope_block": {
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "scope_policy": {
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "subject": {
+        "rows": 1,
+        "sha256": "85c706a1d44a427ddc8d0918d9c90518500086b54e6c3d97ffc5399e692237c7"
+      },
+      "subject_tombstone": {
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "tenant": {
+        "rows": 1,
+        "sha256": "e18d6a3bb961f1e242faefddd5cab36c662d8f4eceb89f29a4f7c389667b46ea"
+      },
+      "trust_event": {
+        "rows": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    }
+  },
+  "postgres": {
+    "binary": "/opt/homebrew/opt/postgresql@17/bin/pg_dump",
+    "major": 17,
+    "server_major": 17,
+    "version": "pg_dump (PostgreSQL) 17.10 (Homebrew)"
+  },
+  "postgres_major": 17,
+  "resource_count": 670
+}
