@@ -964,7 +964,13 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
                 let response = ingest_service
                     .retain(
                         &context,
-                        &format!("lme:{session_id}:{turn_index}"),
+                        // `session_index` (haystack position), not just `session_id`:
+                        // LongMemEval haystacks can repeat a session_id at two
+                        // timestamps (e.g. dev `001be529` has `sharegpt_SYbLHTK_0`
+                        // twice — identical body, different date). Each occurrence
+                        // must ingest as its own episode, so the idempotency key
+                        // is keyed on the haystack position, which is unique.
+                        &format!("lme:{session_index}:{session_id}:{turn_index}"),
                         TrustLevel::TrustedUser,
                         RetainEpisodeHttpRequest {
                             subject_id: context.data_subject_id,
