@@ -1,4 +1,6 @@
-//! Voyage `rerank-2.5` behind MemPhant's existing cross-reranker seam.
+//! Hosted rerankers behind MemPhant's existing cross-reranker seam:
+//! Voyage `rerank-2.5` and Cohere `rerank-v3.5` (both API-only, not
+//! self-hostable — reference/cost arms alongside the local fastembed path).
 
 use std::time::Duration;
 
@@ -12,10 +14,25 @@ const MAX_LENGTH: usize = 32_000;
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 // The release local baseline leaves roughly 330-390ms of non-reranker p95
 // inside the 1.5s recall ceiling, so the hosted call gets the remaining
-// bounded budget. This is still a hard global timeout with no retry.
-const GLOBAL_TIMEOUT: Duration = Duration::from_millis(1_500);
+// bounded budget by default. `MEMPHANT_RERANK_TIMEOUT_MS` overrides it (0 =
+// unbounded) for offline accuracy benchmarking where the hot-path budget does
+// not apply. This is still a hard global timeout with no retry.
+const DEFAULT_GLOBAL_TIMEOUT_MS: u64 = 1_500;
 const RESPONSE_BODY_LIMIT: u64 = 1024 * 1024;
 const ERROR_BODY_LIMIT: u64 = 4096;
+
+/// The hosted-reranker global timeout, from `MEMPHANT_RERANK_TIMEOUT_MS`
+/// (default 1500 ms; `0` disables the timeout for offline benchmarking).
+fn global_timeout() -> Option<Duration> {
+    match std::env::var("MEMPHANT_RERANK_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+    {
+        Some(0) => None,
+        Some(ms) => Some(Duration::from_millis(ms)),
+        None => Some(Duration::from_millis(DEFAULT_GLOBAL_TIMEOUT_MS)),
+    }
+}
 
 pub struct VoyageReranker {
     agent: Agent,
@@ -33,7 +50,7 @@ impl VoyageReranker {
             })?;
         let config = Agent::config_builder()
             .timeout_connect(Some(CONNECT_TIMEOUT))
-            .timeout_global(Some(GLOBAL_TIMEOUT))
+            .timeout_global(global_timeout())
             .http_status_as_error(false)
             .build();
         Ok(Self {
@@ -145,6 +162,127 @@ impl CrossReranker for VoyageReranker {
     }
 }
 
+// --- Cohere rerank (v2 endpoint) ------------------------------------------
+
+const COHERE_URL: &str = "https://api.cohere.com/v2/rerank";
+// Fast/cheap tier by default ($0.001/search, ~600ms). `MEMPHANT_COHERE_MODEL`
+// overrides — e.g. `rerank-v4.0-pro` for the accuracy-max arm ($0.0025/search).
+const COHERE_DEFAULT_MODEL: &str = "rerank-v3.5";
+// Cohere's per-doc context; query+doc are truncated to this. Sent explicitly so
+// the arm is comparable to the local `max_length` knob.
+const COHERE_MAX_LENGTH: usize = 4_096;
+
+pub struct CohereReranker {
+    agent: Agent,
+    api_key: String,
+    model: String,
+    candidate_limit: usize,
+}
+
+impl CohereReranker {
+    pub fn new(candidate_limit: usize) -> Result<Self, String> {
+        let api_key = std::env::var("COHERE_API_KEY")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "COHERE_API_KEY is not set (required for cohere rerank)".to_string())?;
+        let model = std::env::var("MEMPHANT_COHERE_MODEL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| COHERE_DEFAULT_MODEL.to_string());
+        let config = Agent::config_builder()
+            .timeout_connect(Some(CONNECT_TIMEOUT))
+            .timeout_global(global_timeout())
+            .http_status_as_error(false)
+            .build();
+        Ok(Self {
+            agent: config.into(),
+            api_key,
+            model,
+            candidate_limit,
+        })
+    }
+}
+
+#[derive(Serialize)]
+struct CohereRequest<'a> {
+    query: &'a str,
+    documents: &'a [&'a str],
+    model: &'a str,
+    top_n: usize,
+    max_tokens_per_doc: usize,
+}
+
+#[derive(Deserialize)]
+struct CohereResponse {
+    results: Vec<CohereResultItem>,
+}
+
+#[derive(Deserialize)]
+struct CohereResultItem {
+    index: usize,
+    relevance_score: f32,
+}
+
+impl CrossReranker for CohereReranker {
+    fn config(&self) -> CrossRerankerConfig {
+        CrossRerankerConfig {
+            provider: "cohere".to_string(),
+            model: self.model.clone(),
+            candidate_limit: self.candidate_limit,
+            max_length: COHERE_MAX_LENGTH,
+            batch_size: None,
+        }
+    }
+
+    fn rerank(&self, query: &str, docs: &[&str]) -> Result<Vec<f32>, String> {
+        if docs.is_empty() {
+            return Ok(Vec::new());
+        }
+        // top_n = all docs so we get one score per input (we re-scatter by index).
+        let body = CohereRequest {
+            query,
+            documents: docs,
+            model: &self.model,
+            top_n: docs.len(),
+            max_tokens_per_doc: COHERE_MAX_LENGTH,
+        };
+        let mut response = self
+            .agent
+            .post(COHERE_URL)
+            .header("authorization", &format!("Bearer {}", self.api_key))
+            .send_json(&body)
+            .map_err(|error| format!("cohere reranker transport error: {error}"))?;
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            let snippet = response
+                .body_mut()
+                .with_config()
+                .limit(ERROR_BODY_LIMIT)
+                .read_to_string()
+                .unwrap_or_else(|_| "<unreadable body>".to_string());
+            return Err(format!(
+                "cohere reranker HTTP {status}: {}",
+                snippet.trim().chars().take(500).collect::<String>()
+            ));
+        }
+        let decoded = response
+            .body_mut()
+            .with_config()
+            .limit(RESPONSE_BODY_LIMIT)
+            .read_json::<CohereResponse>()
+            .map_err(|error| format!("cohere reranker response decode failed: {error}"))?;
+        let items = decoded
+            .results
+            .into_iter()
+            .map(|item| ResultItem {
+                index: item.index,
+                relevance_score: item.relevance_score,
+            })
+            .collect();
+        scores_in_input_order(items, docs.len())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,6 +302,27 @@ mod tests {
         assert_eq!(value["truncation"], false);
         assert_eq!(value["return_documents"], false);
         assert_eq!(value["documents"], serde_json::json!(["first", "second"]));
+    }
+
+    #[test]
+    fn cohere_request_requests_a_score_for_every_document() {
+        let docs = ["first", "second", "third"];
+        let value = serde_json::to_value(CohereRequest {
+            query: "question",
+            documents: &docs,
+            model: COHERE_DEFAULT_MODEL,
+            top_n: docs.len(),
+            max_tokens_per_doc: COHERE_MAX_LENGTH,
+        })
+        .unwrap();
+        assert_eq!(value["model"], COHERE_DEFAULT_MODEL);
+        // top_n = doc count so we get one score per input to re-scatter by index.
+        assert_eq!(value["top_n"], 3);
+        assert_eq!(value["max_tokens_per_doc"], COHERE_MAX_LENGTH);
+        assert_eq!(
+            value["documents"],
+            serde_json::json!(["first", "second", "third"])
+        );
     }
 
     #[test]

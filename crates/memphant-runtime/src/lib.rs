@@ -249,8 +249,10 @@ pub fn build_cross_reranker() -> Result<Arc<dyn CrossReranker>, String> {
         Some("byo") => build_byo_cross_reranker(),
         Some("voyage-rerank-2.5") => api_reranking::VoyageReranker::new(candidate_limit)
             .map(|reranker| Arc::new(reranker) as Arc<dyn CrossReranker>),
+        Some("cohere-rerank-3.5") => api_reranking::CohereReranker::new(candidate_limit)
+            .map(|reranker| Arc::new(reranker) as Arc<dyn CrossReranker>),
         Some(value) => Err(format!(
-            "MEMPHANT_RERANKER expected fastembed, byo, or voyage-rerank-2.5, got {value:?}"
+            "MEMPHANT_RERANKER expected fastembed, byo, voyage-rerank-2.5, or cohere-rerank-3.5, got {value:?}"
         )),
     }
 }
