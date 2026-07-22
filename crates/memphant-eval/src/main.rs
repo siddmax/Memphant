@@ -331,8 +331,11 @@ fn syndai_trace_compare_command(args: Vec<String>) -> ExitCode {
         }
         Ok(report) => {
             eprintln!(
-                "syndai_trace_compare=fail id={} missing={:?} forbidden={:?}",
-                report.id, report.missing_answer_bearing, report.forbidden_returned
+                "syndai_trace_compare=fail id={} missing={:?} forbidden={:?} other={:?}",
+                report.id,
+                report.missing_answer_bearing,
+                report.forbidden_returned,
+                report.other_mismatches
             );
             ExitCode::from(1)
         }
