@@ -13,7 +13,7 @@ fn print_deep_settlements(report: &EvalReport) {
     for case in &report.case_results {
         if let Some(deep) = &case.deep {
             println!(
-                "deep_settlement case={} status={:?} stop_reason={:?} settled_micros={} unsettled_upper_bound_micros={} tool_iterations={} wall_time_ms={}",
+                "deep_settlement case={} status={:?} stop_reason={:?} settled_micros={} unsettled_upper_bound_micros={} tool_iterations={} wall_time_ms={} gathered_evidence_ids={:?} generation_ids={:?}",
                 case.id,
                 deep.status,
                 deep.stop_reason,
@@ -21,6 +21,8 @@ fn print_deep_settlements(report: &EvalReport) {
                 deep.unsettled_micros_upper_bound,
                 deep.tool_iterations,
                 deep.wall_time_ms,
+                deep.gathered_evidence_ids,
+                deep.generation_ids,
             );
         }
     }

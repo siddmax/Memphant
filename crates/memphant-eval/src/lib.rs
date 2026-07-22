@@ -231,7 +231,7 @@ pub struct EvalCaseResult {
 /// aborts). `settled_micros` is the provider-reconciled spend that lands in
 /// trace cost; `unsettled_micros_upper_bound` is the conservative upper bound
 /// that may have been billed but could not be settled before cancellation.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeepSettlement {
     pub status: DeepRecallStatus,
     pub stop_reason: DeepRecallStopReason,
@@ -239,16 +239,27 @@ pub struct DeepSettlement {
     pub unsettled_micros_upper_bound: u64,
     pub tool_iterations: u32,
     pub wall_time_ms: u64,
+    /// Source UUIDs the provider nominated via `record_evidence`/`finish` — what
+    /// Deep actually surfaced, so a case failure ("Deep completed but didn't
+    /// nominate the gold unit") is diagnosable without re-running.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gathered_evidence_ids: Vec<String>,
+    /// Provider generation IDs for every accepted model turn (audit trail).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generation_ids: Vec<String>,
 }
 
 /// Extract the Deep settlement receipt from a trace, if the case ran Deep.
 fn deep_settlement(trace: &RetrievalTrace) -> Option<DeepSettlement> {
-    deep_settlement_from_summary(trace.deep.as_ref())
+    deep_settlement_from_summary(trace.deep.as_ref(), &trace.l4_gathered_evidence_ids)
 }
 
 /// Testable core: map a Deep summary (present only for Deep cases) to its
 /// settlement receipt. `None` in ⇒ `None` out (Fast/Balanced never settle).
-fn deep_settlement_from_summary(summary: Option<&DeepRecallSummary>) -> Option<DeepSettlement> {
+fn deep_settlement_from_summary(
+    summary: Option<&DeepRecallSummary>,
+    gathered_evidence_ids: &[String],
+) -> Option<DeepSettlement> {
     summary.map(|summary| DeepSettlement {
         status: summary.status,
         stop_reason: summary.stop_reason,
@@ -256,6 +267,8 @@ fn deep_settlement_from_summary(summary: Option<&DeepRecallSummary>) -> Option<D
         unsettled_micros_upper_bound: summary.usage.unsettled_spend_micros_upper_bound,
         tool_iterations: summary.usage.tool_iterations,
         wall_time_ms: summary.usage.wall_time_ms,
+        gathered_evidence_ids: gathered_evidence_ids.to_vec(),
+        generation_ids: summary.generation_ids.clone(),
     })
 }
 
@@ -2333,6 +2346,26 @@ async fn run_golden_case_inner(
         && missing_trace_stages.is_empty()
         && dropped_mismatches.is_empty();
 
+    // Resolve the Deep provider's nominated UUIDs back to fixture unit names
+    // where known, so a "Deep completed but nominated the wrong unit" failure is
+    // legible in the receipt (e.g. it nominated the decoy). Unknown UUIDs pass
+    // through verbatim.
+    let uuid_to_name: HashMap<String, &str> = context
+        .named_units
+        .iter()
+        .map(|(name, unit_id)| (unit_id.as_uuid().to_string(), name.as_str()))
+        .collect();
+    let deep = deep_settlement(&trace).map(|mut settlement| {
+        settlement.gathered_evidence_ids = settlement
+            .gathered_evidence_ids
+            .iter()
+            .map(|id| match uuid_to_name.get(id) {
+                Some(name) => format!("{name}({id})"),
+                None => id.clone(),
+            })
+            .collect();
+        settlement
+    });
     Ok(EvalCaseResult {
         id: case.id.clone(),
         passed,
@@ -2344,7 +2377,7 @@ async fn run_golden_case_inner(
         missing_trace_stages,
         dropped_mismatches,
         error: None,
-        deep: deep_settlement(&trace),
+        deep,
     })
 }
 
@@ -3050,7 +3083,7 @@ mod tests {
         // P0.3 §6: a Deep case records its settle-on-abort receipt (settled +
         // unsettled micros, status, stop reason, tool iterations). Fast/Balanced
         // cases (no Deep summary) settle nothing.
-        assert_eq!(deep_settlement_from_summary(None), None);
+        assert_eq!(deep_settlement_from_summary(None, &[]), None);
 
         let summary = DeepRecallSummary {
             status: DeepRecallStatus::Completed,
@@ -3071,11 +3104,17 @@ mod tests {
             },
             generation_ids: vec!["gen-1".to_string()],
         };
-        let settlement = deep_settlement_from_summary(Some(&summary)).expect("deep case settles");
+        let settlement = deep_settlement_from_summary(Some(&summary), &["unit-abc".to_string()])
+            .expect("deep case settles");
         assert_eq!(settlement.settled_micros, 1_236);
         assert_eq!(settlement.unsettled_micros_upper_bound, 0);
         assert_eq!(settlement.tool_iterations, 2);
         assert_eq!(settlement.status, DeepRecallStatus::Completed);
+        assert_eq!(
+            settlement.gathered_evidence_ids,
+            vec!["unit-abc".to_string()]
+        );
+        assert_eq!(settlement.generation_ids, vec!["gen-1".to_string()]);
         // The $0.30 cap is 300_000 micros — the receipt is well under it.
         assert!(settlement.settled_micros <= 300_000);
     }

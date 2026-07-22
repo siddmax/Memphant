@@ -1,0 +1,5 @@
+DEEP_DIAG call tool=search_files args={"query": "Stargate deploy"} -> {"hits":[{"line":1,"path":"episodes/019f87dd-b38b-74d1-83cc-cf1ccdfcfbdc.md","text":"Stargate deploy requires a routine restart."},{"line":1,"path":"episodes/019f87dd-b38c-7fb3-857c-081d1e18c7ff.md","text":"The archived raw episode says Stargate deploy was blocked until heliotrope approval landed."}],"truncated":false}
+DEEP_DIAG call tool=read_file args={"path": "episodes/019f87dd-b38b-74d1-83cc-cf1ccdfcfbdc.md", "start_line": 1, "end_line": 50} -> {"error":"invalid_range"}
+DEEP_DIAG call tool=read_file args={"path": "episodes/019f87dd-b38c-7fb3-857c-081d1e18c7ff.md", "start_line": 1, "end_line": 50} -> {"error":"invalid_range"}
+eval=fail id=rung12-l4-exhaustive-sampled passed=0/1
+deep_settlement case=l4_exhaustive_raw_episode_buried status=Partial stop_reason=InvalidOutput settled_micros=7898 unsettled_upper_bound_micros=0 tool_iterations=3 wall_time_ms=4868 gathered_evidence_ids=[] generation_ids=["gen-1784690881-nOAe5MQLU6KoExht42cV", "gen-1784690883-C9T7KJ9CozOQQ8wGKCw0"]

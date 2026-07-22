@@ -1384,9 +1384,15 @@ impl WorkspaceTools {
             return tool_error("invalid_range");
         }
         let lines = body.lines().collect::<Vec<_>>();
-        if start > lines.len() || end > lines.len() {
+        // Only `start` past EOF is an error (nothing to read). A model naturally
+        // asks for a generous `end_line` (e.g. 1-50) to read a whole file; clamp
+        // `end` to the file length and return what exists, like `head -N` on a
+        // short file. Erroring here instead tripped the malformed-response limit
+        // and aborted every live Deep recall over short (1-line) episode bodies.
+        if start > lines.len() {
             return tool_error("invalid_range");
         }
+        let end = end.min(lines.len());
         let requested_text = lines[start - 1..end].join("\n");
         let mut text = truncate_utf8(&requested_text, MAX_TOOL_OUTPUT_BYTES).to_string();
         let mut truncated = text.len() < requested_text.len();
@@ -1848,6 +1854,36 @@ mod tests {
         );
         let finished = tools.call("finish", json!({"source_ids": [b, a, b]}));
         assert_eq!(finished.finish, Some(vec![b, a]));
+    }
+
+    #[test]
+    fn read_file_clamps_end_line_past_eof_instead_of_erroring() {
+        // P0.3 live-Deep root cause: episode bodies are often 1 line, and a
+        // model naturally reads a generous range (`end_line: 50`) to see the
+        // whole file. The tool must clamp `end` to the file length and return
+        // the available lines (like `head -50` on a short file), NOT reject the
+        // read as `invalid_range` — two such rejections trip the malformed-
+        // response limit and abort Deep with empty evidence.
+        let (workspace, _a, b) = workspace();
+        let mut tools = WorkspaceTools::new(workspace).unwrap();
+        let read = tools.call(
+            "read_file",
+            json!({"path": format!("resources/{b}.md"), "start_line": 1, "end_line": 50}),
+        );
+        assert!(
+            read.content.get("error").is_none(),
+            "reading past EOF must not error: {}",
+            read.content
+        );
+        assert_eq!(read.content["text"], "zeta");
+        // The response reports the clamped end, so the model sees the true extent.
+        assert_eq!(read.content["end_line"], 1);
+        // A start_line genuinely past EOF is still an error (nothing to read).
+        let past = tools.call(
+            "read_file",
+            json!({"path": format!("resources/{b}.md"), "start_line": 5, "end_line": 9}),
+        );
+        assert_eq!(past.content["error"], "invalid_range");
     }
 
     #[test]

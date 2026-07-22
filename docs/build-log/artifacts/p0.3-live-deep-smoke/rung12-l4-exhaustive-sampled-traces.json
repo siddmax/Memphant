@@ -1,0 +1,62 @@
+{
+  "case_results": [
+    {
+      "deep": {
+        "gathered_evidence_ids": [
+          "019f87e0-1934-7c63-9257-5fffe40c52ff",
+          "019f87e0-1934-7c63-9257-601359f87506"
+        ],
+        "generation_ids": [
+          "gen-1784691038-wFEmBLCkLW62nbXxekGV",
+          "gen-1784691040-lMWBnb9yhVaSjPAh1EzQ",
+          "gen-1784691043-B755jyBagcmf3zTm7S4i",
+          "gen-1784691044-FmzwzFojWKZPsBS1TiSZ"
+        ],
+        "settled_micros": 17194,
+        "status": "completed",
+        "stop_reason": "completed",
+        "tool_iterations": 5,
+        "unsettled_micros_upper_bound": 0,
+        "wall_time_ms": 8255
+      },
+      "dropped_mismatches": [
+        "packed_position:mem_stargate_raw_episode_answer:expected<=1:actual=missing"
+      ],
+      "error": null,
+      "forbidden_present": [
+        "mem_stargate_decoy"
+      ],
+      "id": "l4_exhaustive_raw_episode_buried",
+      "latency_micros": 8256194,
+      "missing_citations": [
+        "mem_stargate_raw_episode_answer"
+      ],
+      "missing_trace_stages": [],
+      "missing_units": [
+        "mem_stargate_raw_episode_answer"
+      ],
+      "passed": false,
+      "trace_id": "019f87e0-3974-7b61-9c27-5f48e6e17673"
+    }
+  ],
+  "eval_id": "rung12-l4-exhaustive-sampled",
+  "metrics": {
+    "context_packing_abstention_enabled": true,
+    "contextual_chunks_enabled": true,
+    "decay_enabled": true,
+    "edge_expansion_enabled": true,
+    "filesystem_control_enabled": false,
+    "l4_exhaustive_enabled": true,
+    "learned_rerank_enabled": true,
+    "passed_cases": 0,
+    "procedure_recall_enabled": true,
+    "query_decomposition_enabled": true,
+    "recall_p50_ms": 8256.194,
+    "recall_p95_ms": 8256.194,
+    "rerank_enabled": true,
+    "temporal_validity_enabled": true,
+    "total_cases": 1
+  },
+  "runner": "memphant-eval",
+  "trace_schema_version": "trace-0.1.0-ws0"
+}
