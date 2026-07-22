@@ -147,6 +147,21 @@ STATUS_B=$(api_status "$KEY_B" GET "/v1/traces/$TRACE_ID?$QS_B")
 STATUS_A=$(api_status "$KEY_A" GET "/v1/traces/$TRACE_ID?$QS_A")
 [ "$STATUS_A" = "200" ] || fail "tenant A cannot read own trace ($STATUS_A)"
 
+# Cross-tenant EPISODIC read isolation (app + tenant-GUC layer). NOTE: this
+# proves the application + `current_tenant_id()` GUC filter, NOT the Postgres
+# RLS backstop — the server connects as the scratch-DB superuser login
+# (rolbypassrls=true), so FORCE RLS never fires here. The RLS swap itself is
+# proven under the real `memphant_app` role by
+# `crates/memphant-store-postgres/tests/episodic_rls_leakage.rs`.
+log "cross-tenant: B's episode is invisible to A's recall (app+GUC layer)"
+CTX_B="\"subject_id\":\"$SUBJ_B\",\"scope_id\":\"$(echo "$BIND_B" | jget "['scope_id']")\",\"actor_id\":\"$(echo "$BIND_B" | jget "['actor_id']")\",\"agent_node_id\":\"$(echo "$BIND_B" | jget "['agent_node_id']")\",\"subject_generation\":$(echo "$BIND_B" | jget "['subject_generation']")"
+api "$KEY_B" POST /v1/episodes "{$CTX_B,\"source_ref\":\"probe:episode:b\",\"observed_at\":\"2026-07-15T00:00:00Z\",\"payload\":{\"episode\":{\"source_kind\":\"user\",\"body\":\"Tenant B private secret is Zurich.\"}}}" >/dev/null
+worker_once
+RECALL_B=$(api "$KEY_B" POST /v1/recall "{$CTX_B,\"query\":\"Where is the private secret?\"}")
+echo "$RECALL_B" | jget "['items'][0]['body']" | grep -q "Zurich" || fail "tenant B cannot recall own episode: $RECALL_B"
+RECALL_A_XT=$(api "$KEY_A" POST /v1/recall "{$CTX_A,\"query\":\"Where is the private secret Zurich?\"}")
+echo "$RECALL_A_XT" | python3 -c "import json,sys;d=json.load(sys.stdin);assert not any('Zurich' in i['body'] for i in d['items']),d" || fail "tenant A recalled tenant B's private episode (cross-tenant leak): $RECALL_A_XT"
+
 log "restart durability"
 kill "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null || true; SERVER_PID=""
 start_server
