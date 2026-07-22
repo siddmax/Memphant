@@ -157,6 +157,25 @@ and none exist today. Nothing paid opens until all three are green.
   `production_parser_first_failure: null`, settled). The *actual* last abort
   (`diagnostic-dee83e37`) died at **ingestion 139/670** on
   `"contextual chunk span does not match its source body"`, before Deep ran.
+  **OUTCOME (2026-07-21): DONE_WITH_CONCERNS — live plumbing PROVEN after fixing
+  the real defect the smoke surfaced.** Vehicle (owner-confirmed): the ONE
+  buried-evidence case via `memphant-eval run
+  benchmarks/rung12-l4-exhaustive-sampled.yaml --l4-runtime-provider` with the
+  sonnet Deep env — real OpenRouter provider through the FULL Deep pipeline
+  (snapshot→workspace tool loop→validate→pack→trace), provider-enforced $0.30
+  cap. The smoke found the reason **Deep had never produced one valid live pair**:
+  a `read_file` tool defect (`deep_recall_openrouter.rs:1396` rejected
+  `end_line > lines.len()` as `invalid_range` on 1-line episode bodies; two such
+  rejections trip `malformed_response_limit=1` → `Partial/InvalidOutput`, empty
+  evidence). The single-turn `f32fdb37` diagnostic sat one iteration too shallow
+  to see it. Fixed (clamp `end` like `head -N`, TDD); **post-fix 7/7 live runs
+  `status=Completed`, 5 tool iterations, 2 nominated sources, ~$0.017 settled** —
+  the first reliable end-to-end live Deep pairs. The buried *case* still fails on
+  quality (Sonnet nominates the decoy, a legitimate surface answer — A2/A3
+  territory). Total spend $0.1288/10 runs, all ≤ $0.30/recall; settlement
+  receipts recorded. **Paid lanes stay CLOSED** on the converging A1 verdict
+  (below), not on plumbing. Proof: `docs/build-log/2026-07-21-p0.3-live-deep-smoke.md`
+  + `docs/build-log/artifacts/p0.3-live-deep-smoke/`.
 - **P0.4 — Ingestion chunk-span reliability (the real ingestion gate).**
   Root-caused this pass: both chunkers are proven correct (new
   `chunk_span_invariant_repro.rs` passes on all adversarial byte shapes), and
@@ -209,6 +228,27 @@ team (rungs), devil's advocate (free-first discipline), codebase team (wiring).
   parallel — because they chase recall depth when the bottleneck is
   utilization.** This is the cheapest single de-risk in the plan; it can
   invalidate half the benchmark roadmap for $0.
+  **OUTCOME (2026-07-21): VERDICT FIRES AT ITS MAXIMUM — the depth lane is
+  deferred.** FREE, zero model spend: the 178-question dev split classified
+  through the product Fast pipeline (session, runtime-chunks, pool 64, k 10,
+  8192 budget; same dataset sha `e4667bed`) into three buckets from the
+  retrieval trace alone (`bench-lme --emit-trace-classification`). Of 166 scored
+  questions (12 `_abs` set aside): **absent-from-pool = 0 (0.0 %)**,
+  in-pool-unpacked = 64 (38.6 %), in-top-k = 102 (61.4 %). Present-but-unpacked-
+  or-unread (B+C) = **166/166 = 100 %** — far past the ≥70 % threshold. **ZERO
+  dev misses are recall-depth-bound**, so Deep (a depth lever) cannot fix a
+  single one. Mechanism: pool median 47 ≈ every ingested session (gold is always
+  in the pool at depth 64), but packed median is only 4 items under the 8192
+  budget — **packing/ordering (rung 7) is the bottleneck, not depth.**
+  Consequence (binding): **Deep → diagnostic status; packing/ordering (rung 7)
+  becomes the center of gravity; D1 and D3 are DEFERRED (not run in parallel).**
+  NB this run's r@10 (0.614) is below the pinned 2026-07-13 0.777 because it
+  carries two bench-lme ingestion fixes the older report predates (`observed_at`
+  RFC3339 + duplicate-session-id keying, both found by this run); absent=0 is
+  robust to that (pool depth ≥ session count). Proof:
+  `docs/superpowers/specs/2026-07-21-a1-fast-miss-classification-design.md` +
+  `docs/build-log/2026-07-21-a1-fast-miss-classification.md` +
+  `docs/build-log/artifacts/a1-fast-miss-classification/`.
 - **A2 (~$1–2.5 realistic, ≤$5.70 cap): the authorized n=12** on
   run-d2f4fcb3, babysat, on a run-owned Postgres (dedicated container, not
   the shared Docker Desktop lifecycle that killed run-65981e4f). Preregistered
