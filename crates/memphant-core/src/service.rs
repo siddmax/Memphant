@@ -949,6 +949,16 @@ impl<S: MemoryStore> MemoryService<S> {
         self
     }
 
+    /// Sets the rung-7 per-item render cap (default OFF = `None`). `Some(cap)`
+    /// bounds each packed item's chunk-render budget at `cap` tokens so a large
+    /// chunk-matched body cannot refill to nearly its whole self and hog the pack
+    /// budget (2026-07-21-rung7-packing-diagnosis.md). Construction-time only;
+    /// the bench lane's `--pack-render-cap <n>` threads its value here.
+    pub fn with_pack_render_cap(mut self, cap: Option<usize>) -> Self {
+        self.pack_levers.pack_render_cap = cap;
+        self
+    }
+
     /// Enables W5 temporal grounding (default OFF): reflect-stage content-date
     /// grounding of `valid_from` + dated chunk headers, query-date windowing at
     /// recall, and `[date ...]`-prefixed packed items. Construction-time only,

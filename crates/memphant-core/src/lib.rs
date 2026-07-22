@@ -451,6 +451,13 @@ pub struct PackLevers {
     /// quota never leaves admissible budget unused). Replacement honours the cap
     /// too. `None` disables the quota (today's unrestricted greedy fill).
     pub session_quota: Option<usize>,
+    /// Rung-7 per-item render cap. `Some(cap)` bounds EACH packed item's
+    /// chunk-render budget at `cap` tokens, so a large chunk-matched body cannot
+    /// refill (via sibling expansion) to nearly its whole self and hog the pack
+    /// budget — the measured cause of the 64 in-pool-unpacked LME-S dev misses
+    /// (2026-07-21-rung7-packing-diagnosis.md). `None` keeps today's per-item
+    /// budget of `whole_body.min(request_budget)` — byte-identical off-path.
+    pub pack_render_cap: Option<usize>,
 }
 
 /// The active vector query for recall: the embedded query plus the embedding
@@ -7489,6 +7496,8 @@ struct PackCtx<'a> {
     live_candidate_ids: HashSet<UnitId>,
     /// Exact structured goal promoted beside an authoritative quantity rollup.
     goal_companion_id: Option<UnitId>,
+    /// Rung-7 per-item render cap threaded from `PackLevers`. `None` off-path.
+    pack_render_cap: Option<usize>,
 }
 
 /// Everything computed once per candidate before the admit/drop decision.
@@ -7707,6 +7716,7 @@ fn pack_recall_context(
         rank_based_ordering_active,
         live_candidate_ids,
         goal_companion_id,
+        pack_render_cap: pack_levers.pack_render_cap,
     };
 
     // Greedy fill. With the session-diversity quota on, a candidate whose episode
@@ -7808,8 +7818,12 @@ fn admit_or_drop(
         }
     }
 
-    let (rendered_body, unit_tokens, chunk_mask) =
-        packed_render(&candidate.unit, ctx.query_tokens, request.budget_tokens);
+    let (rendered_body, unit_tokens, chunk_mask) = packed_render(
+        &candidate.unit,
+        ctx.query_tokens,
+        request.budget_tokens,
+        ctx.pack_render_cap,
+    );
     let candidate_id = candidate.unit.id;
     // The projection and its exact goal are authoritative packet structure.
     // Protect only those items; ordinary candidates must keep competing.
@@ -8105,7 +8119,8 @@ fn packed_body_and_cost(
     unit: &StoredMemoryUnit,
     query_tokens: &[String],
 ) -> (Option<String>, usize) {
-    let (rendered_body, charged_tokens, _mask) = packed_render(unit, query_tokens, usize::MAX);
+    let (rendered_body, charged_tokens, _mask) =
+        packed_render(unit, query_tokens, usize::MAX, None);
     (rendered_body, charged_tokens)
 }
 
@@ -8117,9 +8132,16 @@ fn packed_render(
     unit: &StoredMemoryUnit,
     query_tokens: &[String],
     request_budget_tokens: usize,
+    render_cap: Option<usize>,
 ) -> (Option<String>, usize, Option<Vec<bool>>) {
     let whole_body_tokens = conservative_token_estimate(&unit.body);
-    let render_budget = whole_body_tokens.min(request_budget_tokens);
+    // Rung-7: the per-item render budget is the whole body (bounded by the
+    // request budget), OPTIONALLY capped so one large chunk-matched body cannot
+    // refill to nearly its whole self and hog the pack budget. `None` ⇒ no cap,
+    // byte-identical to before.
+    let render_budget = whole_body_tokens
+        .min(request_budget_tokens)
+        .min(render_cap.unwrap_or(usize::MAX));
     match select_chunk_mask(&unit.contextual_chunks, query_tokens, render_budget) {
         Some(selected) => {
             let rendered = emit_selected_chunks(&unit.contextual_chunks, &selected);
@@ -11868,6 +11890,96 @@ mod pack_cost_tests {
         vec!["x"; n].join(" ")
     }
 
+    /// Rung-7 per-item render cap: without a cap, a big chunk-matched item's
+    /// per-item render budget is its whole body, so sibling expansion refills it
+    /// back to nearly the whole session — the pathology that budget-drops
+    /// top-ranked gold on LME-S (2026-07-21-rung7-packing-diagnosis.md). With
+    /// `pack_render_cap = Some(cap)`, the item renders compactly (matched chunk
+    /// only) and the reclaimed budget admits a second item that the uncapped pack
+    /// budget-drops. `None` is byte-identical to today (covered elsewhere).
+    #[test]
+    fn pack_render_cap_reclaims_budget_and_admits_second_item() {
+        let query_tokens = tokenize("quantum");
+        // Item A (top-ranked): a chunk-matched item. The matched chunk is small,
+        // but its three siblings are large — uncapped expansion pulls them all in.
+        let big_item = || {
+            candidate(
+                unit(
+                    1,
+                    &body_of(120),
+                    vec![
+                        chunk("1-4", "quantum"),     // small matched anchor
+                        chunk("5-8", &body_of(40)),  // large neighbour
+                        chunk("9-12", &body_of(40)), // large neighbour
+                    ],
+                ),
+                5.0,
+            )
+        };
+        // Item B (lower-ranked): a plain 20-token item.
+        let plain = || candidate(unit(2, &body_of(20), Vec::new()), 4.0);
+
+        // The pathology needs the request budget ≥ A's whole body so uncapped
+        // sibling expansion refills A to (nearly) its whole self. Costs:
+        let anchor_cost = chunk_block_token_cost(&chunk("1-4", "quantum"));
+        let expanded_a: usize = [
+            chunk("1-4", "quantum"),
+            chunk("5-8", &body_of(40)),
+            chunk("9-12", &body_of(40)),
+        ]
+        .iter()
+        .map(chunk_block_token_cost)
+        .sum();
+        // Budget holds the fully-expanded A but leaves < 20 for B (so B drops
+        // uncapped), yet holds the anchor-only A plus B (so B fits capped).
+        let budget = expanded_a + 10; // A expands fully; B(20) then overflows
+        let cap = anchor_cost; // per-item render cap = one matched block
+
+        // Uncapped: A expands to its big siblings, exhausting the budget → B drops.
+        let uncapped = pack_recall_context(
+            vec![big_item(), plain()],
+            &request(budget),
+            &[],
+            &query_tokens,
+            Vec::new(),
+            2,
+            PackLevers::default(),
+            false,
+        );
+        assert_eq!(
+            uncapped.items.len(),
+            1,
+            "uncapped: expanded A eats the budget, B is dropped"
+        );
+
+        // Capped: A renders compact (anchor only), reclaimed budget admits B.
+        let capped = pack_recall_context(
+            vec![big_item(), plain()],
+            &request(budget),
+            &[],
+            &query_tokens,
+            Vec::new(),
+            2,
+            PackLevers {
+                pack_render_cap: Some(cap),
+                ..PackLevers::default()
+            },
+            false,
+        );
+        assert_eq!(
+            capped.items.len(),
+            2,
+            "capped: compact A leaves room for B — both packed"
+        );
+        assert!(
+            capped
+                .items
+                .iter()
+                .any(|i| i.unit_id == UnitId::from_u128(2)),
+            "the reclaimed budget admits the lower-ranked item B"
+        );
+    }
+
     /// Budget reclaim: charging a chunk-rendered item its RENDERED token count
     /// (not the whole-body count) frees budget so a second item that whole-body
     /// charging would drop now fits. Same bodies, same budget, only chunking
@@ -12172,6 +12284,7 @@ mod pack_cost_tests {
             PackLevers {
                 sibling_gather_enabled: true,
                 session_quota: None,
+                pack_render_cap: None,
             },
             false,
         );
@@ -12255,6 +12368,7 @@ mod pack_cost_tests {
             PackLevers {
                 sibling_gather_enabled: false,
                 session_quota: Some(DEFAULT_SESSION_DIVERSITY_QUOTA),
+                pack_render_cap: None,
             },
             false,
         );
@@ -12308,6 +12422,7 @@ mod pack_cost_tests {
             PackLevers {
                 sibling_gather_enabled: false,
                 session_quota: Some(2),
+                pack_render_cap: None,
             },
             false,
         );
@@ -12366,6 +12481,7 @@ mod pack_cost_tests {
                 PackLevers {
                     sibling_gather_enabled: false,
                     session_quota: Some(DEFAULT_SESSION_DIVERSITY_QUOTA),
+                    pack_render_cap: None,
                 },
                 DEFAULT_RECALL_POOL_DEPTH,
             );
@@ -12399,6 +12515,7 @@ mod pack_cost_tests {
                 PackLevers {
                     sibling_gather_enabled: false,
                     session_quota: Some(DEFAULT_SESSION_DIVERSITY_QUOTA),
+                    pack_render_cap: None,
                 },
                 DEFAULT_RECALL_POOL_DEPTH,
             );
@@ -12466,6 +12583,7 @@ mod pack_cost_tests {
         let on_levers = PackLevers {
             sibling_gather_enabled: false,
             session_quota: Some(DEFAULT_SESSION_DIVERSITY_QUOTA),
+            pack_render_cap: None,
         };
         let on_scan_limit = recall_pack_scan_limit(
             &req,

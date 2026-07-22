@@ -121,6 +121,10 @@ pub struct BenchLmeOptions {
     /// W4 per-session diversity quota (`--session-quota <n>`, default off =
     /// `None`) threaded via `with_session_quota`.
     pub session_quota: Option<usize>,
+    /// Rung-7 per-item render cap (`--pack-render-cap <n>`, default off = `None`)
+    /// threaded via `with_pack_render_cap`. Bounds each packed item's chunk-render
+    /// budget so a large chunk-matched body cannot hog the pack budget.
+    pub pack_render_cap: Option<usize>,
     /// W5 temporal-grounding flag (`--temporal-grounding`, default off) threaded
     /// via `with_temporal_grounding_enabled` to BOTH the ingest service (so
     /// `valid_from` and chunk headers are date-grounded at reflect) and the
@@ -311,6 +315,10 @@ pub struct BenchLmeReport {
     /// or `None` when off. Serde default `None` for pre-flag reports.
     #[serde(default)]
     pub session_quota: Option<usize>,
+    /// The rung-7 per-item render cap used for this run (`--pack-render-cap`), or
+    /// `None` when off. Serde default `None` for pre-flag reports.
+    #[serde(default)]
+    pub pack_render_cap: Option<usize>,
     /// Whether W5 temporal grounding (`--temporal-grounding`) was on for this
     /// run. Serde default `false`: every report written before the flag existed
     /// was a temporal-grounding-off run, so an absent field ⇒ off.
@@ -878,6 +886,7 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
     // only; both default off so the campaign measures each independently.
     .with_sibling_gather_enabled(options.sibling_gather)
     .with_session_quota(options.session_quota)
+    .with_pack_render_cap(options.pack_render_cap)
     // W5 temporal grounding: query-date windowing + dated packs at recall. Set
     // explicitly here too so the vector-disabled fresh recall service (which is
     // not a clone of `ingest_service`) also carries the flag.
@@ -1364,6 +1373,7 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
         recall_pool_depth: options.pool,
         sibling_gather: options.sibling_gather,
         session_quota: options.session_quota,
+        pack_render_cap: options.pack_render_cap,
         temporal_grounding: options.temporal_grounding,
         fact_extraction: options.fact_extraction,
         runtime_chunks: runtime_chunks_enabled,
