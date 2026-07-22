@@ -100,8 +100,48 @@ Syndai loader cutover (deferred — Task-6 adapter bridge). RLS on the *served* 
 path (server not run under `memphant_app` yet — standing note). Real prod corpus
 distribution (synthetic only).
 
+## UPGRADE — proven on REAL Syndai prod data (2026-07-22, owner-authorized)
+
+The owner granted prod-run permission, so C1 was re-proven on the **real**
+episodic corpus, not just synthetic. A ONE-TIME **read-only** extract
+(`default_transaction_read_only = on`, `SELECT` only) pulled the live
+`syndai.episodic_memories` rows into a **gitignored** corpus
+(`benchmarks/data/private/`, never committed); the runner gained `--corpus` to
+consume it. Real count is **270 rows / 5 tenants** (grown from the recon's 252).
+
+Real data surfaced **three more cutover mappings** the synthetic corpus missed —
+each pinned by a unit test (these ARE the adapter's real work):
+1. **`source_kind` = `rollup`** → `system` (prod has only `dialog_turn` + `rollup`,
+   not the taxonomy the recon implied).
+2. **`rolled_up` exclusion**: 235/270 rows are rolled-up consolidations, which
+   Syndai's `_build_active_scope_filters` drops from recall. Folded into one
+   `is_recall_visible()` predicate (DRY) driving both disposition and the expected
+   set → those rows retain-then-forget.
+3. **`observed_at` RFC3339 normalization**: Postgres exports
+   `2026-06-17 11:03:30.693143+00` (space separator, `+00`), which the strict
+   contract 422s ("observed_at must use a UTC offset"); normalized to `T…Z`.
+
+**Bar 2 reframed honestly for real data.** The **hard gate is state-filter
+correctness** (no rolled-up/archived/correction episode is EVER recallable) — it
+is **EXACT: 0 leaks on all 5 tenants** (55 and 180 rows correctly excluded on the
+two large tenants). **Per-episode retrievability is a REPORTED coverage metric,
+not a gate**: recall is ranked/deduped/budget-limited, so two tenants that are
+near-duplicate 16k-char audit-prompt clusters are legitimately 0% prefix-
+retrievable, while normal-conversation tenants hit 71–100% (12/17, 6/6, 1/1).
+Asserting 100% would be dishonest about what recall is.
+
+**Bar 1 SLO on real data: p50 = 34.4 ms / p95 = 36.4 ms** (short realistic query).
+A surfaced gotcha: querying a full 16k-char episode body embeds+packs in ~1 s —
+that is a test artifact, not the hot path (context injection uses short queries);
+the SLO uses a realistic short query.
+
+Data safety: bodies never leave the gitignored corpus; the committed provenance
+carries only counts/rates with `user_id`s redacted to prefixes — verified no body
+text present. Proof: `docs/build-log/artifacts/c1-episodic/real-prod-backfill-provenance.json`, commit `6d01789b`.
+
 ## Artifacts
 
-- `docs/build-log/artifacts/c1-episodic/backfill-bar2-provenance.json` (+ evidence.jsonl)
+- `docs/build-log/artifacts/c1-episodic/real-prod-backfill-provenance.json` (real prod, redacted)
+- `docs/build-log/artifacts/c1-episodic/backfill-bar2-provenance.json` (synthetic) + evidence.jsonl
 - `docs/build-log/artifacts/c1-episodic/slo-bar1-http-provenance.json`
-- Commits `be8929b6` (corpus) `0a509c8f` (backfill+Bar2) `8d39b5a6` (Bar1) `cbb95ff9`+`cab0738c` (Bar3).
+- Commits `be8929b6` (corpus) `0a509c8f` (backfill+Bar2) `8d39b5a6` (Bar1) `cbb95ff9`+`cab0738c` (Bar3) `6d01789b` (real prod data).
