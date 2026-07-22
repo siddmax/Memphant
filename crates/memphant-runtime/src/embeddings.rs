@@ -1145,4 +1145,117 @@ mod tests {
             );
         }
     }
+
+    /// CHUNKED variant: the 512-token local rerankers can't see past ~2000 chars
+    /// of a long doc, so this reranks every CHUNK of every doc and scores a doc by
+    /// its MAX chunk score (the standard "rerank chunks, aggregate to doc" pattern
+    /// = MemPhant's contextual-chunks design). Reads `MEMPHANT_RR_POOLS_CHUNKED`
+    /// (`{docs:[{chunks:[..]}]}`). Answers "does chunking recover local-reranker
+    /// accuracy on full docs?" bge-base by default; `MEMPHANT_RERANK_BYO_DIR` for
+    /// MiniLM.
+    #[test]
+    #[ignore = "chunked fixed-pool reranker accuracy; set MEMPHANT_RR_POOLS_CHUNKED"]
+    fn rerank_chunked_pool_accuracy() {
+        let Ok(path) = std::env::var("MEMPHANT_RR_POOLS_CHUNKED") else {
+            eprintln!("chunked bench skipped (set MEMPHANT_RR_POOLS_CHUNKED=<pools.json>)");
+            return;
+        };
+        let max_length = std::env::var("MEMPHANT_RERANK_MAX_LENGTH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(512usize);
+        let pools: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("parse");
+        let pools = pools.as_array().expect("array");
+
+        // Build a scoring closure over the chosen local model.
+        let byo_dir = std::env::var("MEMPHANT_RERANK_BYO_DIR").ok();
+        let bge = if byo_dir.is_none() {
+            Some(
+                FastEmbedCrossReranker::with_config(CrossRerankerConfig {
+                    provider: "fastembed".to_string(),
+                    model: FASTEMBED_RERANKER_ID.to_string(),
+                    candidate_limit: 100_000,
+                    max_length,
+                    batch_size: Some(256),
+                })
+                .expect("bge reranker"),
+            )
+        } else {
+            None
+        };
+        let byo = byo_dir.as_ref().map(|dir| {
+            use fastembed::{
+                OnnxSource, RerankInitOptionsUserDefined, TokenizerFiles, UserDefinedRerankingModel,
+            };
+            let dir = std::path::PathBuf::from(dir);
+            let read = |n: &str| std::fs::read(dir.join(n)).expect(n);
+            let tf = TokenizerFiles {
+                tokenizer_file: read("tokenizer.json"),
+                config_file: read("config.json"),
+                special_tokens_map_file: read("special_tokens_map.json"),
+                tokenizer_config_file: read("tokenizer_config.json"),
+            };
+            let onnx = std::env::var("MEMPHANT_RERANK_BYO_ONNX")
+                .unwrap_or_else(|_| "model_quantized.onnx".to_string());
+            let m = UserDefinedRerankingModel::new(OnnxSource::File(dir.join(onnx)), tf);
+            std::sync::Mutex::new(
+                TextRerank::try_new_from_user_defined(
+                    m,
+                    RerankInitOptionsUserDefined::new().with_max_length(max_length),
+                )
+                .expect("byo"),
+            )
+        });
+        let label = if byo.is_some() {
+            "byo-chunked"
+        } else {
+            "bge-chunked"
+        };
+
+        for pool in pools {
+            let query = pool["question"].as_str().unwrap();
+            let gold = pool["gold_index"].as_u64().unwrap() as usize;
+            // Flatten: (doc_index, chunk_text) for every chunk of every doc.
+            let mut flat: Vec<(usize, String)> = Vec::new();
+            for (di, doc) in pool["docs"].as_array().unwrap().iter().enumerate() {
+                for c in doc["chunks"].as_array().unwrap() {
+                    flat.push((di, c.as_str().unwrap().to_string()));
+                }
+            }
+            let chunk_refs: Vec<&str> = flat.iter().map(|(_, c)| c.as_str()).collect();
+            let started = std::time::Instant::now();
+            let chunk_scores = match (&bge, &byo) {
+                (Some(r), _) => r.rerank(query, &chunk_refs).expect("bge rerank"),
+                (_, Some(m)) => {
+                    let results = m
+                        .lock()
+                        .unwrap()
+                        .rerank(query, &chunk_refs, false, Some(256))
+                        .expect("byo rerank");
+                    let mut s = vec![f32::MIN; chunk_refs.len()];
+                    for r in results {
+                        s[r.index] = r.score;
+                    }
+                    s
+                }
+                _ => unreachable!(),
+            };
+            let elapsed_ms = started.elapsed().as_millis();
+            // Max-pool chunk scores back to docs.
+            let n_docs = pool["docs"].as_array().unwrap().len();
+            let mut doc_scores = vec![f32::MIN; n_docs];
+            for ((di, _), s) in flat.iter().zip(chunk_scores.iter()) {
+                if *s > doc_scores[*di] {
+                    doc_scores[*di] = *s;
+                }
+            }
+            let gold_score = doc_scores[gold];
+            let rank = 1 + doc_scores.iter().filter(|s| **s > gold_score).count();
+            eprintln!(
+                "{{\"event\":\"rr_fixed_pool\",\"model\":\"{label}\",\"docs\":{n_docs},\"chunks\":{},\"gold_rank\":{rank},\"elapsed_ms\":{elapsed_ms}}}",
+                chunk_refs.len()
+            );
+        }
+    }
 }

@@ -114,40 +114,118 @@ Aug 2025 — the "multilingual instruction-following reranker" from the Reddit p
 CPU fallback "impractical for production"). Doubly disqualified for our path — an
 accuracy-frontier/GPU option, not a latency-fit self-host one.
 
-### Fixed-pool micro-benchmark (the accuracy/latency/cost head-to-head)
+### Fixed-pool micro-benchmark — the accuracy/latency/cost head-to-head
 
-Call-efficient design: **8 fixed pools** built from real LME-S questions — each pool
-is 1 known-gold session + 43–56 real distractor sessions (~1.5 KB each), gold at a
-known index. Every reranker scores the *same* pools, so accuracy is directly
-comparable and it costs only 8 calls/model. Metric = rank of the gold doc → MRR,
-R@1/5/10. Local arms scored via a Rust `#[ignore]` test (`rerank_fixed_pool_accuracy`);
-API arms via `rr_api_score.py`. Same machine, same pools.
+Metric = rank of the gold doc → MRR, R@1/5/10. Local arms via the Rust `#[ignore]`
+test (`rerank_fixed_pool_accuracy`); API arms via `rr_api_score.py`. Same machine,
+same pools, per model.
+
+**Two test generations — the first was INVALID (a data-quality bug worth recording):**
+
+- **v1** (`build_pools.py`): 8 pools = 1 whole answer session + 43–56 whole distractor
+  sessions, each truncated to 1500 chars. LME-S sessions are **9–18 KB** long and the
+  answer is usually a single turn deep inside — so the 1500-char truncation **cut the
+  answer out of the gold doc in 6 of 8 pools**. The reranker was scoring a gold snippet
+  that no longer contained the signal → noisy, low, mis-ordered scores (e.g. Cohere
+  v4.0-pro *below* v4.0-fast, v3.5 at MRR 0.41). **Do not trust the v1 numbers.**
+- **v2** (`build_pools_v2.py`, the valid test): **12 pools of 48 same-length 1200-char
+  CHUNKS** (MemPhant's runtime-chunk unit). GOLD = the chunk that actually **contains
+  the answer** (verified 12/12); distractors = 47 random real chunks from other
+  sessions. This is the honest, harder test — 48 same-shaped candidates, answer truly
+  present in gold.
+
+**v2 results (valid; 12 pools × 48 chunks):**
 
 | Reranker | MRR | R@1 | R@10 | latency/query | cost/query | self-host |
 |---|---|---|---|---|---|---|
-| Cohere rerank-v4.0-fast | **0.704** | 0.62 | **0.88** | 419 ms | $0.002 | ❌ API + egress |
-| ZeroEntropy zerank-2 | 0.672 | 0.62 | **0.88** | **318 ms** | ~$0.0004 (16.8k tok) | ❌ API + non-commercial |
-| **ms-marco-MiniLM-L6 int8 (local)** | **0.660** | 0.62 | 0.75 | 605 ms | **free** | ✅ Apache, CPU |
-| bge-reranker-base (local) | 0.569 | 0.38 | 0.75 | **6384 ms** | free | ✅ but too slow |
-| Cohere rerank-v4.0-pro | 0.560 | 0.50 | 0.75 | 699 ms | $0.0025 | ❌ API + egress |
-| Cohere rerank-v3.5 | 0.410 | 0.38 | 0.38 | 417 ms | $0.001 | ❌ API + egress |
+| ZeroEntropy zerank-2 | **0.944** | 0.92 | **1.00** | **265 ms** | ~$0.0004 | ❌ non-commercial |
+| bge-reranker-base (local) | 0.927 | 0.92 | **1.00** | 4813 ms | free | ✅ but slow |
+| **ms-marco-MiniLM-L6 int8 (local)** | **0.926** | 0.92 | **1.00** | **391 ms** | **free** | ✅ Apache, CPU |
+| Cohere rerank-v4.0-pro | 0.925 | 0.92 | **1.00** | 646 ms | $0.0025 | ❌ API |
+| Cohere rerank-v4.0-fast | 0.921 | 0.92 | 0.92 | 376 ms | $0.002 | ❌ API |
+| Cohere rerank-v3.5 | 0.866 | 0.83 | 0.92 | 390 ms | $0.001 | ❌ API |
 
-(Voyage rerank-2.5 not run — no `VOYAGE_API_KEY` available. n=8, so a 1-question
-move ≈ 0.12 MRR / 0.125 R@k — directional, not promotion-grade.)
+(Voyage not run — no key. n=12, so a 1-question move ≈ 0.083 MRR — directional.)
 
-**What this shows:**
-- **MiniLM-L6-int8 (local, free, Apache) is statistically tied with the best hosted
-  rerankers** on this set (MRR 0.660 vs cohere-v4-fast 0.704 and zerank-2 0.672 — a
-  0.3–0.5-question gap at n=8) and **beats bge-base, cohere-v4-pro, and cohere-v3.5**.
-- **bge-reranker-base is both slower AND less accurate than MiniLM here** (MRR 0.569,
-  6.4 s/query) — no reason to keep it as the default.
-- Cohere **v3.5 is the weakest** arm (MRR 0.410); the accuracy is in the **v4** family.
-  Cohere **v4.0-fast** is the hosted accuracy+latency sweet spot; **v4.0-pro** was
-  *lower* accuracy than v4.0-fast on this set (more confident scores ≠ better ranking
-  at n=8) and slower.
-- **zerank-2** is genuinely strong — fastest hosted (318 ms), cheapest (~$0.0004/query
-  at $0.025/1M tok), tied-best accuracy — **but non-commercial license** (its Apache
-  sibling is `zerank-1-small`, untested here).
+**What the valid test shows (answers "were the docs similar or wildly different?"):**
+- **On a valid test the whole field is tightly bunched (MRR 0.92–0.94).** 11 of 12
+  questions are rank-1 for *every* reranker; only one hard question ("bought my tennis
+  racket from the sports store downtown") separates them — zerank-2 ranks it 3,
+  MiniLM 9, bge 8, cohere-v4-pro 10, v4-fast 21, v3.5 16. So the rerankers ARE similar
+  on this workload; the v1 "wild differences" were the truncation artifact, not skill.
+- **MiniLM-L6-int8 (free, Apache, local) ties bge-base and Cohere v4** (MRR 0.926 vs
+  bge 0.927, cohere-v4-pro 0.925) at **~12× lower latency than bge** and zero cost.
+- On the *valid* data bge is no longer "worse than MiniLM" — it's **equal accuracy but
+  12× slower**, which still makes MiniLM the right default (accuracy-neutral, huge
+  latency/cost win). zerank-2 is the accuracy leader but non-commercial.
+- **Caveat: this workload may not stress rerankers enough** — 11/12 golds are trivially
+  top-1, so the test can't separate the top models. A harder next test (adversarial
+  near-duplicate distractors, or the full LME-S "hard" question subset) is needed to
+  rank zerank-2 vs MiniLM vs Cohere-v4 with confidence; today they are a statistical tie.
+
+<details><summary>v1 numbers (INVALID — truncation removed the answer; kept for the record)</summary>
+
+| Reranker | MRR | R@10 | note |
+|---|---|---|---|
+| cohere-v4.0-fast | 0.704 | 0.88 | mis-ordered vs v4-pro |
+| zerank-2 | 0.672 | 0.88 | |
+| MiniLM-L6 int8 | 0.660 | 0.75 | |
+| bge-base | 0.569 | 0.75 | |
+| cohere-v4.0-pro | 0.560 | 0.75 | below v4-fast (artifact) |
+| cohere-v3.5 | 0.410 | 0.38 | |
+
+</details>
+
+**Legacy note (superseded by v2):**
+- ~~bge is slower AND less accurate~~ → on valid data bge **ties** on accuracy, still 12× slower.
+- Cohere **v3.5 is the weakest** arm; the accuracy is in the **v4** family. **zerank-2**
+  is the fastest/cheapest hosted and the accuracy leader on v2 — but non-commercial
+  (its Apache sibling `zerank-1-small` is untested here).
+
+### v3/v4 — the long-document stress test (the load-bearing finding)
+
+Owner asked to test on **FULL documents** in a 48-doc pool (`build_pools_v3.py`: 12
+pools of 48 untruncated LME-S sessions, 9–22 KB each, gold session contains the
+answer 12/12). This exposed what the chunk test hid:
+
+| Model | v2 (48 chunks) MRR | **v3 (48 FULL docs) MRR** | v3 latency | max context |
+|---|---|---|---|---|
+| cohere-v4.0-pro | 0.925 | **1.000** | 1342 ms | long / internal chunk |
+| cohere-v4.0-fast | 0.921 | 0.958 | 721 ms | long |
+| cohere-v3.5 | 0.866 | 0.958 | 1164 ms | long |
+| zerank-2 | 0.944 | 0.872 | 1592 ms | chunks internally |
+| **MiniLM-L6 int8 (local)** | 0.926 | **0.572** | 734 ms | **512-token wall** |
+| bge-base (local) | 0.927 | 0.570 | 7077 ms | 512-token wall |
+
+**The local rerankers COLLAPSE on full docs** (0.92 → 0.57). Root cause (verified):
+`ms-marco-MiniLM-L6-v2` and `bge-reranker-base` are `BertForSequenceClassification`
+with **`max_position_embeddings: 512`** — a hard architectural wall (~2000 chars).
+`max_length=2048` gave byte-identical results to 512 (the model ignores it). Only
+**6/12 answers sit in the first ~2000 chars**, so the 6 buried answers are unreachable.
+The hosted rerankers see the full/chunked doc and stay strong.
+
+**Does chunking recover it? YES — completely** (`build_pools_v4.py` + the
+`rerank_chunked_pool_accuracy` test: chunk every doc into ~1200-char windows, rerank
+all chunks, score a doc by its MAX chunk score):
+
+| Model, v3 full docs | direct MRR | **CHUNKED (max-pool) MRR** |
+|---|---|---|
+| MiniLM-L6 int8 (local) | 0.572 | **1.000** |
+
+Chunk-level reranking takes MiniLM from 0.572 to a **perfect 1.000** — matching
+Cohere v4.0-pro — because every chunk fits inside the 512-token window.
+
+**The architecture point (owner's insight):** chunking is done at **reflect/ingest
+time** (free); it does NOT add rerank latency *by itself*. BUT today MemPhant's
+reranker (`cross_rerank_candidates`) feeds `candidate.unit.body` = the **whole session
+body** — `contextual_chunks` is a *field on the session unit* (`Vec<ContextualChunk>`,
+`types/src/lib.rs:1057`), NOT a standalone retrievable unit. So the reranker currently
+sees full sessions (~11k chars — exactly the r15 13 s measurement), and MiniLM/bge
+truncate them. The **fix is to rerank the chunks, not the body**: feed the reranker
+the `contextual_chunks` and max-pool to the unit. Latency then depends on **chunk
+count reranked**, not doc length — rerank the ~64 chunk-candidates the retriever
+already narrowed to (≈ 449 ms for MiniLM), NOT all chunks of all docs (the 4032 ms in
+the test was because it chunked all 48 full docs — unrealistic; production narrows first).
 
 ## Wiring landed (spike → usable seam)
 
@@ -167,33 +245,43 @@ The model files are NOT committed (23 MB int8 ONNX + tokenizer; download from
 
 ## Final suggestion
 
-**Adopt `ms-marco-MiniLM-L6-v2` int8 as the default cross-reranker model** (behind the
-existing default-OFF `--cross-rerank` flag). It is the best point on the
-accuracy × latency × cost × license × privacy frontier for MemPhant's self-host
-constraint:
+Two coupled decisions — the **model** and the **granularity**. The granularity is the
+one that actually unlocks the win.
 
-- **Accuracy**: tied with the best hosted rerankers (within 1 question at n=8),
-  clearly beats the incumbent bge-reranker-base.
-- **Latency**: 449 ms on the full 64×512 pool (13× faster than bge-base) — inside the
-  1.5 s ceiling with headroom, so it needs no candidate cut or truncation.
-- **Cost**: $0 per query (vs $0.001–0.0025 hosted).
-- **License/privacy**: Apache-2.0, runs on CPU, no candidate bodies leave the box.
+**1. Rerank at CHUNK granularity, not whole-session bodies.** Today
+`cross_rerank_candidates` feeds the reranker `candidate.unit.body` (a whole ~11k-char
+session — the source of both the 13 s latency AND the 512-token truncation failure).
+Change it to rerank each candidate's `contextual_chunks` (already computed at ingest,
+free) and max-pool to the unit. On the full-doc test this took MiniLM from **MRR 0.572
+→ 1.000**. Latency scales with *chunks reranked*, so rerank the chunks of the ~64
+narrowed candidates (~hundreds of short chunks, still << the 13 s full-body cost), not
+every chunk of every doc. This is a small change to one function and is the real fix.
 
-**Retire bge-reranker-base as the default** — it is strictly dominated here (slower
-*and* less accurate). Keep it selectable (`MEMPHANT_RERANKER=fastembed`) for parity
-regression only.
+**2. Adopt `ms-marco-MiniLM-L6-v2` int8 as the default reranker model** (behind the
+existing default-OFF flag). On chunk-sized inputs it is the best point on the
+accuracy × latency × cost × license × privacy frontier:
+- **Accuracy**: ties the best hosted rerankers on chunks (MRR 0.926 v2; 1.000 chunked-v3).
+- **Latency**: ~449 ms for 64 chunk-candidates, ~12× faster than bge-base.
+- **Cost**: $0/query. **License/privacy**: Apache-2.0, CPU, no egress.
 
-**Hosted arms stay as opt-in reference/fallback** (`MEMPHANT_RERANKER=cohere-rerank-3.5`
-with `MEMPHANT_COHERE_MODEL=rerank-v4.0-fast`, or a future zerank arm). If a managed
-API is ever preferred over self-hosting: **Cohere v4.0-fast** is the pick (best hosted
-accuracy, ~420 ms, $0.002); **zerank-2** matches it faster and cheaper but is
-non-commercial (evaluate its Apache `zerank-1-small` sibling first). **Do not use
-Cohere v3.5** — it is the weakest arm measured.
+**Retire bge-reranker-base as the default** — equal accuracy to MiniLM on chunks but
+~12× slower (and it hits the same 512-token wall on full docs). Keep it selectable for
+parity regression only.
+
+**Hosted arms stay opt-in** (`MEMPHANT_RERANKER=cohere-rerank-3.5` +
+`MEMPHANT_COHERE_MODEL`). Their edge is **long-document robustness** (they don't need
+chunking): Cohere v4.0-pro was perfect on full docs (MRR 1.000). If a managed API is
+ever preferred, or if reranking un-chunked long docs is required: **Cohere v4.0-fast**
+is the balanced pick; **v4.0-pro** the accuracy-max; **zerank-2** fastest/cheapest but
+**non-commercial** (test its Apache `zerank-1-small` sibling first); **avoid v3.5**.
 
 **Still gated (unchanged):** flipping `--cross-rerank` default-ON is a **paid reader-QA**
-decision, not a retrieval one. This spike removed the *latency* blocker and picked the
-*model*; the binding accuracy gate is a reader-QA run at n≥100 with CIs (rung-7 shows
-recall@k is a weak discriminator when gold is in-pool — use a rank-sensitive metric).
+decision. This spike removed the *latency* blocker, picked the *model*, and identified
+the *granularity* fix; the binding accuracy gate is a reader-QA run at n≥100 with CIs on
+the chunk-reranking path. (These fixed-pool numbers are n=8–12, directional — and this
+LME-S workload is easy: 11/12 golds are trivially top-1 on the valid tests, so it can't
+separate the top models. A harder adversarial set is needed to rank MiniLM vs zerank-2
+vs Cohere-v4 with confidence.)
 
 ## Wiring landed (all committed, gate green)
 
