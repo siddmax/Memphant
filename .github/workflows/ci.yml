@@ -63,6 +63,18 @@ jobs:
       - name: Security smoke
         run: cargo run -p memphant-eval -- security examples/evals/security-smoke.yaml
 
+      - name: Ops lane
+        run: cargo run -p memphant-eval -- ops examples/evals/ops-smoke.yaml
+
+      # fastembed-less honesty: `--all-features` above compiles OUT the
+      # `#[cfg(not(feature = "fastembed"))]` error-path arms and never exercises
+      # a default-features-off build. These two commands close that blind spot —
+      # eval's not(fastembed) tests run, and the server's default build compiles.
+      - name: Rust tests (fastembed off)
+        run: cargo test -p memphant-eval --no-default-features
+      - name: Server build (fastembed off)
+        run: cargo build -p memphant-server --no-default-features
+
       - name: Provider exposure checks
         run: |
           cargo run -p memphant-cli -- db bootstrap-check --provider plain-postgres
@@ -72,3 +84,75 @@ jobs:
       - name: Web launch surface
         working-directory: web
         run: npm test
+
+  # Live-Postgres honesty leg. Everything above proves the InMemory store; this
+  # job proves the *Postgres* store — the 52 `#[ignore]`d live-PG contract tests
+  # (incl. C1's hot_path_slo_pg + episodic_rls_leakage), the real-binaries
+  # e2e_probe, and an n=5 LME-S retrieval smoke so the full-500 chain can't
+  # bit-rot silently between paid runs. Same scratch-DB discipline as AGENTS.md:
+  # every test runs against an ephemeral migrated DB that is dropped afterward,
+  # so no job_state/tenant debris leaks across tests.
+  postgres-contracts:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          # POSTGRES_USER is a superuser in the official image — the migrations
+          # need it to `create role memphant_app` etc. and the scratch-DB helper
+          # needs it to create/drop databases.
+          POSTGRES_USER: memphant
+          POSTGRES_PASSWORD: memphant
+          POSTGRES_DB: memphant
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U memphant"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Base URL for with_scratch_db.sh / e2e_probe.sh: used only to create the
+      # ephemeral scratch DB and reach the server — the tests never touch it.
+      BASE_DATABASE_URL: postgres://memphant:memphant@localhost:5432/memphant
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install Postgres client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Live-Postgres contract + worker tests (ignored suite, scratch DB)
+        run: |
+          bash scripts/with_scratch_db.sh "$BASE_DATABASE_URL" \
+            MEMPHANT_TEST_DATABASE_URL \
+            cargo test -p memphant-store-postgres -p memphant-worker -- --ignored --test-threads=1
+
+      - name: Real-binaries end-to-end probe (scratch DB)
+        run: DATABASE_URL="$BASE_DATABASE_URL" bash scripts/e2e_probe.sh
+
+      # LME-S is a 277 MB sha-pinned public download; cache it so a fetch only
+      # happens when the manifest pin changes, not on every run.
+      - name: Cache LME-S dataset
+        id: lme-cache
+        uses: actions/cache@v4
+        with:
+          path: benchmarks/data/longmemeval_s.json
+          key: lme-s-${{ hashFiles('benchmarks/manifests/longmemeval_s.lock.json') }}
+
+      - name: Fetch LME-S (if not cached)
+        if: steps.lme-cache.outputs.cache-hit != 'true'
+        run: python3 scripts/fetch_longmemeval.py
+
+      - name: LME-S n=5 retrieval chain smoke (scratch DB)
+        run: |
+          bash scripts/with_scratch_db.sh "$BASE_DATABASE_URL" \
+            MEMPHANT_LME_DB \
+            bash -c 'cargo run -p memphant-eval --features fastembed -- \
+              bench-lme --database-url "$MEMPHANT_LME_DB" \
+              --data benchmarks/data/longmemeval_s.json --sample 5 --seed 1 --k 10'

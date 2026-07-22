@@ -794,6 +794,22 @@ create table if not exists memphant.scope_block (
     references memphant.actor (tenant_id, data_subject_id, id) on delete cascade
 );
 
+-- DORMANT tables: the schema (frozen contract) exists but no code path reads or
+-- writes them yet. Registered explicitly here so the catalog says so and nobody
+-- mistakes a schema-only table for a live one. See docs/superpowers/specs/
+-- memphant/STATUS.md "Dormant machinery" and 04-codebase-memphant.md §f.7.
+--   trust_event   — no producer (no trust-decision writer wired)
+--   event_outbox  — no consumer (no outbox drain/relay job)
+--   scope_block   — no surface (observation-block verb is B1, unbuilt)
+-- (retention_tier is a live COLUMN on episode with a real index, not a table —
+--  what is dormant there is the warm/cold tiering job, not the schema.)
+comment on table memphant.trust_event is
+  'DORMANT (2026-07-22): schema-only, no producer. Frozen trust-event contract; no writer wired.';
+comment on table memphant.event_outbox is
+  'DORMANT (2026-07-22): schema-only, no consumer. Frozen outbox contract; no drain/relay job.';
+comment on table memphant.scope_block is
+  'DORMANT (2026-07-22): schema-only, no surface. Observation-block storage; the verb is plan item B1 (unbuilt).';
+
 create index if not exists memphant_subject_tenant_external_idx on memphant.subject (tenant_id, external_ref);
 create index if not exists memphant_subject_tombstone_tenant_erased_idx on memphant.subject_tombstone (tenant_id, erased_subject_id);
 create index if not exists memphant_actor_tenant_external_idx on memphant.actor (tenant_id, kind, external_ref);
@@ -1160,6 +1176,22 @@ begin
           and active.state = 'running'
           and active.claimed_at >= now() - interval '15 minutes'
       )
+      -- Lane ownership is a transaction advisory lock, not just the agent row
+      -- lock. `for update of agent skip locked` sits above the Sort in the plan,
+      -- so two concurrent claimers whose snapshots do not overlap on the row can
+      -- both pass the lock and split the lane at the job-level skip-locked scan
+      -- (owner A takes the first N jobs under `limit`, B skip-locks those and
+      -- claims the rest) — the intermittent XOR failure in the concurrent-claim
+      -- contract test. pg_try_advisory_xact_lock is atomic in shared memory with
+      -- no such window: exactly one claimer keeps the lane, the loser's
+      -- locked_lanes is empty so it claims nothing. Held to transaction end, it
+      -- covers the job claim + prepared-state writes in this same statement.
+      and pg_try_advisory_xact_lock(
+            hashtextextended(
+              agent.tenant_id::text || ':' || agent.data_subject_id::text || ':'
+                || subject.generation::text || ':' || agent.scope_id::text || ':'
+                || agent.id::text,
+              0))
     order by agent.tenant_id, agent.id
     limit greatest(0, least(p_limit, 1000))
     for update of agent skip locked
@@ -1177,6 +1209,18 @@ begin
       and job.run_after <= now()
       and (job.claimed_at is null or job.claimed_at < now() - interval '15 minutes')
       and not exists (
+        -- Do not claim a job while an earlier job in the same lane is not yet
+        -- claimable-past: either it is scheduled for the future (run_after >
+        -- now, the original delayed-predecessor guard) OR it is already
+        -- `running` under a live claim held by another worker. The second case
+        -- is what keeps two concurrent claims from splitting one lane: the
+        -- lane-admission snapshot can be stale (a claimer may admit the lane
+        -- just before a peer commits the head jobs as running), but this guard
+        -- is evaluated in the claim query's own, later snapshot, where the
+        -- peer's running head IS visible — so the tail jobs are excluded and
+        -- the loser claims nothing. The serial-per-lane invariant (a later job
+        -- never runs before an earlier one completes) is thus enforced at claim
+        -- time, not left to the lane lock alone.
         select 1 from memphant.job_state earlier
         where earlier.tenant_id = job.tenant_id
           and earlier.data_subject_id = job.data_subject_id
@@ -1184,7 +1228,11 @@ begin
           and earlier.scope_id = job.scope_id and earlier.agent_node_id = job.agent_node_id
           and earlier.state not in ('done', 'dead')
           and earlier.queue_order < job.queue_order
-          and earlier.run_after > now()
+          and (
+            earlier.run_after > now()
+            or (earlier.state = 'running'
+                and earlier.claimed_at >= now() - interval '15 minutes')
+          )
       )
     order by job.queue_order
     for update of job skip locked

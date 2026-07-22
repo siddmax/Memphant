@@ -307,24 +307,6 @@ pub struct ContextBindingResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct ScopeRef {
-    pub kind: String,
-    pub external_ref: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct RetainInput {
-    pub scope: ScopeRef,
-    pub body: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct RetainResult {
-    pub retained: bool,
-    pub extracted_values: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RetainRequest {
     pub tenant_id: TenantId,
     pub data_subject_id: SubjectId,

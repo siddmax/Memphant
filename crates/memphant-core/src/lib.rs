@@ -34,10 +34,10 @@ use memphant_types::{
     RecallChannel, RecallCitation, RecallContextItem, RecallDropReason, RecallDroppedItem,
     RecallMode, RecallPolicyFilter, RecallRequest, RecallResponse, RecallTime, RecordMaterial,
     ReflectInput, ReflectJob, ReflectJobKind, ReflectStageFact, ReflectTrace, ResolvedMemorySource,
-    RetainInput, RetainOutcome, RetainRequest, RetainResourceOutcome, RetainResourceRequest,
-    RetainResult, RetrievalTrace, ReviewEvent, ScopeId, StoredCitation, StoredEpisode,
-    StoredMemoryEdge, StoredMemoryUnit, StoredResource, SubjectId, TenantId, TraceId, TrustLevel,
-    UnitId, UnitState, agent_level_allows_memory_kind,
+    RetainOutcome, RetainRequest, RetainResourceOutcome, RetainResourceRequest, RetrievalTrace,
+    ReviewEvent, ScopeId, StoredCitation, StoredEpisode, StoredMemoryEdge, StoredMemoryUnit,
+    StoredResource, SubjectId, TenantId, TraceId, TrustLevel, UnitId, UnitState,
+    agent_level_allows_memory_kind,
 };
 use memphant_types::{NewResource, ResourceAcl, ResourceExtractorState, ResourceId};
 use sha2::{Digest, Sha256};
@@ -960,17 +960,6 @@ pub enum CoreError {
     DeepProviderInvalidOutput,
     #[error(transparent)]
     Store(#[from] StoreError),
-}
-
-pub fn retain(input: RetainInput) -> Result<RetainResult, CoreError> {
-    if input.body.trim().is_empty() {
-        return Err(CoreError::EmptyBody);
-    }
-
-    Ok(RetainResult {
-        retained: true,
-        extracted_values: Vec::new(),
-    })
 }
 
 pub fn project_memory_record(material: RecordMaterial) -> MemoryRecord {

@@ -310,7 +310,7 @@ Release:
 
 ```bash
 cargo run -p memphant-eval -- run benchmarks/release.yaml --archive-traces
-cargo run -p memphant-eval -- compare baselines/release-baseline.yaml --paired
+cargo run -p memphant-eval -- profile benchmarks/release.yaml --compare-to baselines/release-baseline.json
 cargo run -p memphant-eval -- security benchmarks/security.yaml
 ```
 

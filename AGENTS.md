@@ -37,7 +37,7 @@ MemPhant is the public Apache-2.0 memory substrate repo. Treat `docs/superpowers
 Run the narrowest meaningful checks while iterating, then the full gate before claiming a workstream exit:
 
 ```sh
-python3 -m pytest tests/ spikes/python-retain/test_spike.py -q
+python3 -m pytest tests/ -q
 python3 scripts/check_spec_drift.py
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings

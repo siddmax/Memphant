@@ -45,7 +45,6 @@ fn main() -> ExitCode {
         "schema" => schema_command(args),
         "ablate" => ablate_command(args),
         "profile" => profile_command(args),
-        "compare" => compare_command(args),
         _ => {
             usage();
             ExitCode::from(2)
@@ -386,15 +385,6 @@ fn ablate_command(args: Vec<String>) -> ExitCode {
             ExitCode::from(1)
         }
     }
-}
-
-fn compare_command(args: Vec<String>) -> ExitCode {
-    if args.is_empty() {
-        usage();
-        return ExitCode::from(2);
-    }
-    println!("compare=pass paired=true");
-    ExitCode::SUCCESS
 }
 
 fn profile_command(args: Vec<String>) -> ExitCode {
