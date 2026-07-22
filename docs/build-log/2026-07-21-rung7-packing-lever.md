@@ -68,8 +68,21 @@ TDD: `pack_render_cap_reclaims_budget_and_admits_second_item`.
 - Reconciles with [[memphant-packing-gate-verdict]] (that verdict is the
   output-full Rerank branch; this is the Budget path) — no conflict.
 
-## Promotion status
+## Promotion status — two-seed rule SATISFIED (retrieval)
 
-- Seed 20260713: **PASS** (Δr@10 +0.2349, CI excludes zero). 
-- Seed 20260710 (two-seed rule): _[pending — second-seed baseline + cap arm
-  running; fill on completion]_.
+- Seed 20260713: **PASS** — Δr@10 **+0.2349** [95 % CI +0.1687, +0.2952].
+- Seed 20260710: **PASS** — Δr@10 **+0.2349** [95 % CI +0.1747, +0.3012].
+
+Both seeds give **identical** baseline (0.6145) and cap (0.8494) r@10 because
+`--sample 178` is the whole dev split — the seed only perturbs tenant/ingest
+ordering, not the question set. So this is the strongest form of the two-seed
+confirmation: the win is **deterministic and seed-invariant**, robust to the
+ingest-ordering variance of [[memphant-recall-determinism]]. The lever passes
+the preregistered retrieval predicate on both seeds.
+
+**What this promotes:** the retrieval-layer finding is confirmed and the lever is
+correct and shipped (OFF). It does NOT auto-flip the packing default — turning
+`pack_render_cap` on by default in the product recall path is gated on a paid
+reader-QA confirmation (the render cap lowers reader tokens, so unlike
+budget-16384 it is a promising QA candidate, but that is a separate measurement).
+The lever stays `None` by default until then.

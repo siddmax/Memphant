@@ -262,8 +262,10 @@ team (rungs), devil's advocate (free-first discipline), codebase team (wiring).
   +0.295]** — bigger than doubling the budget (16384: Δ+0.151 [+0.096, +0.211])
   AND at the SAME 8192 budget (tighter reader context, the opposite of the
   ns-harmful 16384-on-QA finding). Improves every stratum. **This is a
-  RETRIEVAL win; reader-QA is a separate gated (paid) step.** Two-seed promotion
-  hold in progress (seed 20260710). Reconciles with
+  RETRIEVAL win; reader-QA is a separate gated (paid) step.** **Two-seed rule
+  SATISFIED:** seed 20260710 reproduces Δr@10 +0.2349 [+0.175, +0.301]
+  identically (whole-split sample ⇒ seed-invariant, deterministic). Lever ships
+  OFF; default-flip gated on paid reader-QA. Reconciles with
   [[memphant-packing-gate-verdict]] (that is the output-full Rerank branch; this
   is the Budget path). Proof:
   `docs/build-log/2026-07-21-rung7-packing-diagnosis.md` +
