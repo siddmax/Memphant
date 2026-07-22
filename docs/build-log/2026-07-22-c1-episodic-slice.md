@@ -86,11 +86,18 @@ pytest 715 passed / 12 skipped · `cargo fmt --check` clean · `cargo clippy
 (`-p memphant-store-postgres -p memphant-worker --ignored`) 0 failed · provider
 lint 3/3 clean · migration dry-run ok · `e2e_probe.sh` ALL CHECKS PASSED.
 
-**One pre-existing flake identified, isolated, NOT a C1 regression:**
+**One pre-existing flake identified, isolated, NOT a C1 regression — now FIXED
+(2026-07-22, commit `f7828f8c`):**
 `pg_store_contract.rs::concurrent_workers_cannot_split_a_scope_lane_and_reclaim_reuses_preparation`
-intermittently fails under the loaded full `--ignored` suite (two `tokio::join!`'d
-worker claims race the XOR assertion) but passes 3/3 in isolation. C1 touches
-none of the worker-claim path. Flagged for a separate task.
+intermittently failed under the loaded full `--ignored` suite (two `tokio::join!`'d
+worker claims race the XOR assertion) but passed 3/3 in isolation. C1 touches
+none of the worker-claim path. Root-caused to `claim_reflect_jobs`' lane lock:
+`for update of agent skip locked` sits above the Sort, so two non-overlapping
+claimers split a lane (A takes the prefix, B the disjoint tail). Fixed with a
+BLOCKING `pg_advisory_xact_lock` loop before the claim query (a try-lock/skip-
+locked in-query gate leaves a ~0.3% residual — snapshot-vs-lock ordering, not
+lock atomicity). 0/300 under the hammer that previously split; full ignored PG
+suite 43/43 green. This also unblocked the B6 Postgres CI leg.
 
 ## What C1 does NOT prove (honest)
 
