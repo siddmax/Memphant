@@ -295,6 +295,95 @@ def _load_pool(path):
         return json.load(f)
 
 
+def _maxsim(query_tvecs, doc_tvecs):
+    """ColBERT MaxSim: sum over query tokens of the max cosine to any doc token."""
+    total = 0.0
+    for q in query_tvecs:
+        best = max((cosine(q, d) for d in doc_tvecs), default=0.0)
+        total += best
+    return total
+
+
+def _jina_colbert(texts, input_type, key):
+    """Per-token (multi-vector) embeddings from Jina ColBERT v2. Cached per
+    (input_type, text-hash) on disk so a re-run is free."""
+    cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache", "colbert")
+    os.makedirs(cache_dir, exist_ok=True)
+    out = [None] * len(texts)
+    missing, missing_idx = [], []
+    for i, t in enumerate(texts):
+        p = os.path.join(cache_dir, sha256_text(input_type + "\x00" + t) + ".json")
+        if os.path.exists(p):
+            with open(p) as f:
+                out[i] = json.load(f)
+        else:
+            missing.append(t)
+            missing_idx.append(i)
+    for b in range(0, len(missing), 32):
+        batch = missing[b:b + 32]
+        body = {"model": "jina-colbert-v2", "input": batch, "input_type": input_type}
+        req = urllib.request.Request(
+            "https://api.jina.ai/v1/multi-vector",
+            data=json.dumps(body).encode(),
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+                     # Jina sits behind Cloudflare, which 1010-blocks the default
+                     # python-urllib UA; a normal UA clears it.
+                     "User-Agent": "curl/8.4.0", "Accept": "application/json"})
+        for attempt in range(4):
+            try:
+                with urllib.request.urlopen(req, timeout=120) as r:
+                    d = json.loads(r.read())
+                break
+            except Exception as e:  # noqa: BLE001
+                if attempt == 3:
+                    raise
+                time.sleep(2.0 * (attempt + 1))
+        for j, item in enumerate(d["data"]):
+            idx = missing_idx[b + j]
+            out[idx] = item["embeddings"]
+            with open(os.path.join(cache_dir,
+                                   sha256_text(input_type + "\x00" + batch[j]) + ".json"), "w") as f:
+                json.dump(item["embeddings"], f)
+    return out
+
+
+def cmd_retrieve_colbert(args):
+    """V6: late-interaction MaxSim over the full per-question pool (no ANN — the
+    pool is ~100 docs). Processes one question at a time so no giant multi-vector
+    cache is held; token-vecs are disk-cached per text for free re-runs. Doc
+    score = MAX MaxSim over its chunks (chunk-level late interaction)."""
+    import time as _t
+    key = os.environ.get("JINA_API_KEY", "")
+    if not key:
+        raise SystemExit("JINA_API_KEY missing (Doppler syndai/dev)")
+    pool = _load_pool(args.pool)
+    questions = pool["questions"]
+    if args.subset:
+        questions = questions[: args.subset]
+    out = {"meta": {"variant": "v6", "model": "jina-colbert-v2",
+                    "subset": args.subset or len(questions)}, "questions": []}
+    for qi, q in enumerate(questions):
+        t0 = _t.perf_counter()
+        qvec = _jina_colbert([q["question"]], "query", key)[0]
+        chunk_texts, chunk_doc = [], []
+        for di, d in enumerate(q["docs"]):
+            for c in d["chunks"]:
+                chunk_texts.append(c)
+                chunk_doc.append(di)
+        cvecs = _jina_colbert(chunk_texts, "document", key)
+        chunk_scores = [_maxsim(qvec, cv) for cv in cvecs]
+        doc_scores = max_pool_doc_scores(chunk_scores, chunk_doc, len(q["docs"]))
+        ranked = sorted(range(len(q["docs"])), key=lambda i: -doc_scores[i])
+        out["questions"].append({
+            "qid": q["qid"],
+            "ranked": [q["docs"][i]["doc_id"] for i in ranked],
+            "elapsed_ms": (_t.perf_counter() - t0) * 1000.0})
+        print(f"  colbert {qi + 1}/{len(questions)} {q['qid']}", flush=True)
+    with open(args.out, "w") as f:
+        json.dump(out, f)
+    print(f"retrieve v6 (colbert): {len(out['questions'])} questions -> {args.out}")
+
+
 def cmd_retrieve(args):
     import time as _t
     pool = _load_pool(args.pool)
@@ -482,7 +571,7 @@ def cmd_rerank_api(args):
             with open(cpath) as f:
                 row = json.load(f)
         else:
-            t0 = _t.perf_counter()
+            t0 = time.perf_counter()
             body = {"query": c["question"], "documents": texts, "model": args.arm,
                     "top_n": len(texts)}
             req = urllib.request.Request(
@@ -492,7 +581,7 @@ def cmd_rerank_api(args):
                          "Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=120) as r:
                 d = json.loads(r.read())
-            ms = (_t.perf_counter() - t0) * 1000.0
+            ms = (time.perf_counter() - t0) * 1000.0
             res = d.get("results", d.get("data", []))
             scores = {c["docs"][x["index"]]["doc_id"]:
                       x.get("relevance_score", x.get("score", 0.0)) for x in res}
@@ -542,9 +631,15 @@ def main():
     ra.add_argument("--arm", required=True)
     ra.add_argument("--cands", required=True)
     ra.add_argument("--out", required=True)
+    rc = sub.add_parser("retrieve-colbert")
+    rc.add_argument("--pool", required=True)
+    rc.add_argument("--subset", type=int, default=0, help="0 = full pool")
+    rc.add_argument("--out", required=True)
     args = ap.parse_args()
     if args.cmd == "selftest":
         selftest()
+    elif args.cmd == "retrieve-colbert":
+        cmd_retrieve_colbert(args)
     elif args.cmd == "retrieve":
         cmd_retrieve(args)
     elif args.cmd == "make-context-pool":
