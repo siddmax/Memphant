@@ -81,10 +81,18 @@ struct ResultItem {
     relevance_score: f32,
 }
 
-fn scores_in_input_order(items: Vec<ResultItem>, count: usize) -> Result<Vec<f32>, String> {
+/// Reorder a hosted reranker's scored results into input order. Shared by the
+/// Voyage and Cohere arms, so error messages name the calling `provider` — a
+/// hardcoded label would mis-attribute a Cohere fault to Voyage (a real debugging
+/// wrong-turn), since both arms funnel through here.
+fn scores_in_input_order(
+    provider: &str,
+    items: Vec<ResultItem>,
+    count: usize,
+) -> Result<Vec<f32>, String> {
     if items.len() != count {
         return Err(format!(
-            "voyage reranker returned {} results for {count} documents",
+            "{provider} reranker returned {} results for {count} documents",
             items.len()
         ));
     }
@@ -92,13 +100,13 @@ fn scores_in_input_order(items: Vec<ResultItem>, count: usize) -> Result<Vec<f32
     for item in items {
         if item.index >= count || scores[item.index].is_some() {
             return Err(format!(
-                "voyage reranker returned invalid or duplicate index {}",
+                "{provider} reranker returned invalid or duplicate index {}",
                 item.index
             ));
         }
         if !item.relevance_score.is_finite() {
             return Err(format!(
-                "voyage reranker returned non-finite score at index {}",
+                "{provider} reranker returned non-finite score at index {}",
                 item.index
             ));
         }
@@ -107,7 +115,9 @@ fn scores_in_input_order(items: Vec<ResultItem>, count: usize) -> Result<Vec<f32
     scores
         .into_iter()
         .enumerate()
-        .map(|(index, score)| score.ok_or_else(|| format!("voyage reranker omitted index {index}")))
+        .map(|(index, score)| {
+            score.ok_or_else(|| format!("{provider} reranker omitted index {index}"))
+        })
         .collect()
 }
 
@@ -158,7 +168,7 @@ impl CrossReranker for VoyageReranker {
             .limit(RESPONSE_BODY_LIMIT)
             .read_json::<Response>()
             .map_err(|error| format!("voyage reranker response decode failed: {error}"))?;
-        scores_in_input_order(decoded.data, docs.len())
+        scores_in_input_order("voyage", decoded.data, docs.len())
     }
 }
 
@@ -279,7 +289,7 @@ impl CrossReranker for CohereReranker {
                 relevance_score: item.relevance_score,
             })
             .collect();
-        scores_in_input_order(items, docs.len())
+        scores_in_input_order("cohere", items, docs.len())
     }
 }
 
@@ -328,6 +338,7 @@ mod tests {
     #[test]
     fn response_scores_are_strictly_scattered_by_index() {
         let scores = scores_in_input_order(
+            "voyage",
             vec![
                 ResultItem {
                     index: 1,
@@ -342,9 +353,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(scores, vec![0.9, 0.2]);
-        assert!(scores_in_input_order(vec![], 1).is_err());
+        assert!(scores_in_input_order("voyage", vec![], 1).is_err());
         assert!(
             scores_in_input_order(
+                "voyage",
                 vec![
                     ResultItem {
                         index: 0,
@@ -361,6 +373,7 @@ mod tests {
         );
         assert!(
             scores_in_input_order(
+                "voyage",
                 vec![ResultItem {
                     index: 0,
                     relevance_score: f32::NAN,
@@ -368,6 +381,18 @@ mod tests {
                 1,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn error_message_names_the_calling_provider_not_a_hardcoded_one() {
+        // A shared helper must attribute a malformed response to the RIGHT
+        // provider — a Cohere fault labeled "voyage" sends debugging the wrong way.
+        let err = scores_in_input_order("cohere", vec![], 1).unwrap_err();
+        assert!(err.contains("cohere"), "error must name the caller: {err}");
+        assert!(
+            !err.contains("voyage"),
+            "must not mis-label as voyage: {err}"
         );
     }
 
