@@ -430,6 +430,33 @@ pub const DEFAULT_RECALL_POOL_DEPTH: usize = 64;
 /// and the recommended production setting once promoted — not an always-on knob.
 pub const DEFAULT_SESSION_DIVERSITY_QUOTA: usize = 2;
 
+/// Char-per-token ratio used to turn a reranker's token `max_length` into a
+/// per-doc CHAR budget for the [`CrossRerankGranularity::ContextualChunks`]
+/// sub-split. English averages ~4 chars/token; 3 is deliberately conservative
+/// so a sub-window never exceeds the model's true token wall after tokenization
+/// (over-splitting is cheap — a few extra short pairs — while under-splitting
+/// silently truncates the tail, the exact failure this cap removes). Measured
+/// motivation: ~80% of prod `contextual_chunks` on LongMemEval-S exceed the 512
+/// token BERT wall, so whole-chunk reranking still truncates without this cap.
+///
+/// COST BOUNDARY (why this is safe): sub-splitting happens at RERANK read time
+/// on transient in-memory strings. A cross-encoder scores `(query, text)` pairs
+/// directly — it does NOT embed, so this adds ZERO embedder cost and ZERO
+/// stored bytes; `contextual_chunks` are still chunked/stored exactly once at
+/// ingest. The only resource it spends is local-model CPU (one extra forward
+/// pass per sub-window), which [`RERANK_MAX_SUBCHUNKS_PER_CANDIDATE`] bounds —
+/// and versus UN-capped whole-chunk reranking of over-long prod chunks it
+/// *lowers* latency (measured ~30s → ~11s/query). Hosted rerankers bill per
+/// candidate document (not per sub-chunk) and handle long context natively, so
+/// this local-model path leaves their cost unchanged.
+pub const RERANK_CHARS_PER_TOKEN: usize = 3;
+
+/// Backstop on sub-chunks fed per candidate under chunk-granularity rerank, so a
+/// pathologically long body cannot explode the cross-encoder batch (the
+/// candidate cap bounds CANDIDATES, not their sub-chunks). At 48 candidates this
+/// bounds the batch at ~48·16 pairs.
+pub const RERANK_MAX_SUBCHUNKS_PER_CANDIDATE: usize = 16;
+
 /// W4 packing levers, threaded construction-time exactly like
 /// `recall_pool_depth` — no `RecallRequest`/wire/OpenAPI field (item 4). BOTH
 /// default OFF ([`PackLevers::default`]); with both off the packer is
@@ -7147,34 +7174,61 @@ fn cross_rerank_candidates(
 ) -> CrossRerankTrace {
     let config = reranker.config();
     let head = pool.min(config.candidate_limit).min(fused.len());
+    // Per-doc CHAR budget under chunk granularity: the model's token
+    // `max_length` × the conservative chars/token ratio. A `max_length` of 0
+    // (offline "unbounded") disables the sub-split (usize::MAX budget).
+    let char_budget = if config.max_length == 0 {
+        usize::MAX
+    } else {
+        config
+            .max_length
+            .saturating_mul(RERANK_CHARS_PER_TOKEN)
+            .max(1)
+    };
     // One doc RANGE per head candidate: the whole body under `UnitBody` (a
-    // 1-doc range — exactly the historical behavior), the flattened
-    // `contextual_chunks` bodies under `ContextualChunks`, falling back to
-    // the body when a candidate has no chunks so every candidate stays
-    // scored. `candidate_limit`/`pool` bound CANDIDATES, never docs.
-    let mut docs: Vec<&str> = Vec::with_capacity(head);
+    // 1-doc range — exactly the historical behavior), the `contextual_chunks`
+    // bodies under `ContextualChunks` — each sub-split so no fed doc exceeds
+    // `char_budget` (prod chunks routinely blow past a BERT reranker's 512-token
+    // wall, so whole-chunk scoring truncates the tail; see
+    // [`RERANK_CHARS_PER_TOKEN`]), falling back to the (also sub-split) body
+    // when a candidate has no chunks. `candidate_limit`/`pool` bound CANDIDATES,
+    // never their docs; [`RERANK_MAX_SUBCHUNKS_PER_CANDIDATE`] bounds the fan-out.
+    let mut docs: Vec<String> = Vec::with_capacity(head);
     let mut doc_ranges: Vec<std::ops::Range<usize>> = Vec::with_capacity(head);
     for candidate in &fused[..head] {
         let start = docs.len();
         match granularity {
-            CrossRerankGranularity::UnitBody => docs.push(candidate.unit.body.as_str()),
+            CrossRerankGranularity::UnitBody => docs.push(candidate.unit.body.clone()),
             CrossRerankGranularity::ContextualChunks => {
-                if candidate.unit.contextual_chunks.is_empty() {
-                    docs.push(candidate.unit.body.as_str());
+                let sources: Vec<&str> = if candidate.unit.contextual_chunks.is_empty() {
+                    vec![candidate.unit.body.as_str()]
                 } else {
-                    docs.extend(
-                        candidate
-                            .unit
-                            .contextual_chunks
-                            .iter()
-                            .map(|chunk| chunk.body.as_str()),
-                    );
+                    candidate
+                        .unit
+                        .contextual_chunks
+                        .iter()
+                        .map(|chunk| chunk.body.as_str())
+                        .collect()
+                };
+                for source in sources {
+                    for sub in sub_split_for_rerank(source, char_budget) {
+                        if docs.len() - start >= RERANK_MAX_SUBCHUNKS_PER_CANDIDATE {
+                            break;
+                        }
+                        docs.push(sub);
+                    }
+                }
+                // A whitespace-only body yields no sub-chunks; keep every
+                // candidate scored with a single (possibly clipped) doc.
+                if docs.len() == start {
+                    docs.push(candidate.unit.body.clone());
                 }
             }
         }
         doc_ranges.push(start..docs.len());
     }
-    let mut input_chars = docs
+    let doc_refs: Vec<&str> = docs.iter().map(String::as_str).collect();
+    let mut input_chars = doc_refs
         .iter()
         .map(|doc| doc.chars().count())
         .collect::<Vec<_>>();
@@ -7201,12 +7255,12 @@ fn cross_rerank_candidates(
     // flattened length (not `head`) is the no-op signal. Every candidate
     // contributes at least one doc, so `docs` is non-empty whenever the head
     // is, keeping the `Empty` case's meaning unchanged.
-    let scores = match reranker.rerank(query, &docs) {
+    let scores = match reranker.rerank(query, &doc_refs) {
         Ok(scores) if scores.is_empty() => {
             trace.failure = CrossRerankFailure::Empty;
             return trace;
         }
-        Ok(scores) if scores.len() != docs.len() => {
+        Ok(scores) if scores.len() != doc_refs.len() => {
             trace.failure = CrossRerankFailure::InvalidScoreCount;
             return trace;
         }
@@ -7260,6 +7314,73 @@ fn percentile(sorted: &[usize], percentile: usize) -> usize {
     }
     let index = (percentile * sorted.len()).div_ceil(100).saturating_sub(1);
     sorted[index]
+}
+
+/// Splits `text` into ≤`budget`-char windows on whitespace boundaries so a
+/// cross-encoder sees pieces that fit its token wall (the tail of an over-long
+/// chunk is otherwise truncated away). A single word longer than `budget` is
+/// hard-split by char count (byte-safe via `char_indices`) so the invariant
+/// "no window exceeds `budget` chars" always holds. `budget == usize::MAX`
+/// (offline unbounded) returns the whole text as one window; empty/whitespace
+/// text returns nothing (the caller re-inserts a body fallback).
+fn sub_split_for_rerank(text: &str, budget: usize) -> Vec<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    if budget == usize::MAX || trimmed.chars().count() <= budget {
+        return vec![trimmed.to_string()];
+    }
+    let mut windows = Vec::new();
+    let mut current = String::new();
+    let mut current_len = 0usize; // chars in `current`
+    for word in trimmed.split_whitespace() {
+        let word_len = word.chars().count();
+        if word_len > budget {
+            // Flush, then hard-split the oversized word by char count.
+            if !current.is_empty() {
+                windows.push(std::mem::take(&mut current));
+                current_len = 0;
+            }
+            let mut piece = String::new();
+            let mut piece_len = 0usize;
+            for (_, ch) in word.char_indices() {
+                if piece_len == budget {
+                    windows.push(std::mem::take(&mut piece));
+                    piece_len = 0;
+                }
+                piece.push(ch);
+                piece_len += 1;
+            }
+            if !piece.is_empty() {
+                current = piece;
+                current_len = piece_len;
+            }
+            continue;
+        }
+        // +1 for the joining space when `current` is non-empty.
+        let added = if current.is_empty() {
+            word_len
+        } else {
+            word_len + 1
+        };
+        if current_len + added > budget {
+            windows.push(std::mem::take(&mut current));
+            current.push_str(word);
+            current_len = word_len;
+        } else {
+            if !current.is_empty() {
+                current.push(' ');
+                current_len += 1;
+            }
+            current.push_str(word);
+            current_len += word_len;
+        }
+    }
+    if !current.is_empty() {
+        windows.push(current);
+    }
+    windows
 }
 
 fn rerank_candidates(
@@ -10946,6 +11067,74 @@ mod in_memory_mutation_retention_tests {
             store.stage_subject_erasure(&mut mixed).await,
             Err(StoreError::Conflict(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod sub_split_for_rerank_tests {
+    use super::{RERANK_CHARS_PER_TOKEN, sub_split_for_rerank};
+
+    #[test]
+    fn short_text_is_one_window() {
+        assert_eq!(
+            sub_split_for_rerank("hello world", 100),
+            vec!["hello world"]
+        );
+    }
+
+    #[test]
+    fn empty_or_whitespace_yields_nothing() {
+        assert!(sub_split_for_rerank("   \n\t ", 10).is_empty());
+        assert!(sub_split_for_rerank("", 10).is_empty());
+    }
+
+    #[test]
+    fn unbounded_budget_returns_whole_text() {
+        let long = "a ".repeat(1000);
+        assert_eq!(sub_split_for_rerank(&long, usize::MAX).len(), 1);
+    }
+
+    #[test]
+    fn windows_never_exceed_the_budget_and_cover_every_word() {
+        let text = "alpha bravo charlie delta echo foxtrot golf hotel india juliet";
+        let windows = sub_split_for_rerank(text, 12);
+        for w in &windows {
+            assert!(w.chars().count() <= 12, "window over budget: {w:?}");
+        }
+        // Every original word survives across the windows (no drops, no merge loss).
+        let rejoined: Vec<&str> = windows.iter().flat_map(|w| w.split(' ')).collect();
+        assert_eq!(rejoined, text.split(' ').collect::<Vec<_>>());
+        assert!(windows.len() > 1, "long text must split");
+    }
+
+    #[test]
+    fn a_single_word_longer_than_budget_is_hard_split() {
+        let word = "x".repeat(25);
+        let windows = sub_split_for_rerank(&word, 10);
+        assert_eq!(windows.len(), 3); // 10 + 10 + 5
+        for w in &windows {
+            assert!(w.chars().count() <= 10);
+        }
+        assert_eq!(windows.concat(), word);
+    }
+
+    #[test]
+    fn multibyte_hard_split_stays_on_char_boundaries() {
+        // 12 two-byte chars, budget 5 → windows of 5,5,2 chars (never a byte panic).
+        let word = "é".repeat(12);
+        let windows = sub_split_for_rerank(&word, 5);
+        assert_eq!(
+            windows
+                .iter()
+                .map(|w| w.chars().count())
+                .collect::<Vec<_>>(),
+            vec![5, 5, 2]
+        );
+    }
+
+    #[test]
+    fn chars_per_token_ratio_is_conservative() {
+        assert!((1..=4).contains(&RERANK_CHARS_PER_TOKEN));
     }
 }
 

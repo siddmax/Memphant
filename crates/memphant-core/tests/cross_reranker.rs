@@ -873,6 +873,105 @@ async fn chunk_granularity_mixed_pool_scatter_mapping() {
     assert_eq!(facts.failure, CrossRerankFailure::None);
 }
 
+/// Mimics a BERT cross-encoder's hard position wall: only the first
+/// `visible_chars` of each doc are inspected for the needle (everything past
+/// the wall is truncated away, exactly as `ms-marco-MiniLM-L6`/`bge` do at 512
+/// tokens on an over-long chunk). Used to prove the rerank-time sub-chunk cap
+/// makes a tail-buried needle reachable.
+struct TruncatingBoostReranker {
+    needle: String,
+    visible_chars: usize,
+    max_length: usize,
+}
+impl CrossReranker for TruncatingBoostReranker {
+    fn config(&self) -> CrossRerankerConfig {
+        CrossRerankerConfig {
+            provider: "test".to_string(),
+            model: "truncating".to_string(),
+            candidate_limit: 64,
+            max_length: self.max_length,
+            batch_size: None,
+        }
+    }
+
+    fn rerank(&self, _query: &str, docs: &[&str]) -> Result<Vec<f32>, String> {
+        Ok(docs
+            .iter()
+            .map(|doc| {
+                let visible: String = doc.chars().take(self.visible_chars).collect();
+                if visible.contains(&self.needle) {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect())
+    }
+}
+
+/// The rerank-time sub-chunk cap: a contextual chunk whose body exceeds the
+/// model's `max_length` window is split into window-sized sub-chunks before
+/// reranking, and the candidate max-pools over ALL its sub-chunks. So a needle
+/// buried in the TAIL of an over-long chunk (past a truncating model's wall) is
+/// still reached — the fix that makes chunk-granularity actually recover
+/// accuracy on prod-sized `contextual_chunks` (measured ~80% > 512 tokens).
+#[tokio::test]
+async fn oversized_chunks_are_sub_split_so_a_tail_needle_survives_truncation() {
+    let store = InMemoryStore::default();
+    let tenant = TenantId::new();
+    let scope = ScopeId::new();
+    let actor = ActorId::new();
+    let context = memphant_store_testkit::resolved_context(tenant, scope, actor);
+    store.seed_context_binding(&context);
+
+    // The char budget per fed doc is `max_length * RERANK_CHARS_PER_TOKEN`.
+    // With max_length 10 → 35-char windows. A's needle sits in the far tail
+    // (past the first window), invisible to a whole-chunk rerank but reachable
+    // once the chunk is sub-split. B is a short chunk with no needle.
+    let budget = 10 * memphant_core::RERANK_CHARS_PER_TOKEN;
+    let long_tail = format!("{}widget NEEDLE tail", "widget filler prose ".repeat(20));
+    assert!(long_tail.len() > budget, "test needs an over-budget chunk");
+    stage_unit_with_chunks(&store, &context, "unit alpha", &[long_tail.as_str()]).await;
+    stage_unit_with_chunks(&store, &context, "unit bravo", &["widget short chunk"]).await;
+
+    let service = stub_service(store.clone())
+        .with_cross_rerank_granularity(CrossRerankGranularity::ContextualChunks)
+        .with_cross_reranker(Arc::new(TruncatingBoostReranker {
+            needle: "NEEDLE".to_string(),
+            visible_chars: budget,
+            max_length: 10,
+        }));
+    let response = service
+        .recall(
+            memphant_store_testkit::resolved_context(tenant, scope, actor),
+            recall_request(tenant, scope, actor, "widget"),
+        )
+        .await
+        .expect("recall");
+    assert!(
+        response.items[0].body.contains("alpha"),
+        "A's tail needle survives via sub-split + max-pool: {:?}",
+        response.items[0].body
+    );
+    let facts = service
+        .store()
+        .trace_by_id_any_tenant(response.trace_id)
+        .expect("trace exists")
+        .cross_rerank
+        .expect("rerank facts");
+    assert!(
+        facts.docs_scored > 2,
+        "the long chunk was sub-split into multiple window-sized docs (not 1 per candidate): {}",
+        facts.docs_scored
+    );
+    assert!(
+        facts.input_chars_max <= budget,
+        "no fed doc exceeds the max_length char budget ({budget}): {}",
+        facts.input_chars_max
+    );
+    assert_eq!(facts.failure, CrossRerankFailure::None);
+}
+
 #[tokio::test]
 async fn empty_reranker_output_fails_open_and_records_empty() {
     let store = InMemoryStore::default();
