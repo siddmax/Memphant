@@ -331,10 +331,38 @@ team verdict). Each item carries an n=12-style falsification gate.
    in-repo. **Decision: contract InMemoryStore** to pure-logic unit tests;
    all contract evidence moves to scratch-PG (the InMemory/Pg divergence
    anti-pattern is documented and has already hidden bugs).
+   **STALE-CONTRACT SCRIPTS (2026-07-22, C1 follow-up — verified):** a family of
+   ingest scripts still build the pre-cutover FLAT retain body (top-level
+   `tenant_id`/`source_kind`/`source_trust`/`body`, no `payload.episode` wrapper,
+   no `agent_node_id`/`subject_generation`) that the current `deny_unknown_fields`
+   `RetainEpisodeHttpRequest` (`memphant-server/src/lib.rs:358`) rejects at
+   deserialization: `gate_run_memphant.py:333/354`, `build_state_bench_memphant_arm.py:461`,
+   `generate_stale_memphant_answers.py:607`, `generate_memora_memphant_answers.py:1351`.
+   Rebuild them to the C0 nested contract when their lanes are next touched (the
+   `episodic_lane_run_memphant.py`/`code_lane_run_memphant.py` shape is the model).
+   **Latent, masked bug:** `build_state_bench_memphant_arm.py:461` passes an
+   unmapped external `attempt["attempt_type"]` as `source_kind` — it will 422 on
+   the episode enum once the shape is fixed; give it a `map_source_kind`-style
+   translation (the `episodic_lane_run_memphant.py` pattern: raise on unmapped,
+   never silently pass).
 6. **B6 — CI honesty legs** (tests team): a Postgres service leg (52 ignored
    live tests + e2e probe currently never run in CI — all CI eval evidence is
    InMemory today), a fastembed-less leg, the `ops` eval lane, and an LME-S
    n=5 chain smoke to stop the full-500 chain from bit-rotting.
+   **DIVERGENCE-AUDIT (2026-07-22, C1 follow-up — verified, conservative):** the
+   InMemory→Pg anti-pattern guard is prose-only (no executable enforcement); the
+   Pg service leg IS the enforcement, so B6 IS the fix for finding #1. The
+   concentrated remaining gap is the recall **ranking-quality** family proven
+   ONLY on InMemory with no Pg twin: `recall_pool_depth.rs`, `candidate_pool.rs`,
+   `cross_reranker.rs`, `temporal_grounding.rs`, `quantity_rollup.rs`, and
+   `bitemporal_recall.rs`'s split-chain dual-axis test. Pg twins today prove
+   scoping/persistence/supersession/vector-fires, NOT ranking composition against
+   real pgvector KNN order. When adding Pg twins, **future-date the FixedClock
+   (≥2030)** — a past-dated clock + recall silently returns zero on Pg (the
+   worker stamps `transaction_from`=now()); this is now guarded by
+   `crates/memphant-store-postgres/tests/recall_clock_not_past_dated.rs` (commit
+   `220bbef4`). Don't twin the pipeline-shape lock `recall_trace_golden.rs` or the
+   mock-provider `deep_recall.rs` — both are intentionally store-agnostic.
 
 ## 5. Phase C — Cutover (slices 0/1/3 start now; docs is the only gated slice)
 
