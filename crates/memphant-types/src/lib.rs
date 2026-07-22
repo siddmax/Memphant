@@ -607,12 +607,32 @@ pub enum CrossRerankFailure {
     NonFiniteScore,
 }
 
+/// Granularity of the docs fed to the W8 cross-encoder rerank stage: whole
+/// unit bodies (the default), or each candidate's flattened
+/// `contextual_chunks` bodies max-pooled back to one score per candidate
+/// (fallback: the body when a candidate has no chunks).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CrossRerankGranularity {
+    #[default]
+    UnitBody,
+    ContextualChunks,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct CrossRerankTrace {
     pub provider: String,
     pub model: String,
     pub candidate_limit: usize,
+    /// Candidates in the scored head — NOT docs: under `ContextualChunks`
+    /// granularity one candidate can contribute several docs (`docs_scored`).
     pub candidate_count: usize,
+    #[serde(default)]
+    pub granularity: CrossRerankGranularity,
+    /// Docs actually fed to `CrossReranker::rerank` — equals `candidate_count`
+    /// under `UnitBody`, the flattened chunk/fallback-body count otherwise.
+    #[serde(default)]
+    pub docs_scored: usize,
     pub max_length: usize,
     pub batch_size: Option<usize>,
     pub input_chars_p50: usize,

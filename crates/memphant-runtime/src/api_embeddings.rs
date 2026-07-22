@@ -43,7 +43,10 @@ use ureq::http::HeaderMap;
 const VOYAGE_EMBED_URL: &str = "https://api.voyageai.com/v1/embeddings";
 const VOYAGE_CONTEXT_URL: &str = "https://api.voyageai.com/v1/contextualizedembeddings";
 const GEMINI_EMBED_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:batchEmbedContents";
+const GEMINI2_EMBED_URL: &str =
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:batchEmbedContents";
 const OPENAI_EMBED_URL: &str = "https://api.openai.com/v1/embeddings";
+const JINA_EMBED_URL: &str = "https://api.jina.ai/v1/embeddings";
 
 // ---- Declared dims (pinned via live probe 2026-07-11) ----------------------
 
@@ -53,26 +56,38 @@ const OPENAI_EMBED_URL: &str = "https://api.openai.com/v1/embeddings";
 pub const VOYAGE_DIMS: usize = 1024;
 /// `gemini-embedding-001` native output width (no MRL truncation requested).
 pub const GEMINI_DIMS: usize = 3072;
+/// `gemini-embedding-2` native output width (MRL 128-3072; default full).
+pub const GEMINI2_DIMS: usize = 3072;
 /// `text-embedding-3-small` output width.
 pub const OPENAI_DIMS: usize = 1536;
+/// `jina-embeddings-v5-text-small` output width (live-probed 2026-07-22).
+pub const JINA_DIMS: usize = 1024;
 
 // ---- Stable provider ids (key the embedding profile) -----------------------
 
 pub const GEMINI_ID: &str = "gemini-embedding-001";
+pub const GEMINI2_ID: &str = "gemini-embedding-2";
 pub const OPENAI_ID: &str = "openai-text-embedding-3-small";
 pub const VOYAGE_CONTEXT_ID: &str = "voyage-context-4";
+pub const JINA_ID: &str = "jina-v5-small";
+
+const GEMINI_MODEL_PATH: &str = "models/gemini-embedding-001";
+const GEMINI2_MODEL_PATH: &str = "models/gemini-embedding-2";
+const JINA_MODEL: &str = "jina-embeddings-v5-text-small";
 
 // ---- Env var names ---------------------------------------------------------
 
 const VOYAGE_KEY_VAR: &str = "VOYAGE_API_KEY";
 const GEMINI_KEY_VAR: &str = "GEMINI_API_KEY";
 const OPENAI_KEY_VAR: &str = "OPENAI_API_KEY";
+const JINA_KEY_VAR: &str = "JINA_API_KEY";
 
 // ---- Per-request batch caps ------------------------------------------------
 
 const VOYAGE_BATCH: usize = 64;
 const GEMINI_BATCH: usize = 100;
 const OPENAI_BATCH: usize = 256;
+const JINA_BATCH: usize = 128;
 
 // ---- Retry / timeout policy ------------------------------------------------
 
@@ -358,9 +373,34 @@ struct OpenAiRequest<'a> {
     input: &'a [String],
 }
 
+/// Jina is OpenAI-envelope-compatible with an extra asymmetric `task` field
+/// (`retrieval.passage` / `retrieval.query`).
+#[derive(Serialize)]
+struct JinaRequest<'a> {
+    model: &'a str,
+    input: &'a [String],
+    task: &'a str,
+}
+
 #[derive(Serialize)]
 struct GeminiBatchRequest {
     requests: Vec<GeminiSingleRequest>,
+}
+
+fn gemini_single_request(
+    model: &'static str,
+    text: &str,
+    task_type: &'static str,
+) -> GeminiSingleRequest {
+    GeminiSingleRequest {
+        model,
+        content: GeminiContent {
+            parts: vec![GeminiPart {
+                text: text.to_string(),
+            }],
+        },
+        task_type,
+    }
 }
 
 #[derive(Serialize)]
@@ -584,13 +624,40 @@ impl EmbeddingProvider for VoyageContextualizedEmbedding {
 pub struct GeminiEmbedding {
     http: ApiHttp,
     api_key: String,
+    url: &'static str,
+    model_path: &'static str,
+    id: &'static str,
+    dims: usize,
 }
 
 impl GeminiEmbedding {
     pub fn new() -> Result<Self, EmbedError> {
+        Self::with_model(GEMINI_EMBED_URL, GEMINI_MODEL_PATH, GEMINI_ID, GEMINI_DIMS)
+    }
+
+    /// `gemini-embedding-2` (GA 2026-04; same batch wire shape, newer space).
+    pub fn new_v2() -> Result<Self, EmbedError> {
+        Self::with_model(
+            GEMINI2_EMBED_URL,
+            GEMINI2_MODEL_PATH,
+            GEMINI2_ID,
+            GEMINI2_DIMS,
+        )
+    }
+
+    fn with_model(
+        url: &'static str,
+        model_path: &'static str,
+        id: &'static str,
+        dims: usize,
+    ) -> Result<Self, EmbedError> {
         Ok(Self {
             http: ApiHttp::new(),
             api_key: require_key(GEMINI_KEY_VAR)?,
+            url,
+            model_path,
+            id,
+            dims,
         })
     }
 
@@ -604,23 +671,17 @@ impl GeminiEmbedding {
             let batch = &texts[range];
             let requests = batch
                 .iter()
-                .map(|text| GeminiSingleRequest {
-                    model: "models/gemini-embedding-001",
-                    content: GeminiContent {
-                        parts: vec![GeminiPart { text: text.clone() }],
-                    },
-                    task_type,
-                })
+                .map(|text| gemini_single_request(self.model_path, text, task_type))
                 .collect();
             let request = GeminiBatchRequest { requests };
             let response: GeminiResponse = self.http.post_json(
-                GEMINI_EMBED_URL,
+                self.url,
                 &[
                     ("x-goog-api-key", self.api_key.as_str()),
                     ("Content-Type", "application/json"),
                 ],
                 &request,
-                GEMINI_ID,
+                self.id,
             )?;
             // Gemini's `embeddings[]` is order-preserving (no index field).
             let vectors: Vec<Vec<f32>> = response
@@ -628,8 +689,8 @@ impl GeminiEmbedding {
                 .into_iter()
                 .map(|item| item.values)
                 .collect();
-            expect_batch_len(vectors.len(), batch.len(), GEMINI_ID)?;
-            assert_dims(&vectors, GEMINI_DIMS, GEMINI_ID)?;
+            expect_batch_len(vectors.len(), batch.len(), self.id)?;
+            assert_dims(&vectors, self.dims, self.id)?;
             out.extend(vectors);
         }
         Ok(out)
@@ -652,11 +713,80 @@ impl EmbeddingProvider for GeminiEmbedding {
     }
 
     fn dimensions(&self) -> usize {
-        GEMINI_DIMS
+        self.dims
     }
 
     fn id(&self) -> &str {
-        GEMINI_ID
+        self.id
+    }
+}
+
+// ---- Jina ------------------------------------------------------------------
+
+/// `jina-embeddings-v5-text-small` via the OpenAI-compatible `/v1/embeddings`
+/// with Jina's asymmetric `task` field.
+pub struct JinaEmbedding {
+    http: ApiHttp,
+    api_key: String,
+}
+
+impl JinaEmbedding {
+    pub fn new() -> Result<Self, EmbedError> {
+        Ok(Self {
+            http: ApiHttp::new(),
+            api_key: require_key(JINA_KEY_VAR)?,
+        })
+    }
+
+    fn embed_with_task(&self, texts: &[String], task: &str) -> Result<Vec<Vec<f32>>, EmbedError> {
+        let bearer = format!("Bearer {}", self.api_key);
+        let mut out = Vec::with_capacity(texts.len());
+        for range in batch_ranges(texts.len(), JINA_BATCH) {
+            let batch = &texts[range];
+            let request = JinaRequest {
+                model: JINA_MODEL,
+                input: batch,
+                task,
+            };
+            let response: DataEnvelope = self.http.post_json(
+                JINA_EMBED_URL,
+                &[
+                    ("Authorization", bearer.as_str()),
+                    ("Content-Type", "application/json"),
+                ],
+                &request,
+                JINA_ID,
+            )?;
+            let vectors = order_indexed(response.data)?;
+            expect_batch_len(vectors.len(), batch.len(), JINA_ID)?;
+            assert_dims(&vectors, JINA_DIMS, JINA_ID)?;
+            out.extend(vectors);
+        }
+        Ok(out)
+    }
+}
+
+impl EmbeddingProvider for JinaEmbedding {
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.embed_with_task(texts, "retrieval.passage")
+    }
+
+    fn embed_query(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.embed_with_task(texts, "retrieval.query")
+    }
+
+    fn dimensions(&self) -> usize {
+        JINA_DIMS
+    }
+
+    fn id(&self) -> &str {
+        JINA_ID
     }
 }
 
@@ -736,6 +866,31 @@ fn expect_batch_len(got: usize, expected: usize, provider: &str) -> Result<(), E
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- New-arm request shapes (P1 bench: jina-v5-small / gemini-embedding-2)
+
+    #[test]
+    fn jina_request_serializes_model_input_and_task() {
+        let input = vec!["a".to_string(), "b".to_string()];
+        let request = JinaRequest {
+            model: JINA_MODEL,
+            input: &input,
+            task: "retrieval.passage",
+        };
+        let value = serde_json::to_value(&request).expect("serializes");
+        assert_eq!(value["model"], "jina-embeddings-v5-text-small");
+        assert_eq!(value["task"], "retrieval.passage");
+        assert_eq!(value["input"].as_array().expect("array").len(), 2);
+    }
+
+    #[test]
+    fn gemini_single_request_parameterizes_the_model_path() {
+        let request = gemini_single_request(GEMINI2_MODEL_PATH, "hello", "RETRIEVAL_QUERY");
+        let value = serde_json::to_value(&request).expect("serializes");
+        assert_eq!(value["model"], "models/gemini-embedding-2");
+        assert_eq!(value["taskType"], "RETRIEVAL_QUERY");
+        assert_eq!(value["content"]["parts"][0]["text"], "hello");
+    }
 
     // ---- Batching splitter --------------------------------------------------
 

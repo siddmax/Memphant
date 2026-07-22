@@ -323,6 +323,11 @@ pub struct SyndaiTraceCompareReport {
     pub answer_bearing_recall: f32,
     pub missing_answer_bearing: Vec<String>,
     pub forbidden_returned: Vec<String>,
+    /// Non-unit expectation misses from an embedded golden case (citations,
+    /// trace stages, subquery/decomposition assertions) — empty for the
+    /// file-memory surface, whose only assertions are unit-level.
+    #[serde(default)]
+    pub other_mismatches: Vec<String>,
     pub trace_id: Option<String>,
     pub archived_trace_path: Option<PathBuf>,
 }
@@ -438,7 +443,17 @@ struct EvalSuite {
 }
 
 #[derive(Debug, Deserialize)]
-struct SyndaiTraceCompareFixture {
+#[serde(untagged)]
+enum SyndaiTraceCompareFixture {
+    /// The original agent_file_memory surface: files seeded as resources.
+    FileMemory(SyndaiFileMemoryFixture),
+    /// Spec-28 coding-continuity families (28-syndai-code-contract §4): a
+    /// golden case wrapped in the trace-compare surface report shape.
+    CodingContinuity(Box<SyndaiCodingContinuityFixture>),
+}
+
+#[derive(Debug, Deserialize)]
+struct SyndaiFileMemoryFixture {
     id: String,
     surface: String,
     query: String,
@@ -447,6 +462,13 @@ struct SyndaiTraceCompareFixture {
     #[serde(default)]
     forbidden_ids: Vec<String>,
     files: Vec<SyndaiFileMemory>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SyndaiCodingContinuityFixture {
+    id: String,
+    surface: String,
+    case: GoldenCase,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1017,6 +1039,7 @@ pub fn run_syndai_trace_compare_file(
             "answer_bearing_recall": report.answer_bearing_recall,
             "missing_answer_bearing": report.missing_answer_bearing,
             "forbidden_returned": report.forbidden_returned,
+            "other_mismatches": report.other_mismatches,
             "trace_id": report.trace_id,
         });
         write_json(&archive_path, &archive)?;
@@ -1936,6 +1959,71 @@ pub fn generate_trace_schema() -> serde_json::Value {
 async fn run_syndai_trace_compare(
     fixture: &SyndaiTraceCompareFixture,
 ) -> EvalResult<SyndaiTraceCompareReport> {
+    match fixture {
+        SyndaiTraceCompareFixture::FileMemory(fixture) => run_syndai_file_memory(fixture).await,
+        SyndaiTraceCompareFixture::CodingContinuity(fixture) => {
+            run_syndai_coding_continuity(fixture).await
+        }
+    }
+}
+
+async fn run_syndai_coding_continuity(
+    fixture: &SyndaiCodingContinuityFixture,
+) -> EvalResult<SyndaiTraceCompareReport> {
+    if fixture.surface != "coding_continuity" {
+        return Err(EvalError::Failed(format!(
+            "unsupported Syndai surface {}",
+            fixture.surface
+        )));
+    }
+    if fixture.case.id != fixture.id {
+        return Err(EvalError::Failed(format!(
+            "fixture id {} does not match embedded case id {}",
+            fixture.id, fixture.case.id
+        )));
+    }
+    let result = run_golden_case(
+        &fixture.case,
+        &BTreeSet::new(),
+        GoldenRunControls::default(),
+    )
+    .await;
+    if let Some(error) = result.error {
+        return Err(EvalError::Failed(error));
+    }
+    let answer_bearing = &fixture.case.expect.answer_bearing_ids;
+    let (missing_answer_bearing, missing_other): (Vec<String>, Vec<String>) = result
+        .missing_units
+        .into_iter()
+        .partition(|name| answer_bearing.contains(name));
+    let answer_bearing_recall = if answer_bearing.is_empty() {
+        1.0
+    } else {
+        (answer_bearing.len() - missing_answer_bearing.len()) as f32 / answer_bearing.len() as f32
+    };
+    let other_mismatches = [
+        missing_other,
+        result.missing_citations,
+        result.missing_trace_stages,
+        result.dropped_mismatches,
+    ]
+    .concat();
+    Ok(SyndaiTraceCompareReport {
+        id: fixture.id.clone(),
+        surface: fixture.surface.clone(),
+        passed: result.passed,
+        answer_bearing_recall,
+        missing_answer_bearing,
+        forbidden_returned: result.forbidden_present,
+        other_mismatches,
+        trace_id: result.trace_id,
+        archived_trace_path: None,
+    })
+}
+
+async fn run_syndai_file_memory(
+    fixture: &SyndaiFileMemoryFixture,
+) -> EvalResult<SyndaiTraceCompareReport> {
     if fixture.surface != "agent_file_memory" {
         return Err(EvalError::Failed(format!(
             "unsupported Syndai surface {}",
@@ -2034,6 +2122,7 @@ async fn run_syndai_trace_compare(
         answer_bearing_recall,
         missing_answer_bearing,
         forbidden_returned,
+        other_mismatches: Vec::new(),
         trace_id: Some(response.trace_id.as_uuid().to_string()),
         archived_trace_path: None,
     })

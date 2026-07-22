@@ -1,0 +1,58 @@
+# Spec-28 §4 coding-continuity family: one composite query packs the
+# task-state episodic memory plus the semantic constraint, and asserts the
+# trace records subquery_ids (query decomposition actually fired).
+id: syndai_task_plus_semantic_composite_001
+surface: coding_continuity
+case:
+  id: syndai_task_plus_semantic_composite_001
+  query: "Which task is the checkout retry rollout paused on and which constraint gates resuming it?"
+  k: 2
+  mode: balanced
+  budget_tokens: 96
+  seed:
+    units:
+      - name: mem_rollout_task_state
+        episode_body: "Task state: the checkout retry rollout is paused at 50 percent while the error budget recovers."
+        kind: semantic
+        state: active
+        subject_key: "checkout retry rollout task"
+        body: "The checkout retry rollout is paused at 50 percent."
+        trust_level: trusted_system
+      - name: mem_error_budget_constraint
+        episode_body: "Constraint: rollouts stay paused until the error budget is back above 99.9 percent."
+        kind: semantic
+        state: active
+        subject_key: "rollout resume constraint"
+        body: "Rollouts stay paused until the error budget is back above 99.9 percent."
+        trust_level: trusted_system
+      - name: mem_rollout_chatter_0
+        episode_body: "Checkout retry rollout paused constraint resuming noisy status 0."
+        kind: semantic
+        state: active
+        subject_key: "rollout chatter 0"
+        body: "Checkout retry rollout paused constraint resuming noisy status 0."
+        trust_level: trusted_system
+      - name: mem_rollout_chatter_1
+        episode_body: "Checkout retry rollout paused constraint resuming noisy status 1."
+        kind: semantic
+        state: active
+        subject_key: "rollout chatter 1"
+        body: "Checkout retry rollout paused constraint resuming noisy status 1."
+        trust_level: trusted_system
+  expect:
+    answer_bearing_ids:
+      - mem_rollout_task_state
+      - mem_error_budget_constraint
+    top_k_contains:
+      - mem_rollout_task_state
+      - mem_error_budget_constraint
+    packed_context_contains:
+      - mem_rollout_task_state
+      - mem_error_budget_constraint
+    trace_stages_include:
+      - query_decomposition
+      - trace
+    trace_feature_flags_include:
+      - query_decomposition_enabled
+    subquery_count_min: 2
+    decomposition_reason_contains: multi_constraint_conjunction

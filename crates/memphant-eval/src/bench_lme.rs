@@ -148,6 +148,11 @@ pub struct BenchLmeOptions {
     /// fastembed feature; installs the real reranker on the recall service via
     /// `with_cross_reranker`. Off reproduces today's fusion order.
     pub cross_rerank: bool,
+    /// Cross-rerank doc granularity (`--rerank-granularity body|chunk`, default
+    /// body = today's behavior) threaded via `with_cross_rerank_granularity`.
+    /// `chunk` reranks each candidate's flattened `contextual_chunks` bodies
+    /// and max-pools back per candidate. Inert without `--cross-rerank`.
+    pub rerank_granularity: memphant_core::CrossRerankGranularity,
     /// When set, write one QA-evidence JSONL row per question to this path
     /// (question + gold answer + top-k evidence bodies) for the external
     /// reader/judge in `scripts/run_reader.py`.
@@ -890,7 +895,10 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
     // W5 temporal grounding: query-date windowing + dated packs at recall. Set
     // explicitly here too so the vector-disabled fresh recall service (which is
     // not a clone of `ingest_service`) also carries the flag.
-    .with_temporal_grounding_enabled(options.temporal_grounding);
+    .with_temporal_grounding_enabled(options.temporal_grounding)
+    // W8 cross-rerank doc granularity (`--rerank-granularity`): recall-time
+    // only, inert unless `--cross-rerank` installs a reranker below.
+    .with_cross_rerank_granularity(options.rerank_granularity);
 
     // W8 cross-encoder rerank: recall-time only. When on, install the real
     // fastembed reranker so it reorders the widened pool before packing.

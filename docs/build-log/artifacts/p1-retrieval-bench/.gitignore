@@ -1,0 +1,4 @@
+pool*.json
+cache/
+out/
+vectors*/

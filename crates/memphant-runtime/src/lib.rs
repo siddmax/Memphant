@@ -15,11 +15,11 @@ use memphant_core::service::{
 };
 use memphant_core::{
     ApiKeyRow, CompiledWrite, CorrectOutcome, CorrectionWrite, CrossRerankCandidateSelection,
-    CrossReranker, DEFAULT_RECALL_POOL_DEPTH, EmbedError, EmbeddingProfileRow, EmbeddingProvider,
-    EmbeddingRow, ForgetOutcome, ForgetWrite, InMemoryStore, InMemoryTxn, JobFilter, MemoryStore,
-    MutationClaim, MutationClaimOutcome, MutationLedgerStore, MutationResponse, NoopEmbedding,
-    ReflectJobRow, ResolvedMemoryContext, ReviewEventRow, ScopePage, StoreError,
-    SubjectErasureReceipt, SystemClock,
+    CrossRerankGranularity, CrossReranker, DEFAULT_RECALL_POOL_DEPTH, EmbedError,
+    EmbeddingProfileRow, EmbeddingProvider, EmbeddingRow, ForgetOutcome, ForgetWrite,
+    InMemoryStore, InMemoryTxn, JobFilter, MemoryStore, MutationClaim, MutationClaimOutcome,
+    MutationLedgerStore, MutationResponse, NoopEmbedding, ReflectJobRow, ResolvedMemoryContext,
+    ReviewEventRow, ScopePage, StoreError, SubjectErasureReceipt, SystemClock,
 };
 use memphant_store_postgres::{PgStore, PgTxn};
 use memphant_types::{
@@ -148,8 +148,8 @@ mod structured_state_openrouter;
 ///   | `openai-text-embedding-3-small` → the T2 API arms
 pub fn embedder_from_id(id: &str) -> Result<Arc<dyn EmbeddingProvider>, String> {
     use api_embeddings::{
-        GeminiEmbedding, OpenAiEmbedding, VoyageContextualizedEmbedding, VoyageEmbedding,
-        VoyageModel,
+        GeminiEmbedding, JinaEmbedding, OpenAiEmbedding, VoyageContextualizedEmbedding,
+        VoyageEmbedding, VoyageModel,
     };
     match id {
         "off" | "noop" => Ok(Arc::new(NoopEmbedding)),
@@ -163,11 +163,14 @@ pub fn embedder_from_id(id: &str) -> Result<Arc<dyn EmbeddingProvider>, String> 
         "voyage-code-3" => api(VoyageEmbedding::new(VoyageModel::VoyageCode3)),
         "voyage-context-4" => api(VoyageContextualizedEmbedding::new()),
         "gemini-embedding-001" => api(GeminiEmbedding::new()),
+        "gemini-embedding-2" => api(GeminiEmbedding::new_v2()),
         "openai-text-embedding-3-small" => api(OpenAiEmbedding::new()),
+        "jina-v5-small" => api(JinaEmbedding::new()),
         other => Err(format!(
             "unknown embedder id: {other} (accepted: off, noop, fastembed, small, base, \
              bge-m3, fastembed:bge-m3, modernbert, gemma, qwen3, voyage-4, voyage-4-lite, voyage-4-large, voyage-code-3, \
-             voyage-context-4, gemini-embedding-001, openai-text-embedding-3-small)"
+             voyage-context-4, gemini-embedding-001, gemini-embedding-2, \
+             openai-text-embedding-3-small, jina-v5-small)"
         )),
     }
 }
@@ -372,10 +375,15 @@ fn fastembed_or(
 /// so server/MCP never pay the load unless the flag is on. The worker uses
 /// [`build_worker_service`] because it never recalls.
 pub fn build_service(store: AnyStore) -> MemoryService<AnyStore> {
-    let service = build_base_service(store).with_cross_rerank_candidate_selection(
-        cross_rerank_candidate_selection_from_env()
-            .unwrap_or_else(|error| panic!("MEMPHANT_CROSS_RERANK_CANDIDATES: {error}")),
-    );
+    let service = build_base_service(store)
+        .with_cross_rerank_candidate_selection(
+            cross_rerank_candidate_selection_from_env()
+                .unwrap_or_else(|error| panic!("MEMPHANT_CROSS_RERANK_CANDIDATES: {error}")),
+        )
+        .with_cross_rerank_granularity(
+            cross_rerank_granularity_from_env()
+                .unwrap_or_else(|error| panic!("MEMPHANT_RERANK_GRANULARITY: {error}")),
+        );
     let service = if cross_rerank_enabled_from_env() {
         let reranker = build_cross_reranker().unwrap_or_else(|error| {
             panic!("MEMPHANT_CROSS_RERANK=1: {error}");
@@ -486,6 +494,28 @@ fn cross_rerank_candidate_selection_from_value(
         Some(value) => Err(format!(
             "expected fused-head or vector-lexical-balanced, got {value:?}"
         )),
+    }
+}
+
+fn cross_rerank_granularity_from_env() -> Result<CrossRerankGranularity, String> {
+    cross_rerank_granularity_from_value(
+        std::env::var("MEMPHANT_RERANK_GRANULARITY").ok().as_deref(),
+    )
+}
+
+/// `MEMPHANT_RERANK_GRANULARITY` → W8 cross-rerank doc granularity. `body`
+/// (or unset/empty, the shipped default) scores whole unit bodies; `chunk`
+/// scores each candidate's flattened `contextual_chunks` bodies and
+/// max-pools back per candidate. Mirrors
+/// `cross_rerank_candidate_selection_from_value`: explicit and fail-closed
+/// on anything else.
+fn cross_rerank_granularity_from_value(
+    value: Option<&str>,
+) -> Result<CrossRerankGranularity, String> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        None | Some("body") => Ok(CrossRerankGranularity::UnitBody),
+        Some("chunk") => Ok(CrossRerankGranularity::ContextualChunks),
+        Some(value) => Err(format!("expected body or chunk, got {value:?}")),
     }
 }
 
@@ -1330,6 +1360,25 @@ mod tests {
             cross_rerank_candidate_selection_from_value(Some("vector-lexical-quota32")).is_err()
         );
         assert!(cross_rerank_candidate_selection_from_value(Some("quota")).is_err());
+    }
+
+    #[test]
+    fn cross_rerank_granularity_is_explicit_and_fail_closed() {
+        use super::cross_rerank_granularity_from_value;
+        use memphant_core::CrossRerankGranularity::{ContextualChunks, UnitBody};
+
+        assert_eq!(cross_rerank_granularity_from_value(None), Ok(UnitBody));
+        assert_eq!(cross_rerank_granularity_from_value(Some("")), Ok(UnitBody));
+        assert_eq!(
+            cross_rerank_granularity_from_value(Some("body")),
+            Ok(UnitBody)
+        );
+        assert_eq!(
+            cross_rerank_granularity_from_value(Some(" chunk ")),
+            Ok(ContextualChunks)
+        );
+        assert!(cross_rerank_granularity_from_value(Some("chunks")).is_err());
+        assert!(cross_rerank_granularity_from_value(Some("unit-body")).is_err());
     }
 
     #[test]

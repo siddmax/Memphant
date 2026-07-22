@@ -5,6 +5,7 @@ mod mutation_contract;
 pub mod service;
 mod structured_state;
 
+pub use memphant_types::CrossRerankGranularity;
 pub use memphant_types::ResolvedMemoryContext;
 pub use mutation_contract::{canonical_mutation_request_hash, validate_idempotency_key};
 pub use structured_state::{
@@ -5846,6 +5847,7 @@ where
         temporal_grounding_enabled,
         cross_reranker,
         cross_rerank_candidate_selection,
+        CrossRerankGranularity::default(),
         None,
         None,
     )
@@ -5891,6 +5893,7 @@ where
         temporal_grounding_enabled,
         cross_reranker,
         cross_rerank_candidate_selection,
+        CrossRerankGranularity::default(),
         deep_provider,
         deep_started_at,
     )
@@ -5908,6 +5911,7 @@ pub(crate) async fn recall_with_pool_and_selection_and_deep_started<S>(
     temporal_grounding_enabled: bool,
     cross_reranker: Option<&dyn CrossReranker>,
     cross_rerank_candidate_selection: CrossRerankCandidateSelection,
+    cross_rerank_granularity: CrossRerankGranularity,
     deep_provider: Option<&dyn DeepRecallProvider>,
     deep_started_at: Option<std::time::Instant>,
 ) -> Result<RecallResponse, CoreError>
@@ -5924,6 +5928,7 @@ where
         temporal_grounding_enabled,
         cross_reranker,
         cross_rerank_candidate_selection,
+        cross_rerank_granularity,
         deep_provider,
         deep_started_at,
     )
@@ -6033,6 +6038,7 @@ async fn recall_with_pool_and_selection_impl<S>(
     temporal_grounding_enabled: bool,
     cross_reranker: Option<&dyn CrossReranker>,
     cross_rerank_candidate_selection: CrossRerankCandidateSelection,
+    cross_rerank_granularity: CrossRerankGranularity,
     deep_provider: Option<&dyn DeepRecallProvider>,
     deep_started_at: Option<std::time::Instant>,
 ) -> Result<RecallResponse, CoreError>
@@ -6582,6 +6588,7 @@ where
             &request.query,
             reranker,
             recall_pool_depth,
+            cross_rerank_granularity,
         ));
         cross_rerank_ms = cross_rerank_started.elapsed().as_millis() as u64;
         eprintln!(
@@ -7119,9 +7126,12 @@ fn push_unique(values: &mut Vec<String>, value: String) {
 }
 
 /// W8 cross-encoder rerank stage: reorder the top `pool` fused candidates by a
-/// real `(query, body)` cross-encoder, in place. Distinct from the retired
-/// heuristic [`rerank_candidates`] — this reads `CandidateAccumulator::unit.body`
-/// only and never touches the heuristic `rerank_score`/`rerank_rank` fields.
+/// real `(query, doc)` cross-encoder, in place. Docs are unit bodies under
+/// [`CrossRerankGranularity::UnitBody`] (the default) or flattened
+/// `contextual_chunks` bodies max-pooled back per candidate under
+/// [`CrossRerankGranularity::ContextualChunks`]. Distinct from the retired
+/// heuristic [`rerank_candidates`] — this never touches the heuristic
+/// `rerank_score`/`rerank_rank` fields.
 ///
 /// Determinism + ties: the top-`pool` slice is already in fused-rank order, and
 /// a STABLE sort by descending cross-encoder score preserves that order for
@@ -7133,13 +7143,37 @@ fn cross_rerank_candidates(
     query: &str,
     reranker: &dyn CrossReranker,
     pool: usize,
+    granularity: CrossRerankGranularity,
 ) -> CrossRerankTrace {
     let config = reranker.config();
     let head = pool.min(config.candidate_limit).min(fused.len());
-    let docs: Vec<&str> = fused[..head]
-        .iter()
-        .map(|candidate| candidate.unit.body.as_str())
-        .collect();
+    // One doc RANGE per head candidate: the whole body under `UnitBody` (a
+    // 1-doc range — exactly the historical behavior), the flattened
+    // `contextual_chunks` bodies under `ContextualChunks`, falling back to
+    // the body when a candidate has no chunks so every candidate stays
+    // scored. `candidate_limit`/`pool` bound CANDIDATES, never docs.
+    let mut docs: Vec<&str> = Vec::with_capacity(head);
+    let mut doc_ranges: Vec<std::ops::Range<usize>> = Vec::with_capacity(head);
+    for candidate in &fused[..head] {
+        let start = docs.len();
+        match granularity {
+            CrossRerankGranularity::UnitBody => docs.push(candidate.unit.body.as_str()),
+            CrossRerankGranularity::ContextualChunks => {
+                if candidate.unit.contextual_chunks.is_empty() {
+                    docs.push(candidate.unit.body.as_str());
+                } else {
+                    docs.extend(
+                        candidate
+                            .unit
+                            .contextual_chunks
+                            .iter()
+                            .map(|chunk| chunk.body.as_str()),
+                    );
+                }
+            }
+        }
+        doc_ranges.push(start..docs.len());
+    }
     let mut input_chars = docs
         .iter()
         .map(|doc| doc.chars().count())
@@ -7150,6 +7184,8 @@ fn cross_rerank_candidates(
         model: config.model,
         candidate_limit: config.candidate_limit,
         candidate_count: head,
+        granularity,
+        docs_scored: docs.len(),
         max_length: config.max_length,
         batch_size: config.batch_size,
         input_chars_p50: percentile(&input_chars, 50),
@@ -7160,12 +7196,17 @@ fn cross_rerank_candidates(
     if head == 0 {
         return trace;
     }
+    // The fail-open contract validates against the FLATTENED doc count: "one
+    // finite score per input doc" means one per chunk here, so a wrong
+    // flattened length (not `head`) is the no-op signal. Every candidate
+    // contributes at least one doc, so `docs` is non-empty whenever the head
+    // is, keeping the `Empty` case's meaning unchanged.
     let scores = match reranker.rerank(query, &docs) {
         Ok(scores) if scores.is_empty() => {
             trace.failure = CrossRerankFailure::Empty;
             return trace;
         }
-        Ok(scores) if scores.len() != head => {
+        Ok(scores) if scores.len() != docs.len() => {
             trace.failure = CrossRerankFailure::InvalidScoreCount;
             return trace;
         }
@@ -7180,10 +7221,22 @@ fn cross_rerank_candidates(
             return trace;
         }
     };
+    // Max-pool each candidate's OWN doc scores back to one candidate score.
+    // Ranges are non-empty and the scores all finite (validated above), so
+    // the fold never yields the NEG_INFINITY seed.
+    let candidate_scores: Vec<f32> = doc_ranges
+        .iter()
+        .map(|range| {
+            scores[range.clone()]
+                .iter()
+                .copied()
+                .fold(f32::NEG_INFINITY, f32::max)
+        })
+        .collect();
     let mut order: Vec<usize> = (0..head).collect();
     order.sort_by(|&left, &right| {
-        scores[right]
-            .partial_cmp(&scores[left])
+        candidate_scores[right]
+            .partial_cmp(&candidate_scores[left])
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     let mut reordered: Vec<CandidateAccumulator> = order

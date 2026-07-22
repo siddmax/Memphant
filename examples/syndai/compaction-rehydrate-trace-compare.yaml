@@ -1,0 +1,50 @@
+# Spec-28 §4 coding-continuity family: post-compaction "what were we doing /
+# active constraints" recall packs the task-critical units inside a tight
+# context_budget_tokens, ahead of chatty non-critical memories.
+id: syndai_compaction_rehydrate_001
+surface: coding_continuity
+case:
+  id: syndai_compaction_rehydrate_001
+  query: "What were we doing on the importer migration, and which active constraints apply?"
+  k: 2
+  budget_tokens: 96
+  seed:
+    units:
+      - name: mem_task_state_migration
+        episode_body: "Session summary before compaction: migrating the importer to the v2 schema; next step is backfilling the events table."
+        kind: semantic
+        state: active
+        subject_key: "importer migration task state"
+        body: "Active task: migrating the importer to the v2 schema; next step is backfilling the events table."
+        trust_level: trusted_system
+      - name: mem_reversibility_constraint
+        episode_body: "Standing constraint recorded for the importer migration: every ALTER ships with a rollback."
+        kind: semantic
+        state: active
+        subject_key: "importer migration constraint"
+        body: "Constraint: importer migrations must be reversible; every ALTER ships with a rollback."
+        trust_level: trusted_system
+      - name: mem_lunch_chatter
+        episode_body: "The team discussed moving the weekly demo to Thursday afternoons."
+        kind: semantic
+        state: active
+        subject_key: "weekly demo scheduling"
+        body: "The weekly demo moved to Thursday afternoons."
+        trust_level: trusted_system
+      - name: mem_old_completed_task
+        episode_body: "Completed last sprint: the exporter timeout fix shipped and was verified."
+        kind: semantic
+        state: active
+        subject_key: "exporter timeout fix"
+        body: "The exporter timeout fix shipped last sprint and was verified."
+        trust_level: trusted_system
+  expect:
+    answer_bearing_ids:
+      - mem_task_state_migration
+      - mem_reversibility_constraint
+    top_k_contains:
+      - mem_task_state_migration
+      - mem_reversibility_constraint
+    packed_context_contains:
+      - mem_task_state_migration
+      - mem_reversibility_constraint

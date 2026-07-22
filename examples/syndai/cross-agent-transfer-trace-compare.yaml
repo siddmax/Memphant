@@ -1,0 +1,44 @@
+# Spec-28 §4 coding-continuity family: agent A's validated repo-scoped
+# procedure is retrievable by sibling agent B in the same scope — the positive
+# dual of the L1+ deny family. Transfer rides the shared scope (units are
+# scope-scoped; the sibling's recall context differs only by agent node), and
+# only `validated` procedures transfer (05 §1.3): the candidate one is dropped
+# on state.
+id: syndai_cross_agent_transfer_001
+surface: coding_continuity
+case:
+  id: syndai_cross_agent_transfer_001
+  query: "How do I regenerate the API client in this repo?"
+  k: 2
+  budget_tokens: 160
+  seed:
+    units:
+      - name: mem_agent_a_validated_procedure
+        episode_body: "Agent A validated the API client regeneration procedure by replay, five wins out of five."
+        kind: procedural
+        state: validated
+        subject_key: "regenerate api client"
+        body: "Procedure: regenerate the API client by running scripts/gen_client.sh, then cargo fmt; commit the regenerated files together. Validation: replay wins 5 of 5."
+        trust_level: trusted_system
+      - name: mem_agent_a_candidate_procedure
+        episode_body: "Agent A drafted an unvalidated candidate for API client regeneration."
+        kind: procedural
+        state: candidate
+        subject_key: "regenerate api client candidate"
+        body: "Candidate procedure: regenerate the API client by hand-editing the generated files."
+        trust_level: trusted_system
+  expect:
+    answer_bearing_ids:
+      - mem_agent_a_validated_procedure
+    top_k_contains:
+      - mem_agent_a_validated_procedure
+    forbidden_units:
+      - mem_agent_a_candidate_procedure
+    trace_stages_include:
+      - procedure_recall
+      - trace
+    trace_feature_flags_include:
+      - procedure_recall_enabled
+    dropped:
+      - unit: mem_agent_a_candidate_procedure
+        reason: state

@@ -26,14 +26,14 @@ use memphant_types::{
 use crate::deep_recall::DeepRecallProvider;
 use crate::{
     ClaimMutationOutcome, Clock, CoreError, CorrectionWrite, CrossRerankCandidateSelection,
-    CrossReranker, DEFAULT_RECALL_POOL_DEPTH, EmbeddingProvider, ForgetWrite, JobFilter,
-    MemoryStore, MutationClaim, MutationClaimOutcome, MutationLedgerStore, MutationResponse,
-    MutationVerb, PackLevers, PreparedCompiledWrite, ReflectJobRow, ScopePage, StoreError,
-    StructuredStateProvider, StructuredStateRequest, VectorQuery, canonical_mutation_request_hash,
-    derive_episode_dedup_key, embedding_profile_for, normalize_component, parse_content_date,
-    prepare_compiled_write, project_structured_state, recall_scope_admitted,
-    recall_with_pool_and_selection_and_deep_started, reflect_recorded_claimed,
-    structured_compiler_identity, tokenize, validate_valid_interval,
+    CrossRerankGranularity, CrossReranker, DEFAULT_RECALL_POOL_DEPTH, EmbeddingProvider,
+    ForgetWrite, JobFilter, MemoryStore, MutationClaim, MutationClaimOutcome, MutationLedgerStore,
+    MutationResponse, MutationVerb, PackLevers, PreparedCompiledWrite, ReflectJobRow, ScopePage,
+    StoreError, StructuredStateProvider, StructuredStateRequest, VectorQuery,
+    canonical_mutation_request_hash, derive_episode_dedup_key, embedding_profile_for,
+    normalize_component, parse_content_date, prepare_compiled_write, project_structured_state,
+    recall_scope_admitted, recall_with_pool_and_selection_and_deep_started,
+    reflect_recorded_claimed, structured_compiler_identity, tokenize, validate_valid_interval,
 };
 
 pub const DEFAULT_STRUCTURED_STATE_PREFETCH_CONCURRENCY: usize = 4;
@@ -847,6 +847,7 @@ pub struct MemoryService<S: MemoryStore> {
     /// lane's `--cross-rerank` threads the real fastembed reranker here.
     cross_reranker: Option<Arc<dyn CrossReranker>>,
     cross_rerank_candidate_selection: CrossRerankCandidateSelection,
+    cross_rerank_granularity: CrossRerankGranularity,
     structured_state_provider: Option<Arc<dyn StructuredStateProvider>>,
     structured_state_prefetch_concurrency: usize,
     deep_recall_provider: Option<Arc<dyn DeepRecallProvider>>,
@@ -866,6 +867,7 @@ impl<S: MemoryStore> Clone for MemoryService<S> {
             fact_extraction_enabled: self.fact_extraction_enabled,
             cross_reranker: self.cross_reranker.clone(),
             cross_rerank_candidate_selection: self.cross_rerank_candidate_selection,
+            cross_rerank_granularity: self.cross_rerank_granularity,
             structured_state_provider: self.structured_state_provider.clone(),
             structured_state_prefetch_concurrency: self.structured_state_prefetch_concurrency,
             deep_recall_provider: self.deep_recall_provider.clone(),
@@ -887,6 +889,7 @@ impl<S: MemoryStore> MemoryService<S> {
             fact_extraction_enabled: false,
             cross_reranker: None,
             cross_rerank_candidate_selection: CrossRerankCandidateSelection::FusedHead,
+            cross_rerank_granularity: CrossRerankGranularity::UnitBody,
             structured_state_provider: None,
             structured_state_prefetch_concurrency: DEFAULT_STRUCTURED_STATE_PREFETCH_CONCURRENCY,
             deep_recall_provider: None,
@@ -995,6 +998,19 @@ impl<S: MemoryStore> MemoryService<S> {
         selection: CrossRerankCandidateSelection,
     ) -> Self {
         self.cross_rerank_candidate_selection = selection;
+        self
+    }
+
+    /// Sets the W8 cross-rerank doc granularity (default `UnitBody` =
+    /// today's behavior). `ContextualChunks` feeds each head candidate's
+    /// flattened `contextual_chunks` bodies to the reranker (fallback: the
+    /// unit body when a candidate has no chunks) and max-pools the scores
+    /// back to one score per candidate. Construction-time only, mirroring
+    /// `with_cross_rerank_candidate_selection`; the runtime threads
+    /// `MEMPHANT_RERANK_GRANULARITY` here and the bench lane
+    /// `--rerank-granularity`. Inert unless a cross-reranker is installed.
+    pub fn with_cross_rerank_granularity(mut self, granularity: CrossRerankGranularity) -> Self {
+        self.cross_rerank_granularity = granularity;
         self
     }
 
@@ -1405,6 +1421,7 @@ impl<S: MemoryStore> MemoryService<S> {
                 self.temporal_grounding_enabled,
                 self.cross_reranker.as_deref(),
                 self.cross_rerank_candidate_selection,
+                self.cross_rerank_granularity,
                 self.deep_recall_provider.as_deref(),
                 deep_started_at,
             )
@@ -1443,6 +1460,7 @@ impl<S: MemoryStore> MemoryService<S> {
             self.temporal_grounding_enabled,
             self.cross_reranker.as_deref(),
             self.cross_rerank_candidate_selection,
+            self.cross_rerank_granularity,
             self.deep_recall_provider.as_deref(),
             deep_started_at,
         )

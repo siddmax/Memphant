@@ -1,0 +1,43 @@
+# Spec-28 §4 coding-continuity family: a stored architecture-decision episode
+# is packed on a later related-implementation query, and the rejected
+# alternative (superseded by the decision) is excluded from the pack — the
+# fixture-level twin of "do not re-propose what the ADR rejected".
+id: syndai_arch_decision_honored_001
+surface: coding_continuity
+case:
+  id: syndai_arch_decision_honored_001
+  query: "How should importer workers be woken up when new jobs arrive?"
+  k: 2
+  budget_tokens: 96
+  seed:
+    units:
+      - name: mem_adr_listen_notify
+        episode_body: "Architecture decision ADR-14: importer job wake-up uses Postgres LISTEN/NOTIFY; the polling-loop alternative was rejected for connection cost."
+        kind: semantic
+        state: active
+        subject_key: "importer wake-up decision"
+        body: "ADR-14: importer job wake-up uses Postgres LISTEN/NOTIFY; the polling-loop alternative was rejected for connection cost."
+        trust_level: trusted_system
+      - name: mem_rejected_polling_proposal
+        episode_body: "Superseded proposal: wake importer workers with a 500ms polling loop on the jobs table."
+        kind: semantic
+        state: superseded
+        subject_key: "importer wake-up polling proposal"
+        body: "Proposal: wake importer workers with a 500ms polling loop on the jobs table."
+        trust_level: trusted_system
+      - name: mem_unrelated_dashboard_note
+        episode_body: "The billing dashboard refresh interval was raised to one hour."
+        kind: semantic
+        state: active
+        subject_key: "billing dashboard refresh"
+        body: "The billing dashboard refresh interval was raised to one hour."
+        trust_level: trusted_system
+  expect:
+    answer_bearing_ids:
+      - mem_adr_listen_notify
+    top_k_contains:
+      - mem_adr_listen_notify
+    packed_context_contains:
+      - mem_adr_listen_notify
+    forbidden_units:
+      - mem_rejected_polling_proposal

@@ -7,12 +7,12 @@ use std::sync::Arc;
 
 use memphant_core::service::MemoryService;
 use memphant_core::{
-    CrossRerankCandidateSelection, CrossReranker, CrossRerankerConfig, EmbedError,
-    EmbeddingProvider, FixedClock, InMemoryStore, StubEmbedding,
+    CrossRerankCandidateSelection, CrossRerankGranularity, CrossReranker, CrossRerankerConfig,
+    EmbedError, EmbeddingProvider, FixedClock, InMemoryStore, MemoryStore, StubEmbedding,
 };
 use memphant_types::{
-    ActorId, CrossRerankFailure, RecallHttpRequest, RetainEpisodeHttpRequest, ScopeId, TenantId,
-    TrustLevel,
+    ActorId, ContextualChunk, CrossRerankFailure, MemoryKind, NewMemoryUnit, RecallHttpRequest,
+    RetainEpisodeHttpRequest, ScopeId, TenantId, TrustLevel, UnitState,
 };
 
 const CLOCK: FixedClock = FixedClock("2026-07-09T00:00:00Z");
@@ -95,6 +95,37 @@ impl CrossReranker for ErrorReranker {
 
     fn rerank(&self, _query: &str, _docs: &[&str]) -> Result<Vec<f32>, String> {
         Err("backend unavailable".to_string())
+    }
+}
+
+/// Scores each doc by the exact `SCORE_*` marker it contains (else 0.0), so a
+/// mixed chunk/body pool proves each candidate max-pools ITS OWN docs — any
+/// off-by-one in the flattened scatter mapping shifts a marker onto the wrong
+/// candidate and flips the resulting order.
+struct MarkerScoreReranker;
+impl CrossReranker for MarkerScoreReranker {
+    fn config(&self) -> CrossRerankerConfig {
+        test_config(64)
+    }
+
+    fn rerank(&self, _query: &str, docs: &[&str]) -> Result<Vec<f32>, String> {
+        const MARKERS: [(&str, f32); 6] = [
+            ("SCORE_ONE", 1.0),
+            ("SCORE_TWO", 2.0),
+            ("SCORE_THREE", 3.0),
+            ("SCORE_FOUR", 4.0),
+            ("SCORE_SIX", 6.0),
+            ("SCORE_SEVEN", 7.0),
+        ];
+        Ok(docs
+            .iter()
+            .map(|doc| {
+                MARKERS
+                    .iter()
+                    .find(|(marker, _)| doc.contains(marker))
+                    .map_or(0.0, |(_, score)| *score)
+            })
+            .collect())
     }
 }
 
@@ -560,6 +591,286 @@ async fn reranker_error_fails_open_and_records_the_failure() {
         trace.cross_rerank.expect("rerank facts").failure,
         CrossRerankFailure::Error
     );
+}
+
+/// Stages one active semantic unit with EXPLICIT contextual chunks (the
+/// retain→reflect path windows chunks out of the body, so it cannot mint a
+/// chunk carrying text the body lacks — the buried-chunk case under test).
+async fn stage_unit_with_chunks(
+    store: &InMemoryStore,
+    context: &memphant_types::ResolvedMemoryContext,
+    body: &str,
+    chunks: &[&str],
+) {
+    let mut tx = store.begin(context).await.expect("begin");
+    store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id: context.tenant_id,
+                data_subject_id: context.data_subject_id,
+                scope_id: context.scope_id,
+                agent_node_id: context.agent_node_id,
+                subject_generation: context.subject_generation,
+                kind: MemoryKind::Semantic,
+                state: UnitState::Active,
+                fact_key: None,
+                predicate: None,
+                body: body.to_string(),
+                confidence: None,
+                trust_level: TrustLevel::TrustedUser,
+                churn_class: None,
+                freshness_due_at: None,
+                actor_id: Some(context.actor_id),
+                source_kind: None,
+                source_ref: format!("test:{body}"),
+                observed_at: "2026-07-09T00:00:00Z".to_string(),
+                source_episode_id: None,
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: chunks
+                    .iter()
+                    .enumerate()
+                    .map(|(chunk_index, chunk_body)| ContextualChunk {
+                        id: format!("{body}:{chunk_index}"),
+                        header: "ctx".to_string(),
+                        body: (*chunk_body).to_string(),
+                        source_span: None,
+                    })
+                    .collect(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
+            },
+        )
+        .await
+        .expect("stage unit");
+    store.commit(tx).await.expect("commit");
+}
+
+/// Chunk granularity reranks the flattened `contextual_chunks` bodies and
+/// max-pools each candidate's own chunk scores: a needle buried in a chunk
+/// (absent from the body) lifts its unit, while the same reranker under the
+/// default `UnitBody` granularity still ranks by body text alone.
+#[tokio::test]
+async fn chunk_granularity_max_pools_contextual_chunks() {
+    let store = InMemoryStore::default();
+    let tenant = TenantId::new();
+    let scope = ScopeId::new();
+    let actor = ActorId::new();
+    let context = memphant_store_testkit::resolved_context(tenant, scope, actor);
+    store.seed_context_binding(&context);
+    // A: body WITHOUT the needle, one chunk WITH it. B: body WITH the needle.
+    stage_unit_with_chunks(
+        &store,
+        &context,
+        "The widget alpha stays steady",
+        &["alpha calm morning report", "alpha carries NEEDLE marker"],
+    )
+    .await;
+    stage_unit_with_chunks(
+        &store,
+        &context,
+        "The widget bravo NEEDLE beacon",
+        &["bravo calm evening report"],
+    )
+    .await;
+
+    let body_service = stub_service(store.clone()).with_cross_reranker(Arc::new(BoostReranker {
+        needle: "NEEDLE".to_string(),
+    }));
+    let body_response = body_service
+        .recall(
+            memphant_store_testkit::resolved_context(tenant, scope, actor),
+            recall_request(tenant, scope, actor, "widget"),
+        )
+        .await
+        .expect("recall");
+    assert!(
+        body_response.items[0].body.contains("bravo"),
+        "UnitBody granularity scores bodies: B's body carries the needle: {:?}",
+        body_response.items[0].body
+    );
+    let body_facts = body_service
+        .store()
+        .trace_by_id_any_tenant(body_response.trace_id)
+        .expect("trace exists")
+        .cross_rerank
+        .expect("rerank facts");
+    assert_eq!(body_facts.granularity, CrossRerankGranularity::UnitBody);
+    assert_eq!(
+        body_facts.docs_scored, 2,
+        "UnitBody feeds one body per candidate"
+    );
+
+    let chunk_service = stub_service(store.clone())
+        .with_cross_rerank_granularity(CrossRerankGranularity::ContextualChunks)
+        .with_cross_reranker(Arc::new(BoostReranker {
+            needle: "NEEDLE".to_string(),
+        }));
+    let chunk_response = chunk_service
+        .recall(
+            memphant_store_testkit::resolved_context(tenant, scope, actor),
+            recall_request(tenant, scope, actor, "widget"),
+        )
+        .await
+        .expect("recall");
+    assert!(
+        chunk_response.items[0].body.contains("alpha"),
+        "ContextualChunks granularity max-pools chunk scores: A's buried-chunk \
+         needle outranks B: {:?}",
+        chunk_response.items[0].body
+    );
+    assert!(
+        chunk_response.items[1].body.contains("bravo"),
+        "B follows A: {:?}",
+        chunk_response.items[1].body
+    );
+    let chunk_facts = chunk_service
+        .store()
+        .trace_by_id_any_tenant(chunk_response.trace_id)
+        .expect("trace exists")
+        .cross_rerank
+        .expect("rerank facts");
+    assert_eq!(
+        chunk_facts.granularity,
+        CrossRerankGranularity::ContextualChunks
+    );
+    assert_eq!(
+        chunk_facts.docs_scored, 3,
+        "docs fed = total chunks across the head (2 for A + 1 for B)"
+    );
+    assert_eq!(chunk_facts.failure, CrossRerankFailure::None);
+}
+
+/// A chunk-less candidate still participates under chunk granularity: its body
+/// is fed as the fallback doc, so a body-carried needle lifts it past a
+/// lexically stronger chunked candidate.
+#[tokio::test]
+async fn chunk_granularity_falls_back_to_body_when_no_chunks() {
+    let store = InMemoryStore::default();
+    let tenant = TenantId::new();
+    let scope = ScopeId::new();
+    let actor = ActorId::new();
+    let context = memphant_store_testkit::resolved_context(tenant, scope, actor);
+    store.seed_context_binding(&context);
+    stage_unit_with_chunks(&store, &context, "widget charlie NEEDLE beacon", &[]).await;
+    stage_unit_with_chunks(
+        &store,
+        &context,
+        "widget widget delta plain",
+        &["delta calm plain report"],
+    )
+    .await;
+
+    let baseline = recalled_bodies(&stub_service(store.clone()), tenant, scope, actor).await;
+    assert!(
+        baseline[0].contains("delta"),
+        "fixture guard: the fallback target starts BELOW rank 1: {baseline:?}"
+    );
+
+    let service = stub_service(store.clone())
+        .with_cross_rerank_granularity(CrossRerankGranularity::ContextualChunks)
+        .with_cross_reranker(Arc::new(BoostReranker {
+            needle: "NEEDLE".to_string(),
+        }));
+    let response = service
+        .recall(
+            memphant_store_testkit::resolved_context(tenant, scope, actor),
+            recall_request(tenant, scope, actor, "widget"),
+        )
+        .await
+        .expect("recall");
+    assert!(
+        response.items[0].body.contains("charlie"),
+        "the chunk-less candidate is scored via its body fallback: {:?}",
+        response.items[0].body
+    );
+    assert!(
+        response.items[1].body.contains("delta"),
+        "the chunked candidate follows: {:?}",
+        response.items[1].body
+    );
+    let facts = service
+        .store()
+        .trace_by_id_any_tenant(response.trace_id)
+        .expect("trace exists")
+        .cross_rerank
+        .expect("rerank facts");
+    assert_eq!(
+        facts.docs_scored, 2,
+        "one fallback body + one chunk were fed"
+    );
+    assert_eq!(facts.failure, CrossRerankFailure::None);
+}
+
+/// Mixed pool (3-chunk, 0-chunk fallback, 2-chunk): each candidate's score is
+/// the max over ITS OWN docs. Correct mapping yields Y(7) > Z(6) > X(4); any
+/// off-by-one bleed across the flattened list reassigns a marker and produces
+/// a different order (or an out-of-bounds panic).
+#[tokio::test]
+async fn chunk_granularity_mixed_pool_scatter_mapping() {
+    let store = InMemoryStore::default();
+    let tenant = TenantId::new();
+    let scope = ScopeId::new();
+    let actor = ActorId::new();
+    let context = memphant_store_testkit::resolved_context(tenant, scope, actor);
+    store.seed_context_binding(&context);
+    stage_unit_with_chunks(
+        &store,
+        &context,
+        "widget xray unit",
+        &["xray SCORE_ONE", "xray SCORE_FOUR", "xray SCORE_TWO"],
+    )
+    .await;
+    stage_unit_with_chunks(&store, &context, "widget yankee unit SCORE_SEVEN", &[]).await;
+    stage_unit_with_chunks(
+        &store,
+        &context,
+        "widget zulu unit",
+        &["zulu SCORE_THREE", "zulu SCORE_SIX"],
+    )
+    .await;
+
+    let service = stub_service(store.clone())
+        .with_cross_rerank_granularity(CrossRerankGranularity::ContextualChunks)
+        .with_cross_reranker(Arc::new(MarkerScoreReranker));
+    let response = service
+        .recall(
+            memphant_store_testkit::resolved_context(tenant, scope, actor),
+            recall_request(tenant, scope, actor, "widget"),
+        )
+        .await
+        .expect("recall");
+    let bodies: Vec<_> = response
+        .items
+        .iter()
+        .map(|item| item.body.clone())
+        .collect();
+    assert!(
+        bodies[0].contains("yankee"),
+        "Y max-pools its body fallback (7): {bodies:?}"
+    );
+    assert!(
+        bodies[1].contains("zulu"),
+        "Z max-pools its own chunks (max 3,6 = 6): {bodies:?}"
+    );
+    assert!(
+        bodies[2].contains("xray"),
+        "X max-pools its own chunks (max 1,4,2 = 4): {bodies:?}"
+    );
+    let facts = service
+        .store()
+        .trace_by_id_any_tenant(response.trace_id)
+        .expect("trace exists")
+        .cross_rerank
+        .expect("rerank facts");
+    assert_eq!(
+        facts.docs_scored, 6,
+        "3 chunks + 1 fallback body + 2 chunks"
+    );
+    assert_eq!(facts.failure, CrossRerankFailure::None);
 }
 
 #[tokio::test]
