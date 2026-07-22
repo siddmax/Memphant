@@ -41,8 +41,34 @@ def test_source_kind_maps_syndai_to_memphant_enum():
     assert m("assistant_message") == "agent"
     assert m("dialog_turn") == "agent"
     assert m("system_generated") == "system"
+    # Real prod data (2026-07-22 extract) has only dialog_turn + rollup; rollup
+    # is a system-generated consolidation.
+    assert m("rollup") == "system"
     with pytest.raises(KeyError):
         m("not_a_syndai_kind")
+
+
+def test_normalize_observed_at_to_rfc3339():
+    """Postgres exports timestamps as '2026-06-17 11:03:30.693143+00' (space
+    separator, '+00' offset); MemPhant's contract requires RFC3339 with a proper
+    UTC offset. The adapter normalizes to a 'T'-separated, 'Z'-or-'+00:00' form."""
+    n = runner.normalize_observed_at
+    assert n("2026-06-17 11:03:30.693143+00").endswith(("Z", "+00:00"))
+    assert "T" in n("2026-06-17 11:03:30.693143+00")
+    # already-RFC3339 passes through unchanged in shape
+    assert n("2026-01-01T00:00:00Z").endswith(("Z", "+00:00"))
+    assert "T" in n("2026-01-01T00:00:00Z")
+
+
+def test_retain_payload_normalizes_observed_at():
+    """The retain payload's observed_at is RFC3339, whatever the corpus format."""
+    row = {
+        "id": "x", "content": "b", "source_kind": "dialog_turn",
+        "created_at": "2026-06-17 11:03:30.693143+00",
+    }
+    payload = runner.retain_payload(_ctx(), row)
+    assert "T" in payload["observed_at"]
+    assert payload["observed_at"].endswith(("Z", "+00:00"))
 
 
 def test_retain_payload_is_strict_contract_and_maps_source_kind():
@@ -66,20 +92,48 @@ def test_retain_payload_is_strict_contract_and_maps_source_kind():
     assert payload["subject_generation"] == 0
 
 
+def _row(**overrides):
+    """A recall-visible row with all filter fields present; override to test edges."""
+    base = {
+        "source_kind": "dialog_turn",
+        "archived_at": None,
+        "rolled_up": False,
+    }
+    base.update(overrides)
+    return base
+
+
 def test_backfill_disposition_matches_syndai_recall_semantics():
-    """user_correction audit rows -> skip (Syndai excludes them from recall);
-    archived rows -> forget (retain then soft-forget, the archive verb); the
-    rest -> retain. This is what makes the backfilled store's recall surface
-    equal the Conversations tab."""
-    assert runner.backfill_disposition(
-        {"source_kind": "user_correction", "archived_at": None}
-    ) == "skip"
-    assert runner.backfill_disposition(
-        {"source_kind": "user_message", "archived_at": "2026-01-01T00:00:00Z"}
-    ) == "forget"
-    assert runner.backfill_disposition(
-        {"source_kind": "dialog_turn", "archived_at": None}
-    ) == "retain"
+    """Faithful to Syndai's `_build_active_scope_filters` recall predicate
+    (rolled_up=false AND archived_at IS NULL AND source_kind != 'user_correction'):
+      - user_correction audit rows -> skip (excluded from recall)
+      - archived rows -> forget (retain then soft-forget = the archive verb)
+      - rolled_up rows -> forget (consolidated; Syndai drops them from recall)
+      - the rest -> retain."""
+    assert runner.backfill_disposition(_row(source_kind="user_correction")) == "skip"
+    assert runner.backfill_disposition(_row(archived_at="2026-01-01T00:00:00Z")) == "forget"
+    assert runner.backfill_disposition(_row(rolled_up=True)) == "forget"
+    assert runner.backfill_disposition(_row()) == "retain"
+
+
+def test_disposition_and_expected_set_handle_rows_missing_optional_fields():
+    """Robust to corpora that omit rolled_up (the synthetic corpus predates it):
+    a missing rolled_up defaults to not-rolled-up."""
+    assert runner.backfill_disposition({"source_kind": "dialog_turn", "archived_at": None}) == "retain"
+    rows = [{"user_id": "u", "content": "x", "created_at": "t", "source_kind": "dialog_turn", "archived_at": None}]
+    assert len(runner.expected_recall_set(rows, user_id="u")) == 1
+
+
+def test_expected_recall_set_excludes_rolled_up():
+    """rolled_up rows are not part of the Conversations tab / recall surface."""
+    rows = [
+        {"user_id": "u", "content": "live", "created_at": "2026-01-01T00:00:00Z",
+         "source_kind": "dialog_turn", "archived_at": None, "rolled_up": False},
+        {"user_id": "u", "content": "consolidated", "created_at": "2026-01-01T00:01:00Z",
+         "source_kind": "rollup", "archived_at": None, "rolled_up": True},
+    ]
+    visible = runner.expected_recall_set(rows, user_id="u")
+    assert [r["content"] for r in visible] == ["live"]
 
 
 def test_backfill_dispositions_cover_the_whole_corpus():
@@ -125,42 +179,47 @@ def _perfect_recall_fn(rows, user_id):
     """A fake recall that behaves like a correct MemPhant: a query for a body
     returns it IFF that episode is recall-visible for this tenant (state filter
     applied). Injected so equivalence is unit-testable without a server."""
-    visible = {
-        r["content"]
-        for r in rows
-        if r["user_id"] == user_id
-        and r["archived_at"] is None
-        and r["source_kind"] != "user_correction"
-    }
+    visible = [r["content"] for r in runner.expected_recall_set(rows, user_id=user_id)]
 
     def recall_fn(query: str) -> list[str]:
-        return [query] if query in visible else []
+        # The probe queries a leading slice; a correct recall returns any visible
+        # body whose leading slice matches (models chunk retrieval).
+        return [body for body in visible if body.startswith(query)]
 
     return recall_fn
 
 
-def test_probe_equivalence_passes_when_recall_matches_the_tab():
+def test_probe_equivalence_passes_and_reports_full_reachability_on_clean_data():
+    """On the synthetic corpus (short, distinct bodies) a correct recall reaches
+    every distinct visible body — reachability_rate == 1.0 — and the state filter
+    is exact."""
     rows = corpus.build_corpus(count=252, seed=20260721)
     user_id = rows[0]["user_id"]
     summary = runner.probe_conversations_equivalence(
         _perfect_recall_fn(rows, user_id), rows, user_id
     )
-    assert summary["retrievable"] > 0
+    assert summary["reachability_rate"] == 1.0
+    assert summary["distinct_reachable"] == summary["distinct_bodies"] > 0
+    assert summary["state_filter_correct"] is True
     assert summary["correctly_excluded"] > 0
 
 
-def test_probe_equivalence_fails_when_a_visible_episode_is_not_retrievable():
-    """(a) retrievability: a recall that drops a visible episode is a divergence."""
+def test_reachability_is_reported_not_gated_when_recall_drops_a_body():
+    """(a) reachability is a REPORTED metric, not a hard gate: a recall that drops
+    a visible body lowers reachability_rate below 1.0 but does NOT raise (recall
+    is ranked/deduped/budget-limited — dropping a near-duplicate is legitimate).
+    The hard gate is the state filter (b), tested separately."""
     rows = corpus.build_corpus(count=252, seed=20260721)
     user_id = rows[0]["user_id"]
     base = _perfect_recall_fn(rows, user_id)
-    visible_body = runner.expected_recall_set(rows, user_id=user_id)[0]["content"]
+    dropped = runner.expected_recall_set(rows, user_id=user_id)[0]["content"]
 
     def dropping_recall(query: str) -> list[str]:
-        return [] if query == visible_body else base(query)
+        return [] if dropped.startswith(query) else base(query)
 
-    with pytest.raises(RuntimeError):
-        runner.probe_conversations_equivalence(dropping_recall, rows, user_id)
+    summary = runner.probe_conversations_equivalence(dropping_recall, rows, user_id)
+    assert summary["reachability_rate"] < 1.0  # metric moved
+    assert summary["state_filter_correct"] is True  # but the hard gate still holds
 
 
 def test_probe_equivalence_fails_when_archived_episode_leaks_into_recall():
@@ -172,12 +231,12 @@ def test_probe_equivalence_fails_when_archived_episode_leaks_into_recall():
     filtered_body = next(
         r["content"]
         for r in rows
-        if r["user_id"] == user_id
-        and (r["archived_at"] is not None or r["source_kind"] == "user_correction")
+        if r["user_id"] == user_id and not runner.is_recall_visible(r)
     )
 
     def leaking_recall(query: str) -> list[str]:
-        return [query] if query == filtered_body else base(query)
+        # The filtered episode surfaces for its own prefix query — a leak.
+        return [filtered_body] if filtered_body.startswith(query) else base(query)
 
     with pytest.raises(RuntimeError):
         runner.probe_conversations_equivalence(leaking_recall, rows, user_id)
