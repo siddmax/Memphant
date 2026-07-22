@@ -151,10 +151,26 @@ and none exist today. Nothing paid opens until all three are green.
   container fails at row 0, not mid-root. (Already drafted; lands here.)
 - **P0.3 — Live-provider Deep smoke (1 question, ≤$0.30).** The A0 mock test
   proves the *pipeline* changes the answer set; it does NOT prove the real
-  Azure provider emits valid tool calls — the exact thing that aborted every
-  prior run. One live question through the real provider must return a
-  parseable, settled Deep result before A2 is authorized. If it fails, Deep is
-  a provider-parser bug to fix, and the paid A/D lanes stay closed.
+  Azure provider emits valid tool calls. **UPDATE (investigation 2026-07-21):
+  the provider parser is NOT the blocker** — the latest stream diagnostic
+  (`f32fdb37`) shows the real Azure path working (200, tool calls reassembled,
+  `production_parser_first_failure: null`, settled). The *actual* last abort
+  (`diagnostic-dee83e37`) died at **ingestion 139/670** on
+  `"contextual chunk span does not match its source body"`, before Deep ran.
+- **P0.4 — Ingestion chunk-span reliability (the real ingestion gate).**
+  Root-caused this pass: both chunkers are proven correct (new
+  `chunk_span_invariant_repro.rs` passes on all adversarial byte shapes), and
+  every compile path uses one body for both mint and validation — so the
+  conflict only arises on a **re-compile/retry against changed state** (the
+  proof's own "failed jobs queued for retry" note). The offending input was
+  cleaned from disk, so the fix shipped is **diagnostic capture** (the conflict
+  now reports unit/chunk/span/lengths/divergence-point/both slices — commit
+  `9e53d8c4`), turning the next occurrence from an unreproducible abort into a
+  diagnosable one. **Before P0.3/A2 spend, run one ingestion of the LME-V2 dev
+  corpus and confirm it reaches 670/670**; if the conflict recurs, the new
+  message pins the exact source and the retry/re-compile path gets the real
+  fix. This gate protects both the benchmark lane AND the Syndai cutover
+  (same ingestion path).
 
 ## 3. Phase A — Prove T6 (after Phase 0; free → $10)
 
