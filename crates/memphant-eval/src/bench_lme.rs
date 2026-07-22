@@ -37,8 +37,8 @@ use memphant_core::{EmbeddingProvider, MemoryStore, NoopEmbedding, SystemClock};
 use memphant_store_postgres::PgStore;
 use memphant_types::{
     ContextBindingAgentRef, ContextBindingEntityRef, ContextBindingRequest, ContextBindingScopeRef,
-    RecallMode, RecallRequest, RetainEpisodeHttpRequest, RetainEpisodeHttpResponse,
-    RetainEpisodePayload, RetainPayload, TenantId, TrustLevel,
+    RecallDropReason, RecallMode, RecallRequest, RetainEpisodeHttpRequest,
+    RetainEpisodeHttpResponse, RetainEpisodePayload, RetainPayload, TenantId, TrustLevel, UnitId,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -197,6 +197,24 @@ pub struct TraceClassificationRow {
     pub pool_size: usize,
     /// Packed top-k items returned for this recall.
     pub packed_size: usize,
+    /// Rung-7 diagnosis (populated for every scored row; the in_pool_unpacked
+    /// bucket is where it matters). Fused rank (1-based) of the best-ranked
+    /// gold-bearing pool unit, if any gold unit reached the fused candidate
+    /// trace.
+    #[serde(default)]
+    pub gold_fused_rank: Option<usize>,
+    /// Fused score of that same best-ranked gold pool unit.
+    #[serde(default)]
+    pub gold_fused_score: Option<f32>,
+    /// Why the best-ranked gold pool unit was dropped during packing
+    /// (Duplicate / Budget / Rerank / …), or `None` if it never appears in the
+    /// pack `dropped_items` (it either survived into the pack but below the
+    /// answer, or was never reached).
+    #[serde(default)]
+    pub gold_drop_reason: Option<RecallDropReason>,
+    /// The recall `k` this run packed against, for budget/ordering context.
+    #[serde(default)]
+    pub k: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -534,6 +552,40 @@ pub fn classify_question(
         FastMissBucket::InPoolUnpacked
     } else {
         FastMissBucket::AbsentFromPool
+    }
+}
+
+/// Rung-7 packing diagnosis (FREE, retrieval-trace only). Of the gold-bearing
+/// pool units, pick the BEST-ranked one (min `fused_rank`) and report its fused
+/// rank and its pack drop reason. `candidate_ranks` is `(unit, fused_rank)` from
+/// the trace's fused candidates; `drops` is `(unit, reason)` from the pack
+/// `dropped_items`. A gold unit absent from `drops` returns `None` for the
+/// reason — it either survived the pack loop but sat below the answer, or was
+/// never reached. A gold unit absent from `candidate_ranks` (or with no fused
+/// rank) returns `(None, ...)`.
+pub fn classify_gold_drop_cause(
+    gold_unit_ids: &[UnitId],
+    candidate_ranks: &[(UnitId, Option<usize>)],
+    drops: &[(UnitId, RecallDropReason)],
+) -> (Option<usize>, Option<RecallDropReason>) {
+    let best = gold_unit_ids
+        .iter()
+        .filter_map(|gold| {
+            candidate_ranks
+                .iter()
+                .find(|(unit, _)| unit == gold)
+                .and_then(|(_, rank)| rank.map(|r| (*gold, r)))
+        })
+        .min_by_key(|(_, rank)| *rank);
+    match best {
+        Some((gold, rank)) => {
+            let reason = drops
+                .iter()
+                .find(|(unit, _)| *unit == gold)
+                .map(|(_, reason)| *reason);
+            (Some(rank), reason)
+        }
+        None => (None, None),
     }
 }
 
@@ -1107,6 +1159,37 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
                 &question.answer_session_ids,
                 is_abstention,
             );
+            // Rung-7 drop-cause: the gold-bearing pool unit ids (pool_units and
+            // pool_sessions are index-aligned), their fused ranks/scores from
+            // the candidate trace, and the pack drop reasons.
+            let gold_unit_ids: Vec<UnitId> = pool_units
+                .iter()
+                .zip(pool_sessions.iter())
+                .filter(|(_, session)| gold(session))
+                .map(|(unit, _)| unit.id)
+                .collect();
+            let candidate_ranks: Vec<(UnitId, Option<usize>)> = trace
+                .candidates
+                .iter()
+                .map(|c| (c.unit_id, c.fused_rank))
+                .collect();
+            let drops: Vec<(UnitId, RecallDropReason)> = trace
+                .dropped_items
+                .iter()
+                .map(|d| (d.unit_id, d.reason))
+                .collect();
+            let (gold_fused_rank, gold_drop_reason) =
+                classify_gold_drop_cause(&gold_unit_ids, &candidate_ranks, &drops);
+            let gold_fused_score = gold_fused_rank.and_then(|rank| {
+                // The best-ranked gold unit's fused score (same unit the rank
+                // came from). `fused_rank` is 1-based; find the candidate whose
+                // fused_rank matches and read its score.
+                trace
+                    .candidates
+                    .iter()
+                    .find(|c| c.fused_rank == Some(rank) && gold_unit_ids.contains(&c.unit_id))
+                    .and_then(|c| c.fused_score)
+            });
             classification_rows.push(TraceClassificationRow {
                 question_id: question.question_id.clone(),
                 question_type: question.question_type.clone(),
@@ -1116,6 +1199,10 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
                 first_answer_rank: item_sessions.iter().position(gold).map(|i| i + 1),
                 pool_size: pool_unit_ids.len(),
                 packed_size: response.items.len(),
+                gold_fused_rank,
+                gold_fused_score,
+                gold_drop_reason,
+                k: options.k,
             });
         }
         let (hit_at_5, hit_at_10, abstention_correct, first_answer_rank) = score_question(
@@ -1494,6 +1581,40 @@ mod tests {
         assert_eq!(
             classify_question(&[], &[], &["s_gold".to_string()], false),
             FastMissBucket::AbsentFromPool
+        );
+    }
+
+    #[test]
+    fn classify_gold_drop_cause_picks_best_ranked_gold_and_its_drop() {
+        // Rung-7 diagnosis: for an in-pool-unpacked question, WHY did the
+        // gold-bearing pool unit not reach the packed top-k? The pure helper
+        // takes the gold unit ids, the pool candidates' (unit, fused_rank), and
+        // the pack `dropped_items` (unit, reason), and returns the best-ranked
+        // (min fused_rank) gold unit's fused_rank + its drop reason.
+        let g_hi = UnitId::from_u128(1); // fused_rank 12, dropped Duplicate
+        let g_lo = UnitId::from_u128(2); // fused_rank 30, never reached pack loop
+        let decoy = UnitId::from_u128(9);
+        let candidates = vec![
+            (g_lo, Some(30usize)),
+            (decoy, Some(3usize)),
+            (g_hi, Some(12usize)),
+        ];
+        let drops = vec![(g_hi, RecallDropReason::Duplicate)];
+        // Best-ranked gold is g_hi (fused_rank 12 < 30); it was dropped Duplicate.
+        assert_eq!(
+            classify_gold_drop_cause(&[g_hi, g_lo], &candidates, &drops),
+            (Some(12), Some(RecallDropReason::Duplicate))
+        );
+        // A gold unit present in the pool but absent from dropped_items never
+        // reached (or survived) the pack loop drop path: rank known, reason None.
+        assert_eq!(
+            classify_gold_drop_cause(&[g_lo], &candidates, &drops),
+            (Some(30), None)
+        );
+        // Gold not in the candidate trace at all: no rank, no reason.
+        assert_eq!(
+            classify_gold_drop_cause(&[UnitId::from_u128(42)], &candidates, &drops),
+            (None, None)
         );
     }
 
