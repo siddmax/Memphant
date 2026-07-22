@@ -354,19 +354,39 @@ parity. The free re-embed window (OpenAI-1536 → local modernbert) is open only
 while tables are empty. **Slices 0/3 do not wait for Phase A; C1 waits on C3's
 golden.**
 
-- **C0 — Rails**: rebuild the Syndai adapter against the strict landed
-  contract (it currently sends `tenant_id`/`allowed_scope_ids` → 422 → silent
-  legacy fallback, the exact banned failure mode). Add a drift test pinned to
-  `openapi/memphant.v1.json`. Dogfood file memory + facts at nil blast radius.
+- **C0 — Rails** ✅ **LANDED (2026-07-21)**: rebuilt BOTH clients (the MemPhant
+  Python SDK `bindings/python/memphant` AND the Syndai adapter, the latter
+  committed in the Syndai repo off `Syndai/main`) against the strict landed
+  contract — they sent `tenant_id`/`allowed_scope_ids` → 422 → silent legacy
+  fallback (`context_loader` swallowed the 422 with `return None`). Now a
+  `BoundContext`/`bind_context()` handshake (PUT `/v1/context-bindings`), no
+  `tenant_id`, and the caller re-raises on a 4xx contract error (degrades only
+  on transport fault, loudly). Drift test pinned to `openapi/memphant.v1.json`
+  (oneOf-aware, teeth-verified); full local gate green; e2e_probe exercises the
+  same binding flow live. Live Syndai wiring (real context binding) deferred —
+  Syndai has no `subject_generation`/`agent_node` concept yet; dogfood default-
+  off ⇒ nil blast radius. Proof: `docs/build-log/2026-07-21-c3-coding-backfill.md`,
+  commits `d7939105` (SDK) + Syndai `a7f6ceeef`.
 - **C1 — Episodic slice** (first real user value): cut the loader's episodic
   layer + recall/correct/reinforce/archive/forget to MemPhant; backfill 252
   rows; bar = hot-path SLO (p50 < 200 ms) + identical Conversations tab +
   two-user RLS leakage proof (the isolation model swaps from app-filters to
   tenant-RLS — must be proven, not assumed).
-- **C3 — Coding-continuity backfill** (net-new value, no parity bar): 64k
-  events → `retain(episode)` backfill (<1 h) + streaming retain hook on the
-  existing durable-jobs path. This becomes the code-profile corpus that the
-  40Q golden can't provide (distribution drift: local-dev-mined vs prod).
+- **C3 — Coding-continuity backfill** (net-new value, no parity bar) ⚠️
+  **MECHANISM LANDED, VOLUME BLOCKED-on-data (2026-07-21)**: the `retain(episode)`
+  backfill path + the code-lane runner are now strict-contract-correct
+  (`gate_runtime.ApiClient.bind_context()`; `ingest_attempt` nests
+  `payload.episode`; ingest pinned to the spec by a unit test) — the backfill IS
+  this path at `--limit-attempts 0`. Streaming-hook attachment point identified
+  (`Syndai .../coding/events.py:append_coding_event`, one episode per attempt at
+  the terminal event; live wiring deferred with C0's). **The ~64k events are
+  unrecoverable locally** — `syndai-coding-local-db` starts healthy but the
+  event/attempt tables are empty (historical rows wiped, no dump; last real
+  extraction 359 attempts, since gone); local regen needs the full CaaS stack,
+  prod is off-limits (AGENTS.md §18). So C3 ships correctness-only; the
+  volume-matched adversarial golden is a runnable extract→mine→backfill→reader
+  procedure that executes when a corpus exists, and IS the C1 acceptance bar.
+  Proof: `docs/build-log/2026-07-21-c3-coding-backfill.md`, commit `4f90ef57`.
 - **C2 — Docs/knowledge slice (LAST, gated)**: blocked first on a free
   half-day corpus re-pin (Syndai HEAD drifted 109→115 files; the gate
   currently cannot run at all — tests team), then retrieval-only hit@10
