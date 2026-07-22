@@ -187,10 +187,12 @@ def test_corpus_manifest_is_well_formed() -> None:
     assert manifest["git_commit"]
     assert manifest["excluded_prefixes"] == ["docs/superpowers/"]
     assert manifest["sectionizer"] == "markdown_heading_leaf_v1"
-    assert manifest["section_count"] == 4870
-    assert manifest["mining_candidate_section_count"] == 3257
+    # Re-pinned 2026-07-22 (C2 pre-check): Syndai docs at commit 96a26f1f842a
+    # (docs content identical from 36a7f99d02), 114 files / 4920 sections.
+    assert manifest["section_count"] == 4920
+    assert manifest["mining_candidate_section_count"] == 3299
     assert manifest["section_revision"] == (
-        "sha256:82814a4c39ee7894fcc94d5af0192f709ecd845536e638c88966c3117aaea581"
+        "sha256:82a1eecacbf0414cc7e0da2923f8725ee948771784141d2994bb5ffbc4035885"
     )
     for entry in manifest["files"].values():
         assert len(entry["sha256"]) == 64
@@ -391,9 +393,21 @@ def test_answer_spans_are_verbatim_in_the_pinned_corpus(golden_path: Path, lock_
     not on disk). v1 and v2 share the identical pinned corpus (MANIFEST)."""
     _skip_if_absent(golden_path)
     manifest = json.loads(MANIFEST.read_text())
-    root = ROOT.parent / manifest["syndai_repo"]
-    if not root.exists():
-        pytest.skip(f"Syndai corpus not present at {root}")
+    # Resolve the Syndai corpus checkout. The canonical layout is a sibling of
+    # the Memphant checkout (ROOT.parent / "Syndai"); in a git worktree ROOT is
+    # nested deeper, so also try the user home and MEMPHANT_SYNDAI_ROOT before
+    # skipping — otherwise this strongest pin skips silently in a worktree while
+    # the gate is being re-pinned there (the false-confidence trap the audit
+    # flagged).
+    candidates = [
+        ROOT.parent / manifest["syndai_repo"],
+        Path.home() / manifest["syndai_repo"],
+    ]
+    if env_root := __import__("os").environ.get("MEMPHANT_SYNDAI_ROOT"):
+        candidates.insert(0, Path(env_root))
+    root = next((path for path in candidates if path.exists()), None)
+    if root is None:
+        pytest.skip(f"Syndai corpus not present at any of {candidates}")
     for g in _rows(golden_path):
         for entry in g["provenance"]:
             text = (root / entry["file"]).read_text(encoding="utf-8", errors="replace")

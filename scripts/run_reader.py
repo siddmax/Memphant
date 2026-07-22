@@ -233,6 +233,27 @@ PAIRED_RAG_JUDGE_JSON_SCHEMA = {
     "required": ["verdict"],
     "additionalProperties": False,
 }
+# Golden-miner generator kinds (scripts/gate_mine_goldens.py). Registered here
+# because response_contract() fails closed on unknown kinds.
+GENERATE_SINGLE_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "question": {"type": "string"},
+        "answer_span": {"type": "string"},
+    },
+    "required": ["question", "answer_span"],
+    "additionalProperties": False,
+}
+GENERATE_MULTI_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "question": {"type": "string"},
+        "bridge_span": {"type": "string"},
+        "answer_span": {"type": "string"},
+    },
+    "required": ["question", "bridge_span", "answer_span"],
+    "additionalProperties": False,
+}
 RAG_SUPPORTED_SCHEMA_ID = "rag-supported-v1"
 RAG_SUPPORTED_JUDGE_SYSTEM_PROMPT = (
     "Grade whether the answer is correct and fully supported by its retrieved "
@@ -391,6 +412,8 @@ def response_contract(engine: str, kind: str, model: str | None = None) -> dict:
         "judge": JUDGE_JSON_SCHEMA,
         "rag_judge": RAG_SUPPORTED_JUDGE_JSON_SCHEMA,
         "pair_judge": PAIRED_RAG_JUDGE_JSON_SCHEMA,
+        "generate_single": GENERATE_SINGLE_JSON_SCHEMA,
+        "generate_multi": GENERATE_MULTI_JSON_SCHEMA,
     }
     try:
         schema = schemas[kind]

@@ -47,7 +47,11 @@ from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
 
-MEMPHANT_SCRIPTS = "/Users/sidsharma/Memphant/scripts"
+# Default to the scripts dir THIS file lives in (correct in any worktree);
+# MEMPHANT_GATE_SCRIPTS overrides for the rare cross-checkout invocation.
+MEMPHANT_SCRIPTS = os.environ.get(
+    "MEMPHANT_GATE_SCRIPTS", str(Path(__file__).resolve().parent)
+)
 sys.path.insert(0, MEMPHANT_SCRIPTS)
 import gate_common as gc  # noqa: E402
 

@@ -1,7 +1,7 @@
 {
   "corpus": "syndai_product_docs",
   "syndai_repo": "Syndai",
-  "git_commit": "fb650da183a9bc8935e7c4c0acdae78c4dcfe7eb",
+  "git_commit": "6fe7f78f59278c71ee00ee976799b17fa242a438",
   "globs": [
     "docs/*.md",
     "docs/**/*.md"
@@ -10,13 +10,13 @@
     "docs/superpowers/"
   ],
   "exclusion_rationale": "docs/superpowers/ is SDD process scaffolding (plans, audits, briefs, research), not product documentation; the gate corpus is the real product/architecture/spec docs.",
-  "file_count": 109,
-  "total_bytes": 5400406,
+  "file_count": 114,
+  "total_bytes": 5458937,
   "sectionizer": "markdown_heading_leaf_v1",
-  "section_count": 4870,
-  "section_chars": 5134459,
-  "section_revision": "sha256:82814a4c39ee7894fcc94d5af0192f709ecd845536e638c88966c3117aaea581",
-  "mining_candidate_section_count": 3257,
+  "section_count": 4920,
+  "section_chars": 5192845,
+  "section_revision": "sha256:82a1eecacbf0414cc7e0da2923f8725ee948771784141d2994bb5ffbc4035885",
+  "mining_candidate_section_count": 3299,
   "mining_candidate_rule": "content chars >= 240 and section body chars <= 3200; mining only, never indexing",
   "files": {
     "docs/APP_UX_DESIGN.md": {
@@ -44,8 +44,8 @@
       "bytes": 53296
     },
     "docs/DEPLOYMENT_GUIDE.md": {
-      "sha256": "3025e4d359ad17cfceda835804805acf02283b18806d9064465e18ea6a2433d0",
-      "bytes": 8196
+      "sha256": "95a8488da9a5afe360e8643601cddf1831dba418b852beaf707c1c92668d713b",
+      "bytes": 8396
     },
     "docs/IMPLEMENTATION_ROADMAP.md": {
       "sha256": "9c728fc8a34bbb940a38ac307ad95745289a89affa3b15d2fedf6461a0aaa7bd",
@@ -88,8 +88,8 @@
       "bytes": 5556
     },
     "docs/TECHNICAL_ARCHITECTURE.md": {
-      "sha256": "0ca64b692167870ec469225f2544246a34dcb5a0837bd1c641f1783aa419f2de",
-      "bytes": 261427
+      "sha256": "1f683c85fcbe29308658a2037c79f3295e50f8d251d07eaa56417aecb0e63842",
+      "bytes": 260642
     },
     "docs/TOOL_SELECTION.md": {
       "sha256": "1b61d632c9e8b1ad592295cf6c18fca8cfcf75fd889fdfc75b326dc151b1e550",
@@ -175,6 +175,18 @@
       "sha256": "84f4787da6d130688c83b43e6563dc8b90f37f003afa7671b1a64db5224321ac",
       "bytes": 3986
     },
+    "docs/handoffs/2026-07-18-coding-pipeline-overhaul-handoff.md": {
+      "sha256": "0e841816f2bc165d189011518b05ac5c802148e33215b1ff25b48d4318d2920b",
+      "bytes": 11790
+    },
+    "docs/handoffs/2026-07-18-reviewed-tips-set-handoff.md": {
+      "sha256": "7749e25c38bd8a5c21a746b8cb619dc45f0ee485cd9d554f8e3f61ba08e376c5",
+      "bytes": 5548
+    },
+    "docs/handoffs/2026-07-18-ship-followup-handoff.md": {
+      "sha256": "d5780097633d95ffbb6e821d1af7c88903b3a76aa1087c63040264b3dee4cd73",
+      "bytes": 11015
+    },
     "docs/ops/FTL_BLAZE_ACTIVATION.md": {
       "sha256": "ccb99462371e79551acd62a690de1b6244049c2f5d30e0a8209854bb2c565e2e",
       "bytes": 6279
@@ -207,13 +219,21 @@
       "sha256": "2026f2e2ae29fa410c0396533a57afd291ee5f776f5fb9a9cd961878a0118085",
       "bytes": 34741
     },
+    "docs/runbooks/2026-07-14-coding-caas-greenpr-handoff.md": {
+      "sha256": "1a7c73a8a1b379d580e5d4afb8fd5e761ab231f3785b26fab2580017e34fcb3d",
+      "bytes": 14168
+    },
+    "docs/runbooks/2026-07-15-pi-harness-greenpr-handoff.md": {
+      "sha256": "75864e3a19412e546db496bfd5cc3dc3ea88e4215ba1226bdfaa4e6714882c53",
+      "bytes": 9635
+    },
     "docs/runbooks/code-intel-ab-measurement.md": {
       "sha256": "b590a9bf8ad6e40ef5f0c1f1f9538eb70555c9c488199fbf8a8bd713d75946e5",
       "bytes": 11230
     },
     "docs/runbooks/evalrank-truth-kernel-authority.md": {
-      "sha256": "f045d481d13cf040dd376bc4667331a6c7208437f3fb1548c795d77569f3f1a9",
-      "bytes": 2828
+      "sha256": "3e7e3e039edb8e17a270f33149573e6d5f03e215c98528d51bb979f8d2a83056",
+      "bytes": 5485
     },
     "docs/runbooks/frontier-monitor-live-weekly-digest.md": {
       "sha256": "9e5cd367958bd8f3c5d200d5dd0848a7406816ececdbaea724ff80e1f09c1024",
@@ -228,12 +248,16 @@
       "bytes": 5036
     },
     "docs/runbooks/local-coding-e2e-three-harness.md": {
-      "sha256": "a23dd2837ba6ca365d49dc62a5887e7f8ba3354bab744ddc4c8ace85fbbf48f2",
-      "bytes": 14604
+      "sha256": "f0db7af6cae7558b6ca31d09fb6c9f3c3af3be1f39c1b2a09f775347728b8dec",
+      "bytes": 22390
     },
     "docs/runbooks/prod-coding-e2e-three-harness.md": {
-      "sha256": "9ae6599f1b4a895b715e8d75d41708664b4be55f204e8cd5a47a9239c2ef5d9e",
-      "bytes": 17725
+      "sha256": "882ae23e050cd3c2318af25b8cf2f50f5c51080a26b9889a2a2564893d4d2415",
+      "bytes": 19080
+    },
+    "docs/runbooks/republish-coding-final-response.md": {
+      "sha256": "29ce2709be8ff9b4afaf25ec4aec4cc403aa8939d398c15ff85b6383086c9a24",
+      "bytes": 641
     },
     "docs/runbooks/sandbox-ux-gate-activation.md": {
       "sha256": "d431f31bcb85af4abf4db8207676ae8bffdab4407df183c5e1acfdb7819b8981",
@@ -242,10 +266,6 @@
     "docs/runbooks/stripe-outcome-billing-bring-up.md": {
       "sha256": "af0ba4c52d0929c0eb474b43780be9a9bdf39c02a090987d49ce9e07b228cda5",
       "bytes": 2464
-    },
-    "docs/runbooks/temporal-worker-version-promotion.md": {
-      "sha256": "c226872958df4a61ba3d6517901a700e3db10f65b5ee067af99550b7a308e42c",
-      "bytes": 5479
     },
     "docs/specs/AREAS_SINGLE_SURFACE_UX_SPEC.md": {
       "sha256": "95a4b3000f5bad2ddfcd541066567cd0dafb3b92e185686d3b3bf6efb88962b8",
