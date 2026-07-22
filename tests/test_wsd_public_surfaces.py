@@ -10,29 +10,43 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bindings" / "python"))
 
-from memphant import MemPhant, MemPhantValidationError  # noqa: E402
+from memphant import BoundContext, MemPhant, MemPhantValidationError  # noqa: E402
+
+
+def _bind(client: MemPhant) -> BoundContext:
+    return client.bind_context(
+        client_ref="syndai:user:demo",
+        subject_ref="user:demo",
+        subject_kind="user",
+        actor_ref="agent:helper",
+        actor_kind="agent",
+        scope_ref="agent:helper",
+        scope_kind="agent",
+        agent_node_ref="agent:helper",
+    )
 
 
 def test_python_sdk_round_trips_all_public_verbs() -> None:
     server = FakeMemphantServer()
     client = MemPhant(base_url=server.base_url, api_key="test-key")
     try:
-        retained = client.retain(
-            tenant_id="00000000-0000-0000-0000-0000000186a0",
-            scope_id="00000000-0000-0000-0000-0000000186a1",
-            actor_id="00000000-0000-0000-0000-0000000186a2",
+        ctx = _bind(client)
+        assert isinstance(ctx, BoundContext)
+        assert ctx.subject_generation == 0
+
+        retained = client.retain_episode(
+            ctx=ctx,
+            source_ref="release-note:1",
+            observed_at="2025-06-01T00:00:00Z",
             source_kind="system",
-            source_trust="trusted_system",
             body="Release region is Taipei.",
-            subject_hint="release region",
         )
         assert retained["episode_id"] == "ep_test"
 
         client.retain_resource(
-            tenant_id="00000000-0000-0000-0000-0000000186a0",
-            scope_id="00000000-0000-0000-0000-0000000186a1",
-            actor_id="00000000-0000-0000-0000-0000000186a2",
-            source_trust="trusted_user",
+            ctx=ctx,
+            source_ref="repo://demo/src/main.rs",
+            observed_at="2025-06-01T00:00:00Z",
             uri="repo://demo/src/main.rs",
             mime_type="text/x-rust",
             content_hash="sha256:abc",
@@ -41,27 +55,18 @@ def test_python_sdk_round_trips_all_public_verbs() -> None:
             body="fn main() {}",
         )
         client.retain_unit(
-            tenant_id="00000000-0000-0000-0000-0000000186a0",
-            scope_id="00000000-0000-0000-0000-0000000186a1",
-            actor_id="00000000-0000-0000-0000-0000000186a2",
-            source_trust="trusted_user",
+            ctx=ctx,
+            source_ref="fact:release-region",
+            observed_at="2025-06-01T00:00:00Z",
             kind="semantic",
-            subject="release region",
-            predicate="value",
             body="Release region is Taipei.",
         )
 
-        reflected = client.reflect(
-            tenant_id="00000000-0000-0000-0000-0000000186a0",
-            scope_id="00000000-0000-0000-0000-0000000186a1",
-            actor_id="00000000-0000-0000-0000-0000000186a2",
-        )
+        reflected = client.reflect(ctx=ctx)
         assert reflected["episodes_consumed"] == 1
 
         recalled = client.recall(
-            tenant_id="00000000-0000-0000-0000-0000000186a0",
-            scope_id="00000000-0000-0000-0000-0000000186a1",
-            actor_id="00000000-0000-0000-0000-0000000186a2",
+            ctx=ctx,
             query="Where is the release region?",
             aggregation_window={
                 "from": "2025-06-01T00:00:00Z",
@@ -74,26 +79,24 @@ def test_python_sdk_round_trips_all_public_verbs() -> None:
         assert trace["id"] == "00000000-0000-0000-0000-000000099001"
 
         corrected = client.correct(
-            tenant_id="00000000-0000-0000-0000-0000000186a0",
-            scope_id="00000000-0000-0000-0000-0000000186a1",
-            actor_id="00000000-0000-0000-0000-0000000186a2",
+            ctx=ctx,
             memory_unit_id="00000000-0000-0000-0000-000000088001",
             value="Release region is Singapore.",
             reason="stale_fact",
+            source_ref="agent:helper",
+            observed_at="2025-06-02T00:00:00Z",
         )
         assert corrected["correction_kind"] == "current"
 
         forgotten = client.forget(
-            tenant_id="00000000-0000-0000-0000-0000000186a0",
-            scope_id="00000000-0000-0000-0000-0000000186a1",
-            actor_id="00000000-0000-0000-0000-0000000186a2",
+            ctx=ctx,
             memory_unit_id="00000000-0000-0000-0000-000000088001",
             reason="user_request",
         )
         assert forgotten["verification"] == "no_recall_path_returns_forgotten"
 
         marked = client.mark(
-            tenant_id="00000000-0000-0000-0000-0000000186a0",
+            ctx=ctx,
             trace_id="00000000-0000-0000-0000-000000099001",
             caller_id="pytest",
             used_ids=["00000000-0000-0000-0000-000000088001"],
@@ -103,6 +106,7 @@ def test_python_sdk_round_trips_all_public_verbs() -> None:
 
         paths = [request["path"] for request in server.requests]
         assert paths == [
+            "/v1/context-bindings/syndai:user:demo",
             "/v1/episodes",
             "/v1/episodes",
             "/v1/episodes",
@@ -118,15 +122,25 @@ def test_python_sdk_round_trips_all_public_verbs() -> None:
             for request in server.requests
         )
 
-        resource_request = server.requests[1]["body"]
-        assert resource_request["resource"]["uri"] == "repo://demo/src/main.rs"
-        assert resource_request["resource"]["revision"] == "abc123"
-        assert "body" not in resource_request
+        # No verb body smuggles tenant_id / allowed_scope_ids (the banned shape).
+        for request in server.requests:
+            body = request["body"] or {}
+            assert "tenant_id" not in body, f"{request['path']} smuggled tenant_id"
+            assert "allowed_scope_ids" not in body
 
-        unit_request = server.requests[2]["body"]
-        assert unit_request["unit"]["subject"] == "release region"
-        assert unit_request["unit"]["kind"] == "semantic"
-        assert server.requests[4]["body"]["aggregation_window"] == {
+        # Every mutation/recall body carries the resolved identity, not tenant_id.
+        recall_body = server.requests[5]["body"]
+        assert recall_body["subject_id"] == ctx.subject_id
+        assert recall_body["agent_node_id"] == ctx.agent_node_id
+        assert recall_body["subject_generation"] == ctx.subject_generation
+
+        resource_request = server.requests[2]["body"]
+        assert resource_request["payload"]["resource"]["uri"] == "repo://demo/src/main.rs"
+        assert resource_request["payload"]["resource"]["revision"] == "abc123"
+
+        unit_request = server.requests[3]["body"]
+        assert unit_request["payload"]["unit"]["kind"] == "semantic"
+        assert server.requests[5]["body"]["aggregation_window"] == {
             "from": "2025-06-01T00:00:00Z",
             "to": "2025-06-08T00:00:00Z",
         }
@@ -138,13 +152,9 @@ def test_python_sdk_maps_error_envelopes_to_typed_exceptions() -> None:
     server = FakeMemphantServer(error_on_recall=True)
     client = MemPhant(base_url=server.base_url, api_key="test-key")
     try:
+        ctx = _bind(client)
         try:
-            client.recall(
-                tenant_id="00000000-0000-0000-0000-0000000186a0",
-                scope_id="00000000-0000-0000-0000-0000000186a1",
-                actor_id="00000000-0000-0000-0000-0000000186a2",
-                query="bad",
-            )
+            client.recall(ctx=ctx, query="bad")
         except MemPhantValidationError as exc:
             assert exc.code == "invalid_request"
             assert exc.fields == ["query"]
@@ -192,6 +202,25 @@ class FakeMemphantServer:
                 parent._record(self)
                 if self.path.startswith("/v1/traces/"):
                     parent._write(self, 200, {"id": self.path.rsplit("/", 1)[-1]})
+                else:
+                    parent._write(self, 404, {"error": {"code": "not_found", "message": "missing", "request_id": "req_test", "details": {}}})
+
+            def do_PUT(self) -> None:  # noqa: N802
+                parent._record(self)
+                if self.path.startswith("/v1/context-bindings/"):
+                    parent._write(
+                        self,
+                        200,
+                        {
+                            "subject_id": "00000000-0000-0000-0000-0000000186a0",
+                            "actor_id": "00000000-0000-0000-0000-0000000186a2",
+                            "scope_id": "00000000-0000-0000-0000-0000000186a1",
+                            "agent_node_id": "00000000-0000-0000-0000-0000000186a3",
+                            "agent_level": 1,
+                            "policy_revision": 1,
+                            "subject_generation": 0,
+                        },
+                    )
                 else:
                     parent._write(self, 404, {"error": {"code": "not_found", "message": "missing", "request_id": "req_test", "details": {}}})
 

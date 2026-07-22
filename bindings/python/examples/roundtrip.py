@@ -10,25 +10,26 @@ client = MemPhant(
     api_key=os.environ.get("MEMPHANT_API_KEY"),
 )
 
-tenant_id = os.environ["MEMPHANT_TENANT_ID"]
-scope_id = os.environ["MEMPHANT_SCOPE_ID"]
-actor_id = os.environ["MEMPHANT_ACTOR_ID"]
+# Resolve external refs into a bound context (tenant is bound by the API key).
+ctx = client.bind_context(
+    client_ref=os.environ["MEMPHANT_CLIENT_REF"],
+    subject_ref=os.environ["MEMPHANT_SUBJECT_REF"],
+    subject_kind="user",
+    actor_ref=os.environ["MEMPHANT_ACTOR_REF"],
+    actor_kind="agent",
+    scope_ref=os.environ["MEMPHANT_SCOPE_REF"],
+    scope_kind="agent",
+    agent_node_ref=os.environ["MEMPHANT_AGENT_NODE_REF"],
+)
 
-retained = client.retain(
-    tenant_id=tenant_id,
-    scope_id=scope_id,
-    actor_id=actor_id,
+retained = client.retain_episode(
+    ctx=ctx,
+    source_ref="release-note:region",
+    observed_at="2025-06-01T00:00:00Z",
     source_kind="user",
-    source_trust="trusted_user",
-    subject_hint="release region",
     body="Release region is Taipei.",
 )
-client.reflect(tenant_id=tenant_id, scope_id=scope_id, actor_id=actor_id)
-recalled = client.recall(
-    tenant_id=tenant_id,
-    scope_id=scope_id,
-    actor_id=actor_id,
-    query="Where is the release region?",
-)
+client.reflect(ctx=ctx)
+recalled = client.recall(ctx=ctx, query="Where is the release region?")
 
 print({"retained": retained["episode_id"], "trace_id": recalled["trace_id"]})

@@ -1,12 +1,27 @@
+"""MemPhant public REST SDK, pinned to the strict landed contract.
+
+The v1 request schemas are `additionalProperties: false`: an extra key (e.g. a
+legacy `tenant_id`) or a missing required field (`subject_id`, `agent_node_id`,
+`subject_generation`) is a hard 422. Tenant is bound server-side by the API key
+principal and is NEVER sent in a body.
+
+Identity is a two-step handshake that mirrors the server's
+`resolve_memory_context`: `bind_context()` (PUT /v1/context-bindings) resolves
+your external refs into a `BoundContext` (the five ids + subject generation),
+and every verb takes that context. There is no `tenant_id`-shaped legacy path to
+silently fall back to — a contract violation raises `MemPhantValidationError`.
+`tests/test_contract_drift.py` pins every payload to `openapi/memphant.v1.json`.
+"""
+
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 
 class MemPhantError(Exception):
@@ -62,9 +77,31 @@ ERROR_MAP = {
     "conflict": MemPhantConflict,
     "idempotency_conflict": MemPhantConflict,
     "invalid_request": MemPhantValidationError,
+    "context_binding_conflict": MemPhantConflict,
     "rate_limited": MemPhantRateLimited,
     "backend_unavailable": MemPhantUnavailable,
 }
+
+
+@dataclass(frozen=True)
+class BoundContext:
+    """The resolved identity the server needs on every verb. Returned by
+    `bind_context`; opaque to callers beyond carrying it back in."""
+
+    subject_id: str
+    scope_id: str
+    actor_id: str
+    agent_node_id: str
+    subject_generation: int
+
+    def _identity(self) -> dict[str, Any]:
+        return {
+            "subject_id": self.subject_id,
+            "scope_id": self.scope_id,
+            "actor_id": self.actor_id,
+            "agent_node_id": self.agent_node_id,
+            "subject_generation": self.subject_generation,
+        }
 
 
 @dataclass(frozen=True)
@@ -72,120 +109,143 @@ class MemPhant:
     base_url: str
     api_key: str | None = None
     timeout: float = 30.0
+    # Injectable transport (method, path, body) -> response dict; defaults to
+    # the real urllib wire. Tests swap this to capture payloads without a socket.
+    _transport: Callable[[str, str, dict[str, Any] | None], dict[str, Any]] | None = None
 
-    def retain(
+    def bind_context(
         self,
         *,
-        tenant_id: str,
-        scope_id: str,
-        actor_id: str,
+        client_ref: str,
+        subject_ref: str,
+        subject_kind: str,
+        actor_ref: str,
+        actor_kind: str,
+        scope_ref: str,
+        scope_kind: str,
+        agent_node_ref: str,
+        agent_node_parent_ref: str | None = None,
+        scope_parent_ref: str | None = None,
+    ) -> BoundContext:
+        """Resolve external refs into a `BoundContext` (PUT /v1/context-bindings).
+
+        Requires a tenant service key. The returned ids + `subject_generation`
+        are what the server validates on every subsequent verb."""
+        response = self._request(
+            "PUT",
+            f"/v1/context-bindings/{client_ref}",
+            {
+                "subject": {"external_ref": subject_ref, "kind": subject_kind},
+                "actor": {"external_ref": actor_ref, "kind": actor_kind},
+                "scope": {
+                    "external_ref": scope_ref,
+                    "kind": scope_kind,
+                    "parent_external_ref": scope_parent_ref,
+                },
+                "agent_node": {
+                    "external_ref": agent_node_ref,
+                    "parent_external_ref": agent_node_parent_ref,
+                },
+            },
+        )
+        return BoundContext(
+            subject_id=str(response["subject_id"]),
+            scope_id=str(response["scope_id"]),
+            actor_id=str(response["actor_id"]),
+            agent_node_id=str(response["agent_node_id"]),
+            subject_generation=int(response["subject_generation"]),
+        )
+
+    def retain_episode(
+        self,
+        *,
+        ctx: BoundContext,
+        source_ref: str,
+        observed_at: str,
         source_kind: str,
-        source_trust: str,
         body: str,
-        subject_hint: str | None = None,
-        compiler_version: str | None = None,
     ) -> dict[str, Any]:
+        """Retain a raw episode (RetainEpisodePayload: source_kind + body)."""
         return self._post(
             "/v1/episodes",
             {
-                "tenant_id": tenant_id,
-                "scope_id": scope_id,
-                "actor_id": actor_id,
-                "source_kind": source_kind,
-                "source_trust": source_trust,
-                "subject_hint": subject_hint,
-                "body": body,
-                "compiler_version": compiler_version,
+                **ctx._identity(),
+                "source_ref": source_ref,
+                "observed_at": observed_at,
+                "payload": {"episode": {"source_kind": source_kind, "body": body}},
             },
         )
 
     def retain_resource(
         self,
         *,
-        tenant_id: str,
-        scope_id: str,
-        actor_id: str,
-        source_trust: str,
+        ctx: BoundContext,
+        source_ref: str,
+        observed_at: str,
         uri: str,
         mime_type: str,
         content_hash: str,
         kind: str | None = None,
         revision: str | None = None,
         body: str | None = None,
-        source_kind: str = "resource",
-        compiler_version: str | None = None,
     ) -> dict[str, Any]:
-        """Retain a resource payload (spec 08 `resource` shape): documents and
-        code carry a URI + content hash; `revision` is the commit identity."""
+        """Retain a resource (RetainResourcePayload: uri + mime_type +
+        content_hash; `revision` is the commit identity for code)."""
         return self._post(
             "/v1/episodes",
             {
-                "tenant_id": tenant_id,
-                "scope_id": scope_id,
-                "actor_id": actor_id,
-                "source_kind": source_kind,
-                "source_trust": source_trust,
-                "subject_hint": None,
-                "resource": {
-                    "uri": uri,
-                    "mime_type": mime_type,
-                    "content_hash": content_hash,
-                    "kind": kind,
-                    "revision": revision,
-                    "body": body,
+                **ctx._identity(),
+                "source_ref": source_ref,
+                "observed_at": observed_at,
+                "payload": {
+                    "resource": {
+                        "uri": uri,
+                        "mime_type": mime_type,
+                        "content_hash": content_hash,
+                        "kind": kind,
+                        "revision": revision,
+                        "body": body,
+                    }
                 },
-                "compiler_version": compiler_version,
             },
         )
 
     def retain_unit(
         self,
         *,
-        tenant_id: str,
-        scope_id: str,
-        actor_id: str,
-        source_trust: str,
+        ctx: BoundContext,
+        source_ref: str,
+        observed_at: str,
         kind: str,
-        subject: str,
-        predicate: str,
         body: str,
         churn_class: str | None = None,
         valid_from: str | None = None,
         valid_to: str | None = None,
-        source_kind: str = "direct",
-        compiler_version: str | None = None,
     ) -> dict[str, Any]:
-        """Retain a direct pre-compiled unit (spec 08 `unit` shape): requires
-        an explicit subject/predicate; the admission trust policy still
-        applies (untrusted keys mint candidate tier)."""
+        """Retain a pre-compiled unit (RetainUnitPayload). The admission trust
+        policy still applies (untrusted keys mint candidate tier)."""
         return self._post(
             "/v1/episodes",
             {
-                "tenant_id": tenant_id,
-                "scope_id": scope_id,
-                "actor_id": actor_id,
-                "source_kind": source_kind,
-                "source_trust": source_trust,
-                "subject_hint": None,
-                "unit": {
-                    "kind": kind,
-                    "subject": subject,
-                    "predicate": predicate,
-                    "body": body,
-                    "churn_class": churn_class,
-                    "valid_from": valid_from,
-                    "valid_to": valid_to,
+                **ctx._identity(),
+                "source_ref": source_ref,
+                "observed_at": observed_at,
+                "payload": {
+                    "unit": {
+                        "kind": kind,
+                        "body": body,
+                        "churn_class": churn_class,
+                        "valid_from": valid_from,
+                        "valid_to": valid_to,
+                    }
                 },
-                "compiler_version": compiler_version,
             },
         )
 
     def recall(
         self,
         *,
-        tenant_id: str,
-        scope_id: str,
-        actor_id: str,
+        ctx: BoundContext,
         query: str,
         limit: int | None = None,
         budget_tokens: int | None = None,
@@ -198,9 +258,7 @@ class MemPhant:
         return self._post(
             "/v1/recall",
             {
-                "tenant_id": tenant_id,
-                "scope_id": scope_id,
-                "actor_id": actor_id,
+                **ctx._identity(),
                 "query": query,
                 "limit": limit,
                 "budget_tokens": budget_tokens,
@@ -212,46 +270,31 @@ class MemPhant:
             },
         )
 
-    def reflect(
-        self,
-        *,
-        tenant_id: str,
-        scope_id: str,
-        actor_id: str,
-        compiler_version: str | None = None,
-    ) -> dict[str, Any]:
-        return self._post(
-            "/v1/reflect",
-            {
-                "tenant_id": tenant_id,
-                "scope_id": scope_id,
-                "actor_id": actor_id,
-                "compiler_version": compiler_version,
-            },
-        )
+    def reflect(self, *, ctx: BoundContext) -> dict[str, Any]:
+        return self._post("/v1/reflect", {**ctx._identity()})
 
     def correct(
         self,
         *,
-        tenant_id: str,
-        scope_id: str,
-        actor_id: str,
+        ctx: BoundContext,
         memory_unit_id: str,
         value: str,
         reason: str,
+        source_ref: str,
+        observed_at: str,
         valid_from: str | None = None,
         valid_to: str | None = None,
     ) -> dict[str, Any]:
         return self._post(
             "/v1/correct",
             {
-                "tenant_id": tenant_id,
-                "scope_id": scope_id,
-                "actor_id": actor_id,
+                **ctx._identity(),
                 "selector": {"memory_unit_id": memory_unit_id},
                 "correction": {
                     "value": value,
                     "reason": reason,
+                    "source_ref": source_ref,
+                    "observed_at": observed_at,
                     "valid_from": valid_from,
                     "valid_to": valid_to,
                 },
@@ -261,34 +304,38 @@ class MemPhant:
     def forget(
         self,
         *,
-        tenant_id: str,
-        scope_id: str,
-        actor_id: str,
+        ctx: BoundContext,
         reason: str,
         memory_unit_id: str | None = None,
-        selector_scope_id: str | None = None,
+        episode_id: str | None = None,
+        resource_id: str | None = None,
     ) -> dict[str, Any]:
+        """Forget exactly one of memory_unit_id / episode_id / resource_id. The
+        selector carries the scope from the bound context."""
+        selectors = [
+            ("memory_unit_id", memory_unit_id),
+            ("episode_id", episode_id),
+            ("resource_id", resource_id),
+        ]
+        chosen = [(name, value) for name, value in selectors if value is not None]
+        if len(chosen) != 1:
+            raise ValueError(
+                "forget requires exactly one of memory_unit_id, episode_id, resource_id"
+            )
+        selector_name, selector_value = chosen[0]
         return self._post(
             "/v1/forget",
             {
-                "tenant_id": tenant_id,
-                "scope_id": scope_id,
-                "actor_id": actor_id,
-                "selector": {
-                    "memory_unit_id": memory_unit_id,
-                    "scope_id": selector_scope_id,
-                },
+                **ctx._identity(),
+                "selector": {"scope_id": ctx.scope_id, selector_name: selector_value},
                 "reason": reason,
             },
         )
 
-    def trace(self, trace_id: str) -> dict[str, Any]:
-        return self._get(f"/v1/traces/{trace_id}")
-
     def mark(
         self,
         *,
-        tenant_id: str,
+        ctx: BoundContext,
         trace_id: str,
         caller_id: str,
         used_ids: list[str],
@@ -297,13 +344,16 @@ class MemPhant:
         return self._post(
             "/v1/mark",
             {
-                "tenant_id": tenant_id,
+                **ctx._identity(),
                 "trace_id": trace_id,
                 "caller_id": caller_id,
                 "used_ids": used_ids,
                 "outcome": outcome,
             },
         )
+
+    def trace(self, trace_id: str) -> dict[str, Any]:
+        return self._get(f"/v1/traces/{trace_id}")
 
     def _get(self, path: str) -> dict[str, Any]:
         return self._request("GET", path, None)
@@ -314,6 +364,8 @@ class MemPhant:
     def _request(
         self, method: str, path: str, body: dict[str, Any] | None
     ) -> dict[str, Any]:
+        if self._transport is not None:
+            return self._transport(method, path, body)
         payload = None if body is None else json.dumps(_strip_none(body)).encode()
         request = Request(
             _join_url(self.base_url, path),
@@ -372,6 +424,7 @@ def _raise_error(raw: bytes, *, retry_after: str | None = None) -> None:
 
 
 __all__ = [
+    "BoundContext",
     "MemPhant",
     "MemPhantAuthError",
     "MemPhantConflict",
