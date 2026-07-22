@@ -246,12 +246,48 @@ pub fn build_cross_reranker() -> Result<Arc<dyn CrossReranker>, String> {
         .filter(|value| !value.is_empty())
     {
         None | Some("fastembed") => build_fastembed_cross_reranker(),
+        Some("byo") => build_byo_cross_reranker(),
         Some("voyage-rerank-2.5") => api_reranking::VoyageReranker::new(candidate_limit)
             .map(|reranker| Arc::new(reranker) as Arc<dyn CrossReranker>),
         Some(value) => Err(format!(
-            "MEMPHANT_RERANKER expected fastembed or voyage-rerank-2.5, got {value:?}"
+            "MEMPHANT_RERANKER expected fastembed, byo, or voyage-rerank-2.5, got {value:?}"
         )),
     }
+}
+
+/// Bring-your-own reranker arm (`MEMPHANT_RERANKER=byo`): loads a local ONNX +
+/// tokenizer from `MEMPHANT_RERANK_BYO_DIR` (ONNX file `MEMPHANT_RERANK_BYO_ONNX`,
+/// default `model_quantized.onnx`) through fastembed's user-defined path. The
+/// seam for a smaller/faster reranker than bge-reranker-base (e.g. ms-marco-
+/// MiniLM-L6 int8 — ~13x faster at comparable BEIR; see the reranker latency
+/// spike). Same `MEMPHANT_RERANK_CANDIDATE_LIMIT`/`_MAX_LENGTH` env knobs.
+#[cfg(feature = "fastembed")]
+fn build_byo_cross_reranker() -> Result<Arc<dyn CrossReranker>, String> {
+    let dir = std::env::var("MEMPHANT_RERANK_BYO_DIR").map_err(|_| {
+        "MEMPHANT_RERANKER=byo requires MEMPHANT_RERANK_BYO_DIR (dir with the ONNX + tokenizer)"
+            .to_string()
+    })?;
+    let onnx_name = std::env::var("MEMPHANT_RERANK_BYO_ONNX")
+        .unwrap_or_else(|_| "model_quantized.onnx".to_string());
+    let mut config = reranker_config_from_env()?;
+    config.provider = "byo".to_string();
+    config.model = format!("byo:{onnx_name}");
+    embeddings::FastEmbedCrossReranker::from_user_defined(
+        std::path::Path::new(&dir),
+        &onnx_name,
+        config,
+    )
+    .map(|reranker| Arc::new(reranker) as Arc<dyn CrossReranker>)
+    .map_err(|error| format!("byo cross-reranker initialization failed: {error}"))
+}
+
+#[cfg(not(feature = "fastembed"))]
+fn build_byo_cross_reranker() -> Result<Arc<dyn CrossReranker>, String> {
+    Err(
+        "MEMPHANT_RERANKER=byo requires a binary built with --features fastembed \
+         (the cross-encoder loader is fastembed's user-defined path)"
+            .to_string(),
+    )
 }
 
 #[cfg(feature = "fastembed")]

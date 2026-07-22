@@ -394,6 +394,46 @@ impl FastEmbedCrossReranker {
             config,
         })
     }
+
+    /// Bring-your-own reranker: load a local ONNX + tokenizer from `dir` through
+    /// fastembed's `try_new_from_user_defined` (no ort dependency, no enum
+    /// entry). `dir` must hold `model_quantized.onnx` (or the name in
+    /// `MEMPHANT_RERANK_BYO_ONNX`) plus `tokenizer.json` / `config.json` /
+    /// `special_tokens_map.json` / `tokenizer_config.json`. This is the seam for
+    /// a smaller/faster reranker (e.g. `Xenova/ms-marco-MiniLM-L-6-v2` int8,
+    /// ~13x faster than bge-reranker-base at comparable BEIR — see the reranker
+    /// latency spike). `config.model` labels the arm on the trace/report.
+    pub fn from_user_defined(
+        dir: &std::path::Path,
+        onnx_name: &str,
+        config: CrossRerankerConfig,
+    ) -> Result<Self, EmbedError> {
+        use fastembed::{
+            OnnxSource, RerankInitOptionsUserDefined, TokenizerFiles, UserDefinedRerankingModel,
+        };
+        let read = |name: &str| -> Result<Vec<u8>, EmbedError> {
+            std::fs::read(dir.join(name)).map_err(|error| {
+                EmbedError::Unavailable(format!("byo reranker: reading {name}: {error}"))
+            })
+        };
+        let tokenizer_files = TokenizerFiles {
+            tokenizer_file: read("tokenizer.json")?,
+            config_file: read("config.json")?,
+            special_tokens_map_file: read("special_tokens_map.json")?,
+            tokenizer_config_file: read("tokenizer_config.json")?,
+        };
+        let model =
+            UserDefinedRerankingModel::new(OnnxSource::File(dir.join(onnx_name)), tokenizer_files);
+        let text_rerank = TextRerank::try_new_from_user_defined(
+            model,
+            RerankInitOptionsUserDefined::new().with_max_length(config.max_length),
+        )
+        .map_err(|error| EmbedError::Unavailable(error.to_string()))?;
+        Ok(Self {
+            model: Mutex::new(text_rerank),
+            config,
+        })
+    }
 }
 
 impl CrossReranker for FastEmbedCrossReranker {
@@ -912,7 +952,17 @@ mod tests {
             return;
         }
         let query = "What is the capital of France?";
-        for (candidate_count, max_length) in [(64, 512), (32, 512), (32, 256), (32, 128)] {
+        for (candidate_count, max_length) in [
+            (64, 512),
+            (32, 512),
+            (24, 512),
+            (16, 512),
+            (32, 256),
+            (24, 256),
+            (16, 256),
+            (32, 128),
+            (24, 128),
+        ] {
             let batch_size = 256;
             let reranker = FastEmbedCrossReranker::with_config(CrossRerankerConfig {
                 provider: "fastembed".to_string(),
@@ -932,6 +982,59 @@ mod tests {
             );
             assert_eq!(scores.len(), candidate_count);
             assert!(scores.iter().all(|score| score.is_finite()));
+        }
+    }
+
+    /// Latency spike: the SAME matrix against a bring-your-own smaller/quantized
+    /// reranker loaded via fastembed's `try_new_from_user_defined` (no ort
+    /// dependency, no enum entry). Point `MEMPHANT_RERANK_BYO_DIR` at a dir
+    /// holding `model_quantized.onnx` + tokenizer files (tokenizer.json,
+    /// config.json, special_tokens_map.json, tokenizer_config.json) — e.g. a
+    /// download of `Xenova/ms-marco-MiniLM-L-6-v2` int8. Reports ms per config so
+    /// the model-swap lever can be compared against the bge-reranker-base matrix.
+    #[test]
+    #[ignore = "bring-your-own reranker latency spike; set MEMPHANT_RERANK_BYO_DIR"]
+    fn rerank_byo_model_latency_matrix() {
+        use fastembed::{
+            OnnxSource, RerankInitOptionsUserDefined, TokenizerFiles, UserDefinedRerankingModel,
+        };
+        use std::path::PathBuf;
+
+        let Ok(dir) = std::env::var("MEMPHANT_RERANK_BYO_DIR") else {
+            eprintln!("byo rerank matrix skipped (set MEMPHANT_RERANK_BYO_DIR=<model dir>)");
+            return;
+        };
+        let dir = PathBuf::from(dir);
+        let read = |name: &str| std::fs::read(dir.join(name)).expect(name);
+        let tokenizer_files = TokenizerFiles {
+            tokenizer_file: read("tokenizer.json"),
+            config_file: read("config.json"),
+            special_tokens_map_file: read("special_tokens_map.json"),
+            tokenizer_config_file: read("tokenizer_config.json"),
+        };
+        let onnx = OnnxSource::File(dir.join("model_quantized.onnx"));
+
+        let query = "What is the capital of France?";
+        for (candidate_count, max_length) in [(64, 512), (32, 256), (24, 256), (16, 256)] {
+            // A fresh model per config so max_length takes effect at init.
+            let model = UserDefinedRerankingModel::new(onnx.clone(), tokenizer_files.clone());
+            let mut reranker = TextRerank::try_new_from_user_defined(
+                model,
+                RerankInitOptionsUserDefined::new().with_max_length(max_length),
+            )
+            .expect("load byo reranker");
+            let docs = representative_rerank_docs(candidate_count);
+            let doc_refs = docs.iter().map(String::as_str).collect::<Vec<_>>();
+            let started = std::time::Instant::now();
+            let results = reranker
+                .rerank(query, &doc_refs, false, Some(256))
+                .expect("byo rerank");
+            let elapsed_ms = started.elapsed().as_millis();
+            eprintln!(
+                "{{\"event\":\"memphant_rerank_byo_latency\",\"candidate_count\":{candidate_count},\"max_length\":{max_length},\"elapsed_ms\":{elapsed_ms}}}"
+            );
+            assert_eq!(results.len(), candidate_count);
+            assert!(results.iter().all(|r| r.score.is_finite()));
         }
     }
 }
