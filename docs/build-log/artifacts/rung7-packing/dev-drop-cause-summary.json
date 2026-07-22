@@ -1,0 +1,26 @@
+{
+  "run": "dev-drop-cause seed 20260713 Fast(k10,budget8192,pool64,small,rerank-off)",
+  "total_scored": 166,
+  "buckets": {
+    "in_pool_unpacked": 64,
+    "in_top_k": 102,
+    "abstention": 12
+  },
+  "in_pool_unpacked_n": 64,
+  "drop_reason": {
+    "budget": 64
+  },
+  "gold_fused_rank": {
+    "median": 2.0,
+    "min": 1,
+    "max": 35,
+    "le_5": 48,
+    "le_10": 59
+  },
+  "packed_size": {
+    "median": 4.0,
+    "min": 2,
+    "max": 8,
+    "all_below_k": true
+  }
+}
