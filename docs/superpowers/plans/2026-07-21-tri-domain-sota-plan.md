@@ -126,7 +126,18 @@ authority.
 - **Rerank**: the +0.158 QA lever ships only rank-compressed (top-16 fused ×
   256-token truncated pairs, ≤1.5 s p95, balanced/docs surfaces). Free
   pre-check before building: count retired-run flips reproducible within
-  top-16 (<60 % → don't build).
+  top-16 (<60 % → don't build). **PROMOTION-GATE NOTE (2026-07-22 audit):** the
+  hosted arms (Voyage/Cohere) and config are guarded (fail-open on timeout,
+  default-arm on unknown ids, no prod `unwrap`), but the **BYO int8 MiniLM path
+  has no CI correctness pin** — its accuracy/latency guards are `#[ignore]`d and
+  need `MEMPHANT_RERANK_BYO_DIR` at uncommitted model files, so a silent
+  model-swap to garbage scores is caught only by the runtime shape check (wrong
+  count, not wrong scores). Before any default-ON flip of the BYO path, add a
+  committed golden-score pin (small fixture model or a checked-in score vector).
+  Also: local BERT cross-encoders hard-cap at 512 tokens, so production reranks
+  the full body untruncated-past-512 (MiniLM MRR 0.926→0.572 on 16k-char docs);
+  the "rerank chunks → max-pool" recovery exists only in the ignored bench, not
+  wired — wire it before promoting rerank on long-doc/code lanes.
 - **Models**: local embeddings stay default (three bakeoffs: API embedders
   never cleared the bar). Any LLM step (observer/reflector, Deep) picks
   quality first at n=12, then downgrades to cheapest non-inferior.
