@@ -148,6 +148,10 @@ pub struct BenchLmeOptions {
     /// (question + gold answer + top-k evidence bodies) for the external
     /// reader/judge in `scripts/run_reader.py`.
     pub emit_qa: Option<String>,
+    /// A1 (tri-domain-sota-plan §3.A1): when set, write one trace-classification
+    /// JSONL row per question to this path (Fast-miss bucket + pool/top-k gold
+    /// membership) from the retrieval trace. FREE — no reader/model call.
+    pub emit_trace_classification: Option<String>,
     pub command: String,
 }
 
@@ -173,6 +177,26 @@ pub struct QaEvidenceRow {
     pub granularity: String,
     pub k: usize,
     pub evidence: Vec<QaEvidenceItem>,
+}
+
+/// One A1 trace-classification JSONL row (tri-domain-sota-plan §3.A1). Written
+/// per question when `--emit-trace-classification <path>` is set; FREE
+/// (retrieval-trace only, no reader/model call). `gold_in_pool` and
+/// `gold_in_topk` are the two membership signals the bucket derives from,
+/// carried explicitly so the classification is auditable per question.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceClassificationRow {
+    pub question_id: String,
+    pub question_type: String,
+    pub bucket: FastMissBucket,
+    pub gold_in_pool: bool,
+    pub gold_in_topk: bool,
+    /// 1-based rank of the first gold-bearing packed item, if any.
+    pub first_answer_rank: Option<usize>,
+    /// Distinct pool candidate units traced for this recall.
+    pub pool_size: usize,
+    /// Packed top-k items returned for this recall.
+    pub packed_size: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -467,6 +491,52 @@ pub fn stratified_sample_ids(
     picked
 }
 
+/// A1 (tri-domain-sota-plan §3.A1) Fast-miss classification bucket. A scored
+/// question lands in exactly one bucket; `Abstention` is set aside from the
+/// miss denominator. The binding verdict is `AbsentFromPool` share vs the rest:
+/// only `AbsentFromPool` is a recall-DEPTH miss Deep can fix; `InPoolUnpacked`
+/// is a packing/ordering miss and `InTopK` is a reader-utilization miss.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FastMissBucket {
+    /// No pool candidate maps to a gold session — recall never surfaced it.
+    AbsentFromPool,
+    /// A gold candidate is in the pool but not in the packed top-k.
+    InPoolUnpacked,
+    /// A gold-bearing item is in the packed top-k (retrieval hit).
+    InTopK,
+    /// Abstention question (`_abs`): classified separately, never a miss.
+    Abstention,
+}
+
+/// Pure classifier: given the sessions of ALL pool candidates (`pool_sessions`)
+/// and of the packed top-k items (`topk_sessions`), decide the A1 bucket. Both
+/// slices are rank-ordered session ids, `None` when an item has no episode
+/// provenance. `InTopK` is checked first (a hit is a hit regardless of the
+/// pool), then pool membership splits the misses.
+pub fn classify_question(
+    pool_sessions: &[Option<String>],
+    topk_sessions: &[Option<String>],
+    answer_session_ids: &[String],
+    is_abstention: bool,
+) -> FastMissBucket {
+    if is_abstention {
+        return FastMissBucket::Abstention;
+    }
+    let gold = |session: &Option<String>| {
+        session
+            .as_ref()
+            .is_some_and(|s| answer_session_ids.iter().any(|answer| answer == s))
+    };
+    if topk_sessions.iter().any(gold) {
+        FastMissBucket::InTopK
+    } else if pool_sessions.iter().any(gold) {
+        FastMissBucket::InPoolUnpacked
+    } else {
+        FastMissBucket::AbsentFromPool
+    }
+}
+
 /// Pure scorer: `item_sessions` is the recalled items' provenance
 /// (rank-ordered session ids, None when an item has no episode citation).
 pub fn score_question(
@@ -589,6 +659,31 @@ fn paired_comparison(
         bootstrap_resamples: BOOTSTRAP_RESAMPLES,
         bootstrap_seed: seed,
     }
+}
+
+/// Normalize an upstream LongMemEval haystack date to RFC3339 for `observed_at`.
+/// Upstream format is `YYYY/MM/DD (Day) HH:MM` (e.g. `2023/05/20 (Sat) 07:47`);
+/// the `retain` contract requires RFC3339 (`service.rs` `parse_rfc3339`). The
+/// real `HH:MM` is preserved — within-day chronological ordering depends on it —
+/// and reshaped to `YYYY-MM-DDTHH:MM:00Z`. A value already containing `T` (an
+/// RFC3339 timestamp) passes through unchanged; a bare `YYYY/MM/DD` becomes
+/// midnight.
+fn normalize_haystack_date(raw: &str) -> String {
+    // Already RFC3339 (`YYYY-MM-DDThh:mm:ssZ`): dashes in the date, no slashes,
+    // a `T` separator. NB the upstream `(Tue)`/`(Thu)` day tokens also contain a
+    // capital `T`, so a bare `contains('T')` check is wrong here.
+    if raw.contains('T') && raw.contains('-') && !raw.contains('/') {
+        return raw.to_string();
+    }
+    let mut parts = raw.split_whitespace();
+    let date = parts.next().unwrap_or(raw).replace('/', "-");
+    // The `(Day)` token, when present, is the second whitespace field; the time
+    // is the last field. Skip anything parenthesized and take the first HH:MM.
+    let time = parts
+        .find(|token| !token.starts_with('('))
+        .filter(|token| token.contains(':'))
+        .unwrap_or("00:00");
+    format!("{date}T{time}:00Z")
 }
 
 fn session_body(session_id: &str, date: &str, turns: &[LmeTurn]) -> String {
@@ -787,6 +882,7 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
 
     let mut per_question = Vec::new();
     let mut qa_rows: Vec<QaEvidenceRow> = Vec::new();
+    let mut classification_rows: Vec<TraceClassificationRow> = Vec::new();
     for (index, question_id) in sampled_ids.iter().enumerate() {
         let question = by_id
             .get(question_id.as_str())
@@ -877,9 +973,8 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
                             agent_node_id: context.agent_node_id,
                             subject_generation: context.subject_generation,
                             source_ref: format!("longmemeval:session:{session_id}"),
-                            observed_at: format!(
-                                "{}T00:00:00Z",
-                                question.haystack_dates[session_index]
+                            observed_at: normalize_haystack_date(
+                                &question.haystack_dates[session_index],
                             ),
                             payload: RetainPayload::Episode(RetainEpisodePayload {
                                 source_kind: "user".to_string(),
@@ -965,6 +1060,58 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
                     .collect(),
             });
         }
+        if options.emit_trace_classification.is_some() {
+            // A1: classify from the FULL candidate pool (the trace), not the
+            // packed top-k. `candidate_whitelist` is the packed set; the pool
+            // lives in `trace.candidates`. A gold unit that is in the pool but
+            // unpacked (bucket B) is typically uncited, so map every pool unit
+            // to its episode directly from the store (`source_episode_id`),
+            // never from the trace citations (which cover only packed units).
+            let trace = store
+                .trace_by_id(&context, response.trace_id)
+                .await
+                .map_err(|error| format!("trace fetch: {error}"))?
+                .ok_or_else(|| format!("trace missing for {}", question.question_id))?;
+            let mut seen = std::collections::HashSet::new();
+            let pool_unit_ids: Vec<_> = trace
+                .candidates
+                .iter()
+                .map(|c| c.unit_id)
+                .filter(|id| seen.insert(*id))
+                .collect();
+            let pool_units = store
+                .fetch_units_by_ids(&context, &pool_unit_ids)
+                .await
+                .map_err(|error| format!("fetch pool units: {error}"))?;
+            let pool_sessions: Vec<Option<String>> = pool_units
+                .iter()
+                .map(|unit| {
+                    unit.source_episode_id
+                        .and_then(|episode| episode_sessions.get(&episode).cloned())
+                })
+                .collect();
+            let gold = |session: &Option<String>| {
+                session
+                    .as_ref()
+                    .is_some_and(|s| question.answer_session_ids.iter().any(|answer| answer == s))
+            };
+            let bucket = classify_question(
+                &pool_sessions,
+                &item_sessions,
+                &question.answer_session_ids,
+                is_abstention,
+            );
+            classification_rows.push(TraceClassificationRow {
+                question_id: question.question_id.clone(),
+                question_type: question.question_type.clone(),
+                bucket,
+                gold_in_pool: pool_sessions.iter().any(gold),
+                gold_in_topk: item_sessions.iter().any(gold),
+                first_answer_rank: item_sessions.iter().position(gold).map(|i| i + 1),
+                pool_size: pool_unit_ids.len(),
+                packed_size: response.items.len(),
+            });
+        }
         let (hit_at_5, hit_at_10, abstention_correct, first_answer_rank) = score_question(
             &item_sessions,
             &question.answer_session_ids,
@@ -1014,6 +1161,56 @@ async fn run_bench_lme_async(options: &BenchLmeOptions) -> Result<BenchLmeReport
         }
         std::fs::write(path, lines).map_err(|error| format!("write qa jsonl {path}: {error}"))?;
         eprintln!("bench-lme qa evidence rows={} out={path}", qa_rows.len());
+    }
+
+    if let Some(path) = &options.emit_trace_classification {
+        let mut lines = String::new();
+        for row in &classification_rows {
+            lines.push_str(
+                &serde_json::to_string(row)
+                    .map_err(|error| format!("serialize classification row: {error}"))?,
+            );
+            lines.push('\n');
+        }
+        std::fs::write(path, lines)
+            .map_err(|error| format!("write classification jsonl {path}: {error}"))?;
+        // A1 verdict summary to stderr (the JSONL is the durable artifact).
+        let count = |bucket: FastMissBucket| {
+            classification_rows
+                .iter()
+                .filter(|row| row.bucket == bucket)
+                .count()
+        };
+        let (absent, unpacked, in_topk, abstention) = (
+            count(FastMissBucket::AbsentFromPool),
+            count(FastMissBucket::InPoolUnpacked),
+            count(FastMissBucket::InTopK),
+            count(FastMissBucket::Abstention),
+        );
+        let scored = absent + unpacked + in_topk;
+        let not_absent = unpacked + in_topk;
+        let share = |n: usize| {
+            if scored == 0 {
+                0.0
+            } else {
+                n as f64 / scored as f64
+            }
+        };
+        eprintln!(
+            "bench-lme trace-classification rows={} out={path}",
+            classification_rows.len()
+        );
+        eprintln!(
+            "A1 buckets (scored={scored}, abstention={abstention}): absent_from_pool={absent} ({:.3}) in_pool_unpacked={unpacked} ({:.3}) in_top_k={in_topk} ({:.3})",
+            share(absent),
+            share(unpacked),
+            share(in_topk),
+        );
+        eprintln!(
+            "A1 present-but-unpacked-or-unread (B+C) = {not_absent}/{scored} = {:.3} — verdict>=0.70 defers Deep: {}",
+            share(not_absent),
+            share(not_absent) >= 0.70,
+        );
     }
 
     let paired_vs_baseline = match &options.baseline {
@@ -1220,6 +1417,78 @@ mod tests {
                 ingested_sessions: 2,
             },
         ]
+    }
+
+    #[test]
+    fn normalize_haystack_date_produces_rfc3339() {
+        // Upstream LongMemEval dates are `YYYY/MM/DD (Day) HH:MM` — NOT RFC3339,
+        // so `observed_at` must be normalized or `retain` rejects the row
+        // ("observed_at must be RFC3339"). Preserve the real HH:MM (chronological
+        // ordering within a day depends on it), just reshape to RFC3339.
+        assert_eq!(
+            normalize_haystack_date("2023/05/20 (Sat) 07:47"),
+            "2023-05-20T07:47:00Z"
+        );
+        assert_eq!(
+            normalize_haystack_date("2023/06/13 (Tue) 19:33"),
+            "2023-06-13T19:33:00Z"
+        );
+        // A bare date with no time still normalizes (midnight).
+        assert_eq!(
+            normalize_haystack_date("2023/05/20"),
+            "2023-05-20T00:00:00Z"
+        );
+        // An already-RFC3339 value passes through unchanged.
+        assert_eq!(
+            normalize_haystack_date("2023-05-20T07:47:00Z"),
+            "2023-05-20T07:47:00Z"
+        );
+    }
+
+    #[test]
+    fn classify_bucket_covers_absent_unpacked_topk_and_abstention() {
+        // A1 (tri-domain-sota-plan §3.A1): the three-bucket Fast-miss classifier.
+        // Bucket A absent-from-pool: no pool unit maps to a gold session.
+        assert_eq!(
+            classify_question(
+                &[Some("s_noise".to_string()), None],
+                &[Some("s_noise".to_string())],
+                &["s_gold".to_string()],
+                false,
+            ),
+            FastMissBucket::AbsentFromPool
+        );
+        // Bucket B in-pool-but-unpacked: a gold unit is in the pool but the
+        // packed top-k does not surface it (packing/ordering dropped it).
+        assert_eq!(
+            classify_question(
+                &[Some("s_noise".to_string()), Some("s_gold".to_string())],
+                &[Some("s_noise".to_string())],
+                &["s_gold".to_string()],
+                false,
+            ),
+            FastMissBucket::InPoolUnpacked
+        );
+        // Bucket C in-top-k: retrieval succeeded — a gold item is packed.
+        assert_eq!(
+            classify_question(
+                &[Some("s_gold".to_string())],
+                &[Some("s_gold".to_string())],
+                &["s_gold".to_string()],
+                false,
+            ),
+            FastMissBucket::InTopK
+        );
+        // Abstention questions are classified separately, never in the miss buckets.
+        assert_eq!(
+            classify_question(&[], &[], &["s_gold".to_string()], true),
+            FastMissBucket::Abstention
+        );
+        // Empty-pool edge: absent-from-pool, not a panic.
+        assert_eq!(
+            classify_question(&[], &[], &["s_gold".to_string()], false),
+            FastMissBucket::AbsentFromPool
+        );
     }
 
     #[test]
