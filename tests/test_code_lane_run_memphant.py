@@ -184,6 +184,71 @@ def test_outcome_marked_arm_fails_closed_without_explicit_typed_labels(clr):
         clr.require_outcome_mark_ready(readiness)
 
 
+# --- ingest payload conforms to the strict v1 contract ----------------------
+
+
+class _CaptureClient:
+    """Fake ApiClient that records the posted payload instead of sending it."""
+
+    def __init__(self) -> None:
+        self.posts: list[tuple[str, dict]] = []
+
+    def post(self, path: str, payload: dict) -> dict:
+        self.posts.append((path, payload))
+        return {"episode_id": "ep_test"}
+
+
+def _retain_episode_schema() -> tuple[dict, dict]:
+    spec = json.loads((ROOT / "openapi" / "memphant.v1.json").read_text())
+    return spec, spec["components"]["schemas"]["RetainEpisodeHttpRequest"]
+
+
+def _assert_object_conforms(spec: dict, name: str, schema: dict, body: dict) -> None:
+    if "$ref" in schema:
+        schema = spec["components"]["schemas"][schema["$ref"].split("/")[-1]]
+    if "oneOf" in schema:
+        errors = []
+        for i, variant in enumerate(schema["oneOf"]):
+            try:
+                _assert_object_conforms(spec, f"{name}#{i}", variant, body)
+                return
+            except AssertionError as exc:
+                errors.append(str(exc))
+        raise AssertionError(f"{name}: no oneOf variant matched:\n" + "\n".join(errors))
+    props = schema.get("properties", {})
+    extra = set(body) - set(props)
+    assert not extra, f"{name}: keys not in contract (would 422): {sorted(extra)}"
+    missing = set(schema.get("required", [])) - set(body)
+    assert not missing, f"{name}: missing required keys: {sorted(missing)}"
+    for key, value in body.items():
+        if isinstance(value, dict):
+            _assert_object_conforms(spec, f"{name}.{key}", props[key], value)
+
+
+def test_ingest_attempt_payload_conforms_to_strict_contract(clr):
+    ctx = {
+        "subject_id": "00000000-0000-0000-0000-0000000000a1",
+        "scope_id": "00000000-0000-0000-0000-0000000000a2",
+        "actor_id": "00000000-0000-0000-0000-0000000000a3",
+        "agent_node_id": "00000000-0000-0000-0000-0000000000a4",
+        "subject_generation": 0,
+    }
+    client = _CaptureClient()
+    clr.ingest_attempt(
+        client,
+        ctx,
+        {"attempt_id": "attempt-1", "events": [{"sequence": 0, "role": "assistant", "text": "hi"}]},
+    )
+    path, payload = client.posts[-1]
+    assert path == "/v1/episodes"
+    # The banned shape must be gone.
+    assert "tenant_id" not in payload
+    assert "subject_hint" not in payload
+    assert "source_kind" not in payload  # now lives inside payload.episode
+    spec, schema = _retain_episode_schema()
+    _assert_object_conforms(spec, "RetainEpisodeHttpRequest", schema, payload)
+
+
 def test_deterministic_file_search_ranks_raw_matching_event_first():
     search = _load("code_lane_run_deterministic", "scripts/code_lane_run_deterministic.py")
     documents = search.event_documents(

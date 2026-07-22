@@ -58,8 +58,6 @@ import gate_runtime as gr  # noqa: E402
 DEFAULT_BASE_DATABASE_URL = "postgres://memphant:memphant@localhost:5432/memphant"
 CORPUS_PATH = gc.MEMPHANT_ROOT / "benchmarks" / "data" / "coding_events_corpus.jsonl"
 GOLDEN_PATH = gc.MEMPHANT_ROOT / "benchmarks" / "data" / "coding_events_golden.jsonl"
-SCOPE_ID = "7c000000-0000-4000-8000-0000000000b1"
-ACTOR_ID = "7c000000-0000-4000-8000-0000000000b2"
 
 def golden_lock_path(golden_path: Path) -> Path:
     return golden_path.with_name(golden_path.stem + ".lock.json")
@@ -239,16 +237,18 @@ def require_outcome_mark_ready(readiness: dict) -> None:
 # --- ingest ------------------------------------------------------------------
 
 
-def ingest_attempt(client: gr.ApiClient, row: dict) -> str:
+def ingest_attempt(client: gr.ApiClient, ctx: dict, row: dict) -> str:
+    """Retain one coding attempt as an episode, strict-contract shape.
+
+    Identity comes from the bound context (``ctx``); the episode body is the
+    attempt's role-prefixed transcript. ``source_kind="agent"`` (the agent's own
+    transcript); trust is bound by the API key, never sent."""
     body = build_episode_body(row["events"])
     payload = {
-        "tenant_id": client.tenant_id,
-        "scope_id": SCOPE_ID,
-        "actor_id": ACTOR_ID,
-        "source_kind": "agent",
-        "source_trust": "trusted_system",
-        "subject_hint": f"coding-attempt:{row['attempt_id']}",
-        "body": body,
+        **ctx,
+        "source_ref": f"coding-attempt:{row['attempt_id']}",
+        "observed_at": "2026-07-13T00:00:00Z",
+        "payload": {"episode": {"source_kind": "agent", "body": body}},
     }
     response = client.post("/v1/episodes", payload)
     return response.get("episode_id") or ""
@@ -338,9 +338,19 @@ def main() -> int:
     try:
         server.start()
         client = gr.ApiClient(args.port, api_key, tenant_id)
+        # One bound context for the whole code-lane run (strict contract:
+        # server assigns the ids; we never send tenant_id).
+        ctx = client.bind_context(
+            "code-lane:coding-attempts",
+            subject_ref="code-lane:subject",
+            actor_ref="code-lane:actor",
+            actor_kind="agent",
+            scope_ref="code-lane:scope",
+            agent_node_ref="code-lane:agent",
+        )
         t0 = time.time()
         for i, row in enumerate(ingest_rows):
-            ingest_attempt(client, row)
+            ingest_attempt(client, ctx, row)
             if (i + 1) % 25 == 0:
                 print(f"{label_prefix}  ingested {i + 1}/{len(ingest_rows)}", file=sys.stderr)
         print(
@@ -354,7 +364,7 @@ def main() -> int:
         provenance_rows = []
         for i, golden in enumerate(goldens):
             bodies, degraded = gr.recall_query(
-                client, SCOPE_ID, ACTOR_ID, golden["question"], args.k, args.budget_tokens, args.mode
+                client, ctx, golden["question"], args.k, args.budget_tokens, args.mode
             )
             evidence_rows.append(gc.evidence_row(golden, bodies, args.k))
             provenance_rows.append(

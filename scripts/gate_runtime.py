@@ -290,6 +290,39 @@ class ApiClient:
     def get(self, path: str) -> dict:
         return self._request("GET", path)
 
+    def bind_context(
+        self,
+        client_ref: str,
+        *,
+        subject_ref: str,
+        subject_kind: str = "user",
+        actor_ref: str,
+        actor_kind: str = "system",
+        scope_ref: str,
+        scope_kind: str = "user_root",
+        agent_node_ref: str,
+    ) -> dict:
+        """Resolve external refs into the identity every verb requires
+        (PUT /v1/context-bindings). Returns the five ids + subject_generation as
+        a dict ready to spread into a retain/recall body. The strict landed
+        contract validates these on every call; there is no tenant_id path."""
+        response = self.put(
+            f"/v1/context-bindings/{client_ref}",
+            {
+                "subject": {"external_ref": subject_ref, "kind": subject_kind},
+                "actor": {"external_ref": actor_ref, "kind": actor_kind},
+                "scope": {"external_ref": scope_ref, "kind": scope_kind},
+                "agent_node": {"external_ref": agent_node_ref},
+            },
+        )
+        return {
+            "subject_id": response["subject_id"],
+            "scope_id": response["scope_id"],
+            "actor_id": response["actor_id"],
+            "agent_node_id": response["agent_node_id"],
+            "subject_generation": response["subject_generation"],
+        }
+
 
 def reexec_through_scratch_db(base_url: str) -> None:
     """Re-exec this runner through ``scripts/with_scratch_db.sh`` so the bench
@@ -755,15 +788,13 @@ def structured_extractor_attempt_summary(
 
 
 def recall_query(
-    client: ApiClient, scope_id: str, actor_id: str, query: str, k: int, budget_tokens: int, mode: str
+    client: ApiClient, ctx: dict, query: str, k: int, budget_tokens: int, mode: str
 ) -> tuple[list[str], bool]:
     """Calls ``/v1/recall`` and returns ``(item_bodies_by_rank, degraded)``.
-    Scope/actor ids are passed explicitly since each runner mints its own
-    fixed scope/actor pair."""
+    ``ctx`` is a bound context (from ``ApiClient.bind_context``) carrying the
+    strict-contract identity; there is no tenant_id path."""
     payload = {
-        "tenant_id": client.tenant_id,
-        "scope_id": scope_id,
-        "actor_id": actor_id,
+        **ctx,
         "query": query,
         "limit": k,
         "budget_tokens": budget_tokens,
