@@ -23,16 +23,26 @@ fn assert_invariant(label: &str, body: &str) {
         assert!(
             slice == Some(c.body.as_str()),
             "[{label}] span {s}..{e} slices {:?} but chunk.body is {:?}",
-            slice, c.body
+            slice,
+            c.body
         );
     }
 }
 
 #[test]
 fn resource_chunk_span_matches_body_on_adversarial_inputs() {
-    let para = |n: usize| format!("Paragraph {n} carries enough words to matter for the char-budget windower so that the segmenter is forced to open more than a single window across the whole document body here.");
+    let para = |n: usize| {
+        format!(
+            "Paragraph {n} carries enough words to matter for the char-budget windower so that the segmenter is forced to open more than a single window across the whole document body here."
+        )
+    };
     let big = |sep: &str, mid: &str| {
-        format!("{}{sep}{mid}{sep}{}{sep}{mid}{sep}{}", para(1), para(2), para(3))
+        format!(
+            "{}{sep}{mid}{sep}{}{sep}{mid}{sep}{}",
+            para(1),
+            para(2),
+            para(3)
+        )
     };
     assert_invariant("lf-blank", &big("\n", "\n"));
     assert_invariant("crlf-blank", &big("\r\n", "\r\n"));
@@ -43,7 +53,14 @@ fn resource_chunk_span_matches_body_on_adversarial_inputs() {
     assert_invariant("multibyte", &big("\n", "café ☕ 日本語 —— \u{2028}"));
     assert_invariant("u2028", &format!("{}\u{2028}\u{2028}{}", para(1), para(2)));
     assert_invariant("u2029", &format!("{}\u{2029}{}", para(1), para(2)));
-    assert_invariant("fenced", &format!("{}\n\n```\ncode\n\nblank in fence\n```\n\n{}", para(1), para(2)));
+    assert_invariant(
+        "fenced",
+        &format!(
+            "{}\n\n```\ncode\n\nblank in fence\n```\n\n{}",
+            para(1),
+            para(2)
+        ),
+    );
     // very long single paragraph -> split_oversized path over multi-byte text
     let long_mb = "日本語テキスト".repeat(2000);
     assert_invariant("oversized-mb", &long_mb);

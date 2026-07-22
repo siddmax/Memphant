@@ -976,14 +976,25 @@ async fn deep_recovers_exactly_the_unit_fast_misses() {
     );
     // The recovered unit is cited through the Deep channel with real provenance,
     // not smuggled in via the ordinary pool.
-    assert!(deep.deep.is_some(), "Deep response must carry a deep envelope");
-    assert!(fast.deep.is_none(), "Fast response must not carry a deep envelope");
+    assert!(
+        deep.deep.is_some(),
+        "Deep response must carry a deep envelope"
+    );
+    assert!(
+        fast.deep.is_none(),
+        "Fast response must not carry a deep envelope"
+    );
     let deep_trace = store.trace_by_id_any_tenant(deep.trace_id).unwrap();
     assert!(
-        deep_trace.candidates.iter().any(|c| {
-            c.unit_id == answer_id && c.channel == RecallChannel::Deep
-        }),
+        deep_trace
+            .candidates
+            .iter()
+            .any(|c| { c.unit_id == answer_id && c.channel == RecallChannel::Deep }),
         "the recovered unit must be attributed to the Deep channel, not the fast pool"
     );
-    assert_eq!(provider.calls.load(Ordering::SeqCst), 1, "Deep called the provider exactly once");
+    assert_eq!(
+        provider.calls.load(Ordering::SeqCst),
+        1,
+        "Deep called the provider exactly once"
+    );
 }
