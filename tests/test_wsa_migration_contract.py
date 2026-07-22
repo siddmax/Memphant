@@ -704,7 +704,14 @@ def test_episode_dedup_and_worker_claim_lanes_are_exact_context_bound() -> None:
     ) in episode
     claim = sql.split("create or replace function memphant.claim_reflect_jobs", 1)[1]
     for predicate in (
-        "locked_lanes as materialized",
+        # Lane ownership is serialized by a BLOCKING per-lane advisory lock taken
+        # in a plpgsql loop BEFORE the claim query, carried in via the
+        # reflect_lane_key[] array. A skip-locked/try-lock in-query gate is NOT
+        # sufficient (snapshot-vs-lock ordering leaves a ~0.3% lane split) — these
+        # assertions lock the correct structure in against a regression to it.
+        "pg_advisory_xact_lock",
+        "locked_lane_keys",
+        "unnest(locked_lane_keys)",
         "lane.data_subject_id = job.data_subject_id",
         "lane.subject_generation = job.subject_generation",
         "lane.scope_id = job.scope_id",

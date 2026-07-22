@@ -1079,6 +1079,26 @@ as $$
   where key.key_hash = p_key_hash
 $$;
 
+-- Composite key for a reflect scope-lane, used by claim_reflect_jobs to carry
+-- advisory-locked lanes from the lock loop into the claim query.
+do $$
+begin
+  if not exists (
+    select 1 from pg_type t
+    join pg_namespace n on n.oid = t.typnamespace
+    where n.nspname = 'memphant' and t.typname = 'reflect_lane_key'
+  ) then
+    create type memphant.reflect_lane_key as (
+      tenant_id uuid,
+      data_subject_id uuid,
+      subject_generation bigint,
+      scope_id uuid,
+      agent_node_id uuid
+    );
+  end if;
+end
+$$;
+
 create or replace function memphant.claim_reflect_jobs(
   p_limit integer,
   p_tenant_id uuid default null,
@@ -1093,6 +1113,9 @@ set search_path = memphant, pg_catalog
 as $$
 declare
   stale_lane record;
+  cand_lane record;
+  lane_limit integer := greatest(0, least(p_limit, 1000));
+  locked_lane_keys memphant.reflect_lane_key[] := array[]::memphant.reflect_lane_key[];
 begin
   update memphant.job_state job
   set state = 'dead'
@@ -1148,9 +1171,37 @@ begin
       and job.state not in ('done', 'dead');
   end loop;
 
-  return query
-  with locked_lanes as materialized (
-    select agent.tenant_id, agent.data_subject_id, subject.generation as subject_generation,
+  -- Serialize lane ownership with a BLOCKING per-lane transaction advisory
+  -- lock, taken here as its own statement per candidate lane — not inside the
+  -- claim query.
+  --
+  -- Why a blocking lock in a separate loop, and not the obvious in-query gates:
+  --   * `for update of agent skip locked` on the lane's agent_node row is not a
+  --     reliable gate. Its LockRows node sits above the Sort in the plan, so
+  --     under load two concurrent claimers can both pass it in the race window,
+  --     then split the lane at the job-level `for update of job skip locked`
+  --     scan (owner A takes the first N jobs in queue_order, B skip-locks those
+  --     and takes the disjoint tail).
+  --   * `pg_try_advisory_xact_lock` inside the claim query (WHERE clause or a
+  --     CTE filter) does not close the window either: lane ADMISSION and the
+  --     lock are evaluated against the same MVCC snapshot, but the lock loop
+  --     and the claim run as separate plpgsql statements with separate
+  --     snapshots. A claimer can admit a lane on a snapshot taken just before a
+  --     peer commits the head jobs as running, TRY-lock succeeds because the
+  --     peer has already released on commit, and it then claims the tail. Every
+  --     `try`-based placement leaves this residual split (~0.3% under a tight
+  --     concurrent hammer).
+  -- A blocking `pg_advisory_xact_lock` removes the window: the loser WAITS for
+  -- the winner to commit and release, and only then runs its claim query, whose
+  -- fresh snapshot sees the winner's head jobs `running` — so the tail is
+  -- excluded (see the earlier-running guard in `eligible`) and the loser claims
+  -- nothing. Lanes are locked in a deterministic order (tenant_id, agent_id),
+  -- so multiple claimers acquire in the same order and cannot deadlock. Held to
+  -- transaction end, covering the job claim below. Lanes are processed serially
+  -- anyway, so the brief wait costs no real throughput.
+  for cand_lane in
+    select agent.tenant_id, agent.data_subject_id,
+           subject.generation as subject_generation,
            agent.scope_id, agent.id as agent_node_id
     from memphant.agent_node agent
     join memphant.subject subject
@@ -1167,34 +1218,26 @@ begin
           and candidate.attempts < p_max_attempts and candidate.run_after <= now()
           and (candidate.claimed_at is null or candidate.claimed_at < now() - interval '15 minutes')
       )
-      and not exists (
-        select 1 from memphant.job_state active
-        where active.tenant_id = agent.tenant_id
-          and active.data_subject_id = agent.data_subject_id
-          and active.subject_generation = subject.generation
-          and active.scope_id = agent.scope_id and active.agent_node_id = agent.id
-          and active.state = 'running'
-          and active.claimed_at >= now() - interval '15 minutes'
-      )
-      -- Lane ownership is a transaction advisory lock, not just the agent row
-      -- lock. `for update of agent skip locked` sits above the Sort in the plan,
-      -- so two concurrent claimers whose snapshots do not overlap on the row can
-      -- both pass the lock and split the lane at the job-level skip-locked scan
-      -- (owner A takes the first N jobs under `limit`, B skip-locks those and
-      -- claims the rest) — the intermittent XOR failure in the concurrent-claim
-      -- contract test. pg_try_advisory_xact_lock is atomic in shared memory with
-      -- no such window: exactly one claimer keeps the lane, the loser's
-      -- locked_lanes is empty so it claims nothing. Held to transaction end, it
-      -- covers the job claim + prepared-state writes in this same statement.
-      and pg_try_advisory_xact_lock(
-            hashtextextended(
-              agent.tenant_id::text || ':' || agent.data_subject_id::text || ':'
-                || subject.generation::text || ':' || agent.scope_id::text || ':'
-                || agent.id::text,
-              0))
     order by agent.tenant_id, agent.id
-    limit greatest(0, least(p_limit, 1000))
-    for update of agent skip locked
+    limit lane_limit
+  loop
+    exit when cardinality(locked_lane_keys) >= lane_limit;
+    perform pg_advisory_xact_lock(
+      hashtextextended(
+        cand_lane.tenant_id::text || ':' || cand_lane.data_subject_id::text || ':'
+          || cand_lane.subject_generation::text || ':' || cand_lane.scope_id::text || ':'
+          || cand_lane.agent_node_id::text,
+        0));
+    locked_lane_keys := locked_lane_keys || array[
+      row(cand_lane.tenant_id, cand_lane.data_subject_id, cand_lane.subject_generation,
+          cand_lane.scope_id, cand_lane.agent_node_id)::memphant.reflect_lane_key];
+  end loop;
+
+  return query
+  with locked_lanes as (
+    select (key).tenant_id, (key).data_subject_id, (key).subject_generation,
+           (key).scope_id, (key).agent_node_id
+    from unnest(locked_lane_keys) as key
   ), eligible as (
     select job.tenant_id, job.id, job.queue_order
     from memphant.job_state job
