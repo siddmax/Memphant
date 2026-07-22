@@ -49,6 +49,7 @@ import statistics
 import subprocess
 import sys
 import time
+import urllib.parse
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -62,7 +63,9 @@ import gate_common as gc  # noqa: E402
 # call site and any external reference keep working.
 from gate_runtime import (  # noqa: E402, F401
     API_KEY_ENV_BY_ARM,
+    ApiClient,
     check_embed_model_key,
+    provision_tenant,
     reexec_through_scratch_db,
 )
 
@@ -74,14 +77,10 @@ RECALL_E2E_P95_CEILING_MS = 1500
 RETRIEVAL_BUDGET_TOKENS = 1_000_000
 DEFAULT_SYNDAI_ROOT = Path("/Users/sidsharma/Syndai")
 GOLDEN_PATH = gc.MEMPHANT_ROOT / "benchmarks" / "data" / "syndai_docs_golden.jsonl"
-SCOPE_ID = "7c000000-0000-4000-8000-0000000000a1"
-ACTOR_ID = "7c000000-0000-4000-8000-0000000000a2"
-NEGATIVE_SCOPE_IDS = {
-    "active": SCOPE_ID,
-    "other_user": "7c000000-0000-4000-8000-0000000000b1",
-    "other_project": "7c000000-0000-4000-8000-0000000000b2",
-    "other_agent": "7c000000-0000-4000-8000-0000000000b3",
-}
+# Strict-contract identity: every verb carries the five ids resolved by the
+# ``bind_context`` handshake (C0; there is no tenant_id/raw-uuid path). All
+# corpus sections share one fixed observed_at so relative ranking is unaffected.
+OBSERVED_AT = "2026-07-01T00:00:00Z"
 NEGATIVE_SCOPE_ADAPTER_MAPPING = {
     "wrong_tenant": "tenant_id",
     "wrong_user": "scope_id adapter mapping (not a native user dimension)",
@@ -92,27 +91,6 @@ NEGATIVE_SCOPE_ADAPTER_MAPPING = {
 
 def sh(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True, **kwargs)
-
-
-def provision_tenant(cli_bin: str, database_url: str) -> tuple[str, str]:
-    name = f"syndai-gate-{int(time.time())}"
-    out = sh([cli_bin, "admin", "create-tenant", "--name", name, "--database-url", database_url])
-    if out.returncode != 0:
-        raise RuntimeError(f"create-tenant failed: {out.stderr.strip()}")
-    match = re.search(r"tenant_created id=(\S+)", out.stdout)
-    if not match:
-        raise RuntimeError(f"could not parse tenant id from: {out.stdout}")
-    tenant_id = match.group(1)
-    out = sh(
-        [cli_bin, "admin", "create-key", "--tenant", tenant_id,
-         "--max-trust", "trusted_system", "--database-url", database_url]
-    )
-    if out.returncode != 0:
-        raise RuntimeError(f"create-key failed: {out.stderr.strip()}")
-    api_key = out.stdout.strip().splitlines()[-1].strip()
-    if not api_key.startswith("mk_"):
-        raise RuntimeError(f"could not parse api key from: {out.stdout}")
-    return tenant_id, api_key
 
 
 def check_port_free(port: int) -> None:
@@ -162,6 +140,7 @@ class Server:
         rerank_batch_size: int = 256,
         cross_rerank_candidates: str = "fused-head",
         reranker: str = "fastembed",
+        rerank_granularity: str | None = None,
     ) -> None:
         self.server_bin = server_bin
         self.database_url = database_url
@@ -175,6 +154,7 @@ class Server:
         self.rerank_batch_size = rerank_batch_size
         self.cross_rerank_candidates = cross_rerank_candidates
         self.reranker = reranker
+        self.rerank_granularity = rerank_granularity
         self.proc: subprocess.Popen | None = None
         self._log_file = None
 
@@ -214,6 +194,7 @@ class Server:
         env.pop("MEMPHANT_RERANKER", None)
         env.pop("MEMPHANT_RERANK_MAX_LENGTH", None)
         env.pop("MEMPHANT_RERANK_BATCH_SIZE", None)
+        env.pop("MEMPHANT_RERANK_GRANULARITY", None)
         env["MEMPHANT_APP_DATABASE_URL"] = self.database_url
         env["MEMPHANT_AUTHN_DATABASE_URL"] = self.database_url
         env["MEMPHANT_BIND"] = f"127.0.0.1:{self.port}"
@@ -226,9 +207,11 @@ class Server:
             env["MEMPHANT_CROSS_RERANK"] = "1"
             env["MEMPHANT_RERANKER"] = self.reranker
         env["MEMPHANT_RERANK_CANDIDATE_LIMIT"] = str(self.rerank_candidate_limit)
-        if self.reranker == "fastembed":
+        if self.reranker in ("fastembed", "byo"):
             env["MEMPHANT_RERANK_MAX_LENGTH"] = str(self.rerank_max_length)
             env["MEMPHANT_RERANK_BATCH_SIZE"] = str(self.rerank_batch_size)
+        if self.rerank_granularity:
+            env["MEMPHANT_RERANK_GRANULARITY"] = self.rerank_granularity
         env["MEMPHANT_CROSS_RERANK_CANDIDATES"] = self.cross_rerank_candidates
         return env
 
@@ -279,44 +262,23 @@ class Server:
         self._terminate()
 
 
-class ApiClient:
-    def __init__(self, port: int, api_key: str, tenant_id: str) -> None:
-        self.port = port
-        self.headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-        self.tenant_id = tenant_id
-        self.conn = http.client.HTTPConnection("127.0.0.1", port, timeout=120)
-
-    def _request(self, method: str, path: str, payload: dict | None = None) -> dict:
-        body = json.dumps(payload) if payload is not None else None
-        for attempt in range(3):
-            try:
-                self.conn.request(method, path, body=body, headers=self.headers)
-                response = self.conn.getresponse()
-                data = response.read()
-                if response.status >= 400:
-                    raise RuntimeError(f"{path} -> HTTP {response.status}: {data[:300]!r}")
-                return json.loads(data)
-            except (http.client.HTTPException, OSError) as error:
-                self.conn.close()
-                self.conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=120)
-                if attempt == 2:
-                    raise RuntimeError(f"{path} failed after retries: {error}")
-        raise AssertionError("unreachable")
-
-    def post(self, path: str, payload: dict) -> dict:
-        return self._request("POST", path, payload)
-
-    def put(self, path: str, payload: dict) -> dict:
-        return self._request("PUT", path, payload)
-
-    def get(self, path: str) -> dict:
-        return self._request("GET", path)
+def bind_gate_context(client: ApiClient, label: str) -> dict:
+    """One bound strict-contract context per gate scope. ``label`` picks the
+    scope_ref, so 'active' and each negative scope kind resolve to distinct
+    scopes under the same tenant (the scope_id adapter mapping recorded in
+    ``NEGATIVE_SCOPE_ADAPTER_MAPPING``); subject/actor/agent refs are shared."""
+    return client.bind_context(
+        f"syndai-docs-gate:{label}",
+        subject_ref="syndai-gate:subject",
+        actor_ref="syndai-gate:actor",
+        scope_ref=f"syndai-gate:scope:{label}",
+        agent_node_ref="syndai-gate:agent",
+    )
 
 
-def ingest_section(client: ApiClient, section: gc.Section, breadcrumb: bool = False) -> str:
+def ingest_section(
+    client: ApiClient, ctx: dict, section: gc.Section, breadcrumb: bool = False
+) -> str:
     """POSTs one section as a resource. ``breadcrumb=True`` prefixes the body
     with Syndai's "Section path: a > b" convention (``gate_common.
     breadcrumb_prefix`` — byte-identical to ``processing_chunks.py:84``)
@@ -327,53 +289,56 @@ def ingest_section(client: ApiClient, section: gc.Section, breadcrumb: bool = Fa
     if breadcrumb:
         body = gc.breadcrumb_prefix(section.heading_path) + body
     payload = {
-        "tenant_id": client.tenant_id,
-        "scope_id": SCOPE_ID,
-        "actor_id": ACTOR_ID,
-        "source_kind": "docs",
-        "source_trust": "trusted_system",
-        "resource": {
-            "uri": section.uri(),
-            "mime_type": "text/markdown",
-            "content_hash": "sha256:" + hashlib.sha256(body.encode()).hexdigest(),
-            "kind": "document",
-            "revision": "syndai-gate",
-            "body": body,
+        **ctx,
+        "source_ref": section.uri(),
+        "observed_at": OBSERVED_AT,
+        "payload": {
+            "resource": {
+                "uri": section.uri(),
+                "mime_type": "text/markdown",
+                "content_hash": "sha256:" + hashlib.sha256(body.encode()).hexdigest(),
+                "kind": "document",
+                "revision": "syndai-gate",
+                "body": body,
+            }
         },
     }
     response = client.post("/v1/episodes", payload)
     return response.get("resource_id") or ""
 
 
-def ingest_negative_document(client: ApiClient, document: dict, scope_id: str) -> str:
+def ingest_negative_document(client: ApiClient, ctx: dict, document: dict) -> str:
     body = document["body"]
     payload = {
-        "tenant_id": client.tenant_id,
-        "scope_id": scope_id,
-        "actor_id": ACTOR_ID,
-        "source_kind": "negative-gate",
-        "source_trust": "trusted_system",
+        **ctx,
+        "source_ref": f"memphant://negative/{document['document_id']}",
+        "observed_at": document["valid_from"] or OBSERVED_AT,
     }
     if document["valid_to"] is not None:
-        payload["unit"] = {
-            "kind": "semantic",
-            "subject": f"negative:{document['document_id']}",
-            "predicate": "fixture_value",
-            "body": body,
-            "valid_from": document["valid_from"],
-            "valid_to": document["valid_to"],
+        payload["payload"] = {
+            "unit": {
+                "kind": "semantic",
+                "fact_key": f"negative:{document['document_id']}",
+                "predicate": "fixture_value",
+                "body": body,
+                "confidence": 1.0,
+                "valid_from": document["valid_from"],
+                "valid_to": document["valid_to"],
+            }
         }
     else:
-        payload["resource"] = {
+        payload["payload"] = {
+            "resource": {
                 "uri": f"memphant://negative/{document['document_id']}",
                 "mime_type": "text/plain",
                 "content_hash": "sha256:" + hashlib.sha256(body.encode()).hexdigest(),
                 "kind": "document",
                 "revision": "syndai-docs-negative-v1",
                 "body": body,
+            }
         }
     response = client.post("/v1/episodes", payload)
-    if "unit" in payload:
+    if "unit" in payload["payload"]:
         unit_ids = response.get("unit_ids")
         if not isinstance(unit_ids, list) or len(unit_ids) != 1 or not isinstance(unit_ids[0], str):
             raise RuntimeError("stale negative direct retain did not create exactly one unit")
@@ -468,6 +433,7 @@ def _cross_rerank_facts(
 
 def recall(
     client: ApiClient,
+    ctx: dict,
     question: str,
     k: int,
     budget_tokens: int,
@@ -479,9 +445,7 @@ def recall(
     valid_at: str | None = None,
 ) -> tuple[list[str], str, dict | None, int, int, int]:
     payload = {
-        "tenant_id": client.tenant_id,
-        "scope_id": SCOPE_ID,
-        "actor_id": ACTOR_ID,
+        **ctx,
         "query": question,
         "limit": k,
         # Raise the pack budget so the top-k ranked units are returned rather
@@ -508,7 +472,18 @@ def recall(
         for item in items
     ):
         raise RuntimeError("recall response items are malformed")
-    trace = client.get(f"/v1/traces/{trace_id}")
+    # The strict trace endpoint resolves the same bound context as recall, so
+    # the five ids + generation ride as query params (GET has no body).
+    trace_query = urllib.parse.urlencode(
+        {
+            "subject_id": ctx["subject_id"],
+            "scope_id": ctx["scope_id"],
+            "actor_id": ctx["actor_id"],
+            "agent_node_id": ctx["agent_node_id"],
+            "subject_generation": ctx["subject_generation"],
+        }
+    )
+    trace = client.get(f"/v1/traces/{trace_id}?{trace_query}")
     trace_finished_ns = time.perf_counter_ns()
     if not isinstance(trace, dict) or trace.get("id") != trace_id:
         raise RuntimeError(f"missing or mismatched recall trace for trace_id={trace_id}")
@@ -748,6 +723,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--syndai-root", default=str(DEFAULT_SYNDAI_ROOT))
     parser.add_argument(
+        "--manifest",
+        default=None,
+        help=(
+            "corpus manifest lock to verify against (default: the committed "
+            "benchmarks/manifests/syndai_docs_gate.lock.json). Pass an archived "
+            "manifest to reproduce a run against an OLD corpus pin (paired with "
+            "--syndai-root at a checkout/archive of that pin)."
+        ),
+    )
+    parser.add_argument(
         "--golden",
         action="append",
         default=None,
@@ -829,14 +814,31 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rerank-batch-size", type=positive_int, default=256)
     parser.add_argument(
         "--reranker",
-        choices=("fastembed", "voyage-rerank-2.5"),
+        choices=("fastembed", "byo", "voyage-rerank-2.5"),
         default="fastembed",
-        help="construction-time cross-reranker implementation; no generic provider routing",
+        help=(
+            "construction-time cross-reranker implementation; no generic "
+            "provider routing. 'byo' loads the local ONNX + tokenizer dir from "
+            "MEMPHANT_RERANK_BYO_DIR (e.g. ms-marco-MiniLM-L6-v2 int8, the "
+            "reranker-latency-spike winner)"
+        ),
     )
     parser.add_argument(
         "--cross-rerank-candidates",
         choices=("fused-head", "vector-lexical-balanced"),
         default="fused-head",
+    )
+    parser.add_argument(
+        "--rerank-granularity",
+        choices=("body", "chunk"),
+        default=None,
+        help=(
+            "MEMPHANT_RERANK_GRANULARITY: 'body' reranks whole section bodies "
+            "(default); 'chunk' reranks each candidate's contextual_chunks and "
+            "max-pools to the unit (needs --resource-chunks so sections carry "
+            "chunks). The reranker-latency-spike fix for long docs past the "
+            "512-token wall."
+        ),
     )
     parser.add_argument(
         "--candidate-oracle-k",
@@ -904,7 +906,12 @@ def main() -> int:
         )
 
     root = Path(args.syndai_root)
-    files, haystack, corpus_manifest = gc.load_pinned_corpus(root)
+    if args.manifest:
+        files, haystack, corpus_manifest = gc.load_pinned_corpus(
+            root, manifest_path=Path(args.manifest)
+        )
+    else:
+        files, haystack, corpus_manifest = gc.load_pinned_corpus(root)
     if args.limit_haystack:
         raise RuntimeError("--limit-haystack violates the full common-corpus contract")
     # Coverage assertion: every gold section (in every golden set) must be
@@ -938,8 +945,14 @@ def main() -> int:
         {key: value for key, value in run_identity.items() if key != "sha256"}
     )
 
-    tenant_id, api_key = provision_tenant(args.cli_bin, args.database_url)
-    other_tenant = provision_tenant(args.cli_bin, args.database_url) if negative_cases else None
+    tenant_id, api_key = provision_tenant(
+        args.cli_bin, args.database_url, name_prefix="syndai-gate"
+    )
+    other_tenant = (
+        provision_tenant(args.cli_bin, args.database_url, name_prefix="syndai-gate-other")
+        if negative_cases
+        else None
+    )
     print(f"{label_prefix}tenant={tenant_id}", file=sys.stderr)
 
     log_name = f"server-{args.label}.log" if args.label else "server.log"
@@ -954,6 +967,7 @@ def main() -> int:
         rerank_batch_size=args.rerank_batch_size,
         cross_rerank_candidates=args.cross_rerank_candidates,
         reranker=args.reranker,
+        rerank_granularity=args.rerank_granularity,
     )
     # Symmetric cleanup: start() and the ingest/recall body are both inside
     # this try so the server child is always killed on any exception path,
@@ -965,20 +979,31 @@ def main() -> int:
         other_client = (
             ApiClient(args.port, other_tenant[1], other_tenant[0]) if other_tenant else None
         )
+        ctx = bind_gate_context(client, "active")
+        negative_contexts = (
+            {
+                scope: bind_gate_context(client, scope)
+                for scope in ("other_user", "other_project", "other_agent")
+            }
+            | {"active": ctx}
+            if negative_cases
+            else {}
+        )
+        other_ctx = bind_gate_context(other_client, "active") if other_client else None
         t0 = time.time()
         for i, section in enumerate(haystack):
-            ingest_section(client, section, breadcrumb=args.breadcrumb)
+            ingest_section(client, ctx, section, breadcrumb=args.breadcrumb)
             if (i + 1) % 500 == 0:
                 print(f"{label_prefix}  ingested {i + 1}/{len(haystack)}", file=sys.stderr)
         if negative_cases:
             for case in negative_cases:
                 for document in gc.negative_ingest_projection(case):
                     if document["scope"] == "other_tenant":
-                        assert other_client is not None
-                        ingest_negative_document(other_client, document, SCOPE_ID)
+                        assert other_client is not None and other_ctx is not None
+                        ingest_negative_document(other_client, other_ctx, document)
                     else:
                         ingest_negative_document(
-                            client, document, NEGATIVE_SCOPE_IDS[document["scope"]]
+                            client, negative_contexts[document["scope"]], document
                         )
         print(f"{label_prefix}ingest done in {time.time() - t0:.1f}s; draining worker...", file=sys.stderr)
         compiled = drain_worker(
@@ -987,23 +1012,31 @@ def main() -> int:
         )
         print(f"{label_prefix}worker drained: compiled={compiled} jobs", file=sys.stderr)
 
-        requested_rerank_config = (
-            {
+        if args.reranker == "voyage-rerank-2.5":
+            requested_rerank_config = {
                 "provider": "voyage",
                 "model": "rerank-2.5",
                 "candidate_limit": args.rerank_candidate_limit,
                 "max_length": 32_000,
                 "batch_size": None,
             }
-            if args.reranker == "voyage-rerank-2.5"
-            else {
+        elif args.reranker == "byo":
+            requested_rerank_config = {
+                "provider": "byo",
+                "model": "byo:"
+                + os.environ.get("MEMPHANT_RERANK_BYO_ONNX", "model_quantized.onnx"),
+                "candidate_limit": args.rerank_candidate_limit,
+                "max_length": args.rerank_max_length,
+                "batch_size": args.rerank_batch_size,
+            }
+        else:
+            requested_rerank_config = {
                 "provider": "fastembed",
                 "model": "fastembed:bge-reranker-base",
                 "candidate_limit": args.rerank_candidate_limit,
                 "max_length": args.rerank_max_length,
                 "batch_size": args.rerank_batch_size,
             }
-        )
         negative_summary = None
         if negative_cases:
             negative_evidence = []
@@ -1015,6 +1048,7 @@ def main() -> int:
                     query = gc.negative_query_projection(case)
                     raw_bodies, *_ = recall(
                         client,
+                        ctx,
                         query["question"],
                         args.k,
                         RETRIEVAL_BUDGET_TOKENS,
@@ -1052,7 +1086,7 @@ def main() -> int:
                     trace_read_ms,
                     recall_e2e_ms,
                 ) = recall(
-                    client, golden["question"], args.k, RETRIEVAL_BUDGET_TOKENS, args.mode,
+                    client, ctx, golden["question"], args.k, RETRIEVAL_BUDGET_TOKENS, args.mode,
                     cross_rerank=args.cross_rerank,
                     expected_rerank_config=requested_rerank_config,
                 )
@@ -1060,6 +1094,7 @@ def main() -> int:
                 if args.candidate_oracle_k:
                     oracle_bodies, *_ = recall(
                         client,
+                        ctx,
                         golden["question"],
                         args.candidate_oracle_k,
                         1_000_000,
