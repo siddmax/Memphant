@@ -249,6 +249,27 @@ team (rungs), devil's advocate (free-first discipline), codebase team (wiring).
   `docs/superpowers/specs/2026-07-21-a1-fast-miss-classification-design.md` +
   `docs/build-log/2026-07-21-a1-fast-miss-classification.md` +
   `docs/build-log/artifacts/a1-fast-miss-classification/`.
+- **RUNG 7 (packing/ordering — the A1-elevated center of gravity). DIAGNOSED +
+  LEVER FOUND (2026-07-21, FREE).** The 64 in-pool-unpacked dev misses are
+  **100 % `Budget` drops** (zero dedup, zero rerank, zero scan-depth): gold at
+  median fused_rank 2 is budget-dropped because ~3230-tok whole-session bodies
+  exhaust the 8192 pack budget (only ~4 items fit; probe-verified). The cause is
+  **per-item cost, not total budget**: `packed_render` gave each item a render
+  budget of its whole body, so chunk-render refilled it to ~4600 tok and hogged
+  the budget. **Lever (`PackLevers.pack_render_cap`, default OFF): cap each
+  item's chunk-render at 1200 tok.** Paired dev retrieval (166q, seed 20260713,
+  FREE) vs the 8192 baseline: **r@10 0.6145 → 0.8494, Δ+0.2349 [95 % CI +0.169,
+  +0.295]** — bigger than doubling the budget (16384: Δ+0.151 [+0.096, +0.211])
+  AND at the SAME 8192 budget (tighter reader context, the opposite of the
+  ns-harmful 16384-on-QA finding). Improves every stratum. **This is a
+  RETRIEVAL win; reader-QA is a separate gated (paid) step.** Two-seed promotion
+  hold in progress (seed 20260710). Reconciles with
+  [[memphant-packing-gate-verdict]] (that is the output-full Rerank branch; this
+  is the Budget path). Proof:
+  `docs/build-log/2026-07-21-rung7-packing-diagnosis.md` +
+  `docs/build-log/2026-07-21-rung7-packing-lever.md` +
+  `docs/build-log/artifacts/rung7-packing/` (PREREGISTRATION, paired reports,
+  per-question drop-cause).
 - **A2 (~$1–2.5 realistic, ≤$5.70 cap): the authorized n=12** on
   run-d2f4fcb3, babysat, on a run-owned Postgres (dedicated container, not
   the shared Docker Desktop lifecycle that killed run-65981e4f). Preregistered
