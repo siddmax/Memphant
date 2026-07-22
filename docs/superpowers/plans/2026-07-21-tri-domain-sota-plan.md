@@ -345,6 +345,36 @@ team verdict). Each item carries an n=12-style falsification gate.
    the episode enum once the shape is fixed; give it a `map_source_kind`-style
    translation (the `episodic_lane_run_memphant.py` pattern: raise on unmapped,
    never silently pass).
+   **⏳ PARTIALLY LANDED (2026-07-22, commit `f637dc01`; gate green):** deleted the
+   WS-0 `retain(RetainInput)` core stub + its `RetainInput`/`RetainResult`/
+   `ScopeRef` types (zero callers); deleted the always-passing `memphant-eval
+   compare` stub and repointed the spec runbook at the real `profile
+   --compare-to`; finished the sibling's spike-dir removal by dropping the now-
+   dangling `spikes/python-retain/test_spike.py` from the AGENTS.md gate and the
+   stale `spikes/rust-retain` Cargo workspace `exclude`; marked the three
+   schema-only tables (`trust_event`, `event_outbox`, `scope_block`) explicitly
+   DORMANT via `comment on table` (catalog-queryable). **Findings that revise §f:**
+   (a) the "synthetic rung YAML fleet, archive the rest" premise is inverted —
+   nearly every `benchmarks/rung*.yaml` is a live regression gate referenced by
+   `profile_contract.rs`/`eval_contract.rs`; only `rung4-baseline-sampled.yaml`
+   and `rung5-baseline-sampled.yaml` were genuine orphans (already removed by the
+   sibling C1 commit). (b) `retention_tier` is a live COLUMN on `episode` with a
+   real index, not a dormant table. **DEFERRED — the heuristic-rerank +
+   `RecallMode::Balanced` retirement (§f.2/§f.3):** owner redirected to first
+   settle "which reranker actually helps" (accuracy > cost > speed). Recon shows
+   the OLD heuristic reranker is production-dead (public path forces
+   `rerank_enabled:false`) but its deletion ripples into 5 `RetrievalTrace`
+   fields, ~15 tests, the `--disable-rerank`/`--disable-learned-rerank` eval
+   flags, rung13 validators, AND three versioned external JSON schemas
+   (`trace-schema.v1.json`, `openapi/memphant.v1.json`, `mcp/memphant.tools.v1.json`);
+   Balanced collapses to a Fast alias once the reranker is gone. In-repo evidence
+   is already decisive: heuristic rerank HARMS chat retrieval (ΔR@10 −0.074, CI
+   excl 0, n=100 2026-07-10) → delete; the cross-encoder seam (`bge-reranker-base`
+   / Voyage `rerank-2.5`) is the campaign's largest QA lever (+0.158) but
+   latency-retired at 12.9–13.6 s/query (9× the 1.5 s ceiling) → KEEP the seam,
+   default OFF, adopt a smaller/faster OSS reranker or rank-compression (§2.Q4).
+   l4-naming shims (§f.5) and the `subject_hint` internal-type prune (§f.6) also
+   deferred as their own focused passes.
 6. **B6 — CI honesty legs** (tests team): a Postgres service leg (52 ignored
    live tests + e2e probe currently never run in CI — all CI eval evidence is
    InMemory today), a fastembed-less leg, the `ops` eval lane, and an LME-S
@@ -363,6 +393,24 @@ team verdict). Each item carries an n=12-style falsification gate.
    `crates/memphant-store-postgres/tests/recall_clock_not_past_dated.rs` (commit
    `220bbef4`). Don't twin the pipeline-shape lock `recall_trace_golden.rs` or the
    mock-provider `deep_recall.rs` — both are intentionally store-agnostic.
+   **✅ LANDED (2026-07-22, commit `f637dc01`; all legs validated locally on the
+   packaged runtime + a live scratch PG):** `.github/workflows/ci.yml` gains a
+   `postgres-contracts` job (`postgres:17` service) that runs the full `#[ignore]`d
+   live-PG suite via `with_scratch_db.sh` (`-p memphant-store-postgres -p
+   memphant-worker -- --ignored --test-threads=1`, 43/43 in `pg_store_contract`
+   incl. C1's `hot_path_slo_pg.rs` + `episodic_rls_leakage.rs`), the real-binaries
+   `e2e_probe.sh`, and an n=5 LME-S retrieval chain smoke (`bench-lme --sample 5
+   --embed-model small`, sha-pinned dataset cached via `actions/cache`;
+   `recall_at_10=0.8` on the local run — chain not bit-rotted). `public-gates`
+   gains the `ops` lane + a fastembed-off leg (`cargo test -p memphant-eval
+   --no-default-features` exercises the `not(fastembed)` arms `--all-features`
+   compiled out; `cargo build -p memphant-server --no-default-features`).
+   **Prereq resolved:** the known `claim_reflect_jobs` concurrent-claim flake was
+   root-caused (SQL, not test: `for update … skip locked` above the Sort lets two
+   non-overlapping claimers split a lane) and fixed at the source with
+   `pg_try_advisory_xact_lock` in the migration (0/500 under the hammer that
+   failed 1/120). `race_repro.rs` (a sibling scratch harness) is deliberately NOT
+   committed, so the CI `--ignored` leg never runs its 200-trial hammer.
 
 ## 5. Phase C — Cutover (slices 0/1/3 start now; docs is the only gated slice)
 
