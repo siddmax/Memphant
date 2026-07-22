@@ -1037,4 +1037,112 @@ mod tests {
             assert!(results.iter().all(|r| r.score.is_finite()));
         }
     }
+
+    /// Fixed-pool ACCURACY micro-benchmark for the LOCAL self-hostable rerankers,
+    /// scoring the exact same pools the API arms score (`rr_api_score.py`). Reads
+    /// `MEMPHANT_RR_POOLS` (JSON list of `{question, gold_index, docs:[..]}`),
+    /// reranks each pool, and prints gold rank + latency per pool as JSON so a
+    /// downstream step computes MRR/recall@k. bge-reranker-base by default; set
+    /// `MEMPHANT_RERANK_BYO_DIR` (+ `MEMPHANT_RERANK_MAX_LENGTH`) for the MiniLM
+    /// int8 arm. Call-efficient: one local model load, N pool reranks, no network.
+    #[test]
+    #[ignore = "fixed-pool reranker accuracy bench; set MEMPHANT_RR_POOLS"]
+    fn rerank_fixed_pool_accuracy() {
+        let Ok(pools_path) = std::env::var("MEMPHANT_RR_POOLS") else {
+            eprintln!("fixed-pool bench skipped (set MEMPHANT_RR_POOLS=<pools.json>)");
+            return;
+        };
+        let max_length = std::env::var("MEMPHANT_RERANK_MAX_LENGTH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(512usize);
+        let raw = std::fs::read_to_string(&pools_path).expect("read pools");
+        let pools: serde_json::Value = serde_json::from_str(&raw).expect("parse pools");
+        let pools = pools.as_array().expect("pools is an array");
+
+        // Build the local reranker: BYO MiniLM if a dir is set, else bge-base.
+        enum Arm {
+            Bge(FastEmbedCrossReranker),
+            Byo(std::sync::Mutex<TextRerank>),
+        }
+        let (label, arm) = match std::env::var("MEMPHANT_RERANK_BYO_DIR").ok() {
+            Some(dir) => {
+                use fastembed::{
+                    OnnxSource, RerankInitOptionsUserDefined, TokenizerFiles,
+                    UserDefinedRerankingModel,
+                };
+                let dir = std::path::PathBuf::from(dir);
+                let read = |n: &str| std::fs::read(dir.join(n)).expect(n);
+                let tf = TokenizerFiles {
+                    tokenizer_file: read("tokenizer.json"),
+                    config_file: read("config.json"),
+                    special_tokens_map_file: read("special_tokens_map.json"),
+                    tokenizer_config_file: read("tokenizer_config.json"),
+                };
+                let onnx_name = std::env::var("MEMPHANT_RERANK_BYO_ONNX")
+                    .unwrap_or_else(|_| "model_quantized.onnx".to_string());
+                let model =
+                    UserDefinedRerankingModel::new(OnnxSource::File(dir.join(&onnx_name)), tf);
+                let tr = TextRerank::try_new_from_user_defined(
+                    model,
+                    RerankInitOptionsUserDefined::new().with_max_length(max_length),
+                )
+                .expect("byo reranker");
+                (
+                    format!("byo:{onnx_name}"),
+                    Arm::Byo(std::sync::Mutex::new(tr)),
+                )
+            }
+            None => (
+                "bge-reranker-base".to_string(),
+                Arm::Bge(
+                    FastEmbedCrossReranker::with_config(CrossRerankerConfig {
+                        provider: "fastembed".to_string(),
+                        model: FASTEMBED_RERANKER_ID.to_string(),
+                        candidate_limit: 64,
+                        max_length,
+                        batch_size: Some(256),
+                    })
+                    .expect("bge reranker"),
+                ),
+            ),
+        };
+
+        for pool in pools {
+            let query = pool["question"].as_str().unwrap();
+            let gold = pool["gold_index"].as_u64().unwrap() as usize;
+            let docs: Vec<String> = pool["docs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|d| d.as_str().unwrap().to_string())
+                .collect();
+            let doc_refs: Vec<&str> = docs.iter().map(String::as_str).collect();
+            let started = std::time::Instant::now();
+            let scores = match &arm {
+                Arm::Bge(r) => r.rerank(query, &doc_refs).expect("bge rerank"),
+                Arm::Byo(m) => {
+                    let results = m
+                        .lock()
+                        .unwrap()
+                        .rerank(query, &doc_refs, false, Some(256))
+                        .expect("byo rerank");
+                    // scatter score to input order
+                    let mut s = vec![0f32; doc_refs.len()];
+                    for r in results {
+                        s[r.index] = r.score;
+                    }
+                    s
+                }
+            };
+            let elapsed_ms = started.elapsed().as_millis();
+            // gold rank = 1 + number of docs scoring strictly higher than gold.
+            let gold_score = scores[gold];
+            let rank = 1 + scores.iter().filter(|s| **s > gold_score).count();
+            eprintln!(
+                "{{\"event\":\"rr_fixed_pool\",\"model\":\"{label}\",\"docs\":{},\"gold_rank\":{rank},\"elapsed_ms\":{elapsed_ms}}}",
+                doc_refs.len()
+            );
+        }
+    }
 }

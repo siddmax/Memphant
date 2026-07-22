@@ -96,17 +96,58 @@ larger n is the better next screen.
 
 ## Cohere & Contextual Reranker v2 (owner-requested comparison)
 
-Both fall outside the CPU-self-host-commercial constraint:
-- **Cohere Rerank**: no `COHERE_API_KEY` in env or Doppler `syndai/dev`; API-only,
-  not self-hostable. Would be a cost-arm like Voyage, not a self-host option.
-- **Contextual AI Reranker v2** (`ctxl-rerank-v2-instruct-multilingual-1b/2b/6b`,
-  Aug 2025 — the "multilingual instruction-following reranker"): **CC-BY-NC-SA-4.0
-  (non-commercial)** AND GPU-only (1B+ causal LM, BF16/vLLM/NVFP4; CPU fallback
-  "impractical for production"). Doubly disqualified for our path — an accuracy-
-  frontier/GPU option, not a latency-fit self-host one.
+**Cohere Rerank v3.5** — wired as `MEMPHANT_RERANKER=cohere-rerank-3.5` (owner
+supplied a key; `CohereReranker` mirrors `VoyageReranker`, `MEMPHANT_COHERE_MODEL`
+overrides the model for the v4.0-pro accuracy tier). Direct probe, 24 realistic
+~1.5 KB docs, 5 calls: **p50 306 ms / p95 361 ms**, correct top-1, **1 search unit
+= $0.001/query** (`billed_units`). It is genuinely fast and cheap — but **API-only
+(not self-hostable) and it egresses every candidate body to Cohere**. In the LME-S
+bench arm at the hard 1.5 s recall budget, some queries hit the reranker's global
+timeout (cold-connection/TLS on first calls) and degraded → recall@10 0.333; the
+steady-state probe latency above is the fair number. Pricing tiers (per search
+unit): v3.5 $0.001, Fast $0.002, v4.0-pro $0.0025; v4.0-pro is higher-latency
+premium quality.
 
-Available API keys for optional accuracy/cost *reference* arms (not self-hostable):
-`VOYAGE` (rerank-2.5), `JINA` (jina-v2, CC-BY-NC for self-host but API-testable).
+**Contextual AI Reranker v2** (`ctxl-rerank-v2-instruct-multilingual-1b/2b/6b`,
+Aug 2025 — the "multilingual instruction-following reranker" from the Reddit post):
+**CC-BY-NC-SA-4.0 (non-commercial)** AND GPU-only (1B+ causal LM, BF16/vLLM/NVFP4;
+CPU fallback "impractical for production"). Doubly disqualified for our path — an
+accuracy-frontier/GPU option, not a latency-fit self-host one.
+
+### Fixed-pool micro-benchmark (the accuracy/latency/cost head-to-head)
+
+Call-efficient design: **8 fixed pools** built from real LME-S questions — each pool
+is 1 known-gold session + 43–56 real distractor sessions (~1.5 KB each), gold at a
+known index. Every reranker scores the *same* pools, so accuracy is directly
+comparable and it costs only 8 calls/model. Metric = rank of the gold doc → MRR,
+R@1/5/10. Local arms scored via a Rust `#[ignore]` test (`rerank_fixed_pool_accuracy`);
+API arms via `rr_api_score.py`. Same machine, same pools.
+
+| Reranker | MRR | R@1 | R@10 | latency/query | cost/query | self-host |
+|---|---|---|---|---|---|---|
+| Cohere rerank-v4.0-fast | **0.704** | 0.62 | **0.88** | 419 ms | $0.002 | ❌ API + egress |
+| ZeroEntropy zerank-2 | 0.672 | 0.62 | **0.88** | **318 ms** | ~$0.0004 (16.8k tok) | ❌ API + non-commercial |
+| **ms-marco-MiniLM-L6 int8 (local)** | **0.660** | 0.62 | 0.75 | 605 ms | **free** | ✅ Apache, CPU |
+| bge-reranker-base (local) | 0.569 | 0.38 | 0.75 | **6384 ms** | free | ✅ but too slow |
+| Cohere rerank-v4.0-pro | 0.560 | 0.50 | 0.75 | 699 ms | $0.0025 | ❌ API + egress |
+| Cohere rerank-v3.5 | 0.410 | 0.38 | 0.38 | 417 ms | $0.001 | ❌ API + egress |
+
+(Voyage rerank-2.5 not run — no `VOYAGE_API_KEY` available. n=8, so a 1-question
+move ≈ 0.12 MRR / 0.125 R@k — directional, not promotion-grade.)
+
+**What this shows:**
+- **MiniLM-L6-int8 (local, free, Apache) is statistically tied with the best hosted
+  rerankers** on this set (MRR 0.660 vs cohere-v4-fast 0.704 and zerank-2 0.672 — a
+  0.3–0.5-question gap at n=8) and **beats bge-base, cohere-v4-pro, and cohere-v3.5**.
+- **bge-reranker-base is both slower AND less accurate than MiniLM here** (MRR 0.569,
+  6.4 s/query) — no reason to keep it as the default.
+- Cohere **v3.5 is the weakest** arm (MRR 0.410); the accuracy is in the **v4** family.
+  Cohere **v4.0-fast** is the hosted accuracy+latency sweet spot; **v4.0-pro** was
+  *lower* accuracy than v4.0-fast on this set (more confident scores ≠ better ranking
+  at n=8) and slower.
+- **zerank-2** is genuinely strong — fastest hosted (318 ms), cheapest (~$0.0004/query
+  at $0.025/1M tok), tied-best accuracy — **but non-commercial license** (its Apache
+  sibling is `zerank-1-small`, untested here).
 
 ## Wiring landed (spike → usable seam)
 
@@ -124,12 +165,46 @@ Available API keys for optional accuracy/cost *reference* arms (not self-hostabl
 The model files are NOT committed (23 MB int8 ONNX + tokenizer; download from
 `Xenova/ms-marco-MiniLM-L-6-v2`). The seam is data-agnostic.
 
-## Recommendation
+## Final suggestion
 
-1. **Adopt ms-marco-MiniLM-L6 int8 as the cross-reranker model** behind the existing
-   default-OFF flag — it removes the *latency* blocker entirely (13× headroom).
-2. Keep bge-reranker-base as a selectable higher-accuracy arm (`MEMPHANT_RERANKER=fastembed`)
-   for when latency is not a constraint (async knowledge panels).
-3. **Gate the default-ON flip on paid reader-QA** (unchanged): confirm MiniLM's
-   reader-QA is non-inferior to bge-base before flipping. The retrieval-parity check
-   above is the free pre-screen.
+**Adopt `ms-marco-MiniLM-L6-v2` int8 as the default cross-reranker model** (behind the
+existing default-OFF `--cross-rerank` flag). It is the best point on the
+accuracy × latency × cost × license × privacy frontier for MemPhant's self-host
+constraint:
+
+- **Accuracy**: tied with the best hosted rerankers (within 1 question at n=8),
+  clearly beats the incumbent bge-reranker-base.
+- **Latency**: 449 ms on the full 64×512 pool (13× faster than bge-base) — inside the
+  1.5 s ceiling with headroom, so it needs no candidate cut or truncation.
+- **Cost**: $0 per query (vs $0.001–0.0025 hosted).
+- **License/privacy**: Apache-2.0, runs on CPU, no candidate bodies leave the box.
+
+**Retire bge-reranker-base as the default** — it is strictly dominated here (slower
+*and* less accurate). Keep it selectable (`MEMPHANT_RERANKER=fastembed`) for parity
+regression only.
+
+**Hosted arms stay as opt-in reference/fallback** (`MEMPHANT_RERANKER=cohere-rerank-3.5`
+with `MEMPHANT_COHERE_MODEL=rerank-v4.0-fast`, or a future zerank arm). If a managed
+API is ever preferred over self-hosting: **Cohere v4.0-fast** is the pick (best hosted
+accuracy, ~420 ms, $0.002); **zerank-2** matches it faster and cheaper but is
+non-commercial (evaluate its Apache `zerank-1-small` sibling first). **Do not use
+Cohere v3.5** — it is the weakest arm measured.
+
+**Still gated (unchanged):** flipping `--cross-rerank` default-ON is a **paid reader-QA**
+decision, not a retrieval one. This spike removed the *latency* blocker and picked the
+*model*; the binding accuracy gate is a reader-QA run at n≥100 with CIs (rung-7 shows
+recall@k is a weak discriminator when gold is in-pool — use a rank-sensitive metric).
+
+## Wiring landed (all committed, gate green)
+
+- `MEMPHANT_RERANKER=byo` + `FastEmbedCrossReranker::from_user_defined` (local ONNX via
+  fastembed's user-defined path — no ort dep). Commit `127e131e`.
+- `MEMPHANT_RERANKER=cohere-rerank-3.5` + `CohereReranker` + `MEMPHANT_COHERE_MODEL` +
+  `MEMPHANT_RERANK_TIMEOUT_MS` (0 = unbounded, for offline benching). Commit `2e7fa26a`.
+- Reusable `#[ignore]` tests: `rerank_real_model_latency_matrix` (bge),
+  `rerank_byo_model_latency_matrix` (BYO latency), `rerank_fixed_pool_accuracy`
+  (local accuracy on fixed pools). API arms: `docs/build-log/artifacts/reranker-spike/`
+  (`rr_api_score.py` + `rr_pools.json`).
+
+Model files (MiniLM int8 ONNX) and the LME-S corpus are NOT committed; the pools JSON
++ scorer are archived under the build-log artifacts so the bench is reproducible.
