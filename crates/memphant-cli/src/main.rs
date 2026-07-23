@@ -106,7 +106,7 @@ fn main() -> ExitCode {
         }
         _ => {
             eprintln!(
-                "usage: memphant <retain|recall|reflect|correct|forget|mark|trace> --subject-id <uuid> --scope <uuid> --actor <uuid> --agent-node <uuid> --subject-generation <n> [verb options]; mutations require --idempotency-key <key> (env: MEMPHANT_URL, MEMPHANT_API_KEY)"
+                "usage: memphant <compile|verify|lock|retain|recall|reflect|correct|forget|mark|trace|db|admin> [options]; memory context commands use --subject-id <uuid> --scope <uuid> --actor <uuid> --agent-node <uuid> --subject-generation <n> (env: MEMPHANT_URL, MEMPHANT_API_KEY)"
             );
             ExitCode::from(2)
         }

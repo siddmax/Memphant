@@ -46,3 +46,43 @@ still required the deleted fixture-only `--source` path.
 
 The unrelated `.superpowers/sdd/progress.md` modification remains unstaged.
 No Task 4, P1 campaign, paid/model call, push, or deployment work was performed.
+
+## Independent-review fix wave
+
+The task review found that a self-consistent forged manifest could redefine the
+offline base, pathname reads could follow a non-regular replacement after
+recording an lstat finding, and compile did not preserve the exact validated
+tree across its network request. New red contracts reproduced both coordinated
+semantic forgery and a deterministic mid-request local edit overwrite before
+the fix.
+
+- Clean validation now rebuilds the exact `MEMORY.md`, reconstructs typed
+  `CanonicalProjectionUnit` records from strict footers plus bodies, and uses
+  the shared canonical fingerprint helper to bind body, validity, and immutable
+  metadata to `snapshot_sha256`. UUIDs, semantic/procedural kinds, fact keys,
+  predicates, confidence, UTC validity ranges, footer generation, and requested
+  plus returned server context are validated explicitly.
+- Validation retains root, units, and inbox directory descriptors and a digest
+  of their identities, names, and exact managed bytes. Immediately after the
+  projection response and render, it revalidates through those same handles;
+  any concurrent edit or path-identity change fails before the first mutation.
+- Managed reads use bounded `openat` with `O_NOFOLLOW|O_NONBLOCK`, then `fstat`
+  before reading. Directory enumeration is capability-relative through
+  `cap-std` over duplicated retained descriptors. FIFOs, symlinks, oversized
+  files, and other non-regular objects therefore fail without following or
+  blocking.
+- New trees walk from a resolved existing parent with descriptor-relative
+  `openat`/`mkdirat`. Existing and new writes use same-directory `create_new`
+  descriptors, `renameat`, `unlinkat`, and directory fsync. Root/units/inbox
+  identities are checked before mutation and again before success, so a swapped
+  path cannot redirect output or stale cleanup.
+- The negative CLI matrix now separately covers duplicate IDs, paths, and fact
+  keys; duplicate footer JSON; coordinated snapshot/context/validity/body/index
+  forgery; all managed root/directory/file symlink positions; FIFO nonblocking;
+  concurrent edits; and delayed root/units redirection with outside sentinels
+  unchanged. The shared inbox-name predicate rejects reserved export names and
+  Windows device-style components. The fallback usage includes `compile`.
+
+Fresh fix-wave proof: `cargo test -p memphant-cli` passed one unit test and 19
+integration tests, including the 8 real-CLI compile contracts. CLI all-target
+clippy with `-D warnings` and format passed after the last code change.

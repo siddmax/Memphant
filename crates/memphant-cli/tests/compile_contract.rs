@@ -9,6 +9,7 @@ use memphant_types::{
     ContextBindingAgentRef, ContextBindingEntityRef, ContextBindingRequest, ContextBindingResponse,
     ContextBindingScopeRef, MemoryKind, NewMemoryUnit, TenantId, TrustLevel, UnitState,
 };
+use sha2::{Digest, Sha256};
 
 const TENANT: &str = "00000000-0000-0000-0000-00000000b203";
 
@@ -119,11 +120,14 @@ async fn compile_refuses_dirty_tampered_duplicate_traversal_and_unmanaged_trees(
         "missing",
         "memory",
         "unexpected",
-        "duplicate",
+        "duplicate_id",
+        "duplicate_path",
+        "duplicate_fact_key",
         "duplicate_json_key",
         "traversal",
         "footer",
         "generation",
+        "footer_duplicate_json",
     ] {
         let out = tempfile::tempdir().unwrap();
         assert_success(&compile(&url, &binding, out.path(), &[]));
@@ -142,11 +146,26 @@ async fn compile_refuses_dirty_tampered_duplicate_traversal_and_unmanaged_trees(
             "missing" => fs::remove_file(&unit).unwrap(),
             "memory" => fs::write(out.path().join("MEMORY.md"), "tampered\n").unwrap(),
             "unexpected" => fs::write(out.path().join("notes.md"), "unmanaged\n").unwrap(),
-            "duplicate" => {
+            "duplicate_id" => {
                 let path = out.path().join("memphant-export.json");
                 let mut manifest: serde_json::Value =
                     serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
                 let entry = manifest["entries"][0].clone();
+                manifest["entries"].as_array_mut().unwrap().push(entry);
+                fs::write(path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+            }
+            "duplicate_path" | "duplicate_fact_key" => {
+                let path = out.path().join("memphant-export.json");
+                let mut manifest: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                let mut entry = manifest["entries"][0].clone();
+                let new_id = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+                entry["unit_id"] = serde_json::json!(new_id);
+                if mutation == "duplicate_fact_key" {
+                    entry["path"] = serde_json::json!(format!("units/{new_id}.md"));
+                } else {
+                    entry["fact_key"] = serde_json::json!("different:key");
+                }
                 manifest["entries"].as_array_mut().unwrap().push(entry);
                 fs::write(path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
             }
@@ -186,6 +205,14 @@ async fn compile_refuses_dirty_tampered_duplicate_traversal_and_unmanaged_trees(
                 )
                 .unwrap();
             }
+            "footer_duplicate_json" => {
+                let content = fs::read_to_string(&unit).unwrap();
+                fs::write(
+                    &unit,
+                    content.replacen("\"unit_id\":", "\"unit_id\":\"duplicate\",\"unit_id\":", 1),
+                )
+                .unwrap();
+            }
             _ => unreachable!(),
         }
 
@@ -197,6 +224,16 @@ async fn compile_refuses_dirty_tampered_duplicate_traversal_and_unmanaged_trees(
             stderr.contains("run `memphant sync` or restore"),
             "{mutation}: {stderr}"
         );
+        let expected = match mutation {
+            "duplicate_id" => Some("duplicate unit_id"),
+            "duplicate_path" => Some("duplicate path"),
+            "duplicate_fact_key" => Some("duplicate fact_key"),
+            "footer_duplicate_json" => Some("duplicate JSON key"),
+            _ => None,
+        };
+        if let Some(expected) = expected {
+            assert!(stderr.contains(expected), "{mutation}: {stderr}");
+        }
         let dirty = verify(out.path());
         assert!(!dirty.status.success(), "{mutation} verified clean");
     }
@@ -216,21 +253,304 @@ async fn compile_and_verify_reject_managed_symlinks() {
         "City is Taipei.",
     )
     .await;
+    for target_kind in ["root", "units", "inbox", "memory", "manifest", "unit"] {
+        let base = tempfile::tempdir().unwrap();
+        let out = base.path().join("nested/memory");
+        assert_success(&compile(&url, &binding, &out, &[]));
+        match target_kind {
+            "root" => {
+                let target = base.path().join("moved-root");
+                fs::rename(&out, &target).unwrap();
+                symlink(&target, &out).unwrap();
+            }
+            "units" | "inbox" => {
+                let path = out.join(target_kind);
+                let target = base.path().join(format!("moved-{target_kind}"));
+                fs::rename(&path, &target).unwrap();
+                symlink(&target, &path).unwrap();
+            }
+            "memory" | "manifest" | "unit" => {
+                let path = match target_kind {
+                    "memory" => out.join("MEMORY.md"),
+                    "manifest" => out.join("memphant-export.json"),
+                    "unit" => out.join("units").join(format!("{}.md", id.as_uuid())),
+                    _ => unreachable!(),
+                };
+                let target = base.path().join(format!("moved-{target_kind}.file"));
+                fs::rename(&path, &target).unwrap();
+                symlink(&target, &path).unwrap();
+            }
+            _ => unreachable!(),
+        }
+
+        let rejected = compile(&url, &binding, &out, &[]);
+        assert!(!rejected.status.success(), "{target_kind} symlink accepted");
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr).contains("symlink"),
+            "{target_kind}: {}",
+            String::from_utf8_lossy(&rejected.stderr)
+        );
+        assert!(!verify(&out).status.success());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn verify_rejects_coordinated_manifest_semantic_and_memory_tampering() {
+    let (url, binding, state) = spawn_server().await;
+    let id = seed_unit(
+        &state,
+        &binding,
+        UnitState::Active,
+        "profile:city",
+        "City is Taipei.",
+    )
+    .await;
+
+    for mutation in ["snapshot", "context", "validity", "body", "memory"] {
+        let out = tempfile::tempdir().unwrap();
+        assert_success(&compile(&url, &binding, out.path(), &[]));
+        let manifest_path = out.path().join("memphant-export.json");
+        let unit_path = out
+            .path()
+            .join("units")
+            .join(format!("{}.md", id.as_uuid()));
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        match mutation {
+            "snapshot" => manifest["snapshot_sha256"] = serde_json::json!("a".repeat(64)),
+            "context" => {
+                manifest["scope_id"] = serde_json::json!("00000000-0000-0000-0000-00000000dead")
+            }
+            "validity" => {
+                manifest["entries"][0]["valid_from"] = serde_json::json!("2026-07-23T00:00:00Z")
+            }
+            "body" => {
+                let old = fs::read_to_string(&unit_path).unwrap();
+                let new_body = "City is Kyoto.";
+                let body_hash = sha256(new_body.as_bytes());
+                let footer_start = old.rfind("<!-- memphant ").unwrap();
+                let footer_end = old.rfind(" -->").unwrap();
+                let mut footer: serde_json::Value =
+                    serde_json::from_str(&old[footer_start + "<!-- memphant ".len()..footer_end])
+                        .unwrap();
+                footer["body_sha256"] = serde_json::json!(body_hash);
+                let rendered = format!(
+                    "# profile:city\n\n{new_body}\n\n<!-- memphant {} -->\n",
+                    serde_json::to_string(&footer).unwrap()
+                );
+                fs::write(&unit_path, &rendered).unwrap();
+                manifest["entries"][0]["body_sha256"] = serde_json::json!(body_hash);
+                manifest["entries"][0]["file_sha256"] =
+                    serde_json::json!(sha256(rendered.as_bytes()));
+            }
+            "memory" => {
+                let memory_path = out.path().join("MEMORY.md");
+                let memory = fs::read_to_string(&memory_path)
+                    .unwrap()
+                    .replace("# MemPhant Memory", "# Forged Memory");
+                fs::write(&memory_path, &memory).unwrap();
+                manifest["memory_sha256"] = serde_json::json!(sha256(memory.as_bytes()));
+            }
+            _ => unreachable!(),
+        }
+        fs::write(
+            &manifest_path,
+            format!("{}\n", serde_json::to_string_pretty(&manifest).unwrap()),
+        )
+        .unwrap();
+
+        let result = verify(out.path());
+        assert!(
+            !result.status.success(),
+            "coordinated {mutation} tamper verified clean"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compile_binds_an_existing_manifest_to_requested_and_server_context() {
+    let (url, binding, state) = spawn_server().await;
+    seed_unit(
+        &state,
+        &binding,
+        UnitState::Active,
+        "profile:city",
+        "City is Taipei.",
+    )
+    .await;
+
+    let requested = tempfile::tempdir().unwrap();
+    assert_success(&compile(&url, &binding, requested.path(), &[]));
+    let mut wrong_binding = binding.clone();
+    wrong_binding.scope_id = memphant_types::ScopeId::new();
+    let wrong_request = compile(&url, &wrong_binding, requested.path(), &[]);
+    assert!(!wrong_request.status.success());
+    assert!(String::from_utf8_lossy(&wrong_request.stderr).contains("manifest context mismatch"));
+
+    let server = tempfile::tempdir().unwrap();
+    assert_success(&compile(&url, &binding, server.path(), &[]));
+    let manifest_path = server.path().join("memphant-export.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["tenant_id"] = serde_json::json!("00000000-0000-0000-0000-00000000dead");
+    fs::write(
+        &manifest_path,
+        format!("{}\n", serde_json::to_string_pretty(&manifest).unwrap()),
+    )
+    .unwrap();
+    let wrong_server_context = compile(&url, &binding, server.path(), &[]);
+    assert!(!wrong_server_context.status.success());
+    assert!(
+        String::from_utf8_lossy(&wrong_server_context.stderr)
+            .contains("server context differs from manifest")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compile_refuses_a_local_edit_while_projection_request_is_in_flight() {
+    let (url, binding, state, projection_started) = spawn_delayed_server().await;
+    let id = seed_unit(
+        &state,
+        &binding,
+        UnitState::Active,
+        "profile:city",
+        "City is Taipei.",
+    )
+    .await;
     let out = tempfile::tempdir().unwrap();
     assert_success(&compile(&url, &binding, out.path(), &[]));
     let unit = out
         .path()
         .join("units")
         .join(format!("{}.md", id.as_uuid()));
-    let target = out.path().join("outside.md");
-    fs::write(&target, fs::read(&unit).unwrap()).unwrap();
-    fs::remove_file(&unit).unwrap();
-    symlink(&target, &unit).unwrap();
+    let changed = fs::read_to_string(&unit)
+        .unwrap()
+        .replace("Taipei", "changed while fetching");
+    let target = unit.clone();
+    let editor = std::thread::spawn(move || {
+        projection_started.recv().unwrap();
+        fs::write(target, &changed).unwrap();
+        changed
+    });
 
-    let rejected = compile(&url, &binding, out.path(), &[]);
-    assert!(!rejected.status.success());
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("symlink"));
-    assert!(!verify(out.path()).status.success());
+    let result = compile(&url, &binding, out.path(), &[]);
+    let changed = editor.join().unwrap();
+    assert!(
+        !result.status.success(),
+        "concurrent local edit was overwritten"
+    );
+    assert_eq!(fs::read_to_string(unit).unwrap(), changed);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compile_refuses_root_and_units_redirection_while_fetching() {
+    use std::os::unix::fs::symlink;
+
+    for swapped in ["root", "units"] {
+        let (url, binding, state, projection_started) = spawn_delayed_server().await;
+        let id = seed_unit(
+            &state,
+            &binding,
+            UnitState::Active,
+            "profile:city",
+            "City is Taipei.",
+        )
+        .await;
+        let base = tempfile::tempdir().unwrap();
+        let out = base.path().join("memory");
+        assert_success(&compile(&url, &binding, &out, &[]));
+        let before = tree_bytes(&out);
+        let moved = base.path().join(format!("moved-{swapped}"));
+        let outside = base.path().join(format!("outside-{swapped}"));
+        let out_for_editor = out.clone();
+        let editor = std::thread::spawn(move || {
+            projection_started.recv().unwrap();
+            match swapped {
+                "root" => {
+                    fs::rename(&out_for_editor, &moved).unwrap();
+                    fs::create_dir(&outside).unwrap();
+                    fs::write(outside.join("sentinel"), "outside-root").unwrap();
+                    symlink(&outside, &out_for_editor).unwrap();
+                }
+                "units" => {
+                    fs::rename(out_for_editor.join("units"), &moved).unwrap();
+                    fs::create_dir(&outside).unwrap();
+                    fs::write(
+                        outside.join(format!("{}.md", id.as_uuid())),
+                        "outside-units",
+                    )
+                    .unwrap();
+                    symlink(&outside, out_for_editor.join("units")).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            (moved, outside)
+        });
+
+        let result = compile(&url, &binding, &out, &[]);
+        let (moved, outside) = editor.join().unwrap();
+        assert!(
+            !result.status.success(),
+            "{swapped} redirection was accepted"
+        );
+        if swapped == "root" {
+            assert_eq!(tree_bytes(&moved), before);
+            assert_eq!(
+                fs::read_to_string(outside.join("sentinel")).unwrap(),
+                "outside-root"
+            );
+        } else {
+            assert_eq!(
+                fs::read_to_string(outside.join(format!("{}.md", id.as_uuid()))).unwrap(),
+                "outside-units"
+            );
+            assert!(moved.join(format!("{}.md", id.as_uuid())).is_file());
+        }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn verify_rejects_fifo_without_blocking() {
+    let (url, binding, state) = spawn_server().await;
+    seed_unit(
+        &state,
+        &binding,
+        UnitState::Active,
+        "profile:city",
+        "City is Taipei.",
+    )
+    .await;
+    let out = tempfile::tempdir().unwrap();
+    assert_success(&compile(&url, &binding, out.path(), &[]));
+    fs::remove_file(out.path().join("MEMORY.md")).unwrap();
+    assert!(
+        Command::new("mkfifo")
+            .arg(out.path().join("MEMORY.md"))
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_memphant-cli"))
+        .current_dir(repo_root())
+        .args(["verify", "--lock", "memphant.lock", "--export"])
+        .arg(out.path())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(!status.success());
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            panic!("verify blocked while opening a FIFO");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 async fn spawn_server() -> (
@@ -273,6 +593,72 @@ async fn spawn_server() -> (
     let app = memphant_server::app(state.clone());
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     (format!("http://{address}"), binding, state)
+}
+
+async fn spawn_delayed_server() -> (
+    String,
+    ContextBindingResponse,
+    AppState<memphant_core::InMemoryStore>,
+    std::sync::mpsc::Receiver<()>,
+) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    let tenant = TenantId::from_u128(uuid::Uuid::parse_str(TENANT).unwrap().as_u128());
+    let state = AppState::new_in_memory().with_dev_tenant(tenant);
+    let binding = state
+        .store()
+        .resolve_context_binding(
+            tenant,
+            "b2-cli-delayed-contract".to_string(),
+            ContextBindingRequest {
+                subject: ContextBindingEntityRef {
+                    external_ref: "b2-user".into(),
+                    kind: "user".into(),
+                },
+                actor: ContextBindingEntityRef {
+                    external_ref: "b2-user".into(),
+                    kind: "user".into(),
+                },
+                scope: ContextBindingScopeRef {
+                    external_ref: "b2-root".into(),
+                    kind: "user_root".into(),
+                    parent_external_ref: None,
+                },
+                agent_node: ContextBindingAgentRef {
+                    external_ref: "b2-l0".into(),
+                    parent_external_ref: None,
+                },
+                access_policies: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+    let started_tx = Arc::new(Mutex::new(Some(started_tx)));
+    let requests = Arc::new(AtomicUsize::new(0));
+    let app = memphant_server::app(state.clone()).layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let started_tx = started_tx.clone();
+            let requests = requests.clone();
+            async move {
+                if request.uri().path().ends_with("/projection")
+                    && requests.fetch_add(1, Ordering::SeqCst) == 1
+                {
+                    if let Some(sender) = started_tx.lock().unwrap().take() {
+                        sender.send(()).unwrap();
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+                next.run(request).await
+            }
+        },
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{address}"), binding, state, started_rx)
 }
 
 async fn seed_unit(
@@ -405,6 +791,10 @@ fn assert_success(output: &Output) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn repo_root() -> PathBuf {
