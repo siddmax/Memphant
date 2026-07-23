@@ -1256,11 +1256,13 @@ pub trait MemoryStore: Send + Sync {
         cursor: Option<UnitId>,
         limit: usize,
     ) -> impl Future<Output = Result<ScopePage, StoreError>> + Send;
-    /// One complete, current file-projection snapshot. This is deliberately
-    /// separate from the historical, paginated scope-memory export.
+    /// One complete bitemporally-current file-projection snapshot, evaluated
+    /// at the caller-supplied RFC3339 instant. This is deliberately separate
+    /// from the historical, paginated scope-memory export.
     fn canonical_projection_units(
         &self,
         context: &ResolvedMemoryContext,
+        evaluated_at: &str,
     ) -> impl Future<Output = Result<Vec<StoredMemoryUnit>, StoreError>> + Send;
 
     // Reflect job queue (SKIP LOCKED semantics in Postgres).
@@ -4214,9 +4216,15 @@ impl MemoryStore for InMemoryStore {
     async fn canonical_projection_units(
         &self,
         context: &ResolvedMemoryContext,
+        evaluated_at: &str,
     ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
         let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
         state.validate_context(context)?;
+        let time = RecallTime {
+            evaluated_at: evaluated_at.to_string(),
+            transaction_as_of: evaluated_at.to_string(),
+            valid_at: evaluated_at.to_string(),
+        };
         let mut units: Vec<_> = state
             .memory_units
             .get(&context.tenant_id)
@@ -4230,8 +4238,9 @@ impl MemoryStore for InMemoryStore {
                             && unit.scope_id == context.scope_id
                             && unit.agent_node_id == context.agent_node_id
                             && unit.actor_id == Some(context.actor_id)
-                            && unit.transaction_to.is_none()
                             && unit.deletion_generation.is_none()
+                            && unit.trust_level != TrustLevel::Quarantined
+                            && bitemporally_recallable(unit, &time)
                             && matches!(
                                 (unit.kind, unit.state),
                                 (

@@ -3414,15 +3414,20 @@ impl MemoryStore for PgStore {
     async fn canonical_projection_units(
         &self,
         context: &ResolvedMemoryContext,
+        evaluated_at: &str,
     ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
         let mut tx = self.tenant_tx(context.tenant_id).await?;
         Self::fetch_units_where(
             &mut tx,
             "tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
              and scope_id = $4 and agent_node_id = $5 and actor_id = $6
-             and transaction_to is null and deletion_generation is null
+             and deletion_generation is null and trust_level <> 'quarantined'
+             and (transaction_from is null or transaction_from <= $7::timestamptz)
+             and (transaction_to is null or $7::timestamptz < transaction_to)
+             and (valid_from is null or valid_from <= $7::timestamptz)
+             and (valid_to is null or $7::timestamptz < valid_to)
              and (
-               (kind = 'semantic' and state = any($7))
+               (kind = 'semantic' and state = any($8))
                or (kind = 'procedural' and state = 'validated')
              )",
             "order by id",
@@ -3433,6 +3438,7 @@ impl MemoryStore for PgStore {
                 Bind::Uuid(context.scope_id.as_uuid()),
                 Bind::Uuid(context.agent_node_id.as_uuid()),
                 Bind::Uuid(context.actor_id.as_uuid()),
+                Bind::Text(evaluated_at.to_string()),
                 Bind::TextVec(vec!["active".to_string(), "validated".to_string()]),
             ],
         )

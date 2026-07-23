@@ -1854,7 +1854,7 @@ pub struct ScopeMemoryResponse {
     pub has_more: bool,
 }
 
-/// One current unit in the canonical file-projection snapshot.
+/// One unit current at the projection response's `evaluated_at` instant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct CanonicalProjectionUnit {
     pub unit_id: UnitId,
@@ -1863,10 +1863,12 @@ pub struct CanonicalProjectionUnit {
     pub predicate: Option<String>,
     pub body: String,
     pub confidence: Option<f32>,
+    pub valid_from: Option<String>,
+    pub valid_to: Option<String>,
     pub body_sha256: String,
 }
 
-/// The complete, unranked, tenant-bound file-projection snapshot.
+/// The complete, unranked, tenant-bound file-projection snapshot evaluated at one RFC3339 server-clock instant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct CanonicalProjectionResponse {
     pub tenant_id: TenantId,
@@ -1875,6 +1877,7 @@ pub struct CanonicalProjectionResponse {
     pub scope_id: ScopeId,
     pub agent_node_id: AgentNodeId,
     pub subject_generation: u64,
+    pub evaluated_at: String,
     pub items: Vec<CanonicalProjectionUnit>,
     pub fingerprint: String,
 }

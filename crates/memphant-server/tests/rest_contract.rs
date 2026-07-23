@@ -189,6 +189,43 @@ fn bind_recall_request(
     request
 }
 
+fn active_projection_unit(
+    tenant_id: TenantId,
+    binding: &ContextBindingResponse,
+    source_ref: &str,
+    fact_key: &str,
+    body: &str,
+) -> NewMemoryUnit {
+    NewMemoryUnit {
+        tenant_id,
+        data_subject_id: binding.subject_id,
+        scope_id: binding.scope_id,
+        agent_node_id: binding.agent_node_id,
+        subject_generation: binding.subject_generation,
+        kind: MemoryKind::Semantic,
+        state: UnitState::Active,
+        fact_key: Some(fact_key.to_string()),
+        predicate: Some("states".to_string()),
+        body: body.to_string(),
+        confidence: Some(1.0),
+        trust_level: TrustLevel::TrustedSystem,
+        churn_class: None,
+        freshness_due_at: None,
+        actor_id: Some(binding.actor_id),
+        source_kind: Some("test".to_string()),
+        source_ref: source_ref.to_string(),
+        observed_at: "2026-07-22T00:00:00Z".to_string(),
+        source_episode_id: None,
+        source_resource_id: None,
+        deletion_generation: None,
+        contextual_chunks: Vec::new(),
+        valid_from: Some("2026-07-01T00:00:00Z".to_string()),
+        valid_to: Some("2026-08-01T00:00:00Z".to_string()),
+        transaction_from: None,
+        transaction_to: None,
+    }
+}
+
 #[tokio::test]
 async fn canonical_projection_is_a_dedicated_unranked_visible_snapshot() {
     let tenant_id = tenant(96_000);
@@ -213,8 +250,8 @@ async fn canonical_projection_is_a_dedicated_unranked_visible_snapshot() {
                 predicate: "states".to_string(),
                 body: "This is the visible canonical fact.".to_string(),
                 confidence: 1.0,
-                valid_from: None,
-                valid_to: None,
+                valid_from: Some("2026-07-01T00:00:00Z".to_string()),
+                valid_to: Some("2026-08-01T00:00:00Z".to_string()),
             }),
         }),
     )
@@ -252,6 +289,9 @@ async fn canonical_projection_is_a_dedicated_unranked_visible_snapshot() {
         projection.items[0].body_sha256,
         "cd18204f20a65227152e24543607e22722c3631ca8b76c46343c7c6d65c3081f"
     );
+    let encoded = serde_json::to_value(&projection).expect("projection JSON");
+    assert_eq!(encoded["items"][0]["valid_from"], "2026-07-01T00:00:00Z");
+    assert_eq!(encoded["items"][0]["valid_to"], "2026-08-01T00:00:00Z");
     assert_eq!(projection.fingerprint.len(), 64);
 
     let repeated: CanonicalProjectionResponse = json_request(
@@ -271,6 +311,90 @@ async fn canonical_projection_is_a_dedicated_unranked_visible_snapshot() {
     .1;
     assert_eq!(repeated.items, projection.items);
     assert_eq!(repeated.fingerprint, projection.fingerprint);
+}
+
+#[tokio::test]
+async fn canonical_projection_route_orders_multiple_units_by_unit_id() {
+    let tenant_id = tenant(96_150);
+    let (app, state) = dev_app_with_state(tenant_id);
+    let binding = bind_context(&app, "canonical-projection-order").await;
+    let context = state
+        .store()
+        .resolve_memory_context(
+            tenant_id,
+            binding.subject_id,
+            binding.actor_id,
+            binding.scope_id,
+            binding.agent_node_id,
+        )
+        .await
+        .expect("resolve projection context");
+
+    let mut first_tx = state.store().begin(&context).await.expect("begin first");
+    let first_id = state
+        .store()
+        .stage_memory_unit(
+            &mut first_tx,
+            active_projection_unit(
+                tenant_id,
+                &binding,
+                "rest:canonical-projection-order:first",
+                "projection:z",
+                "first generated id",
+            ),
+        )
+        .await
+        .expect("stage first");
+    let mut second_tx = state.store().begin(&context).await.expect("begin second");
+    let second_id = state
+        .store()
+        .stage_memory_unit(
+            &mut second_tx,
+            active_projection_unit(
+                tenant_id,
+                &binding,
+                "rest:canonical-projection-order:second",
+                "projection:a",
+                "second generated id",
+            ),
+        )
+        .await
+        .expect("stage second");
+    assert!(first_id.as_uuid() < second_id.as_uuid());
+
+    // Commit in reverse to prove the HTTP read is ordered by unit id, rather
+    // than by insertion order in the backing store.
+    state
+        .store()
+        .commit(second_tx)
+        .await
+        .expect("commit second");
+    state.store().commit(first_tx).await.expect("commit first");
+
+    let projection: CanonicalProjectionResponse = json_request(
+        &app,
+        "GET",
+        &format!(
+            "/v1/scopes/{}/projection?subject_id={}&actor_id={}&agent_node_id={}&subject_generation={}",
+            binding.scope_id.as_uuid(),
+            binding.subject_id.as_uuid(),
+            binding.actor_id.as_uuid(),
+            binding.agent_node_id.as_uuid(),
+            binding.subject_generation,
+        ),
+        None::<()>,
+    )
+    .await
+    .1;
+
+    assert_eq!(
+        projection
+            .items
+            .iter()
+            .map(|item| item.unit_id)
+            .collect::<Vec<_>>(),
+        vec![first_id, second_id]
+    );
 }
 
 #[tokio::test]

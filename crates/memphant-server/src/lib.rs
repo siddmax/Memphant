@@ -807,7 +807,7 @@ fn openapi_paths() -> serde_json::Map<String, Value> {
         ],
     );
     canonical_projection["get"]["description"] = json!(format!(
-        "Returns the complete current canonical projection in one snapshot. Responses exceeding {MAX_CANONICAL_PROJECTION_ENCODED_BYTES} encoded JSON bytes fail with 413 and are never truncated."
+        "Returns the complete bitemporally-current canonical projection at one server-clock instant, returned as evaluated_at. Responses exceeding {MAX_CANONICAL_PROJECTION_ENCODED_BYTES} encoded JSON bytes fail with 413 and are never truncated."
     ));
     paths.insert(CANONICAL_PROJECTION_PATH.to_string(), canonical_projection);
     paths.insert(

@@ -866,8 +866,9 @@ impl MemoryStore for AnyStore {
     async fn canonical_projection_units(
         &self,
         context: &ResolvedMemoryContext,
+        evaluated_at: &str,
     ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
-        delegate!(self, store => store.canonical_projection_units(context).await)
+        delegate!(self, store => store.canonical_projection_units(context, evaluated_at).await)
     }
 
     async fn claim_reflect_jobs(

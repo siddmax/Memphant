@@ -45,7 +45,7 @@ pub const MAX_CANONICAL_PROJECTION_ENCODED_BYTES: usize = 1_048_576;
 #[cfg(test)]
 mod canonical_projection_store_tests {
     use super::*;
-    use crate::{InMemoryStore, MemoryStore, NewMemoryUnit, UnitState};
+    use crate::{FixedClock, InMemoryStore, MemoryStore, NewMemoryUnit, NoopEmbedding, UnitState};
     use memphant_types::{
         ActorId, AgentNodeId, CanonicalProjectionUnit, ContextBindingAgentRef,
         ContextBindingEntityRef, ContextBindingRequest, ContextBindingScopeRef, MemoryKind,
@@ -175,7 +175,7 @@ mod canonical_projection_store_tests {
             UnitState::Active,
             "closed-transaction",
         );
-        closed.transaction_to = Some("2026-07-22T00:00:01Z".to_string());
+        closed.transaction_to = Some("2026-07-21T00:00:00Z".to_string());
         store
             .stage_memory_unit(&mut tx, closed)
             .await
@@ -191,6 +191,45 @@ mod canonical_projection_store_tests {
             .stage_memory_unit(&mut tx, deleted)
             .await
             .expect("stage deleted unit");
+        let mut quarantined_trust = unit(
+            &context,
+            MemoryKind::Semantic,
+            UnitState::Active,
+            "quarantined-trust",
+        );
+        quarantined_trust.trust_level = TrustLevel::Quarantined;
+        store
+            .stage_memory_unit(&mut tx, quarantined_trust)
+            .await
+            .expect("stage quarantined-trust unit");
+        let mut future_valid = unit(
+            &context,
+            MemoryKind::Semantic,
+            UnitState::Active,
+            "future-valid",
+        );
+        future_valid.valid_from = Some("2026-07-23T00:00:00Z".to_string());
+        store
+            .stage_memory_unit(&mut tx, future_valid)
+            .await
+            .expect("stage future-valid unit");
+        let mut expired = unit(&context, MemoryKind::Semantic, UnitState::Active, "expired");
+        expired.valid_to = Some("2026-07-21T00:00:00Z".to_string());
+        store
+            .stage_memory_unit(&mut tx, expired)
+            .await
+            .expect("stage expired unit");
+        let mut future_transaction = unit(
+            &context,
+            MemoryKind::Semantic,
+            UnitState::Active,
+            "future-transaction",
+        );
+        future_transaction.transaction_from = Some("2026-07-23T00:00:00Z".to_string());
+        store
+            .stage_memory_unit(&mut tx, future_transaction)
+            .await
+            .expect("stage future-transaction unit");
         store.commit(tx).await.expect("commit");
 
         let template = store
@@ -226,7 +265,7 @@ mod canonical_projection_store_tests {
         }
 
         let projected = store
-            .canonical_projection_units(&context)
+            .canonical_projection_units(&context, "2026-07-22T00:00:00Z")
             .await
             .expect("one visible projection snapshot");
         assert_eq!(
@@ -242,18 +281,60 @@ mod canonical_projection_store_tests {
         );
     }
 
+    #[tokio::test]
+    async fn canonical_projection_service_uses_its_returned_clock_instant_for_visibility() {
+        let store = InMemoryStore::default();
+        let context = context(&store).await;
+        let mut tx = store.begin(&context).await.expect("begin");
+        let visible_id = store
+            .stage_memory_unit(
+                &mut tx,
+                unit(
+                    &context,
+                    MemoryKind::Semantic,
+                    UnitState::Active,
+                    "visible-at-clock",
+                ),
+            )
+            .await
+            .expect("stage visible unit");
+        let mut expires_at_clock = unit(
+            &context,
+            MemoryKind::Semantic,
+            UnitState::Active,
+            "expires-at-clock",
+        );
+        expires_at_clock.valid_to = Some("2026-07-22T00:00:00Z".to_string());
+        store
+            .stage_memory_unit(&mut tx, expires_at_clock)
+            .await
+            .expect("stage expired unit");
+        store.commit(tx).await.expect("commit");
+
+        let service = MemoryService::new(
+            Arc::new(store),
+            Arc::new(FixedClock("2026-07-22T00:00:00Z")),
+            Arc::new(NoopEmbedding),
+        );
+        let projection = service
+            .canonical_projection(&context)
+            .await
+            .expect("canonical projection");
+
+        assert_eq!(projection.evaluated_at, "2026-07-22T00:00:00Z");
+        assert_eq!(
+            projection
+                .items
+                .iter()
+                .map(|item| item.unit_id)
+                .collect::<Vec<_>>(),
+            vec![visible_id]
+        );
+    }
+
     #[test]
-    fn canonical_projection_fingerprint_is_sha256_of_ordered_records() {
+    fn canonical_projection_fingerprint_is_fixed_for_differently_ordered_records() {
         let items = vec![
-            CanonicalProjectionUnit {
-                unit_id: UnitId::from_u128(1),
-                kind: MemoryKind::Semantic,
-                fact_key: Some("a".to_string()),
-                predicate: Some("states".to_string()),
-                body: "A".to_string(),
-                confidence: Some(1.0),
-                body_sha256: "aa".to_string(),
-            },
             CanonicalProjectionUnit {
                 unit_id: UnitId::from_u128(2),
                 kind: MemoryKind::Procedural,
@@ -261,12 +342,25 @@ mod canonical_projection_store_tests {
                 predicate: Some("does".to_string()),
                 body: "B".to_string(),
                 confidence: Some(0.5),
+                valid_from: None,
+                valid_to: None,
                 body_sha256: "bb".to_string(),
+            },
+            CanonicalProjectionUnit {
+                unit_id: UnitId::from_u128(1),
+                kind: MemoryKind::Semantic,
+                fact_key: Some("a".to_string()),
+                predicate: Some("states".to_string()),
+                body: "A".to_string(),
+                confidence: Some(1.0),
+                valid_from: Some("2026-07-01T00:00:00Z".to_string()),
+                valid_to: Some("2026-08-01T00:00:00Z".to_string()),
+                body_sha256: "aa".to_string(),
             },
         ];
         assert_eq!(
             canonical_projection_fingerprint(&items).expect("fingerprint"),
-            "86b1fdcc5639ceede2c72558b942f63565143e7b7c3a11d8650e318838cf6f83"
+            "4b2e0c7f4801952ddf18abfb6136d9c7cbf83a50180f49fba66774e1bd568cb8"
         );
         assert_ne!(
             canonical_projection_fingerprint(&items).expect("fingerprint"),
@@ -2057,15 +2151,16 @@ impl<S: MemoryStore> MemoryService<S> {
         Ok(self.store.scope_memory_page(context, cursor, limit).await?)
     }
 
-    /// Returns the complete current file projection from one store snapshot.
+    /// Returns the complete bitemporally-current file projection at one server clock instant.
     /// The historical cursor export above intentionally has different semantics.
     pub async fn canonical_projection(
         &self,
         context: &ResolvedMemoryContext,
     ) -> Result<CanonicalProjectionResponse, ServiceError> {
+        let evaluated_at = self.clock.now_rfc3339();
         let items = self
             .store
-            .canonical_projection_units(context)
+            .canonical_projection_units(context, &evaluated_at)
             .await?
             .into_iter()
             .map(|unit| CanonicalProjectionUnit {
@@ -2076,6 +2171,8 @@ impl<S: MemoryStore> MemoryService<S> {
                 body_sha256: format!("{:x}", Sha256::digest(unit.body.as_bytes())),
                 body: unit.body,
                 confidence: unit.confidence,
+                valid_from: unit.valid_from,
+                valid_to: unit.valid_to,
             })
             .collect::<Vec<_>>();
         let response = CanonicalProjectionResponse {
@@ -2085,6 +2182,7 @@ impl<S: MemoryStore> MemoryService<S> {
             scope_id: context.scope_id,
             agent_node_id: context.agent_node_id,
             subject_generation: context.subject_generation,
+            evaluated_at,
             fingerprint: canonical_projection_fingerprint(&items)?,
             items,
         };

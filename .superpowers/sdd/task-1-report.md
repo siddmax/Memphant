@@ -77,3 +77,50 @@ truncated. The exact Postgres statement is covered by compile/lint and the
 shared in-memory contract; the live-Postgres suite was skipped because this
 worktree has no configured scratch database. The unrelated
 `.superpowers/sdd/progress.md` modification was preserved unstaged.
+
+## Review follow-up: bitemporal and trust visibility
+
+### Test-first evidence
+
+1. Extended the in-memory projection contract with an `active` unit at
+   `TrustLevel::Quarantined`, a future-valid unit, an expired unit, and a
+   future-transaction unit. Before the predicate fix,
+   `canonical_projection_store_excludes_historical_and_disallowed_units`
+   failed with seven projected records where three were required.
+2. Extended the REST projection contract to require `valid_from` and
+   `valid_to`. Before the response mapping change it failed with
+   `valid_from: Null` instead of `"2026-07-01T00:00:00Z"`.
+3. Changed the fixed ordered-record fingerprint fixture to reverse its UUID
+   ordering and include validity bounds. Its old fingerprint failed as
+   expected; the intentional canonical JSON fingerprint is now
+   `4b2e0c7f4801952ddf18abfb6136d9c7cbf83a50180f49fba66774e1bd568cb8`.
+
+### Implementation
+
+- `MemoryStore::canonical_projection_units` now takes exactly one RFC3339
+  `evaluated_at` instant. `MemoryService` reads its clock once, sends that
+  value to the store, and returns it in `CanonicalProjectionResponse`.
+- Both stores now exclude `TrustLevel::Quarantined` and enforce bitemporal
+  currentness at that instant. The Postgres implementation remains one ordered
+  tenant transaction statement, filtering future `transaction_from`, closed
+  `transaction_to`, future `valid_from`, and elapsed `valid_to` intervals.
+- Projection units publish `valid_from`/`valid_to`; those fields are included
+  in the ordered-record fingerprint.
+- Added a fixed-clock service regression and an HTTP regression that commits
+  two staged records in reverse order, proving the route returns UUID order.
+- Regenerated OpenAPI. The endpoint and response schema now document and
+  expose `evaluated_at` plus per-unit validity bounds.
+
+### Verification
+
+- `cargo test -p memphant-types` — 6 passed.
+- `cargo test -p memphant-core --lib service::canonical_projection_store_tests -- --nocapture` — 3 passed.
+- `cargo test -p memphant-server --test rest_contract` — 22 passed.
+- `cargo test -p memphant-store-postgres` — local/unit/provider checks passed;
+  67 live-Postgres checks skipped because `MEMPHANT_TEST_DATABASE_URL` is not
+  configured.
+- `cargo test -p memphant-runtime` — 137 passed; 7 live/paid provider checks
+  skipped, with no model calls made.
+- `cargo fmt --check`, scoped all-features clippy with `-D warnings`, and
+  `git diff --check` — passed.
+- `cargo run -q -p memphant-server -- --openapi-json > openapi/memphant.v1.json` — regenerated successfully.
