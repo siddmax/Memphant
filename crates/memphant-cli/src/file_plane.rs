@@ -98,6 +98,7 @@ Default: dry-run; prints the JSON plan to stdout and changes nothing.
 Safe next steps:
   Review the plan, then rerun the same command with --apply.
   outcome_unknown: the request may have committed; do not retry a different plan.
+  First create the binary contract with `memphant lock --out memphant.lock`.
   After apply: run `memphant verify --lock memphant.lock --export <DIR>`.
 ";
 

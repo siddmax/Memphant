@@ -35,6 +35,21 @@ fn sync_help_documents_dry_run_apply_and_recovery() {
     assert!(
         help.contains("After apply: run `memphant verify --lock memphant.lock --export <DIR>`")
     );
+    assert!(
+        help.contains("First create the binary contract with `memphant lock --out memphant.lock`")
+    );
+}
+
+#[test]
+fn readme_quickstart_creates_the_binary_lock_before_verification() {
+    let readme = include_str!("../../../README.md");
+    let lock = readme
+        .find("memphant lock --out memphant.lock")
+        .expect("quickstart creates the binary contract lock");
+    let verify = readme
+        .find("memphant verify --lock memphant.lock --export")
+        .expect("quickstart verifies the projection and lock");
+    assert!(lock < verify, "lock creation must precede verification");
 }
 
 fn help(command: &str) -> Output {

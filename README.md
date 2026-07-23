@@ -29,6 +29,9 @@ export AGENT_NODE_ID=00000000-0000-0000-0000-000000000004
 export SUBJECT_GENERATION=0
 export MEMORY_DIR=./memory
 
+# Pin the CLI/server binary contract used by verification.
+memphant lock --out memphant.lock
+
 # Compile the canonical snapshot. This refuses to overwrite local edits.
 memphant compile --subject-id "$SUBJECT_ID" --scope "$SCOPE_ID" \
   --actor "$ACTOR_ID" --agent-node "$AGENT_NODE_ID" \
@@ -45,7 +48,7 @@ memphant sync --subject-id "$SUBJECT_ID" --scope "$SCOPE_ID" \
   --actor "$ACTOR_ID" --agent-node "$AGENT_NODE_ID" \
   --subject-generation "$SUBJECT_GENERATION" --out "$MEMORY_DIR" --apply
 
-# Verify the refreshed projection and the binary contract.
+# Verify the refreshed projection against the pinned binary contract.
 memphant verify --lock memphant.lock --export "$MEMORY_DIR"
 ```
 
