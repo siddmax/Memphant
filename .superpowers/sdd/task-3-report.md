@@ -86,3 +86,63 @@ the fix.
 Fresh fix-wave proof: `cargo test -p memphant-cli` passed one unit test and 19
 integration tests, including the 8 real-CLI compile contracts. CLI all-target
 clippy with `-D warnings` and format passed after the last code change.
+
+## Second independent-review fix wave
+
+The follow-up review identified three remaining release blockers: absent and
+empty output trees were not retained as exact pre-request states; per-file
+replacement/deletion did not recheck the validated file immediately before the
+mutation or validate the complete rendered tree afterward; and the direct
+Unix-only `rustix` backend prevented Windows compilation.
+
+Two delayed real-CLI contracts were first run against pre-fix commit
+`87253539`. Both failed behaviorally: an absent output that appeared during the
+projection request was overwritten, and an empty output swapped during that
+request was accepted and initialized. The same-inode writer contracts then
+failed against the identity-only intermediate implementation, proving that an
+in-place edit could still be overwritten or deleted without changing its inode.
+
+- Compile now carries one explicit state across the network request:
+  `Absent(retained parent capability + identity + missing components)`,
+  `Empty(retained parent/root capabilities + identities + empty-name
+  snapshot)`, or `Existing(ValidatedExport)`. It revalidates that exact state
+  before creating a directory or writing a byte. Delayed tests prove appeared
+  and swapped roots fail with parent sentinels and both original/replacement
+  trees unchanged.
+- The filesystem backend now uses portable `cap-std` and `cap-fs-ext`
+  capability operations for no-follow directory/file opens, portable
+  device/inode identities, nonblocking reads, relative rename/removal, and
+  directory sync. Direct `rustix`, `OwnedFd`, pathname `openat`, and other
+  Unix-only production code were removed. Every newly created component is
+  synced through its retained parent before traversal continues.
+- Existing validation retains the exact bytes and identity of every managed
+  file. Immediately before each atomic replacement or stale deletion, the
+  current no-follow regular file is reopened and both identity and bytes must
+  still match (or the path must still be absent). Deterministic tests replace a
+  future unit and a stale unit in place during the write sequence and prove the
+  sentinel is preserved.
+- The manifest remains the final replacement. After its directory sync, the
+  validator rereads the exact names, types, bytes, hashes, metadata, and
+  capability bindings through the retained handles and compares the resulting
+  manifest with the rendered canonical manifest. A deterministic
+  post-manifest tamper test proves this final gate fails closed.
+
+Fresh proof after the final code change:
+
+- `cargo test -p memphant-cli`: 4 unit and 21 integration tests passed,
+  including 10 real-CLI compile contracts.
+- `cargo clippy -p memphant-cli --all-targets --all-features -- -D warnings`,
+  `cargo fmt --all --check`, and `git diff --check`: passed.
+- `python3 scripts/check_spec_drift.py`: skipped, not passed, because the
+  private Syndai specs are absent from this worktree.
+- `rustup target add x86_64-pc-windows-msvc`: installed the Windows standard
+  library. `cargo check -p memphant-cli --target x86_64-pc-windows-msvc` is
+  externally blocked before MemPhant source compilation: transitive
+  `ring 0.17.14` invokes host `cc` for MSVC and cannot find the Windows SDK
+  `assert.h`; this host has no `VCINSTALLDIR` or Windows cross-C toolchain.
+  `cargo tree -p memphant-cli --target x86_64-pc-windows-msvc -i ring` traces
+  the blocker through existing `rustls` consumers (`ureq`, `sqlx`, and
+  runtime dependencies), not the file-plane capability backend.
+
+The unrelated `.superpowers/sdd/progress.md` modification remains unstaged.
+No Task 4, P1 campaign, paid/model call, push, or deployment work was performed.

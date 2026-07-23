@@ -8,11 +8,11 @@ rust-version.workspace = true
 
 [dependencies]
 cap-std.workspace = true
+cap-fs-ext.workspace = true
 jiff.workspace = true
 memphant-core.workspace = true
 memphant-store-postgres = { path = "../memphant-store-postgres" }
 memphant-types.workspace = true
-rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

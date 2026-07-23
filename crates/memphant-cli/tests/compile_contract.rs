@@ -442,6 +442,73 @@ async fn compile_refuses_a_local_edit_while_projection_request_is_in_flight() {
     assert_eq!(fs::read_to_string(unit).unwrap(), changed);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compile_refuses_an_absent_output_that_appears_while_fetching() {
+    let (url, binding, state, projection_started) = spawn_delayed_server_at(0).await;
+    seed_unit(
+        &state,
+        &binding,
+        UnitState::Active,
+        "profile:city",
+        "City is Taipei.",
+    )
+    .await;
+    let base = tempfile::tempdir().unwrap();
+    let sentinel = base.path().join("sentinel");
+    fs::write(&sentinel, "parent-sentinel").unwrap();
+    let out = base.path().join("memory");
+    let appeared = out.clone();
+    let editor = std::thread::spawn(move || {
+        projection_started.recv().unwrap();
+        fs::create_dir(&appeared).unwrap();
+    });
+
+    let result = compile(&url, &binding, &out, &[]);
+    editor.join().unwrap();
+    assert!(
+        !result.status.success(),
+        "new output directory was overwritten"
+    );
+    assert!(root_names(&out).is_empty());
+    assert_eq!(fs::read_to_string(sentinel).unwrap(), "parent-sentinel");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compile_refuses_an_empty_output_swapped_while_fetching() {
+    let (url, binding, state, projection_started) = spawn_delayed_server_at(0).await;
+    seed_unit(
+        &state,
+        &binding,
+        UnitState::Active,
+        "profile:city",
+        "City is Taipei.",
+    )
+    .await;
+    let base = tempfile::tempdir().unwrap();
+    let sentinel = base.path().join("sentinel");
+    fs::write(&sentinel, "parent-sentinel").unwrap();
+    let out = base.path().join("memory");
+    let moved = base.path().join("moved-memory");
+    fs::create_dir(&out).unwrap();
+    let out_for_editor = out.clone();
+    let moved_for_editor = moved.clone();
+    let editor = std::thread::spawn(move || {
+        projection_started.recv().unwrap();
+        fs::rename(&out_for_editor, &moved_for_editor).unwrap();
+        fs::create_dir(&out_for_editor).unwrap();
+    });
+
+    let result = compile(&url, &binding, &out, &[]);
+    editor.join().unwrap();
+    assert!(
+        !result.status.success(),
+        "swapped empty output was overwritten"
+    );
+    assert!(root_names(&out).is_empty());
+    assert!(root_names(&moved).is_empty());
+    assert_eq!(fs::read_to_string(sentinel).unwrap(), "parent-sentinel");
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compile_refuses_root_and_units_redirection_while_fetching() {
@@ -601,6 +668,17 @@ async fn spawn_delayed_server() -> (
     AppState<memphant_core::InMemoryStore>,
     std::sync::mpsc::Receiver<()>,
 ) {
+    spawn_delayed_server_at(1).await
+}
+
+async fn spawn_delayed_server_at(
+    delayed_request: usize,
+) -> (
+    String,
+    ContextBindingResponse,
+    AppState<memphant_core::InMemoryStore>,
+    std::sync::mpsc::Receiver<()>,
+) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -644,7 +722,7 @@ async fn spawn_delayed_server() -> (
             let requests = requests.clone();
             async move {
                 if request.uri().path().ends_with("/projection")
-                    && requests.fetch_add(1, Ordering::SeqCst) == 1
+                    && requests.fetch_add(1, Ordering::SeqCst) == delayed_request
                 {
                     if let Some(sender) = started_tx.lock().unwrap().take() {
                         sender.send(()).unwrap();

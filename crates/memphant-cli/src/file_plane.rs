@@ -1,9 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fmt;
-use std::fs::{self, File};
+use std::fs;
 use std::io::{Read, Write};
-use std::os::fd::{AsFd, OwnedFd};
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,11 +15,9 @@ use serde_json::{Map, Number, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use cap_std::fs::Dir;
-use rustix::fs::{
-    AtFlags, CWD, FileType, Mode, OFlags, fstat, fsync, mkdirat, openat, renameat, statat, unlinkat,
-};
-use rustix::io::dup;
+use cap_fs_ext::{DirExt, FollowSymlinks, MetadataExt, OpenOptionsFollowExt, OpenOptionsSyncExt};
+use cap_std::ambient_authority;
+use cap_std::fs::{Dir, OpenOptions};
 
 const DEFAULT_URL: &str = "http://127.0.0.1:8080";
 const SCHEMA_VERSION: u32 = 1;
@@ -40,11 +37,20 @@ struct FileIdentity {
     inode: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ManagedFileSnapshot {
+    identity: FileIdentity,
+    bytes: Vec<u8>,
+}
+
 #[derive(Debug)]
 struct TreeHandles {
-    root: OwnedFd,
-    units: OwnedFd,
-    inbox: OwnedFd,
+    parent: Dir,
+    root_name: String,
+    root: Dir,
+    units: Dir,
+    inbox: Dir,
+    parent_identity: FileIdentity,
     root_identity: FileIdentity,
     units_identity: FileIdentity,
     inbox_identity: FileIdentity,
@@ -55,6 +61,31 @@ struct ValidatedExport {
     manifest: ExportManifest,
     snapshot_sha256: String,
     handles: TreeHandles,
+    managed_files: BTreeMap<String, ManagedFileSnapshot>,
+}
+
+#[derive(Debug)]
+struct AbsentOutput {
+    parent: Dir,
+    missing_components: Vec<String>,
+    parent_identity: FileIdentity,
+}
+
+#[derive(Debug)]
+struct EmptyOutput {
+    parent: Dir,
+    root_name: String,
+    root: Dir,
+    parent_identity: FileIdentity,
+    root_identity: FileIdentity,
+    root_names: Vec<String>,
+}
+
+#[derive(Debug)]
+enum OutputState {
+    Absent(AbsentOutput),
+    Empty(EmptyOutput),
+    Existing(Box<ValidatedExport>),
 }
 
 #[derive(Debug)]
@@ -114,6 +145,7 @@ pub(crate) struct ExportManifest {
 struct RenderedProjection {
     memory: Vec<u8>,
     units: BTreeMap<String, Vec<u8>>,
+    manifest: ExportManifest,
     manifest_bytes: Vec<u8>,
 }
 
@@ -150,23 +182,19 @@ pub(crate) fn run_compile(args: &[String]) -> ExitCode {
 
 fn compile(args: &[String]) -> Result<(Uuid, PathBuf, String, usize), CompileFailure> {
     let args = parse_compile_args(args).map_err(CompileFailure::Error)?;
-    let previous = inspect_existing(&args.out)?;
-    if let Some(previous) = &previous {
+    let output = inspect_output(&args.out)?;
+    if let OutputState::Existing(previous) = &output {
         validate_manifest_binding(&previous.manifest, &args).map_err(CompileFailure::Dirty)?;
     }
     let projection = fetch_projection(&args).map_err(CompileFailure::Error)?;
     validate_response_binding(&projection, &args).map_err(CompileFailure::Error)?;
-    if let Some(previous) = &previous {
+    if let OutputState::Existing(previous) = &output {
         validate_manifest_response_context(&previous.manifest, &projection)
             .map_err(CompileFailure::Dirty)?;
     }
     let rendered = render_projection(&projection).map_err(CompileFailure::Error)?;
-    if let Some(previous) = &previous {
-        previous
-            .revalidate(&args.out)
-            .map_err(CompileFailure::Dirty)?;
-    }
-    replace_projection(&args.out, previous.as_ref(), &rendered).map_err(CompileFailure::Error)?;
+    output.revalidate().map_err(CompileFailure::Dirty)?;
+    replace_projection(&args.out, &output, &rendered).map_err(CompileFailure::Error)?;
     Ok((
         args.scope_id,
         args.out,
@@ -449,6 +477,7 @@ fn render_projection(response: &CanonicalProjectionResponse) -> Result<RenderedP
     Ok(RenderedProjection {
         memory,
         units,
+        manifest,
         manifest_bytes,
     })
 }
@@ -497,34 +526,48 @@ fn escape_link_text(value: &str) -> String {
 
 impl TreeHandles {
     fn open(root: &Path) -> Result<Self, String> {
-        let root_fd =
-            open_directory_at(CWD, root).map_err(|error| format!("output root: {error}"))?;
-        Self::from_root(root_fd, root)
+        let (mut current, components, _) = output_anchor(root)?;
+        for (index, name) in components.iter().enumerate() {
+            if index + 1 == components.len() {
+                let root_dir = open_directory_at(&current, name)
+                    .map_err(|error| format!("output root: {error}"))?;
+                return Self::from_root(current, name.clone(), root_dir);
+            }
+            current = open_directory_at(&current, name)
+                .map_err(|error| format!("output component {name}: {error}"))?;
+        }
+        Err("output root may not be the filesystem root".to_string())
     }
 
-    fn from_root(root_fd: OwnedFd, root: &Path) -> Result<Self, String> {
-        let units = open_directory_at(&root_fd, UNITS_DIR)
-            .map_err(|error| format!("{UNITS_DIR}: {error}"))?;
-        let inbox = open_directory_at(&root_fd, INBOX_DIR)
-            .map_err(|error| format!("{INBOX_DIR}: {error}"))?;
+    fn from_root(parent: Dir, root_name: String, root: Dir) -> Result<Self, String> {
+        let units =
+            open_directory_at(&root, UNITS_DIR).map_err(|error| format!("{UNITS_DIR}: {error}"))?;
+        let inbox =
+            open_directory_at(&root, INBOX_DIR).map_err(|error| format!("{INBOX_DIR}: {error}"))?;
         let handles = Self {
-            root_identity: identity(&root_fd)?,
-            units_identity: identity(&units)?,
-            inbox_identity: identity(&inbox)?,
-            root: root_fd,
+            parent_identity: directory_identity(&parent)?,
+            root_identity: directory_identity(&root)?,
+            units_identity: directory_identity(&units)?,
+            inbox_identity: directory_identity(&inbox)?,
+            parent,
+            root_name,
+            root,
             units,
             inbox,
         };
-        handles.ensure_bound(root)?;
+        handles.ensure_bound()?;
         Ok(handles)
     }
 
-    fn ensure_bound(&self, root_path: &Path) -> Result<(), String> {
-        let root = identity_at(CWD, root_path)
+    fn ensure_bound(&self) -> Result<(), String> {
+        if directory_identity(&self.parent)? != self.parent_identity {
+            return Err("output parent handle changed identity".to_string());
+        }
+        let root = directory_identity_at(&self.parent, &self.root_name)
             .map_err(|error| format!("output root path changed: {error}"))?;
-        let units = identity_at(&self.root, UNITS_DIR)
+        let units = directory_identity_at(&self.root, UNITS_DIR)
             .map_err(|error| format!("{UNITS_DIR} path changed: {error}"))?;
-        let inbox = identity_at(&self.root, INBOX_DIR)
+        let inbox = directory_identity_at(&self.root, INBOX_DIR)
             .map_err(|error| format!("{INBOX_DIR} path changed: {error}"))?;
         if root != self.root_identity {
             return Err("output root path no longer names the validated directory".to_string());
@@ -539,7 +582,7 @@ impl TreeHandles {
     }
 }
 
-fn create_output_tree(root: &Path) -> Result<TreeHandles, String> {
+fn output_anchor(root: &Path) -> Result<(Dir, Vec<String>, FileIdentity), String> {
     if root
         .components()
         .any(|component| matches!(component, Component::ParentDir))
@@ -564,7 +607,9 @@ fn create_output_tree(root: &Path) -> Result<TreeHandles, String> {
             .ok_or_else(|| "output path must end in a UTF-8 component".to_string())?
             .to_string(),
     ];
-    while !ancestor.exists() {
+    while fs::symlink_metadata(&ancestor)
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
         components.push(
             ancestor
                 .file_name()
@@ -579,25 +624,54 @@ fn create_output_tree(root: &Path) -> Result<TreeHandles, String> {
     }
     let ancestor = fs::canonicalize(&ancestor)
         .map_err(|error| format!("cannot resolve output parent: {error}"))?;
-    let mut current = open_directory_at(CWD, &ancestor)?;
-    for name in components.into_iter().rev() {
-        current = match open_directory_at(&current, name.as_str()) {
-            Ok(next) => next,
-            Err(_) => {
-                mkdirat(&current, name.as_str(), Mode::from_raw_mode(0o700))
+    let parent = Dir::open_ambient_dir(&ancestor, ambient_authority())
+        .map_err(|error| format!("cannot safely open output parent: {error}"))?;
+    let identity = directory_identity(&parent)?;
+    components.reverse();
+    Ok((parent, components, identity))
+}
+
+fn initialize_output_tree(output: &OutputState) -> Result<TreeHandles, String> {
+    let (parent, root_name, root) = match output {
+        OutputState::Absent(absent) => {
+            let mut current = absent
+                .parent
+                .try_clone()
+                .map_err(|error| error.to_string())?;
+            let mut result = None;
+            for (index, name) in absent.missing_components.iter().enumerate() {
+                current
+                    .create_dir(name)
                     .map_err(|error| format!("cannot create output component {name}: {error}"))?;
-                open_directory_at(&current, name.as_str())?
+                sync_directory(&current)
+                    .map_err(|error| format!("cannot sync output parent: {error}"))?;
+                let next = open_directory_at(&current, name)?;
+                if index + 1 == absent.missing_components.len() {
+                    result = Some((current, name.clone(), next));
+                    break;
+                }
+                current = next;
             }
-        };
-    }
-    for name in [UNITS_DIR, INBOX_DIR] {
-        match mkdirat(&current, name, Mode::from_raw_mode(0o700)) {
-            Ok(()) => {}
-            Err(error) if error == rustix::io::Errno::EXIST => {}
-            Err(error) => return Err(format!("cannot create {name}: {error}")),
+            result.ok_or_else(|| "output path has no missing component".to_string())?
         }
+        OutputState::Empty(empty) => (
+            empty
+                .parent
+                .try_clone()
+                .map_err(|error| error.to_string())?,
+            empty.root_name.clone(),
+            empty.root.try_clone().map_err(|error| error.to_string())?,
+        ),
+        OutputState::Existing(_) => {
+            return Err("existing output tree does not need initialization".to_string());
+        }
+    };
+    for name in [UNITS_DIR, INBOX_DIR] {
+        root.create_dir(name)
+            .map_err(|error| format!("cannot create {name}: {error}"))?;
+        sync_directory(&root).map_err(|error| format!("cannot sync output root: {error}"))?;
     }
-    let handles = TreeHandles::from_root(current, root)?;
+    let handles = TreeHandles::from_root(parent, root_name, root)?;
     let root_names = directory_names(&handles.root)?;
     if root_names != [INBOX_DIR.to_string(), UNITS_DIR.to_string()]
         || !directory_names(&handles.units)?.is_empty()
@@ -609,9 +683,13 @@ fn create_output_tree(root: &Path) -> Result<TreeHandles, String> {
 }
 
 impl ValidatedExport {
-    fn revalidate(&self, root: &Path) -> Result<(), Vec<String>> {
-        let (manifest, snapshot_sha256) = validate_export_handles(root, &self.handles, false)?;
-        if manifest != self.manifest || snapshot_sha256 != self.snapshot_sha256 {
+    fn revalidate(&self) -> Result<(), Vec<String>> {
+        let (manifest, snapshot_sha256, managed_files) =
+            validate_export_handles(&self.handles, false)?;
+        if manifest != self.manifest
+            || snapshot_sha256 != self.snapshot_sha256
+            || managed_files != self.managed_files
+        {
             return Err(vec![
                 "projection changed while the canonical snapshot was being fetched".to_string(),
             ]);
@@ -620,67 +698,125 @@ impl ValidatedExport {
     }
 }
 
-fn open_directory_at<Fd: AsFd>(dir: Fd, path: impl rustix::path::Arg) -> Result<OwnedFd, String> {
-    openat(
-        dir,
-        path,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|error| format!("refusing symlink or non-directory: {error}"))
+impl OutputState {
+    fn revalidate(&self) -> Result<(), Vec<String>> {
+        match self {
+            Self::Existing(existing) => existing.revalidate(),
+            Self::Absent(absent) => {
+                if directory_identity(&absent.parent).map_err(|error| vec![error])?
+                    != absent.parent_identity
+                {
+                    return Err(vec!["output parent handle changed identity".to_string()]);
+                }
+                let first = absent
+                    .missing_components
+                    .first()
+                    .ok_or_else(|| vec!["output path has no missing component".to_string()])?;
+                match absent.parent.symlink_metadata(first) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Ok(_) => Err(vec![
+                        "output path appeared while the canonical snapshot was being fetched"
+                            .to_string(),
+                    ]),
+                    Err(error) => Err(vec![format!(
+                        "cannot revalidate absent output component {first}: {error}"
+                    )]),
+                }
+            }
+            Self::Empty(empty) => {
+                let mut findings = Vec::new();
+                if directory_identity(&empty.parent).ok() != Some(empty.parent_identity) {
+                    findings.push("output parent handle changed identity".to_string());
+                }
+                if directory_identity(&empty.root).ok() != Some(empty.root_identity) {
+                    findings.push("output root handle changed identity".to_string());
+                }
+                match directory_identity_at(&empty.parent, &empty.root_name) {
+                    Ok(identity) if identity == empty.root_identity => {}
+                    _ => findings.push(
+                        "output root path no longer names the validated empty directory"
+                            .to_string(),
+                    ),
+                }
+                match directory_names(&empty.root) {
+                    Ok(names) if names == empty.root_names => {}
+                    Ok(_) => findings.push(
+                        "empty output changed while the canonical snapshot was being fetched"
+                            .to_string(),
+                    ),
+                    Err(error) => findings.push(format!("cannot revalidate empty output: {error}")),
+                }
+                if findings.is_empty() {
+                    Ok(())
+                } else {
+                    Err(findings)
+                }
+            }
+        }
+    }
 }
 
-fn identity<Fd: AsFd>(fd: Fd) -> Result<FileIdentity, String> {
-    let stat = fstat(fd).map_err(|error| error.to_string())?;
-    if !FileType::from_raw_mode(stat.st_mode).is_dir() {
+fn open_directory_at(dir: &Dir, path: impl AsRef<Path>) -> Result<Dir, String> {
+    dir.open_dir_nofollow(path)
+        .map_err(|error| format!("refusing symlink or non-directory: {error}"))
+}
+
+fn metadata_identity(metadata: &cap_std::fs::Metadata) -> FileIdentity {
+    FileIdentity {
+        device: MetadataExt::dev(metadata),
+        inode: MetadataExt::ino(metadata),
+    }
+}
+
+fn directory_identity(dir: &Dir) -> Result<FileIdentity, String> {
+    let metadata = dir.dir_metadata().map_err(|error| error.to_string())?;
+    if !metadata.is_dir() {
         return Err("expected directory".to_string());
     }
-    Ok(FileIdentity {
-        device: stat.st_dev as u64,
-        inode: stat.st_ino as u64,
-    })
+    Ok(metadata_identity(&metadata))
 }
 
-fn identity_at<Fd: AsFd>(dir: Fd, path: impl rustix::path::Arg) -> Result<FileIdentity, String> {
-    let stat = statat(dir, path, AtFlags::SYMLINK_NOFOLLOW).map_err(|error| error.to_string())?;
-    if !FileType::from_raw_mode(stat.st_mode).is_dir() {
+fn directory_identity_at(dir: &Dir, path: impl AsRef<Path>) -> Result<FileIdentity, String> {
+    let metadata = dir
+        .symlink_metadata(path)
+        .map_err(|error| error.to_string())?;
+    if !metadata.is_dir() || metadata.is_symlink() {
         return Err("expected a non-symlink directory".to_string());
     }
-    Ok(FileIdentity {
-        device: stat.st_dev as u64,
-        inode: stat.st_ino as u64,
-    })
+    Ok(metadata_identity(&metadata))
 }
 
-fn read_regular_at<Fd: AsFd>(dir: Fd, name: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
-    let fd = openat(
-        dir,
-        name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|error| format!("refusing symlink or unreadable file: {error}"))?;
-    let stat = fstat(&fd).map_err(|error| error.to_string())?;
-    if !FileType::from_raw_mode(stat.st_mode).is_file() {
+fn read_regular_at(
+    dir: &Dir,
+    name: &str,
+    max_bytes: u64,
+) -> Result<(Vec<u8>, FileIdentity), String> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    options.follow(FollowSymlinks::No);
+    options.nonblock(true);
+    let file = dir
+        .open_with(name, &options)
+        .map_err(|error| format!("refusing symlink or unreadable file: {error}"))?;
+    let metadata = file.metadata().map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
         return Err("expected a regular file".to_string());
     }
-    if stat.st_size < 0 || stat.st_size as u64 > max_bytes {
+    if metadata.len() > max_bytes {
         return Err(format!("file exceeds {max_bytes} bytes"));
     }
-    let mut bytes = Vec::with_capacity(stat.st_size as usize);
-    File::from(fd)
-        .take(max_bytes + 1)
+    let identity = metadata_identity(&metadata);
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(max_bytes + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| error.to_string())?;
     if bytes.len() as u64 > max_bytes {
         return Err(format!("file exceeds {max_bytes} bytes"));
     }
-    Ok(bytes)
+    Ok((bytes, identity))
 }
 
-fn directory_names<Fd: AsFd>(fd: Fd) -> Result<Vec<String>, String> {
-    let fd = dup(fd).map_err(|error| error.to_string())?;
-    let directory = Dir::from_std_file(File::from(fd));
+fn directory_names(directory: &Dir) -> Result<Vec<String>, String> {
     let mut names = Vec::new();
     for entry in directory.entries().map_err(|error| error.to_string())? {
         let name = entry
@@ -697,44 +833,66 @@ fn directory_names<Fd: AsFd>(fd: Fd) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
-fn inspect_existing(root: &Path) -> Result<Option<ValidatedExport>, CompileFailure> {
-    match fs::symlink_metadata(root) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            return Err(CompileFailure::Dirty(vec![format!(
-                "symlink output root: {}",
-                root.display()
-            )]));
+fn inspect_output(root: &Path) -> Result<OutputState, CompileFailure> {
+    let (mut current, components, _) = output_anchor(root).map_err(CompileFailure::Error)?;
+    for (index, name) in components.iter().enumerate() {
+        match current.symlink_metadata(name) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let current_identity =
+                    directory_identity(&current).map_err(CompileFailure::Error)?;
+                return Ok(OutputState::Absent(AbsentOutput {
+                    parent: current,
+                    missing_components: components[index..].to_vec(),
+                    parent_identity: current_identity,
+                }));
+            }
+            Err(error) => {
+                return Err(CompileFailure::Error(format!(
+                    "cannot inspect output component {name}: {error}"
+                )));
+            }
+            Ok(metadata) if !metadata.is_dir() || metadata.is_symlink() => {
+                return Err(CompileFailure::Dirty(vec![format!(
+                    "output component is a symlink or non-directory: {name}"
+                )]));
+            }
+            Ok(_) => {}
         }
-        Ok(metadata) if !metadata.is_dir() => {
-            return Err(CompileFailure::Dirty(vec![format!(
-                "output root is not a directory: {}",
-                root.display()
-            )]));
+        let next = open_directory_at(&current, name).map_err(|error| {
+            CompileFailure::Dirty(vec![format!(
+                "cannot safely open output component {name}: {error}"
+            )])
+        })?;
+        if index + 1 == components.len() {
+            let names = directory_names(&next).map_err(|error| {
+                CompileFailure::Dirty(vec![format!("cannot read output root: {error}")])
+            })?;
+            if names.is_empty() {
+                return Ok(OutputState::Empty(EmptyOutput {
+                    parent_identity: directory_identity(&current).map_err(CompileFailure::Error)?,
+                    root_identity: directory_identity(&next).map_err(CompileFailure::Error)?,
+                    parent: current,
+                    root_name: name.clone(),
+                    root: next,
+                    root_names: names,
+                }));
+            }
+            let handles = TreeHandles::from_root(current, name.clone(), next)
+                .map_err(|error| CompileFailure::Dirty(vec![error]))?;
+            let (manifest, snapshot_sha256, managed_files) =
+                validate_export_handles(&handles, false).map_err(CompileFailure::Dirty)?;
+            return Ok(OutputState::Existing(Box::new(ValidatedExport {
+                manifest,
+                snapshot_sha256,
+                handles,
+                managed_files,
+            })));
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(CompileFailure::Error(format!(
-                "cannot inspect output root {}: {error}",
-                root.display()
-            )));
-        }
-        Ok(_) => {}
+        current = next;
     }
-    let root_fd = open_directory_at(CWD, root).map_err(|error| {
-        CompileFailure::Dirty(vec![format!(
-            "cannot safely open {}: {error}",
-            root.display()
-        )])
-    })?;
-    if directory_names(&root_fd)
-        .map_err(|error| CompileFailure::Dirty(vec![format!("cannot read output root: {error}")]))?
-        .is_empty()
-    {
-        return Ok(None);
-    }
-    validate_export_anchored(root, false)
-        .map(Some)
-        .map_err(CompileFailure::Dirty)
+    Err(CompileFailure::Error(
+        "output root may not be the filesystem root".to_string(),
+    ))
 }
 
 pub(crate) fn verify_export(root: &Path) -> Result<ExportManifest, Vec<String>> {
@@ -753,25 +911,41 @@ fn validate_export_anchored(
     allow_inbox_files: bool,
 ) -> Result<ValidatedExport, Vec<String>> {
     let handles = TreeHandles::open(root).map_err(|error| vec![error])?;
-    let (manifest, snapshot_sha256) = validate_export_handles(root, &handles, allow_inbox_files)?;
+    let (manifest, snapshot_sha256, managed_files) =
+        validate_export_handles(&handles, allow_inbox_files)?;
     Ok(ValidatedExport {
         manifest,
         snapshot_sha256,
         handles,
+        managed_files,
     })
 }
 
 fn validate_export_handles(
-    root: &Path,
     handles: &TreeHandles,
     allow_inbox_files: bool,
-) -> Result<(ExportManifest, String), Vec<String>> {
+) -> Result<
+    (
+        ExportManifest,
+        String,
+        BTreeMap<String, ManagedFileSnapshot>,
+    ),
+    Vec<String>,
+> {
     let mut findings = Vec::new();
-    if let Err(error) = handles.ensure_bound(root) {
+    if let Err(error) = handles.ensure_bound() {
         return Err(vec![error]);
     }
-    let manifest_bytes = read_regular_at(&handles.root, MANIFEST_FILE, MAX_MANIFEST_BYTES)
-        .map_err(|error| vec![format!("{MANIFEST_FILE}: {error}")])?;
+    let (manifest_bytes, manifest_identity) =
+        read_regular_at(&handles.root, MANIFEST_FILE, MAX_MANIFEST_BYTES)
+            .map_err(|error| vec![format!("{MANIFEST_FILE}: {error}")])?;
+    let mut managed_files = BTreeMap::from([(
+        MANIFEST_FILE.to_string(),
+        ManagedFileSnapshot {
+            identity: manifest_identity,
+            bytes: manifest_bytes.clone(),
+        },
+    )]);
     let manifest = strict_from_slice::<ExportManifest>(&manifest_bytes)
         .map_err(|error| vec![format!("{MANIFEST_FILE}: invalid JSON: {error}")]);
     let manifest = match manifest {
@@ -784,7 +958,16 @@ fn validate_export_handles(
     validate_manifest_fields(&manifest, &mut findings);
 
     let memory_bytes = match read_regular_at(&handles.root, MEMORY_FILE, MAX_MANAGED_FILE_BYTES) {
-        Ok(bytes) => bytes,
+        Ok((bytes, identity)) => {
+            managed_files.insert(
+                MEMORY_FILE.to_string(),
+                ManagedFileSnapshot {
+                    identity,
+                    bytes: bytes.clone(),
+                },
+            );
+            bytes
+        }
         Err(error) => {
             findings.push(format!("{MEMORY_FILE}: {error}"));
             Vec::new()
@@ -806,7 +989,16 @@ fn validate_export_handles(
         let file_name = format!("{}.md", entry.unit_id);
         expected_unit_names.insert(file_name.clone());
         let bytes = match read_regular_at(&handles.units, &file_name, MAX_MANAGED_FILE_BYTES) {
-            Ok(bytes) => bytes,
+            Ok((bytes, identity)) => {
+                managed_files.insert(
+                    entry.path.clone(),
+                    ManagedFileSnapshot {
+                        identity,
+                        bytes: bytes.clone(),
+                    },
+                );
+                bytes
+            }
             Err(error) => {
                 findings.push(format!("{}: {error}", entry.path));
                 continue;
@@ -902,7 +1094,7 @@ fn validate_export_handles(
         }
     }
 
-    if let Err(error) = handles.ensure_bound(root) {
+    if let Err(error) = handles.ensure_bound() {
         findings.push(error);
     }
 
@@ -916,7 +1108,7 @@ fn validate_export_handles(
             &memory_bytes,
             &unit_bytes,
         );
-        Ok((manifest, snapshot_sha256))
+        Ok((manifest, snapshot_sha256, managed_files))
     } else {
         findings.sort();
         findings.dedup();
@@ -1107,11 +1299,27 @@ pub(crate) fn parse_unit(bytes: &[u8]) -> Result<(String, UnitFooter), String> {
 
 fn replace_projection(
     root: &Path,
-    previous: Option<&ValidatedExport>,
+    output: &OutputState,
     rendered: &RenderedProjection,
 ) -> Result<(), String> {
+    replace_projection_with_hook(root, output, rendered, |_| {})
+}
+
+fn replace_projection_with_hook(
+    _root: &Path,
+    output: &OutputState,
+    rendered: &RenderedProjection,
+    mut after_mutation: impl FnMut(&str),
+) -> Result<(), String> {
+    output
+        .revalidate()
+        .map_err(|findings| findings.join("; "))?;
+    let previous = match output {
+        OutputState::Existing(previous) => Some(previous.as_ref()),
+        OutputState::Absent(_) | OutputState::Empty(_) => None,
+    };
     let owned_handles = if previous.is_none() {
-        Some(create_output_tree(root)?)
+        Some(initialize_output_tree(output)?)
     } else {
         None
     };
@@ -1119,16 +1327,30 @@ fn replace_projection(
         .map(|validated| &validated.handles)
         .or(owned_handles.as_ref())
         .expect("existing or newly opened output handles");
-    handles.ensure_bound(root)?;
+    handles.ensure_bound()?;
 
     for (path, bytes) in &rendered.units {
         let name = Path::new(path)
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(|| format!("invalid rendered unit path {path}"))?;
-        write_atomic_at(&handles.units, name, bytes)?;
+        handles.ensure_bound()?;
+        write_atomic_at(
+            &handles.units,
+            name,
+            bytes,
+            expected_managed_file(previous, path),
+        )?;
+        after_mutation(path);
     }
-    write_atomic_at(&handles.root, MEMORY_FILE, &rendered.memory)?;
+    handles.ensure_bound()?;
+    write_atomic_at(
+        &handles.root,
+        MEMORY_FILE,
+        &rendered.memory,
+        expected_managed_file(previous, MEMORY_FILE),
+    )?;
+    after_mutation(MEMORY_FILE);
 
     if let Some(previous) = previous {
         let current = rendered.units.keys().collect::<BTreeSet<_>>();
@@ -1138,46 +1360,130 @@ fn replace_projection(
                     .file_name()
                     .and_then(|name| name.to_str())
                     .ok_or_else(|| format!("invalid stale unit path {}", entry.path))?;
-                unlinkat(&handles.units, name, AtFlags::empty())
+                handles.ensure_bound()?;
+                require_managed_file(
+                    &handles.units,
+                    name,
+                    expected_managed_file(Some(previous), &entry.path),
+                )?;
+                handles
+                    .units
+                    .remove_file(name)
                     .map_err(|error| format!("cannot remove stale {}: {error}", entry.path))?;
+                sync_directory(&handles.units)
+                    .map_err(|error| format!("cannot sync {UNITS_DIR}: {error}"))?;
+                after_mutation(&entry.path);
             }
         }
     }
-    fsync(&handles.units).map_err(|error| format!("cannot sync {UNITS_DIR}: {error}"))?;
-    write_atomic_at(&handles.root, MANIFEST_FILE, &rendered.manifest_bytes)?;
-    fsync(&handles.root).map_err(|error| format!("cannot sync output root: {error}"))?;
-    handles.ensure_bound(root)?;
+    handles.ensure_bound()?;
+    write_atomic_at(
+        &handles.root,
+        MANIFEST_FILE,
+        &rendered.manifest_bytes,
+        expected_managed_file(previous, MANIFEST_FILE),
+    )?;
+    after_mutation(MANIFEST_FILE);
+    handles.ensure_bound()?;
+    let (actual_manifest, _, _) = validate_export_handles(handles, false).map_err(|findings| {
+        format!(
+            "final rendered-tree validation failed: {}",
+            findings.join("; ")
+        )
+    })?;
+    if actual_manifest != rendered.manifest {
+        return Err("final rendered tree differs from the canonical projection".to_string());
+    }
     Ok(())
 }
 
-fn write_atomic_at<Fd: AsFd>(directory: Fd, name: &str, bytes: &[u8]) -> Result<(), String> {
+fn expected_managed_file<'a>(
+    previous: Option<&'a ValidatedExport>,
+    path: &str,
+) -> Option<&'a ManagedFileSnapshot> {
+    previous.and_then(|validated| validated.managed_files.get(path))
+}
+
+fn managed_identity_at(directory: &Dir, name: &str) -> Result<Option<FileIdentity>, String> {
+    match directory.symlink_metadata(name) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("cannot inspect {name}: {error}")),
+        Ok(metadata) if metadata.is_file() && !metadata.is_symlink() => {
+            Ok(Some(metadata_identity(&metadata)))
+        }
+        Ok(_) => Err(format!("{name}: expected a non-symlink regular file")),
+    }
+}
+
+fn require_managed_file(
+    directory: &Dir,
+    name: &str,
+    expected: Option<&ManagedFileSnapshot>,
+) -> Result<(), String> {
+    match expected {
+        None if managed_identity_at(directory, name)?.is_none() => Ok(()),
+        None => Err(format!(
+            "{name}: appeared after validation; refusing to overwrite it"
+        )),
+        Some(expected) => {
+            let max_bytes = if name == MANIFEST_FILE {
+                MAX_MANIFEST_BYTES
+            } else {
+                MAX_MANAGED_FILE_BYTES
+            };
+            let (bytes, identity) = read_regular_at(directory, name, max_bytes)?;
+            if identity == expected.identity && bytes == expected.bytes {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{name}: changed after validation; refusing to overwrite or delete it"
+                ))
+            }
+        }
+    }
+}
+
+fn sync_directory(directory: &Dir) -> Result<(), String> {
+    directory
+        .try_clone()
+        .map_err(|error| error.to_string())?
+        .into_std_file()
+        .sync_all()
+        .map_err(|error| error.to_string())
+}
+
+fn write_atomic_at(
+    directory: &Dir,
+    name: &str,
+    bytes: &[u8],
+    expected: Option<&ManagedFileSnapshot>,
+) -> Result<(), String> {
     let mut attempts = 0;
-    let (temporary, fd) = loop {
+    let (temporary, mut file) = loop {
         let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let temporary = format!(".{name}.tmp-{}-{sequence}", std::process::id());
-        match openat(
-            &directory,
-            temporary.as_str(),
-            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::from_raw_mode(0o600),
-        ) {
-            Ok(fd) => break (temporary, fd),
-            Err(error) if error == rustix::io::Errno::EXIST && attempts < 32 => {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        options.follow(FollowSymlinks::No);
+        match directory.open_with(&temporary, &options) {
+            Ok(file) => break (temporary, file),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempts < 32 => {
                 attempts += 1;
             }
             Err(error) => return Err(format!("cannot create temporary file: {error}")),
         }
     };
-    let mut file = File::from(fd);
     let result = (|| {
         file.write_all(bytes).map_err(|error| error.to_string())?;
         file.sync_all().map_err(|error| error.to_string())?;
-        renameat(&directory, temporary.as_str(), &directory, name)
+        require_managed_file(directory, name, expected)?;
+        directory
+            .rename(&temporary, directory, name)
             .map_err(|error| error.to_string())?;
-        fsync(&directory).map_err(|error| error.to_string())
+        sync_directory(directory)
     })();
     if result.is_err() {
-        let _ = unlinkat(&directory, temporary.as_str(), AtFlags::empty());
+        let _ = directory.remove_file(&temporary);
     }
     result.map_err(|error| format!("cannot replace {name}: {error}"))
 }
@@ -1377,7 +1683,15 @@ impl<'de> Visitor<'de> for StrictValueVisitor {
 
 #[cfg(test)]
 mod tests {
-    use super::is_safe_inbox_name;
+    use super::{
+        MEMORY_FILE, OutputState, canonical_projection_fingerprint, inspect_output,
+        is_safe_inbox_name, render_projection, replace_projection, replace_projection_with_hook,
+        sha256,
+    };
+    use memphant_types::{
+        ActorId, AgentNodeId, CanonicalProjectionResponse, CanonicalProjectionUnit, MemoryKind,
+        ScopeId, SubjectId, TenantId, UnitId,
+    };
 
     #[test]
     fn inbox_names_reject_reserved_and_device_components() {
@@ -1394,5 +1708,122 @@ mod tests {
         ] {
             assert!(!is_safe_inbox_name(name), "reserved inbox name {name}");
         }
+    }
+
+    #[test]
+    fn compile_refuses_a_managed_file_replaced_during_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("memory");
+        let initial = rendered_projection(&[(1, "alpha before"), (2, "beta before")]);
+        let empty = inspect_output(&output).unwrap();
+        replace_projection(&output, &empty, &initial).unwrap();
+        let existing = inspect_output(&output).unwrap();
+        assert!(matches!(existing, OutputState::Existing(_)));
+
+        let replacement = rendered_projection(&[(1, "alpha after"), (2, "beta after")]);
+        let first_path = replacement.units.keys().next().unwrap().clone();
+        let second_path = replacement.units.keys().nth(1).unwrap().clone();
+        let victim = output.join(&second_path);
+        let mut swapped = false;
+        let result = replace_projection_with_hook(&output, &existing, &replacement, |written| {
+            if written == first_path && !swapped {
+                std::fs::write(&victim, "concurrent sentinel").unwrap();
+                swapped = true;
+            }
+        });
+
+        let error = result.unwrap_err();
+        assert!(error.contains("changed after validation"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(victim).unwrap(),
+            "concurrent sentinel"
+        );
+    }
+
+    #[test]
+    fn compile_refuses_a_stale_managed_file_replaced_before_deletion() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("memory");
+        let initial = rendered_projection(&[(1, "alpha before"), (2, "beta before")]);
+        let empty = inspect_output(&output).unwrap();
+        replace_projection(&output, &empty, &initial).unwrap();
+        let existing = inspect_output(&output).unwrap();
+        assert!(matches!(existing, OutputState::Existing(_)));
+
+        let replacement = rendered_projection(&[(1, "alpha after")]);
+        let stale_path = initial.units.keys().nth(1).unwrap().clone();
+        let victim = output.join(&stale_path);
+        let mut swapped = false;
+        let result = replace_projection_with_hook(&output, &existing, &replacement, |written| {
+            if written == MEMORY_FILE && !swapped {
+                std::fs::write(&victim, "concurrent stale sentinel").unwrap();
+                swapped = true;
+            }
+        });
+
+        let error = result.unwrap_err();
+        assert!(error.contains("changed after validation"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(victim).unwrap(),
+            "concurrent stale sentinel"
+        );
+    }
+
+    #[test]
+    fn compile_validates_the_exact_tree_after_manifest_last() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("memory");
+        let initial = rendered_projection(&[(1, "alpha before")]);
+        let absent = inspect_output(&output).unwrap();
+        replace_projection(&output, &absent, &initial).unwrap();
+        let existing = inspect_output(&output).unwrap();
+
+        let replacement = rendered_projection(&[(1, "alpha after")]);
+        let unit = output.join(replacement.units.keys().next().unwrap());
+        let result = replace_projection_with_hook(&output, &existing, &replacement, |written| {
+            if written == super::MANIFEST_FILE {
+                std::fs::write(&unit, "post-manifest sentinel").unwrap();
+            }
+        });
+
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("final rendered-tree validation failed"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(unit).unwrap(),
+            "post-manifest sentinel"
+        );
+    }
+
+    fn rendered_projection(items: &[(u128, &str)]) -> super::RenderedProjection {
+        let items = items
+            .iter()
+            .map(|(id, body)| CanonicalProjectionUnit {
+                unit_id: UnitId::from_u128(*id),
+                kind: MemoryKind::Semantic,
+                fact_key: Some(format!("fact:{id}")),
+                predicate: Some("states".to_string()),
+                body: (*body).to_string(),
+                confidence: Some(0.9),
+                valid_from: None,
+                valid_to: None,
+                body_sha256: sha256(body.as_bytes()),
+            })
+            .collect::<Vec<_>>();
+        let fingerprint = canonical_projection_fingerprint(&items).unwrap();
+        render_projection(&CanonicalProjectionResponse {
+            tenant_id: TenantId::new(),
+            subject_id: SubjectId::new(),
+            actor_id: ActorId::new(),
+            scope_id: ScopeId::new(),
+            agent_node_id: AgentNodeId::new(),
+            subject_generation: 0,
+            evaluated_at: "2026-07-22T00:00:00Z".to_string(),
+            items,
+            fingerprint,
+        })
+        .unwrap()
     }
 }
