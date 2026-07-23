@@ -1,7 +1,11 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use memphant_core::{MemoryStore, service::MAX_CANONICAL_PROJECTION_ENCODED_BYTES};
+use memphant_core::service::MemoryService;
+use memphant_core::{
+    FixedClock, InMemoryStore, MemoryStore, NoopEmbedding,
+    service::MAX_CANONICAL_PROJECTION_ENCODED_BYTES,
+};
 use memphant_types::{
     ActorId, CanonicalProjectionResponse, ContextBindingAgentRef, ContextBindingEntityRef,
     ContextBindingRequest, ContextBindingResponse, ContextBindingScopeRef, CorrectRequest,
@@ -14,10 +18,12 @@ use memphant_types::{
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tower::ServiceExt;
 
 static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+const REST_TEST_CLOCK: FixedClock = FixedClock("2026-07-22T00:00:00Z");
 
 fn add_idempotency_header(
     mut builder: axum::http::request::Builder,
@@ -47,8 +53,20 @@ fn actor(value: u128) -> ActorId {
     ActorId::from_u128(value)
 }
 
+fn dev_state(tenant_id: TenantId) -> memphant_server::AppState<InMemoryStore> {
+    memphant_server::AppState::from_service(
+        MemoryService::new(
+            Arc::new(InMemoryStore::default()),
+            Arc::new(REST_TEST_CLOCK),
+            Arc::new(NoopEmbedding),
+        ),
+        "memory",
+    )
+    .with_dev_tenant(tenant_id)
+}
+
 fn dev_app(tenant_id: TenantId) -> axum::Router {
-    memphant_server::app(memphant_server::AppState::new_in_memory().with_dev_tenant(tenant_id))
+    memphant_server::app(dev_state(tenant_id))
 }
 
 fn dev_app_with_state(
@@ -57,7 +75,7 @@ fn dev_app_with_state(
     axum::Router,
     memphant_server::AppState<memphant_core::InMemoryStore>,
 ) {
-    let state = memphant_server::AppState::new_in_memory().with_dev_tenant(tenant_id);
+    let state = dev_state(tenant_id);
     (memphant_server::app(state.clone()), state)
 }
 
@@ -280,6 +298,7 @@ async fn canonical_projection_is_a_dedicated_unranked_visible_snapshot() {
     assert_eq!(projection.scope_id, binding.scope_id);
     assert_eq!(projection.agent_node_id, binding.agent_node_id);
     assert_eq!(projection.subject_generation, binding.subject_generation);
+    assert_eq!(projection.evaluated_at, REST_TEST_CLOCK.0);
     assert_eq!(projection.items.len(), 1);
     assert_eq!(
         projection.items[0].body,

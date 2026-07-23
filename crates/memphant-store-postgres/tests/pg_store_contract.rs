@@ -28,7 +28,7 @@ use memphant_store_postgres::PgStore;
 use memphant_store_testkit::StoreHarness;
 use memphant_types::{
     ContextBindingAccessPolicy, ContextBindingAgentRef, ContextBindingEntityRef,
-    ContextBindingRequest, ContextBindingScopeRef, JobId, MarkOutcome, MemoryKind,
+    ContextBindingRequest, ContextBindingScopeRef, JobId, MarkOutcome, MemoryKind, NewMemoryUnit,
     RecallHttpRequest, RecallMode, RecallRequest, RecallTime, ReflectCandidate, ReflectInput,
     ReflectJob, ReflectJobKind, ResolvedMemoryContext, RetainEpisodeHttpRequest,
     RetainEpisodeHttpResponse, RetainEpisodePayload, RetainPayload, RetainRequest,
@@ -159,6 +159,141 @@ fn context_binding_request(suffix: &str) -> ContextBindingRequest {
 
 async fn fresh_memory_context(store: &PgStore, tenant: TenantId) -> ResolvedMemoryContext {
     memphant_store_testkit::bind_context(store, tenant).await
+}
+
+fn active_projection_unit(context: &ResolvedMemoryContext, body: &str) -> NewMemoryUnit {
+    NewMemoryUnit {
+        tenant_id: context.tenant_id,
+        data_subject_id: context.data_subject_id,
+        scope_id: context.scope_id,
+        agent_node_id: context.agent_node_id,
+        subject_generation: context.subject_generation,
+        kind: MemoryKind::Semantic,
+        state: UnitState::Active,
+        fact_key: Some(format!("projection:{body}")),
+        predicate: Some("states".to_string()),
+        body: body.to_string(),
+        confidence: Some(1.0),
+        trust_level: TrustLevel::TrustedSystem,
+        churn_class: None,
+        freshness_due_at: None,
+        actor_id: Some(context.actor_id),
+        source_kind: Some("pg-contract".to_string()),
+        source_ref: format!("pg-contract:projection:{body}"),
+        observed_at: CLOCK.0.to_string(),
+        source_episode_id: None,
+        source_resource_id: None,
+        deletion_generation: None,
+        contextual_chunks: Vec::new(),
+        valid_from: None,
+        valid_to: None,
+        transaction_from: None,
+        transaction_to: None,
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn canonical_projection_filters_bitemporal_trust_bounds_and_orders_by_uuid() {
+    let store = connect().await;
+    let tenant = fresh_tenant(&store).await;
+    let context = fresh_memory_context(&store, tenant).await;
+
+    let mut first_tx = store
+        .begin(&context)
+        .await
+        .expect("begin first projection tx");
+    let mut visible_at_lower_bound = active_projection_unit(&context, "visible-lower-bound");
+    visible_at_lower_bound.valid_from = Some(CLOCK.0.to_string());
+    let lower_bound_id = store
+        .stage_memory_unit(&mut first_tx, visible_at_lower_bound)
+        .await
+        .expect("stage lower-bound visible unit");
+
+    let mut second_tx = store
+        .begin(&context)
+        .await
+        .expect("begin second projection tx");
+    let open_id = store
+        .stage_memory_unit(
+            &mut second_tx,
+            active_projection_unit(&context, "visible-open-interval"),
+        )
+        .await
+        .expect("stage open visible unit");
+    assert!(
+        lower_bound_id.as_uuid() < open_id.as_uuid(),
+        "the UUID-order assertion needs two independently staged ids"
+    );
+
+    let mut quarantined = active_projection_unit(&context, "quarantined-trust");
+    quarantined.trust_level = TrustLevel::Quarantined;
+    store
+        .stage_memory_unit(&mut second_tx, quarantined)
+        .await
+        .expect("stage quarantined unit");
+
+    let mut valid_to_at_boundary = active_projection_unit(&context, "valid-to-boundary");
+    valid_to_at_boundary.valid_to = Some(CLOCK.0.to_string());
+    store
+        .stage_memory_unit(&mut second_tx, valid_to_at_boundary)
+        .await
+        .expect("stage exclusive-valid-to unit");
+
+    let mut future_valid = active_projection_unit(&context, "future-valid-from");
+    future_valid.valid_from = Some("2030-01-01T00:00:01Z".to_string());
+    store
+        .stage_memory_unit(&mut second_tx, future_valid)
+        .await
+        .expect("stage future-valid unit");
+
+    let mut expired_valid = active_projection_unit(&context, "expired-valid-to");
+    expired_valid.valid_to = Some("2029-12-31T23:59:59Z".to_string());
+    store
+        .stage_memory_unit(&mut second_tx, expired_valid)
+        .await
+        .expect("stage expired-valid unit");
+
+    let mut future_transaction = active_projection_unit(&context, "future-transaction-from");
+    future_transaction.transaction_from = Some("2030-01-01T00:00:01Z".to_string());
+    store
+        .stage_memory_unit(&mut second_tx, future_transaction)
+        .await
+        .expect("stage future-transaction unit");
+
+    let mut closed_transaction = active_projection_unit(&context, "closed-transaction-to");
+    closed_transaction.transaction_to = Some(CLOCK.0.to_string());
+    store
+        .stage_memory_unit(&mut second_tx, closed_transaction)
+        .await
+        .expect("stage closed-transaction unit");
+
+    // Reverse physical insertion order. The read contract must still use UUID
+    // order, independent of commit order.
+    store
+        .commit(second_tx)
+        .await
+        .expect("commit second projection tx");
+    store
+        .commit(first_tx)
+        .await
+        .expect("commit first projection tx");
+
+    let projected = store
+        .canonical_projection_units(&context, CLOCK.0)
+        .await
+        .expect("read canonical projection");
+    assert_eq!(
+        projected.iter().map(|unit| unit.id).collect::<Vec<_>>(),
+        vec![lower_bound_id, open_id]
+    );
+    assert_eq!(
+        projected
+            .iter()
+            .map(|unit| unit.body.as_str())
+            .collect::<Vec<_>>(),
+        vec!["visible-lower-bound", "visible-open-interval"]
+    );
 }
 
 #[tokio::test]

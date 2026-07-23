@@ -51,6 +51,37 @@ No CLI sync, P1 artifact, or model/provider work was touched.
 - `cargo fmt --check` — passed.
 - `cargo clippy -p memphant-types -p memphant-core -p memphant-runtime -p memphant-store-postgres -p memphant-server --all-targets --all-features -- -D warnings` — passed.
 - `cargo run -q -p memphant-server -- --openapi-json > openapi/memphant.v1.json` — regenerated successfully.
+
+## Final review follow-up: deterministic REST clock and live Postgres proof
+
+### Test-first evidence
+
+1. The projection REST contract now asserts its returned `evaluated_at` equals
+   the test clock. Against the previous `SystemClock`-backed test app, the
+   exact test failed with a real wall-clock value
+   (`2026-07-23T03:40:24.970078Z`) instead of the required
+   `2026-07-22T00:00:00Z`.
+2. Rebuilt the REST test app through `AppState::from_service` with
+   `FixedClock("2026-07-22T00:00:00Z")`. This makes all REST-contract temporal
+   behavior deterministic without changing the production `SystemClock`
+   constructor.
+3. Added the ignored, scratch-Postgres-only contract
+   `canonical_projection_filters_bitemporal_trust_bounds_and_orders_by_uuid`.
+   It stages two expected units in reverse commit order plus otherwise-visible
+   rows for quarantined trust, exclusive `valid_to`, future `valid_from`,
+   expired `valid_to`, future `transaction_from`, and closed
+   `transaction_to`. The actual SQL read must return only the lower-bound and
+   unbounded units in UUID order.
+
+### Live proof and final focused verification
+
+- `bash scripts/with_scratch_db.sh postgres://memphant:memphant@localhost:5432/memphant MEMPHANT_TEST_DATABASE_URL cargo test -p memphant-store-postgres --test pg_store_contract canonical_projection_filters_bitemporal_trust_bounds_and_orders_by_uuid -- --ignored --exact --test-threads=1` — 1 passed against an ephemeral migrated database; this is not a skip.
+- `cargo test -p memphant-core --lib service::canonical_projection_store_tests -- --nocapture` — 3 passed.
+- `cargo test -p memphant-server --test rest_contract` — 22 passed.
+- `cargo fmt --check`, `cargo clippy -p memphant-server -p memphant-store-postgres --all-targets --all-features -- -D warnings`, and `git diff --check` — passed.
+
+The unrelated `.superpowers/sdd/progress.md` modification remains preserved and
+unstaged.
 - `git diff --check` — passed.
 
 ## Files
