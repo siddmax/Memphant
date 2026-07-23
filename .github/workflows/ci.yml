@@ -15,6 +15,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Lineage-repair contracts inspect the controller at the recorded
+          # measured commit; the default shallow checkout omits that object.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v6
         with:

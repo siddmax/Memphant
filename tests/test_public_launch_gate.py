@@ -66,6 +66,16 @@ def test_release_process_and_ci_run_public_launch_gates() -> None:
     assert "scripts/check_spec_drift.py" not in workflow
 
 
+def test_python_lineage_contracts_run_with_full_git_history() -> None:
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    public_gates = workflow.split("  postgres-contracts:", maxsplit=1)[0]
+
+    assert "fetch-depth: 0" in public_gates
+    assert public_gates.index("fetch-depth: 0") < public_gates.index(
+        "python -m pytest tests -q"
+    )
+
+
 def test_public_benchmark_profile_kept_as_audit_trail_never_promotion_evidence() -> None:
     scorecard = load_scorecard()
     profile_path = ROOT / scorecard["profile"]["path"]
