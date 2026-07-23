@@ -179,9 +179,16 @@ footer input.
 - The recovery pathname is derived only from the captured canonical anchor.
   After recovery creation and before reporting it as current, compile requires
   both the captured anchor identity and the retained parent/name identity to
-  match the retained recovery handle. If the parent changes after recovery has
-  received an inode, compile cannot succeed and retains that inode through the
-  recovery handle/name under the moved parent.
+  match the retained recovery-root handle. It also requires the retained
+  `units/` handle identity and the `root/units` name binding to match. If the
+  parent changes after recovery has received an inode, compile cannot succeed
+  and retains that inode through the recovery handle/name under the moved
+  parent.
+- Recovery tracks the exact count of managed inodes it currently retains. The
+  count increments immediately after a successful move and before directory
+  fsync; a successful no-replace restoration decrements it immediately before
+  its sync barriers. Diagnostics therefore distinguish an empty recovery from
+  one that still owns managed data even when later validation or fsync fails.
 - Recovery directories use mode `0700` on Unix. Windows uses the inherited ACL
   of the retained output parent; MemPhant does not claim to narrow an already
   broader parent ACL without a platform ACL policy supplied by the operator.

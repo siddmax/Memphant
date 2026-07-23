@@ -419,3 +419,47 @@ Fresh proof after the final code change:
 
 The unrelated `.superpowers/sdd/progress.md` modification remains unstaged.
 No Task 4, P1 campaign, paid/model call, push, or deployment work was performed.
+
+## Seventh independent-review fix wave
+
+The final recovery-tree audit found two remaining precision gaps. Recovery
+confirmation retained a `units` directory handle but validated only the root,
+so a renamed-and-replaced `recovery/units` binding could route the first moved
+inode into a detached directory. The retained-data boolean also stayed true
+after a successful no-replace restoration emptied recovery, allowing later
+diagnostics to claim data remained there.
+
+Both deterministic contracts were red first. Replacing `recovery/units` at the
+existing `recovery:created` seam was accepted and compile succeeded; corrupting
+a recovered inode to force successful restoration, then displacing the empty
+recovery at the new post-restore seam, produced a current `recovery=` result
+instead of truthful last-known/empty state.
+
+- `RecoveryArea` now retains the `units` identity. Every recovery confirmation
+  verifies the units handle identity and the `root/units` name binding in
+  addition to the anchor, recovery-root handle, and parent/name binding.
+  Replacing `units/` therefore fails before the source inode moves, leaves both
+  displaced and replacement units directories empty, and reports the actual
+  units-binding cause without parent-move or retained-data wording.
+- The boolean is replaced by an exact retained-managed-inode count. A successful
+  atomic move increments it before either directory fsync; a successful
+  no-replace restoration decrements it before its sync barriers. Partial
+  recovery and restoration failures therefore preserve the exact ownership
+  state.
+- Deterministic `write:<name>:restored` and `delete:<name>:restored` seams fire
+  only after the namespace restoration succeeds. The replacement contract uses
+  that seam to displace a now-empty recovery and proves the error reports only
+  `recovery_last_known=`, never current-path, parent-change, or retained-data
+  claims.
+
+Fresh proof after the final code change:
+
+- `cargo test -p memphant-cli`: 21 unit and 21 integration tests passed,
+  including 10 real-CLI compile contracts.
+- `cargo clippy -p memphant-cli --all-targets --all-features -- -D warnings`,
+  `cargo fmt --all --check`, and `git diff --check`: passed.
+- `python3 scripts/check_spec_drift.py`: skipped, not passed, because the
+  private Syndai specs are absent from this worktree.
+
+The unrelated `.superpowers/sdd/progress.md` modification remains unstaged.
+No Task 4, P1 campaign, paid/model call, push, or deployment work was performed.
