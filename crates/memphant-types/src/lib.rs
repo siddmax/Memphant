@@ -1882,6 +1882,125 @@ pub struct CanonicalProjectionResponse {
     pub fingerprint: String,
 }
 
+/// Immutable fields copied from one canonical projection unit. File sync uses
+/// this shape to prove that a correction or forget still targets the exact
+/// unit the local file was compiled from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FileSyncUnitMetadata {
+    pub unit_id: UnitId,
+    pub kind: MemoryKind,
+    pub fact_key: Option<String>,
+    pub predicate: Option<String>,
+    pub confidence: Option<f32>,
+    pub valid_from: Option<String>,
+    pub valid_to: Option<String>,
+    pub body_sha256: String,
+}
+
+/// One ordered operation in an atomic file-sync plan.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FileSyncOperation {
+    Correct {
+        base: FileSyncUnitMetadata,
+        body: String,
+    },
+    Retain {
+        fact_key: String,
+        predicate: String,
+        body: String,
+        confidence: f32,
+        #[serde(default)]
+        valid_from: Option<String>,
+        #[serde(default)]
+        valid_to: Option<String>,
+    },
+    Forget {
+        base: FileSyncUnitMetadata,
+    },
+}
+
+/// One fully context-bound atomic file-sync request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FileSyncRequest {
+    pub subject_id: SubjectId,
+    pub scope_id: ScopeId,
+    pub actor_id: ActorId,
+    pub agent_node_id: AgentNodeId,
+    pub subject_generation: u64,
+    pub base_fingerprint: String,
+    pub plan_sha256: String,
+    pub observed_at: String,
+    pub operations: Vec<FileSyncOperation>,
+}
+
+/// Per-operation receipt, ordered exactly like the submitted plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FileSyncOperationResult {
+    Correct {
+        memory_unit_id: UnitId,
+        created: Vec<UnitId>,
+    },
+    Retain {
+        created: Vec<UnitId>,
+    },
+    Forget {
+        memory_unit_id: UnitId,
+        deletion_generation: u64,
+        invalidated: Vec<UnitId>,
+    },
+}
+
+/// Receipt committed with the batch's mutation-ledger claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FileSyncResult {
+    pub base_fingerprint: String,
+    pub fingerprint: String,
+    pub evaluated_at: String,
+    pub plan_sha256: String,
+    pub operations: Vec<FileSyncOperationResult>,
+}
+
+#[cfg(test)]
+mod file_sync_contract_tests {
+    use super::*;
+
+    #[test]
+    fn file_sync_request_and_tagged_operations_deny_unknown_fields() {
+        let operation = FileSyncOperation::Retain {
+            fact_key: "profile:test".to_string(),
+            predicate: "states".to_string(),
+            body: "A strict file sync body.".to_string(),
+            confidence: 1.0,
+            valid_from: None,
+            valid_to: None,
+        };
+        let request = FileSyncRequest {
+            subject_id: SubjectId::new(),
+            scope_id: ScopeId::new(),
+            actor_id: ActorId::new(),
+            agent_node_id: AgentNodeId::new(),
+            subject_generation: 0,
+            base_fingerprint: "0".repeat(64),
+            plan_sha256: "1".repeat(64),
+            observed_at: "2026-07-22T00:00:00Z".to_string(),
+            operations: vec![operation],
+        };
+
+        let mut unknown_request = serde_json::to_value(&request).unwrap();
+        unknown_request["unknown"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<FileSyncRequest>(unknown_request).is_err());
+
+        let mut unknown_operation = serde_json::to_value(&request.operations[0]).unwrap();
+        unknown_operation["unknown"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<FileSyncOperation>(unknown_operation).is_err());
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ErrorBody {
     pub code: String,

@@ -553,6 +553,8 @@ pub enum StoreError {
     StaleSubjectGeneration,
     #[error("subject has been erased")]
     SubjectErased,
+    #[error("serializable transaction conflicted")]
+    SerializationConflict,
     #[error("backend error: {0}")]
     Backend(String),
 }
@@ -564,6 +566,7 @@ pub enum MutationVerb {
     Correct,
     Forget,
     Mark,
+    FileSync,
     EraseSubject,
 }
 
@@ -575,6 +578,7 @@ impl MutationVerb {
             Self::Correct => "correct",
             Self::Forget => "forget",
             Self::Mark => "mark",
+            Self::FileSync => "file_sync",
             Self::EraseSubject => "erase_subject",
         }
     }
@@ -1069,6 +1073,12 @@ pub trait MemoryStore: Send + Sync {
         &self,
         context: &ResolvedMemoryContext,
     ) -> impl Future<Output = Result<Self::Txn, StoreError>> + Send;
+    /// Starts the transaction used by file sync. Durable stores must configure
+    /// SERIALIZABLE before the transaction's first claim or data read.
+    fn begin_serializable(
+        &self,
+        context: &ResolvedMemoryContext,
+    ) -> impl Future<Output = Result<Self::Txn, StoreError>> + Send;
     fn commit(&self, tx: Self::Txn) -> impl Future<Output = Result<(), StoreError>> + Send;
     fn rollback(&self, tx: Self::Txn) -> impl Future<Output = Result<(), StoreError>> + Send;
     fn stage_episode(
@@ -1262,6 +1272,13 @@ pub trait MemoryStore: Send + Sync {
     fn canonical_projection_units(
         &self,
         context: &ResolvedMemoryContext,
+        evaluated_at: &str,
+    ) -> impl Future<Output = Result<Vec<StoredMemoryUnit>, StoreError>> + Send;
+    /// The canonical projection read from the same transaction that owns a
+    /// file-sync claim and its staged writes.
+    fn canonical_projection_units_in_tx(
+        &self,
+        tx: &mut Self::Txn,
         evaluated_at: &str,
     ) -> impl Future<Output = Result<Vec<StoredMemoryUnit>, StoreError>> + Send;
 
@@ -2670,11 +2687,57 @@ impl MutationLedgerStore for InMemoryStore {
     }
 }
 
+fn in_memory_canonical_projection_units(
+    state: &InMemoryState,
+    context: &ResolvedMemoryContext,
+    evaluated_at: &str,
+) -> Vec<StoredMemoryUnit> {
+    let time = RecallTime {
+        evaluated_at: evaluated_at.to_string(),
+        transaction_as_of: evaluated_at.to_string(),
+        valid_at: evaluated_at.to_string(),
+    };
+    let mut units = state
+        .memory_units
+        .get(&context.tenant_id)
+        .into_iter()
+        .flatten()
+        .filter(|unit| {
+            unit.tenant_id == context.tenant_id
+                && unit.data_subject_id == context.data_subject_id
+                && unit.subject_generation == context.subject_generation
+                && unit.scope_id == context.scope_id
+                && unit.agent_node_id == context.agent_node_id
+                && unit.actor_id == Some(context.actor_id)
+                && unit.deletion_generation.is_none()
+                && unit.trust_level != TrustLevel::Quarantined
+                && bitemporally_recallable(unit, &time)
+                && matches!(
+                    (unit.kind, unit.state),
+                    (
+                        MemoryKind::Semantic,
+                        UnitState::Active | UnitState::Validated
+                    ) | (MemoryKind::Procedural, UnitState::Validated)
+                )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    units.sort_unstable_by_key(|unit| unit.id.as_uuid());
+    units
+}
+
 impl MemoryStore for InMemoryStore {
     type Txn = InMemoryTxn;
 
     async fn begin(&self, context: &ResolvedMemoryContext) -> Result<Self::Txn, StoreError> {
         Ok(self.begin_at(context, &SystemClock))
+    }
+
+    async fn begin_serializable(
+        &self,
+        context: &ResolvedMemoryContext,
+    ) -> Result<Self::Txn, StoreError> {
+        self.begin(context).await
     }
 
     async fn commit(&self, mut tx: Self::Txn) -> Result<(), StoreError> {
@@ -4220,41 +4283,25 @@ impl MemoryStore for InMemoryStore {
     ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
         let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
         state.validate_context(context)?;
-        let time = RecallTime {
-            evaluated_at: evaluated_at.to_string(),
-            transaction_as_of: evaluated_at.to_string(),
-            valid_at: evaluated_at.to_string(),
-        };
-        let mut units: Vec<_> = state
-            .memory_units
-            .get(&context.tenant_id)
-            .map(|units| {
-                units
-                    .iter()
-                    .filter(|unit| {
-                        unit.tenant_id == context.tenant_id
-                            && unit.data_subject_id == context.data_subject_id
-                            && unit.subject_generation == context.subject_generation
-                            && unit.scope_id == context.scope_id
-                            && unit.agent_node_id == context.agent_node_id
-                            && unit.actor_id == Some(context.actor_id)
-                            && unit.deletion_generation.is_none()
-                            && unit.trust_level != TrustLevel::Quarantined
-                            && bitemporally_recallable(unit, &time)
-                            && matches!(
-                                (unit.kind, unit.state),
-                                (
-                                    MemoryKind::Semantic,
-                                    UnitState::Active | UnitState::Validated
-                                ) | (MemoryKind::Procedural, UnitState::Validated)
-                            )
-                    })
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
-        units.sort_unstable_by_key(|unit| unit.id.as_uuid());
-        Ok(units)
+        Ok(in_memory_canonical_projection_units(
+            &state,
+            context,
+            evaluated_at,
+        ))
+    }
+
+    async fn canonical_projection_units_in_tx(
+        &self,
+        tx: &mut Self::Txn,
+        evaluated_at: &str,
+    ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
+        let context = tx.context.clone();
+        let state = self.staged_state(tx)?;
+        Ok(in_memory_canonical_projection_units(
+            state,
+            &context,
+            evaluated_at,
+        ))
     }
 
     async fn claim_reflect_jobs(

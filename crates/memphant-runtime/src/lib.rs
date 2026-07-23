@@ -615,6 +615,16 @@ impl MemoryStore for AnyStore {
         })
     }
 
+    async fn begin_serializable(
+        &self,
+        context: &ResolvedMemoryContext,
+    ) -> Result<Self::Txn, StoreError> {
+        Ok(match self {
+            Self::Mem(store) => AnyTxn::Mem(store.begin_serializable(context).await?),
+            Self::Pg(store) => AnyTxn::Pg(store.begin_serializable(context).await?),
+        })
+    }
+
     async fn commit(&self, tx: Self::Txn) -> Result<(), StoreError> {
         match (self, tx) {
             (Self::Mem(store), AnyTxn::Mem(tx)) => store.commit(tx).await,
@@ -869,6 +879,26 @@ impl MemoryStore for AnyStore {
         evaluated_at: &str,
     ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
         delegate!(self, store => store.canonical_projection_units(context, evaluated_at).await)
+    }
+
+    async fn canonical_projection_units_in_tx(
+        &self,
+        tx: &mut Self::Txn,
+        evaluated_at: &str,
+    ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
+        match (self, tx) {
+            (Self::Mem(store), AnyTxn::Mem(tx)) => {
+                store
+                    .canonical_projection_units_in_tx(tx, evaluated_at)
+                    .await
+            }
+            (Self::Pg(store), AnyTxn::Pg(tx)) => {
+                store
+                    .canonical_projection_units_in_tx(tx, evaluated_at)
+                    .await
+            }
+            _ => txn_mismatch(),
+        }
     }
 
     async fn claim_reflect_jobs(

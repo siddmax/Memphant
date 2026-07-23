@@ -751,6 +751,306 @@
         ],
         "type": "object"
       },
+      "FileSyncOperation": {
+        "description": "One ordered operation in an atomic file-sync plan.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "base": {
+                "$ref": "#/components/schemas/FileSyncUnitMetadata"
+              },
+              "body": {
+                "type": "string"
+              },
+              "op": {
+                "const": "correct",
+                "type": "string"
+              }
+            },
+            "required": [
+              "op",
+              "base",
+              "body"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "body": {
+                "type": "string"
+              },
+              "confidence": {
+                "format": "float",
+                "type": "number"
+              },
+              "fact_key": {
+                "type": "string"
+              },
+              "op": {
+                "const": "retain",
+                "type": "string"
+              },
+              "predicate": {
+                "type": "string"
+              },
+              "valid_from": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "valid_to": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "op",
+              "fact_key",
+              "predicate",
+              "body",
+              "confidence"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "base": {
+                "$ref": "#/components/schemas/FileSyncUnitMetadata"
+              },
+              "op": {
+                "const": "forget",
+                "type": "string"
+              }
+            },
+            "required": [
+              "op",
+              "base"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "FileSyncOperationResult": {
+        "description": "Per-operation receipt, ordered exactly like the submitted plan.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "created": {
+                "items": {
+                  "$ref": "#/components/schemas/UnitId"
+                },
+                "type": "array"
+              },
+              "memory_unit_id": {
+                "$ref": "#/components/schemas/UnitId"
+              },
+              "op": {
+                "const": "correct",
+                "type": "string"
+              }
+            },
+            "required": [
+              "op",
+              "memory_unit_id",
+              "created"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "created": {
+                "items": {
+                  "$ref": "#/components/schemas/UnitId"
+                },
+                "type": "array"
+              },
+              "op": {
+                "const": "retain",
+                "type": "string"
+              }
+            },
+            "required": [
+              "op",
+              "created"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "deletion_generation": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "invalidated": {
+                "items": {
+                  "$ref": "#/components/schemas/UnitId"
+                },
+                "type": "array"
+              },
+              "memory_unit_id": {
+                "$ref": "#/components/schemas/UnitId"
+              },
+              "op": {
+                "const": "forget",
+                "type": "string"
+              }
+            },
+            "required": [
+              "op",
+              "memory_unit_id",
+              "deletion_generation",
+              "invalidated"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "FileSyncRequest": {
+        "additionalProperties": false,
+        "description": "One fully context-bound atomic file-sync request.",
+        "properties": {
+          "actor_id": {
+            "$ref": "#/components/schemas/ActorId"
+          },
+          "agent_node_id": {
+            "$ref": "#/components/schemas/AgentNodeId"
+          },
+          "base_fingerprint": {
+            "type": "string"
+          },
+          "observed_at": {
+            "type": "string"
+          },
+          "operations": {
+            "items": {
+              "$ref": "#/components/schemas/FileSyncOperation"
+            },
+            "type": "array"
+          },
+          "plan_sha256": {
+            "type": "string"
+          },
+          "scope_id": {
+            "$ref": "#/components/schemas/ScopeId"
+          },
+          "subject_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject_id": {
+            "$ref": "#/components/schemas/SubjectId"
+          }
+        },
+        "required": [
+          "subject_id",
+          "scope_id",
+          "actor_id",
+          "agent_node_id",
+          "subject_generation",
+          "base_fingerprint",
+          "plan_sha256",
+          "observed_at",
+          "operations"
+        ],
+        "type": "object"
+      },
+      "FileSyncResult": {
+        "additionalProperties": false,
+        "description": "Receipt committed with the batch's mutation-ledger claim.",
+        "properties": {
+          "base_fingerprint": {
+            "type": "string"
+          },
+          "evaluated_at": {
+            "type": "string"
+          },
+          "fingerprint": {
+            "type": "string"
+          },
+          "operations": {
+            "items": {
+              "$ref": "#/components/schemas/FileSyncOperationResult"
+            },
+            "type": "array"
+          },
+          "plan_sha256": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "base_fingerprint",
+          "fingerprint",
+          "evaluated_at",
+          "plan_sha256",
+          "operations"
+        ],
+        "type": "object"
+      },
+      "FileSyncUnitMetadata": {
+        "additionalProperties": false,
+        "description": "Immutable fields copied from one canonical projection unit. File sync uses\nthis shape to prove that a correction or forget still targets the exact\nunit the local file was compiled from.",
+        "properties": {
+          "body_sha256": {
+            "type": "string"
+          },
+          "confidence": {
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "fact_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "$ref": "#/components/schemas/MemoryKind"
+          },
+          "predicate": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "unit_id": {
+            "$ref": "#/components/schemas/UnitId"
+          },
+          "valid_from": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "valid_to": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "unit_id",
+          "kind",
+          "body_sha256"
+        ],
+        "type": "object"
+      },
       "ForgetRequest": {
         "additionalProperties": false,
         "properties": {
@@ -2585,6 +2885,51 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/RetainEpisodeHttpResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/file-sync": {
+      "post": {
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "maxLength": 255,
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FileSyncRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileSyncResult"
                 }
               }
             }

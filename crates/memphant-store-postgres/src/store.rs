@@ -58,7 +58,16 @@ fn canonical_timestamp(value: Option<String>) -> Option<String> {
 }
 
 fn backend(error: sqlx::Error) -> StoreError {
-    StoreError::Backend(error.to_string())
+    if error
+        .as_database_error()
+        .and_then(|database| database.code())
+        .as_deref()
+        == Some("40001")
+    {
+        StoreError::SerializationConflict
+    } else {
+        StoreError::Backend(error.to_string())
+    }
 }
 
 fn enum_str<T: Serialize>(value: &T) -> String {
@@ -1442,6 +1451,28 @@ impl MemoryStore for PgStore {
 
     async fn begin(&self, context: &ResolvedMemoryContext) -> Result<Self::Txn, StoreError> {
         let mut tx = self.pool.begin().await.map_err(backend)?;
+        sqlx::query("select memphant.bind_tenant($1)")
+            .bind(context.tenant_id.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .map_err(backend)?;
+        Ok(PgTxn {
+            tx,
+            context: context.clone(),
+            mutation: None,
+            has_subject_writes: false,
+        })
+    }
+
+    async fn begin_serializable(
+        &self,
+        context: &ResolvedMemoryContext,
+    ) -> Result<Self::Txn, StoreError> {
+        let mut tx = self.pool.begin().await.map_err(backend)?;
+        sqlx::query("set transaction isolation level serializable")
+            .execute(&mut *tx)
+            .await
+            .map_err(backend)?;
         sqlx::query("select memphant.bind_tenant($1)")
             .bind(context.tenant_id.as_uuid())
             .execute(&mut *tx)
@@ -3419,6 +3450,40 @@ impl MemoryStore for PgStore {
         let mut tx = self.tenant_tx(context.tenant_id).await?;
         Self::fetch_units_where(
             &mut tx,
+            "tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+             and scope_id = $4 and agent_node_id = $5 and actor_id = $6
+             and deletion_generation is null and trust_level <> 'quarantined'
+             and (transaction_from is null or transaction_from <= $7::timestamptz)
+             and (transaction_to is null or $7::timestamptz < transaction_to)
+             and (valid_from is null or valid_from <= $7::timestamptz)
+             and (valid_to is null or $7::timestamptz < valid_to)
+             and (
+               (kind = 'semantic' and state = any($8))
+               or (kind = 'procedural' and state = 'validated')
+             )",
+            "order by id",
+            vec![
+                Bind::Uuid(context.tenant_id.as_uuid()),
+                Bind::Uuid(context.data_subject_id.as_uuid()),
+                Bind::I64(context.subject_generation as i64),
+                Bind::Uuid(context.scope_id.as_uuid()),
+                Bind::Uuid(context.agent_node_id.as_uuid()),
+                Bind::Uuid(context.actor_id.as_uuid()),
+                Bind::Text(evaluated_at.to_string()),
+                Bind::TextVec(vec!["active".to_string(), "validated".to_string()]),
+            ],
+        )
+        .await
+    }
+
+    async fn canonical_projection_units_in_tx(
+        &self,
+        txn: &mut Self::Txn,
+        evaluated_at: &str,
+    ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
+        let context = &txn.context;
+        Self::fetch_units_where(
+            &mut txn.tx,
             "tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
              and scope_id = $4 and agent_node_id = $5 and actor_id = $6
              and deletion_generation is null and trust_level <> 'quarantined'

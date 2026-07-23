@@ -17,9 +17,10 @@ use memphant_core::{
 use memphant_types::{
     ActorId, AgentNodeId, CanonicalProjectionResponse, ContextBindingRequest,
     ContextBindingResponse, CorrectRequest, ENGINE_VERSION, ErrorBody, ErrorEnvelope,
-    HealthResponse, MarkRequest, RecallHttpRequest, ReflectAccepted, ReflectRequest,
-    RetainEpisodeHttpRequest, RetainEpisodeHttpResponse, RetrievalTrace, SCHEMA_COMPAT_REVISION,
-    ScopeId, ScopeMemoryResponse, SubjectId, TRACE_SCHEMA_VERSION, TenantId, TrustLevel,
+    FileSyncRequest, FileSyncResult, HealthResponse, MarkRequest, RecallHttpRequest,
+    ReflectAccepted, ReflectRequest, RetainEpisodeHttpRequest, RetainEpisodeHttpResponse,
+    RetrievalTrace, SCHEMA_COMPAT_REVISION, ScopeId, ScopeMemoryResponse, SubjectId,
+    TRACE_SCHEMA_VERSION, TenantId, TrustLevel,
 };
 use schemars::JsonSchema;
 use schemars::generate::{SchemaGenerator, SchemaSettings};
@@ -37,6 +38,7 @@ const REFLECT_PATH: &str = "/v1/reflect";
 const CORRECT_PATH: &str = "/v1/correct";
 const FORGET_PATH: &str = "/v1/forget";
 const MARK_PATH: &str = "/v1/mark";
+const FILE_SYNC_PATH: &str = "/v1/file-sync";
 const TRACE_PATH: &str = "/v1/traces/{id}";
 const SCOPE_MEMORY_PATH: &str = "/v1/scopes/{id}/memory";
 const CANONICAL_PROJECTION_PATH: &str = "/v1/scopes/{id}/projection";
@@ -49,6 +51,7 @@ const DOCUMENTED_OPENAPI_PATHS: &[&str] = &[
     CORRECT_PATH,
     FORGET_PATH,
     MARK_PATH,
+    FILE_SYNC_PATH,
     TRACE_PATH,
     SCOPE_MEMORY_PATH,
     CANONICAL_PROJECTION_PATH,
@@ -143,6 +146,8 @@ pub struct AuthedTenant {
 
 struct StrictJson<T>(T);
 
+struct FileSyncJson(FileSyncRequest);
+
 struct IdempotencyKey(String);
 
 impl<S: Send + Sync> FromRequestParts<S> for IdempotencyKey {
@@ -179,6 +184,20 @@ where
             .await
             .map(|Json(value)| Self(value))
             .map_err(|error| ApiError::invalid(error.body_text()))
+    }
+}
+
+impl<S> FromRequest<S> for FileSyncJson
+where
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        Json::<FileSyncRequest>::from_request(request, state)
+            .await
+            .map(|Json(value)| Self(value))
+            .map_err(|error| ApiError::sync_invalid(error.body_text()))
     }
 }
 
@@ -270,6 +289,7 @@ pub fn app<S: MutationLedgerStore + 'static>(state: AppState<S>) -> Router {
         .route(CORRECT_PATH, post(correct_handler::<S>))
         .route(FORGET_PATH, post(forget_handler::<S>))
         .route(MARK_PATH, post(mark_handler::<S>))
+        .route(FILE_SYNC_PATH, post(file_sync_handler::<S>))
         .route(TRACE_PATH, get(trace_handler::<S>))
         .route(SCOPE_MEMORY_PATH, get(scope_memory_handler::<S>))
         .route(
@@ -533,6 +553,38 @@ async fn forget_handler<S: MutationLedgerStore + 'static>(
     )
 }
 
+async fn file_sync_handler<S: MutationLedgerStore + 'static>(
+    State(state): State<AppState<S>>,
+    authed: AuthedTenant,
+    IdempotencyKey(idempotency_key): IdempotencyKey,
+    FileSyncJson(request): FileSyncJson,
+) -> Result<Response, ApiError> {
+    authed.check_principal(request.actor_id, request.scope_id)?;
+    let context = state
+        .store()
+        .resolve_memory_context(
+            authed.tenant,
+            request.subject_id,
+            request.actor_id,
+            request.scope_id,
+            request.agent_node_id,
+        )
+        .await
+        .map_err(|error| match error {
+            StoreError::NotFound(_) => ApiError::scope_denied(),
+            other => ApiError::from(other),
+        })?;
+    if request.subject_generation != context.subject_generation {
+        return Err(ApiError::sync_conflict("subject generation is stale"));
+    }
+    mutation_http_response(
+        state
+            .service
+            .file_sync(&context, &idempotency_key, request)
+            .await?,
+    )
+}
+
 async fn mark_handler<S: MutationLedgerStore + 'static>(
     State(state): State<AppState<S>>,
     authed: AuthedTenant,
@@ -778,6 +830,10 @@ fn openapi_paths() -> serde_json::Map<String, Value> {
         mutation_path_item("MarkRequest", "MarkResult"),
     );
     paths.insert(
+        FILE_SYNC_PATH.to_string(),
+        mutation_path_item("FileSyncRequest", "FileSyncResult"),
+    );
+    paths.insert(
         TRACE_PATH.to_string(),
         get_path_item("RetrievalTrace", vec![path_param("id")]),
     );
@@ -840,6 +896,8 @@ fn component_schemas() -> serde_json::Map<String, Value> {
     seed_component::<memphant_types::ForgetResult>(&mut generator);
     seed_component::<MarkRequest>(&mut generator);
     seed_component::<memphant_types::MarkResult>(&mut generator);
+    seed_component::<FileSyncRequest>(&mut generator);
+    seed_component::<FileSyncResult>(&mut generator);
     seed_component::<RetrievalTrace>(&mut generator);
     seed_component::<ScopeMemoryResponse>(&mut generator);
     seed_component::<CanonicalProjectionResponse>(&mut generator);
@@ -1066,6 +1124,22 @@ impl ApiError {
         }
     }
 
+    fn sync_invalid(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "sync_invalid",
+            message: message.into(),
+        }
+    }
+
+    fn sync_conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "sync_conflict",
+            message: message.into(),
+        }
+    }
+
     fn conflict(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::CONFLICT,
@@ -1097,6 +1171,9 @@ impl From<StoreError> for ApiError {
                 message: "subject has been erased".to_string(),
             },
             StoreError::NotFound(entity) => Self::not_found(entity),
+            StoreError::SerializationConflict => {
+                Self::sync_conflict("serializable transaction conflicted")
+            }
             StoreError::TransactionAlreadyCommitted
             | StoreError::Poisoned
             | StoreError::Backend(_) => Self::backend_unavailable(),
@@ -1145,6 +1222,8 @@ impl From<ServiceError> for ApiError {
         match error {
             ServiceError::Core(core) => core.into(),
             ServiceError::Invalid(message) => Self::invalid(message),
+            ServiceError::SyncInvalid(message) => Self::sync_invalid(message),
+            ServiceError::SyncConflict(message) => Self::sync_conflict(message),
             ServiceError::ProjectionTooLarge { max_bytes } => Self::projection_too_large(max_bytes),
         }
     }

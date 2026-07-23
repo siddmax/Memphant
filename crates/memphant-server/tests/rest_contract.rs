@@ -9,11 +9,11 @@ use memphant_core::{
 use memphant_types::{
     ActorId, CanonicalProjectionResponse, ContextBindingAgentRef, ContextBindingEntityRef,
     ContextBindingRequest, ContextBindingResponse, ContextBindingScopeRef, CorrectRequest,
-    CorrectSelector, CorrectionPayload, ForgetRequest, ForgetSelector, HealthResponse, MarkOutcome,
-    MarkRequest, MemoryKind, NewMemoryUnit, RecallHttpRequest, RecallResponse, ReflectRequest,
-    RetainEpisodeHttpRequest, RetainEpisodeHttpResponse, RetainEpisodePayload, RetainPayload,
-    RetainResourcePayload, RetainUnitPayload, ScopeId, ScopeMemoryResponse, TenantId, TrustLevel,
-    UnitState,
+    CorrectSelector, CorrectionPayload, FileSyncOperation, FileSyncRequest, FileSyncResult,
+    ForgetRequest, ForgetSelector, HealthResponse, MarkOutcome, MarkRequest, MemoryKind,
+    NewMemoryUnit, RecallHttpRequest, RecallResponse, ReflectRequest, RetainEpisodeHttpRequest,
+    RetainEpisodeHttpResponse, RetainEpisodePayload, RetainPayload, RetainResourcePayload,
+    RetainUnitPayload, ScopeId, ScopeMemoryResponse, TenantId, TrustLevel, UnitState,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -31,7 +31,12 @@ fn add_idempotency_header(
 ) -> axum::http::request::Builder {
     if matches!(
         path,
-        "/v1/episodes" | "/v1/reflect" | "/v1/correct" | "/v1/forget" | "/v1/mark"
+        "/v1/episodes"
+            | "/v1/reflect"
+            | "/v1/correct"
+            | "/v1/forget"
+            | "/v1/mark"
+            | "/v1/file-sync"
     ) {
         builder = builder.header(
             "idempotency-key",
@@ -39,6 +44,112 @@ fn add_idempotency_header(
         );
     }
     builder
+}
+
+fn file_sync_request(
+    binding: &ContextBindingResponse,
+    base_fingerprint: String,
+    operations: Vec<FileSyncOperation>,
+) -> FileSyncRequest {
+    use sha2::{Digest, Sha256};
+    FileSyncRequest {
+        subject_id: binding.subject_id,
+        scope_id: binding.scope_id,
+        actor_id: binding.actor_id,
+        agent_node_id: binding.agent_node_id,
+        subject_generation: binding.subject_generation,
+        base_fingerprint,
+        plan_sha256: format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&operations).unwrap())
+        ),
+        observed_at: REST_TEST_CLOCK.0.to_string(),
+        operations,
+    }
+}
+
+#[tokio::test]
+async fn file_sync_route_is_atomic_strict_and_uses_stable_error_codes() {
+    let tenant_id = tenant(96_500);
+    let app = dev_app(tenant_id);
+    let binding = bind_context(&app, "file-sync-route").await;
+    let projection: CanonicalProjectionResponse = json_request(
+        &app,
+        "GET",
+        &format!(
+            "/v1/scopes/{}/projection?subject_id={}&actor_id={}&agent_node_id={}&subject_generation={}",
+            binding.scope_id.as_uuid(),
+            binding.subject_id.as_uuid(),
+            binding.actor_id.as_uuid(),
+            binding.agent_node_id.as_uuid(),
+            binding.subject_generation
+        ),
+        Option::<()>::None,
+    )
+    .await
+    .1;
+    let operation = FileSyncOperation::Retain {
+        fact_key: "profile:route".to_string(),
+        predicate: "states".to_string(),
+        body: "The authenticated route writes one semantic unit.".to_string(),
+        confidence: 1.0,
+        valid_from: None,
+        valid_to: None,
+    };
+    let request = file_sync_request(&binding, projection.fingerprint, vec![operation]);
+    let result: FileSyncResult = json_request(&app, "POST", "/v1/file-sync", Some(request))
+        .await
+        .1;
+    assert_eq!(result.operations.len(), 1);
+
+    let stale = file_sync_request(
+        &binding,
+        "0".repeat(64),
+        vec![FileSyncOperation::Retain {
+            fact_key: "profile:stale-route".to_string(),
+            predicate: "states".to_string(),
+            body: "The stale route write must not land.".to_string(),
+            confidence: 1.0,
+            valid_from: None,
+            valid_to: None,
+        }],
+    );
+    let (status, body): (StatusCode, Value) =
+        error_json_request(&app, "POST", "/v1/file-sync", stale).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"]["code"], "sync_conflict");
+
+    let invalid_timestamp = file_sync_request(
+        &binding,
+        result.fingerprint,
+        vec![FileSyncOperation::Retain {
+            fact_key: "profile:invalid-time-route".to_string(),
+            predicate: "states".to_string(),
+            body: "The invalid timestamp must use the sync error contract.".to_string(),
+            confidence: 1.0,
+            valid_from: Some("2026-07-22T00:00:00-07:00".to_string()),
+            valid_to: None,
+        }],
+    );
+    let (status, body): (StatusCode, Value) =
+        error_json_request(&app, "POST", "/v1/file-sync", invalid_timestamp).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "sync_invalid");
+
+    let raw = Request::builder()
+        .method("POST")
+        .uri("/v1/file-sync")
+        .header("content-type", "application/json")
+        .header("idempotency-key", "file-sync-unknown-field")
+        .body(Body::from(
+            r#"{"subject_id":"00000000-0000-0000-0000-000000000001","unknown":true}"#,
+        ))
+        .unwrap();
+    let response = app.oneshot(raw).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["error"]["code"], "sync_invalid");
 }
 
 fn tenant(value: u128) -> TenantId {

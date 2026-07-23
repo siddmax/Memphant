@@ -28,11 +28,12 @@ use memphant_store_postgres::PgStore;
 use memphant_store_testkit::StoreHarness;
 use memphant_types::{
     ContextBindingAccessPolicy, ContextBindingAgentRef, ContextBindingEntityRef,
-    ContextBindingRequest, ContextBindingScopeRef, JobId, MarkOutcome, MemoryKind, NewMemoryUnit,
-    RecallHttpRequest, RecallMode, RecallRequest, RecallTime, ReflectCandidate, ReflectInput,
-    ReflectJob, ReflectJobKind, ResolvedMemoryContext, RetainEpisodeHttpRequest,
-    RetainEpisodeHttpResponse, RetainEpisodePayload, RetainPayload, RetainRequest,
-    RetainResourceRequest, RetainUnitPayload, ReviewEvent, TenantId, TrustLevel, UnitState,
+    ContextBindingRequest, ContextBindingScopeRef, FileSyncOperation, FileSyncRequest, JobId,
+    MarkOutcome, MemoryKind, NewMemoryUnit, RecallHttpRequest, RecallMode, RecallRequest,
+    RecallTime, ReflectCandidate, ReflectInput, ReflectJob, ReflectJobKind, ResolvedMemoryContext,
+    RetainEpisodeHttpRequest, RetainEpisodeHttpResponse, RetainEpisodePayload, RetainPayload,
+    RetainRequest, RetainResourceRequest, RetainUnitPayload, ReviewEvent, TenantId, TrustLevel,
+    UnitState,
 };
 use uuid::Uuid;
 
@@ -159,6 +160,161 @@ fn context_binding_request(suffix: &str) -> ContextBindingRequest {
 
 async fn fresh_memory_context(store: &PgStore, tenant: TenantId) -> ResolvedMemoryContext {
     memphant_store_testkit::bind_context(store, tenant).await
+}
+
+fn file_sync_request(
+    context: &ResolvedMemoryContext,
+    base_fingerprint: String,
+    operations: Vec<FileSyncOperation>,
+) -> FileSyncRequest {
+    use sha2::{Digest, Sha256};
+    FileSyncRequest {
+        subject_id: context.data_subject_id,
+        scope_id: context.scope_id,
+        actor_id: context.actor_id,
+        agent_node_id: context.agent_node_id,
+        subject_generation: context.subject_generation,
+        base_fingerprint,
+        plan_sha256: format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&operations).unwrap())
+        ),
+        observed_at: CLOCK.0.to_string(),
+        operations,
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn file_sync_is_atomic_rejects_stale_base_and_serializes_concurrent_batches() {
+    let store = connect().await;
+    let tenant = fresh_tenant(&store).await;
+    let context = fresh_memory_context(&store, tenant).await;
+    let mut seed = store.begin(&context).await.unwrap();
+    let mut seed_unit = active_projection_unit(&context, "seed file-sync unit");
+    seed_unit.fact_key = Some("profile:seed-file-sync".to_string());
+    store.stage_memory_unit(&mut seed, seed_unit).await.unwrap();
+    store.commit(seed).await.unwrap();
+    let service = service(store.clone());
+    let base = service.canonical_projection(&context).await.unwrap();
+    sqlx::query(
+        "create function memphant.test_file_sync_fail_op_n() returns trigger language plpgsql as $$
+         begin
+           if new.fact_key = 'profile:fail-op-n' then
+             raise exception 'injected file-sync operation failure';
+           end if;
+           return new;
+         end
+         $$",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "create trigger test_file_sync_fail_op_n before insert on memphant.memory_unit
+         for each row execute function memphant.test_file_sync_fail_op_n()",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    let before = store.fetch_scope_open_units(&context).await.unwrap();
+    let rollback = file_sync_request(
+        &context,
+        base.fingerprint.clone(),
+        vec![
+            FileSyncOperation::Retain {
+                fact_key: "profile:rollback-first".to_string(),
+                predicate: "states".to_string(),
+                body: "This first operation must roll back.".to_string(),
+                confidence: 1.0,
+                valid_from: None,
+                valid_to: None,
+            },
+            FileSyncOperation::Retain {
+                fact_key: "profile:fail-op-n".to_string(),
+                predicate: "states".to_string(),
+                body: "This second operation fails inside Postgres.".to_string(),
+                confidence: 1.0,
+                valid_from: None,
+                valid_to: None,
+            },
+        ],
+    );
+    assert!(
+        service
+            .file_sync(&context, "pg-file-sync-rollback", rollback)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store.fetch_scope_open_units(&context).await.unwrap(),
+        before
+    );
+
+    let stale = file_sync_request(
+        &context,
+        "0".repeat(64),
+        vec![FileSyncOperation::Retain {
+            fact_key: "profile:stale-pg".to_string(),
+            predicate: "states".to_string(),
+            body: "This stale Postgres write must not land.".to_string(),
+            confidence: 1.0,
+            valid_from: None,
+            valid_to: None,
+        }],
+    );
+    let stale_result = service
+        .file_sync(&context, "pg-file-sync-stale", stale)
+        .await;
+    assert!(
+        matches!(
+            stale_result,
+            Err(memphant_core::service::ServiceError::SyncConflict(_))
+        ),
+        "unexpected stale result: {stale_result:?}"
+    );
+    assert_eq!(
+        store.fetch_scope_open_units(&context).await.unwrap(),
+        before
+    );
+
+    let fresh = service.canonical_projection(&context).await.unwrap();
+    let left = file_sync_request(
+        &context,
+        fresh.fingerprint.clone(),
+        vec![FileSyncOperation::Retain {
+            fact_key: "profile:concurrent-left".to_string(),
+            predicate: "states".to_string(),
+            body: "The left concurrent Postgres batch is valid.".to_string(),
+            confidence: 1.0,
+            valid_from: None,
+            valid_to: None,
+        }],
+    );
+    let right = file_sync_request(
+        &context,
+        fresh.fingerprint,
+        vec![FileSyncOperation::Retain {
+            fact_key: "profile:concurrent-right".to_string(),
+            predicate: "states".to_string(),
+            body: "The right concurrent Postgres batch is valid.".to_string(),
+            confidence: 1.0,
+            valid_from: None,
+            valid_to: None,
+        }],
+    );
+    let (left, right) = tokio::join!(
+        service.file_sync(&context, "pg-file-sync-left", left),
+        service.file_sync(&context, "pg-file-sync-right", right),
+    );
+    assert_eq!(left.is_ok() as u8 + right.is_ok() as u8, 1);
+    assert!(
+        [left, right]
+            .into_iter()
+            .filter_map(Result::err)
+            .all(|error| matches!(error, memphant_core::service::ServiceError::SyncConflict(_)))
+    );
 }
 
 fn active_projection_unit(context: &ResolvedMemoryContext, body: &str) -> NewMemoryUnit {

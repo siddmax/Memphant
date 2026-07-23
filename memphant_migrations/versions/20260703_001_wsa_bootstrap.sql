@@ -620,7 +620,7 @@ create table if not exists memphant.job_state (
 -- for at most this ledger's 24-hour replay window.
 create table if not exists memphant.mutation_ledger (
   tenant_id uuid not null references memphant.tenant(id) on delete cascade,
-  verb text not null check (verb in ('retain','reflect','correct','forget','mark','erase_subject')),
+  verb text not null check (verb in ('retain','reflect','correct','forget','mark','file_sync','erase_subject')),
   idempotency_key text not null check (octet_length(idempotency_key) between 1 and 255),
   data_subject_id uuid not null,
   subject_generation bigint not null check (subject_generation >= 0),
