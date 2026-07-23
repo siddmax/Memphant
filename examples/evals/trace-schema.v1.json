@@ -18,6 +18,14 @@
       ],
       "type": "string"
     },
+    "CrossRerankGranularity": {
+      "description": "Granularity of the docs fed to the W8 cross-encoder rerank stage: whole\nunit bodies (the default), or each candidate's flattened\n`contextual_chunks` bodies max-pooled back to one score per candidate\n(fallback: the body when a candidate has no chunks).",
+      "enum": [
+        "unit_body",
+        "contextual_chunks"
+      ],
+      "type": "string"
+    },
     "CrossRerankTrace": {
       "properties": {
         "batch_size": {
@@ -29,6 +37,7 @@
           ]
         },
         "candidate_count": {
+          "description": "Candidates in the scored head — NOT docs: under `ContextualChunks`\ngranularity one candidate can contribute several docs (`docs_scored`).",
           "format": "uint",
           "minimum": 0,
           "type": "integer"
@@ -38,8 +47,19 @@
           "minimum": 0,
           "type": "integer"
         },
+        "docs_scored": {
+          "default": 0,
+          "description": "Docs actually fed to `CrossReranker::rerank` — equals `candidate_count`\nunder `UnitBody`, the flattened chunk/fallback-body count otherwise.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
         "failure": {
           "$ref": "#/$defs/CrossRerankFailure"
+        },
+        "granularity": {
+          "$ref": "#/$defs/CrossRerankGranularity",
+          "default": "unit_body"
         },
         "input_chars_max": {
           "format": "uint",
