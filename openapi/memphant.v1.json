@@ -27,6 +27,94 @@
         ],
         "type": "object"
       },
+      "CanonicalProjectionResponse": {
+        "description": "The complete, unranked, tenant-bound file-projection snapshot.",
+        "properties": {
+          "actor_id": {
+            "$ref": "#/components/schemas/ActorId"
+          },
+          "agent_node_id": {
+            "$ref": "#/components/schemas/AgentNodeId"
+          },
+          "fingerprint": {
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/CanonicalProjectionUnit"
+            },
+            "type": "array"
+          },
+          "scope_id": {
+            "$ref": "#/components/schemas/ScopeId"
+          },
+          "subject_generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject_id": {
+            "$ref": "#/components/schemas/SubjectId"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          }
+        },
+        "required": [
+          "tenant_id",
+          "subject_id",
+          "actor_id",
+          "scope_id",
+          "agent_node_id",
+          "subject_generation",
+          "items",
+          "fingerprint"
+        ],
+        "type": "object"
+      },
+      "CanonicalProjectionUnit": {
+        "description": "One current unit in the canonical file-projection snapshot.",
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "body_sha256": {
+            "type": "string"
+          },
+          "confidence": {
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "fact_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "$ref": "#/components/schemas/MemoryKind"
+          },
+          "predicate": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "unit_id": {
+            "$ref": "#/components/schemas/UnitId"
+          }
+        },
+        "required": [
+          "unit_id",
+          "kind",
+          "body",
+          "body_sha256"
+        ],
+        "type": "object"
+      },
       "ContextBindingAccessPolicy": {
         "oneOf": [
           {
@@ -369,6 +457,14 @@
         ],
         "type": "string"
       },
+      "CrossRerankGranularity": {
+        "description": "Granularity of the docs fed to the W8 cross-encoder rerank stage: whole\nunit bodies (the default), or each candidate's flattened\n`contextual_chunks` bodies max-pooled back to one score per candidate\n(fallback: the body when a candidate has no chunks).",
+        "enum": [
+          "unit_body",
+          "contextual_chunks"
+        ],
+        "type": "string"
+      },
       "CrossRerankTrace": {
         "properties": {
           "batch_size": {
@@ -380,6 +476,7 @@
             ]
           },
           "candidate_count": {
+            "description": "Candidates in the scored head — NOT docs: under `ContextualChunks`\ngranularity one candidate can contribute several docs (`docs_scored`).",
             "format": "uint",
             "minimum": 0,
             "type": "integer"
@@ -389,8 +486,19 @@
             "minimum": 0,
             "type": "integer"
           },
+          "docs_scored": {
+            "default": 0,
+            "description": "Docs actually fed to `CrossReranker::rerank` — equals `candidate_count`\nunder `UnitBody`, the flattened chunk/fallback-body count otherwise.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
           "failure": {
             "$ref": "#/components/schemas/CrossRerankFailure"
+          },
+          "granularity": {
+            "$ref": "#/components/schemas/CrossRerankGranularity",
+            "default": "unit_body"
           },
           "input_chars_max": {
             "format": "uint",
@@ -2741,6 +2849,77 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ScopeMemoryResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/scopes/{id}/projection": {
+      "get": {
+        "description": "Returns the complete current canonical projection in one snapshot. Responses exceeding 1048576 encoded JSON bytes fail with 413 and are never truncated.",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "subject_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "actor_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "agent_node_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "subject_generation",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CanonicalProjectionResponse"
                 }
               }
             }

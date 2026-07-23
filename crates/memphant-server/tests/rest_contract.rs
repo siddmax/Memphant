@@ -1,13 +1,15 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
+use memphant_core::{MemoryStore, service::MAX_CANONICAL_PROJECTION_ENCODED_BYTES};
 use memphant_types::{
-    ActorId, ContextBindingAgentRef, ContextBindingEntityRef, ContextBindingRequest,
-    ContextBindingResponse, ContextBindingScopeRef, CorrectRequest, CorrectSelector,
-    CorrectionPayload, ForgetRequest, ForgetSelector, HealthResponse, MarkOutcome, MarkRequest,
-    MemoryKind, RecallHttpRequest, RecallResponse, ReflectRequest, RetainEpisodeHttpRequest,
-    RetainEpisodeHttpResponse, RetainEpisodePayload, RetainPayload, RetainResourcePayload, ScopeId,
-    ScopeMemoryResponse, TenantId,
+    ActorId, CanonicalProjectionResponse, ContextBindingAgentRef, ContextBindingEntityRef,
+    ContextBindingRequest, ContextBindingResponse, ContextBindingScopeRef, CorrectRequest,
+    CorrectSelector, CorrectionPayload, ForgetRequest, ForgetSelector, HealthResponse, MarkOutcome,
+    MarkRequest, MemoryKind, NewMemoryUnit, RecallHttpRequest, RecallResponse, ReflectRequest,
+    RetainEpisodeHttpRequest, RetainEpisodeHttpResponse, RetainEpisodePayload, RetainPayload,
+    RetainResourcePayload, RetainUnitPayload, ScopeId, ScopeMemoryResponse, TenantId, TrustLevel,
+    UnitState,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -185,6 +187,183 @@ fn bind_recall_request(
     request.agent_node_id = binding.agent_node_id;
     request.subject_generation = binding.subject_generation;
     request
+}
+
+#[tokio::test]
+async fn canonical_projection_is_a_dedicated_unranked_visible_snapshot() {
+    let tenant_id = tenant(96_000);
+    let app = dev_app(tenant_id);
+    let binding = bind_context(&app, "canonical-projection").await;
+
+    let _: RetainEpisodeHttpResponse = json_request(
+        &app,
+        "POST",
+        "/v1/episodes",
+        Some(RetainEpisodeHttpRequest {
+            subject_id: binding.subject_id,
+            scope_id: binding.scope_id,
+            actor_id: binding.actor_id,
+            agent_node_id: binding.agent_node_id,
+            subject_generation: binding.subject_generation,
+            source_ref: "rest:canonical-projection".to_string(),
+            observed_at: "2026-07-22T00:00:00Z".to_string(),
+            payload: RetainPayload::Unit(RetainUnitPayload {
+                kind: MemoryKind::Semantic,
+                fact_key: "projection:visible".to_string(),
+                predicate: "states".to_string(),
+                body: "This is the visible canonical fact.".to_string(),
+                confidence: 1.0,
+                valid_from: None,
+                valid_to: None,
+            }),
+        }),
+    )
+    .await
+    .1;
+
+    let projection: CanonicalProjectionResponse = json_request(
+        &app,
+        "GET",
+        &format!(
+            "/v1/scopes/{}/projection?subject_id={}&actor_id={}&agent_node_id={}&subject_generation={}",
+            binding.scope_id.as_uuid(),
+            binding.subject_id.as_uuid(),
+            binding.actor_id.as_uuid(),
+            binding.agent_node_id.as_uuid(),
+            binding.subject_generation,
+        ),
+        None::<()>,
+    )
+    .await
+    .1;
+
+    assert_eq!(projection.tenant_id, tenant_id);
+    assert_eq!(projection.subject_id, binding.subject_id);
+    assert_eq!(projection.actor_id, binding.actor_id);
+    assert_eq!(projection.scope_id, binding.scope_id);
+    assert_eq!(projection.agent_node_id, binding.agent_node_id);
+    assert_eq!(projection.subject_generation, binding.subject_generation);
+    assert_eq!(projection.items.len(), 1);
+    assert_eq!(
+        projection.items[0].body,
+        "This is the visible canonical fact."
+    );
+    assert_eq!(
+        projection.items[0].body_sha256,
+        "cd18204f20a65227152e24543607e22722c3631ca8b76c46343c7c6d65c3081f"
+    );
+    assert_eq!(projection.fingerprint.len(), 64);
+
+    let repeated: CanonicalProjectionResponse = json_request(
+        &app,
+        "GET",
+        &format!(
+            "/v1/scopes/{}/projection?subject_id={}&actor_id={}&agent_node_id={}&subject_generation={}",
+            binding.scope_id.as_uuid(),
+            binding.subject_id.as_uuid(),
+            binding.actor_id.as_uuid(),
+            binding.agent_node_id.as_uuid(),
+            binding.subject_generation,
+        ),
+        None::<()>,
+    )
+    .await
+    .1;
+    assert_eq!(repeated.items, projection.items);
+    assert_eq!(repeated.fingerprint, projection.fingerprint);
+}
+
+#[tokio::test]
+async fn canonical_projection_rejects_an_encoded_payload_over_the_ceiling() {
+    let tenant_id = tenant(96_200);
+    let (app, state) = dev_app_with_state(tenant_id);
+    let binding = bind_context(&app, "canonical-projection-ceiling").await;
+    let context = state
+        .store()
+        .resolve_memory_context(
+            tenant_id,
+            binding.subject_id,
+            binding.actor_id,
+            binding.scope_id,
+            binding.agent_node_id,
+        )
+        .await
+        .expect("resolve projection context");
+    let mut tx = state
+        .store()
+        .begin(&context)
+        .await
+        .expect("begin projection seed");
+    state
+        .store()
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id,
+                data_subject_id: binding.subject_id,
+                scope_id: binding.scope_id,
+                agent_node_id: binding.agent_node_id,
+                subject_generation: binding.subject_generation,
+                kind: MemoryKind::Semantic,
+                state: UnitState::Active,
+                fact_key: Some("projection:ceiling".to_string()),
+                predicate: Some("states".to_string()),
+                body: "x".repeat(MAX_CANONICAL_PROJECTION_ENCODED_BYTES),
+                confidence: Some(1.0),
+                trust_level: TrustLevel::TrustedSystem,
+                churn_class: None,
+                freshness_due_at: None,
+                actor_id: Some(binding.actor_id),
+                source_kind: Some("test".to_string()),
+                source_ref: "rest:canonical-projection-ceiling".to_string(),
+                observed_at: "2026-07-22T00:00:00Z".to_string(),
+                source_episode_id: None,
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
+            },
+        )
+        .await
+        .expect("stage projection seed");
+    state
+        .store()
+        .commit(tx)
+        .await
+        .expect("commit projection seed");
+
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!(
+            "/v1/scopes/{}/projection?subject_id={}&actor_id={}&agent_node_id={}&subject_generation={}",
+            binding.scope_id.as_uuid(),
+            binding.subject_id.as_uuid(),
+            binding.actor_id.as_uuid(),
+            binding.agent_node_id.as_uuid(),
+            binding.subject_generation,
+        ))
+        .body(Body::empty())
+        .expect("projection request");
+    let response = app
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("projection response");
+    let status = response.status();
+    let body: Value = serde_json::from_slice(
+        &response
+            .into_body()
+            .collect()
+            .await
+            .expect("projection error body")
+            .to_bytes(),
+    )
+    .expect("projection error json");
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "body={body}");
+    assert_eq!(body["error"]["code"], "projection_too_large");
 }
 
 #[tokio::test]

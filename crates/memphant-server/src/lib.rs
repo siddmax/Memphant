@@ -7,17 +7,19 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
-use memphant_core::service::{MemoryService, ServiceError, clamp_trust};
+use memphant_core::service::{
+    MAX_CANONICAL_PROJECTION_ENCODED_BYTES, MemoryService, ServiceError, clamp_trust,
+};
 use memphant_core::{
     CoreError, InMemoryStore, MemoryStore, MutationLedgerStore, MutationResponse, NoopEmbedding,
     StoreError, SystemClock, validate_idempotency_key,
 };
 use memphant_types::{
-    ActorId, AgentNodeId, ContextBindingRequest, ContextBindingResponse, CorrectRequest,
-    ENGINE_VERSION, ErrorBody, ErrorEnvelope, HealthResponse, MarkRequest, RecallHttpRequest,
-    ReflectAccepted, ReflectRequest, RetainEpisodeHttpRequest, RetainEpisodeHttpResponse,
-    RetrievalTrace, SCHEMA_COMPAT_REVISION, ScopeId, ScopeMemoryResponse, SubjectId,
-    TRACE_SCHEMA_VERSION, TenantId, TrustLevel,
+    ActorId, AgentNodeId, CanonicalProjectionResponse, ContextBindingRequest,
+    ContextBindingResponse, CorrectRequest, ENGINE_VERSION, ErrorBody, ErrorEnvelope,
+    HealthResponse, MarkRequest, RecallHttpRequest, ReflectAccepted, ReflectRequest,
+    RetainEpisodeHttpRequest, RetainEpisodeHttpResponse, RetrievalTrace, SCHEMA_COMPAT_REVISION,
+    ScopeId, ScopeMemoryResponse, SubjectId, TRACE_SCHEMA_VERSION, TenantId, TrustLevel,
 };
 use schemars::JsonSchema;
 use schemars::generate::{SchemaGenerator, SchemaSettings};
@@ -37,6 +39,7 @@ const FORGET_PATH: &str = "/v1/forget";
 const MARK_PATH: &str = "/v1/mark";
 const TRACE_PATH: &str = "/v1/traces/{id}";
 const SCOPE_MEMORY_PATH: &str = "/v1/scopes/{id}/memory";
+const CANONICAL_PROJECTION_PATH: &str = "/v1/scopes/{id}/projection";
 const CONTEXT_BINDING_PATH: &str = "/v1/context-bindings/{client_ref}";
 
 const DOCUMENTED_OPENAPI_PATHS: &[&str] = &[
@@ -48,6 +51,7 @@ const DOCUMENTED_OPENAPI_PATHS: &[&str] = &[
     MARK_PATH,
     TRACE_PATH,
     SCOPE_MEMORY_PATH,
+    CANONICAL_PROJECTION_PATH,
     CONTEXT_BINDING_PATH,
     HEALTH_PATH,
 ];
@@ -268,6 +272,10 @@ pub fn app<S: MutationLedgerStore + 'static>(state: AppState<S>) -> Router {
         .route(MARK_PATH, post(mark_handler::<S>))
         .route(TRACE_PATH, get(trace_handler::<S>))
         .route(SCOPE_MEMORY_PATH, get(scope_memory_handler::<S>))
+        .route(
+            CANONICAL_PROJECTION_PATH,
+            get(canonical_projection_handler::<S>),
+        )
         .route(CONTEXT_BINDING_PATH, put(context_binding_handler::<S>))
         .with_state(state)
 }
@@ -629,6 +637,15 @@ struct ScopeMemoryQuery {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CanonicalProjectionQuery {
+    subject_id: SubjectId,
+    actor_id: ActorId,
+    agent_node_id: AgentNodeId,
+    subject_generation: u64,
+}
+
 async fn scope_memory_handler<S: MemoryStore + 'static>(
     State(state): State<AppState<S>>,
     authed: AuthedTenant,
@@ -673,6 +690,38 @@ async fn scope_memory_handler<S: MemoryStore + 'static>(
         next_cursor: page.next_cursor.map(|cursor| cursor.as_uuid().to_string()),
         has_more: page.has_more,
     }))
+}
+
+async fn canonical_projection_handler<S: MemoryStore + 'static>(
+    State(state): State<AppState<S>>,
+    authed: AuthedTenant,
+    Path(id): Path<String>,
+    Query(query): Query<CanonicalProjectionQuery>,
+) -> Result<Json<CanonicalProjectionResponse>, ApiError> {
+    let uuid = Uuid::parse_str(&id).map_err(|_| ApiError::invalid("invalid scope id"))?;
+    let scope_id = ScopeId::from_u128(uuid.as_u128());
+    authed.check_scope(scope_id)?;
+    authed.check_principal(query.actor_id, scope_id)?;
+    let context = state
+        .store()
+        .resolve_memory_context(
+            authed.tenant,
+            query.subject_id,
+            query.actor_id,
+            scope_id,
+            query.agent_node_id,
+        )
+        .await
+        .map_err(|error| match error {
+            StoreError::NotFound(_) => ApiError::scope_denied(),
+            other => ApiError::from(other),
+        })?;
+    if query.subject_generation != context.subject_generation {
+        return Err(ApiError::context_binding_conflict(
+            "subject generation is stale".to_string(),
+        ));
+    }
+    Ok(Json(state.service.canonical_projection(&context).await?))
 }
 
 pub fn openapi_document() -> Value {
@@ -747,6 +796,20 @@ fn openapi_paths() -> serde_json::Map<String, Value> {
             ],
         ),
     );
+    let mut canonical_projection = get_path_item(
+        "CanonicalProjectionResponse",
+        vec![
+            path_param("id"),
+            required_query_param("subject_id", "uuid"),
+            required_query_param("actor_id", "uuid"),
+            required_query_param("agent_node_id", "uuid"),
+            required_query_param("subject_generation", "integer"),
+        ],
+    );
+    canonical_projection["get"]["description"] = json!(format!(
+        "Returns the complete current canonical projection in one snapshot. Responses exceeding {MAX_CANONICAL_PROJECTION_ENCODED_BYTES} encoded JSON bytes fail with 413 and are never truncated."
+    ));
+    paths.insert(CANONICAL_PROJECTION_PATH.to_string(), canonical_projection);
     paths.insert(
         HEALTH_PATH.to_string(),
         get_path_item("HealthResponse", Vec::new()),
@@ -779,6 +842,7 @@ fn component_schemas() -> serde_json::Map<String, Value> {
     seed_component::<memphant_types::MarkResult>(&mut generator);
     seed_component::<RetrievalTrace>(&mut generator);
     seed_component::<ScopeMemoryResponse>(&mut generator);
+    seed_component::<CanonicalProjectionResponse>(&mut generator);
     seed_component::<HealthResponse>(&mut generator);
     seed_component::<ContextBindingRequest>(&mut generator);
     seed_component::<ContextBindingResponse>(&mut generator);
@@ -994,6 +1058,14 @@ impl ApiError {
         }
     }
 
+    fn projection_too_large(max_bytes: usize) -> Self {
+        Self {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            code: "projection_too_large",
+            message: format!("canonical projection exceeds {max_bytes} encoded bytes"),
+        }
+    }
+
     fn conflict(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::CONFLICT,
@@ -1073,6 +1145,7 @@ impl From<ServiceError> for ApiError {
         match error {
             ServiceError::Core(core) => core.into(),
             ServiceError::Invalid(message) => Self::invalid(message),
+            ServiceError::ProjectionTooLarge { max_bytes } => Self::projection_too_large(max_bytes),
         }
     }
 }

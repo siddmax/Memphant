@@ -13,15 +13,16 @@ use futures::{StreamExt, stream};
 #[cfg(test)]
 use memphant_types::TenantId;
 use memphant_types::{
-    COMPILER_VERSION, ContextualChunk, CorrectRequest, DegradedRecallTraceItem, ENGINE_VERSION,
-    EpisodeId, ForgetRequest, ForgetResult, MarkRequest, MarkResult, MemoryKind, NewEpisode,
-    NewResource, RecallContextItem, RecallDegradationDiagnostic, RecallDegradationReason,
-    RecallHttpRequest, RecallMode, RecallRequest, RecallResponse, ReflectAccepted,
-    ReflectCandidate, ReflectInput, ReflectJob, ReflectJobKind, ReflectRequest,
-    ResolvedMemoryContext, ResourceId, ResourceKind, RetainEpisodeHttpRequest,
-    RetainEpisodeHttpResponse, RetrievalTrace, ReviewEvent, StoredEpisode, TraceId, TrustLevel,
-    UnitId,
+    COMPILER_VERSION, CanonicalProjectionResponse, CanonicalProjectionUnit, ContextualChunk,
+    CorrectRequest, DegradedRecallTraceItem, ENGINE_VERSION, EpisodeId, ForgetRequest,
+    ForgetResult, MarkRequest, MarkResult, MemoryKind, NewEpisode, NewResource, RecallContextItem,
+    RecallDegradationDiagnostic, RecallDegradationReason, RecallHttpRequest, RecallMode,
+    RecallRequest, RecallResponse, ReflectAccepted, ReflectCandidate, ReflectInput, ReflectJob,
+    ReflectJobKind, ReflectRequest, ResolvedMemoryContext, ResourceId, ResourceKind,
+    RetainEpisodeHttpRequest, RetainEpisodeHttpResponse, RetrievalTrace, ReviewEvent,
+    StoredEpisode, TraceId, TrustLevel, UnitId,
 };
+use sha2::{Digest, Sha256};
 
 use crate::deep_recall::DeepRecallProvider;
 use crate::{
@@ -38,6 +39,242 @@ use crate::{
 
 pub const DEFAULT_STRUCTURED_STATE_PREFETCH_CONCURRENCY: usize = 4;
 pub const MAX_STRUCTURED_STATE_PREFETCH_CONCURRENCY: usize = 16;
+/// The maximum encoded JSON payload returned by the canonical projection read.
+pub const MAX_CANONICAL_PROJECTION_ENCODED_BYTES: usize = 1_048_576;
+
+#[cfg(test)]
+mod canonical_projection_store_tests {
+    use super::*;
+    use crate::{InMemoryStore, MemoryStore, NewMemoryUnit, UnitState};
+    use memphant_types::{
+        ActorId, AgentNodeId, CanonicalProjectionUnit, ContextBindingAgentRef,
+        ContextBindingEntityRef, ContextBindingRequest, ContextBindingScopeRef, MemoryKind,
+        ResolvedMemoryContext, TenantId, UnitId,
+    };
+
+    async fn context(store: &InMemoryStore) -> ResolvedMemoryContext {
+        let tenant = TenantId::from_u128(96_100);
+        let binding = store
+            .resolve_context_binding(
+                tenant,
+                "canonical-projection-store".to_string(),
+                ContextBindingRequest {
+                    subject: ContextBindingEntityRef {
+                        external_ref: "subject:canonical-projection-store".to_string(),
+                        kind: "user".to_string(),
+                    },
+                    actor: ContextBindingEntityRef {
+                        external_ref: "actor:canonical-projection-store".to_string(),
+                        kind: "user".to_string(),
+                    },
+                    scope: ContextBindingScopeRef {
+                        external_ref: "scope:canonical-projection-store".to_string(),
+                        kind: "memory".to_string(),
+                        parent_external_ref: None,
+                    },
+                    agent_node: ContextBindingAgentRef {
+                        external_ref: "agent:canonical-projection-store".to_string(),
+                        parent_external_ref: None,
+                    },
+                    access_policies: Vec::new(),
+                },
+            )
+            .await
+            .expect("bind context");
+        store
+            .resolve_memory_context(
+                tenant,
+                binding.subject_id,
+                binding.actor_id,
+                binding.scope_id,
+                binding.agent_node_id,
+            )
+            .await
+            .expect("resolve context")
+    }
+
+    fn unit(
+        context: &ResolvedMemoryContext,
+        kind: MemoryKind,
+        state: UnitState,
+        body: &str,
+    ) -> NewMemoryUnit {
+        NewMemoryUnit {
+            tenant_id: context.tenant_id,
+            data_subject_id: context.data_subject_id,
+            scope_id: context.scope_id,
+            agent_node_id: context.agent_node_id,
+            subject_generation: context.subject_generation,
+            kind,
+            state,
+            fact_key: Some(format!("projection:{body}")),
+            predicate: Some("states".to_string()),
+            body: body.to_string(),
+            confidence: Some(1.0),
+            trust_level: TrustLevel::TrustedSystem,
+            churn_class: None,
+            freshness_due_at: None,
+            actor_id: Some(context.actor_id),
+            source_kind: Some("test".to_string()),
+            source_ref: format!("test:{body}"),
+            observed_at: "2026-07-22T00:00:00Z".to_string(),
+            source_episode_id: None,
+            source_resource_id: None,
+            deletion_generation: None,
+            contextual_chunks: Vec::new(),
+            valid_from: None,
+            valid_to: None,
+            transaction_from: None,
+            transaction_to: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn canonical_projection_store_excludes_historical_and_disallowed_units() {
+        let store = InMemoryStore::default();
+        let context = context(&store).await;
+        let mut tx = store.begin(&context).await.expect("begin");
+        for (kind, state, body) in [
+            (MemoryKind::Semantic, UnitState::Active, "semantic-active"),
+            (
+                MemoryKind::Semantic,
+                UnitState::Validated,
+                "semantic-validated",
+            ),
+            (
+                MemoryKind::Procedural,
+                UnitState::Validated,
+                "procedure-validated",
+            ),
+            (
+                MemoryKind::Procedural,
+                UnitState::Active,
+                "procedure-active",
+            ),
+            (MemoryKind::Episodic, UnitState::Active, "episodic-active"),
+            (MemoryKind::Belief, UnitState::Active, "belief-active"),
+            (MemoryKind::Resource, UnitState::Active, "resource-active"),
+            (MemoryKind::Semantic, UnitState::Captured, "captured"),
+            (MemoryKind::Semantic, UnitState::Extracted, "extracted"),
+            (MemoryKind::Semantic, UnitState::Candidate, "candidate"),
+            (MemoryKind::Semantic, UnitState::Superseded, "superseded"),
+            (MemoryKind::Semantic, UnitState::Invalidated, "invalidated"),
+            (MemoryKind::Semantic, UnitState::Deleted, "deleted"),
+            (MemoryKind::Semantic, UnitState::Quarantined, "quarantined"),
+            (MemoryKind::Semantic, UnitState::Expired, "expired"),
+            (MemoryKind::Semantic, UnitState::Retired, "retired"),
+        ] {
+            store
+                .stage_memory_unit(&mut tx, unit(&context, kind, state, body))
+                .await
+                .expect("stage unit");
+        }
+        let mut closed = unit(
+            &context,
+            MemoryKind::Semantic,
+            UnitState::Active,
+            "closed-transaction",
+        );
+        closed.transaction_to = Some("2026-07-22T00:00:01Z".to_string());
+        store
+            .stage_memory_unit(&mut tx, closed)
+            .await
+            .expect("stage closed unit");
+        let mut deleted = unit(
+            &context,
+            MemoryKind::Semantic,
+            UnitState::Active,
+            "deleted-generation",
+        );
+        deleted.deletion_generation = Some(1);
+        store
+            .stage_memory_unit(&mut tx, deleted)
+            .await
+            .expect("stage deleted unit");
+        store.commit(tx).await.expect("commit");
+
+        let template = store
+            .memory_units(context.tenant_id)
+            .into_iter()
+            .next()
+            .expect("seed unit");
+        let mut wrong_generation = template.clone();
+        wrong_generation.id = UnitId::from_u128(96_101);
+        wrong_generation.subject_generation += 1;
+        let mut wrong_agent = template.clone();
+        wrong_agent.id = UnitId::from_u128(96_102);
+        wrong_agent.agent_node_id = AgentNodeId::from_u128(96_102);
+        let mut wrong_actor = template.clone();
+        wrong_actor.id = UnitId::from_u128(96_103);
+        wrong_actor.actor_id = Some(ActorId::from_u128(96_103));
+        let mut wrong_tenant = template;
+        let foreign_tenant = TenantId::from_u128(96_104);
+        wrong_tenant.id = UnitId::from_u128(96_104);
+        wrong_tenant.tenant_id = foreign_tenant;
+        {
+            let mut state = store.inner.lock().expect("in-memory state");
+            state
+                .memory_units
+                .entry(context.tenant_id)
+                .or_default()
+                .extend([wrong_generation, wrong_agent, wrong_actor]);
+            state
+                .memory_units
+                .entry(foreign_tenant)
+                .or_default()
+                .push(wrong_tenant);
+        }
+
+        let projected = store
+            .canonical_projection_units(&context)
+            .await
+            .expect("one visible projection snapshot");
+        assert_eq!(
+            projected
+                .iter()
+                .map(|unit| (unit.kind, unit.state))
+                .collect::<Vec<_>>(),
+            vec![
+                (MemoryKind::Semantic, UnitState::Active),
+                (MemoryKind::Semantic, UnitState::Validated),
+                (MemoryKind::Procedural, UnitState::Validated),
+            ]
+        );
+    }
+
+    #[test]
+    fn canonical_projection_fingerprint_is_sha256_of_ordered_records() {
+        let items = vec![
+            CanonicalProjectionUnit {
+                unit_id: UnitId::from_u128(1),
+                kind: MemoryKind::Semantic,
+                fact_key: Some("a".to_string()),
+                predicate: Some("states".to_string()),
+                body: "A".to_string(),
+                confidence: Some(1.0),
+                body_sha256: "aa".to_string(),
+            },
+            CanonicalProjectionUnit {
+                unit_id: UnitId::from_u128(2),
+                kind: MemoryKind::Procedural,
+                fact_key: Some("b".to_string()),
+                predicate: Some("does".to_string()),
+                body: "B".to_string(),
+                confidence: Some(0.5),
+                body_sha256: "bb".to_string(),
+            },
+        ];
+        assert_eq!(
+            canonical_projection_fingerprint(&items).expect("fingerprint"),
+            "86b1fdcc5639ceede2c72558b942f63565143e7b7c3a11d8650e318838cf6f83"
+        );
+        assert_ne!(
+            canonical_projection_fingerprint(&items).expect("fingerprint"),
+            canonical_projection_fingerprint(&items.into_iter().rev().collect::<Vec<_>>())
+                .expect("reordered fingerprint")
+        );
+    }
+}
 
 /// Errors surfaced by the application layer. Transport layers map these onto
 /// their envelope (REST status codes / MCP tool errors).
@@ -47,6 +284,18 @@ pub enum ServiceError {
     Core(#[from] CoreError),
     #[error("invalid request: {0}")]
     Invalid(String),
+    #[error("canonical projection exceeds {max_bytes} encoded bytes")]
+    ProjectionTooLarge { max_bytes: usize },
+}
+
+/// SHA-256 of the canonical JSON encoding of ordered projection unit records.
+pub fn canonical_projection_fingerprint(
+    items: &[CanonicalProjectionUnit],
+) -> Result<String, ServiceError> {
+    let encoded = serde_json::to_vec(items).map_err(|error| {
+        ServiceError::Invalid(format!("canonical projection cannot be encoded: {error}"))
+    })?;
+    Ok(format!("{:x}", Sha256::digest(encoded)))
 }
 
 fn canonical_utc_timestamp(value: &str, field: &str) -> Result<String, ServiceError> {
@@ -1806,6 +2055,51 @@ impl<S: MemoryStore> MemoryService<S> {
         limit: usize,
     ) -> Result<ScopePage, ServiceError> {
         Ok(self.store.scope_memory_page(context, cursor, limit).await?)
+    }
+
+    /// Returns the complete current file projection from one store snapshot.
+    /// The historical cursor export above intentionally has different semantics.
+    pub async fn canonical_projection(
+        &self,
+        context: &ResolvedMemoryContext,
+    ) -> Result<CanonicalProjectionResponse, ServiceError> {
+        let items = self
+            .store
+            .canonical_projection_units(context)
+            .await?
+            .into_iter()
+            .map(|unit| CanonicalProjectionUnit {
+                unit_id: unit.id,
+                kind: unit.kind,
+                fact_key: unit.fact_key,
+                predicate: unit.predicate,
+                body_sha256: format!("{:x}", Sha256::digest(unit.body.as_bytes())),
+                body: unit.body,
+                confidence: unit.confidence,
+            })
+            .collect::<Vec<_>>();
+        let response = CanonicalProjectionResponse {
+            tenant_id: context.tenant_id,
+            subject_id: context.data_subject_id,
+            actor_id: context.actor_id,
+            scope_id: context.scope_id,
+            agent_node_id: context.agent_node_id,
+            subject_generation: context.subject_generation,
+            fingerprint: canonical_projection_fingerprint(&items)?,
+            items,
+        };
+        if serde_json::to_vec(&response)
+            .map_err(|error| {
+                ServiceError::Invalid(format!("canonical projection cannot be encoded: {error}"))
+            })?
+            .len()
+            > MAX_CANONICAL_PROJECTION_ENCODED_BYTES
+        {
+            return Err(ServiceError::ProjectionTooLarge {
+                max_bytes: MAX_CANONICAL_PROJECTION_ENCODED_BYTES,
+            });
+        }
+        Ok(response)
     }
 
     /// One worker tick: claims up to `batch` reflect jobs (unfiltered across

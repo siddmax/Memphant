@@ -1,66 +1,79 @@
-# Task 1 implementation report: P1-T6 paired gate
+# B2 Task 1 implementation report: canonical projection read
 
 ## Result
 
-Superseded the four-arm P1-T6 execution contract with the preregistered
-Fast/Sonnet paired gate. The manifest expands to 24 rows for 12 cases,
-contains 12 constructions, and names Sonnet as the only selected executable
-Deep arm. Luna and Sol remain an inactive researched shortlist.
+Implemented the authenticated `GET /v1/scopes/{id}/projection` foundation for
+the B2 file plane. It is distinct from the historical, paginated
+`/v1/scopes/{id}/memory` endpoint and returns one complete, unranked snapshot.
+No CLI sync, P1 artifact, or model/provider work was touched.
 
 ## Test-first evidence
 
-1. Replaced the old 48-row manifest assertion with
-   `test_campaign_is_single_candidate_paired_gate`.
-2. Ran `python3 -m pytest tests/test_run_lme_v2_p1_t6.py -q` before production
-   changes. It failed as intended because the old manifest verified as 48 rows
-   and four arms instead of 24 rows, two arms, and 12 constructions.
-3. Implemented the minimal manifest verification and row-expansion contract,
-   then reran the focused suite successfully.
+1. Added the REST contract before the route existed and ran:
+   `cargo test -p memphant-server --test rest_contract canonical_projection_is_a_dedicated_unranked_visible_snapshot -- --exact`.
+   It failed as expected with `404 Not Found` for the missing dedicated route.
+2. Added the in-memory store contract for the permitted projection states,
+   historical states, closed/deletion-marked rows, and wrong context rows.
+3. Added the encoded-byte-ceiling contract, temporarily without the size guard,
+   and ran it. It failed as expected with `200` where `413` was required.
+4. Implemented the shared store/service/server path, then ran the focused
+   contracts green.
 
-## Contract changes
+## Implementation
 
-- `selected_deep_arm` is `sonnet`; row order is `fast`, then `sonnet`.
-- The fresh reserve is 3,600,000 micros for 12 Deep dispatches plus 2,097,600
-  micros for 24 reader/judge reservations.
-- Prior liability now includes the stopped `run-408363c9` reader's settled
-  3,018 micros: 7,542 settled plus 316,142 unresolved, 323,684 micros total.
-- Cumulative maximum is 6,021,284 micros under the 6,250,000-micro hard cap.
-- Amendment 11 binds the manifest and stopped-root hashes and preregisters the
-  required efficiency checkpoint and stop rule.
+- Added typed `CanonicalProjectionUnit` and `CanonicalProjectionResponse`.
+- Added a separate `MemoryStore::canonical_projection_units` seam. In-memory
+  reads one locked snapshot; Postgres executes one ordered statement in the
+  tenant transaction.
+- The store includes semantic `active|validated` and procedural `validated`
+  rows only, with exact tenant/subject/generation/scope/agent/actor binding;
+  it excludes closed, deletion-marked, historical, quarantined, wrong-kind,
+  and wrong-context rows.
+- The service builds the SHA-256 from canonical JSON for UUID-ordered unit
+  records, publishes each body SHA-256, and rejects encoded responses above
+  `1_048_576` bytes with a stable `413 projection_too_large` error.
+- Regenerated `openapi/memphant.v1.json` through the server binary. The API
+  description states the byte ceiling and no-truncation behavior.
 
 ## Verification
 
-- Initial `python3 -m pytest tests/test_run_lme_v2_p1_t6.py -q` — 46 passed,
-  2 skipped; superseded by the review-fix verification below.
-- `python3 -m json.tool benchmarks/manifests/longmemeval_v2.p1_t6.json`.
-- `git diff --check`.
-
-## Self-review
-
-Aggregation now follows the selected paired arm and the restored synthetic
-tests exercise a valid 24-row root. All candidate metadata hashes remain
-verified even though only Sonnet can execute. No treatment was dispatched, no
-historical artifact was changed, and the unrelated handoff edit was left
-unstaged.
-
-## Review-fix follow-up
-
-The controller audit found that `aggregate_campaign()` still iterated the
-superseded Sonnet/Luna/Sol set, so a valid 24-row root raised `KeyError` for
-Luna. The fix binds aggregation and confirmation advance directly to
-`protocol.selected_deep_arm`, restores both synthetic aggregate tests, verifies
-all three immutable candidate config hashes, restores full 24-row ordering
-coverage, and tightens the hard ceiling to 6,250,000 micros.
-
-### Test-first evidence
-
-Before the production fix, `python3 -m pytest tests/test_run_lme_v2_p1_t6.py
--q` failed as intended: 4 failed, 44 passed. The failures covered the old
-15.5-dollar ceiling, inactive Luna config-hash drift going unchecked, and both
-valid 24-row aggregate fixtures raising `KeyError` for Luna.
-
-### Verification
-
-- `python3 -m pytest tests/test_run_lme_v2_p1_t6.py -q` — 48 passed in 3.96s.
-- `python3 -m json.tool benchmarks/manifests/longmemeval_v2.p1_t6.json >/dev/null` — passed.
+- Red REST route proof: failed with the expected `404 Not Found`.
+- Red byte-limit proof: failed with the expected observed `200` versus required
+  `413` before the guard was restored.
+- `cargo test -p memphant-types` — 6 passed.
+- `cargo test -p memphant-core --lib service::canonical_projection_store_tests -- --nocapture` — 2 passed.
+- `cargo test -p memphant-server --test rest_contract` — 21 passed.
+- `cargo test -p memphant-store-postgres` — local/unit/provider checks passed;
+  67 live-Postgres checks were skipped because `MEMPHANT_TEST_DATABASE_URL` was
+  not configured.
+- `cargo test -p memphant-runtime` — 137 passed; 7 live/paid provider tests
+  skipped, with no model calls made.
+- `cargo fmt --check` — passed.
+- `cargo clippy -p memphant-types -p memphant-core -p memphant-runtime -p memphant-store-postgres -p memphant-server --all-targets --all-features -- -D warnings` — passed.
+- `cargo run -q -p memphant-server -- --openapi-json > openapi/memphant.v1.json` — regenerated successfully.
 - `git diff --check` — passed.
+
+## Files
+
+- `crates/memphant-types/src/lib.rs`
+- `crates/memphant-core/src/lib.rs`
+- `crates/memphant-core/src/service.rs`
+- `crates/memphant-runtime/src/lib.rs`
+- `crates/memphant-store-postgres/src/store.rs`
+- `crates/memphant-server/src/lib.rs`
+- `crates/memphant-server/tests/rest_contract.rs`
+- `openapi/memphant.v1.json` (generated)
+- `.superpowers/sdd/task-1-report.md`
+
+## Commit
+
+This report is included in the local Task 1 commit; its SHA is reported in the
+implementer handoff.
+
+## Self-review and concerns
+
+The historical paginated export remains unchanged, and no response is silently
+truncated. The exact Postgres statement is covered by compile/lint and the
+shared in-memory contract; the live-Postgres suite was skipped because this
+worktree has no configured scratch database. The unrelated
+`.superpowers/sdd/progress.md` modification was preserved unstaged.

@@ -3411,6 +3411,34 @@ impl MemoryStore for PgStore {
         })
     }
 
+    async fn canonical_projection_units(
+        &self,
+        context: &ResolvedMemoryContext,
+    ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
+        let mut tx = self.tenant_tx(context.tenant_id).await?;
+        Self::fetch_units_where(
+            &mut tx,
+            "tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+             and scope_id = $4 and agent_node_id = $5 and actor_id = $6
+             and transaction_to is null and deletion_generation is null
+             and (
+               (kind = 'semantic' and state = any($7))
+               or (kind = 'procedural' and state = 'validated')
+             )",
+            "order by id",
+            vec![
+                Bind::Uuid(context.tenant_id.as_uuid()),
+                Bind::Uuid(context.data_subject_id.as_uuid()),
+                Bind::I64(context.subject_generation as i64),
+                Bind::Uuid(context.scope_id.as_uuid()),
+                Bind::Uuid(context.agent_node_id.as_uuid()),
+                Bind::Uuid(context.actor_id.as_uuid()),
+                Bind::TextVec(vec!["active".to_string(), "validated".to_string()]),
+            ],
+        )
+        .await
+    }
+
     async fn claim_reflect_jobs(
         &self,
         filter: JobFilter,

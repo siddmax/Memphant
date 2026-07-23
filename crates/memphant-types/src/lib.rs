@@ -1854,6 +1854,31 @@ pub struct ScopeMemoryResponse {
     pub has_more: bool,
 }
 
+/// One current unit in the canonical file-projection snapshot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CanonicalProjectionUnit {
+    pub unit_id: UnitId,
+    pub kind: MemoryKind,
+    pub fact_key: Option<String>,
+    pub predicate: Option<String>,
+    pub body: String,
+    pub confidence: Option<f32>,
+    pub body_sha256: String,
+}
+
+/// The complete, unranked, tenant-bound file-projection snapshot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CanonicalProjectionResponse {
+    pub tenant_id: TenantId,
+    pub subject_id: SubjectId,
+    pub actor_id: ActorId,
+    pub scope_id: ScopeId,
+    pub agent_node_id: AgentNodeId,
+    pub subject_generation: u64,
+    pub items: Vec<CanonicalProjectionUnit>,
+    pub fingerprint: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ErrorBody {
     pub code: String,

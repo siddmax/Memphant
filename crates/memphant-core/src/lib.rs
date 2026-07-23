@@ -1256,6 +1256,12 @@ pub trait MemoryStore: Send + Sync {
         cursor: Option<UnitId>,
         limit: usize,
     ) -> impl Future<Output = Result<ScopePage, StoreError>> + Send;
+    /// One complete, current file-projection snapshot. This is deliberately
+    /// separate from the historical, paginated scope-memory export.
+    fn canonical_projection_units(
+        &self,
+        context: &ResolvedMemoryContext,
+    ) -> impl Future<Output = Result<Vec<StoredMemoryUnit>, StoreError>> + Send;
 
     // Reflect job queue (SKIP LOCKED semantics in Postgres).
     fn claim_reflect_jobs(
@@ -4203,6 +4209,43 @@ impl MemoryStore for InMemoryStore {
             next_cursor,
             has_more,
         })
+    }
+
+    async fn canonical_projection_units(
+        &self,
+        context: &ResolvedMemoryContext,
+    ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
+        let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+        state.validate_context(context)?;
+        let mut units: Vec<_> = state
+            .memory_units
+            .get(&context.tenant_id)
+            .map(|units| {
+                units
+                    .iter()
+                    .filter(|unit| {
+                        unit.tenant_id == context.tenant_id
+                            && unit.data_subject_id == context.data_subject_id
+                            && unit.subject_generation == context.subject_generation
+                            && unit.scope_id == context.scope_id
+                            && unit.agent_node_id == context.agent_node_id
+                            && unit.actor_id == Some(context.actor_id)
+                            && unit.transaction_to.is_none()
+                            && unit.deletion_generation.is_none()
+                            && matches!(
+                                (unit.kind, unit.state),
+                                (
+                                    MemoryKind::Semantic,
+                                    UnitState::Active | UnitState::Validated
+                                ) | (MemoryKind::Procedural, UnitState::Validated)
+                            )
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        units.sort_unstable_by_key(|unit| unit.id.as_uuid());
+        Ok(units)
     }
 
     async fn claim_reflect_jobs(

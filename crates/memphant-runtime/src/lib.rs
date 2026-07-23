@@ -863,6 +863,13 @@ impl MemoryStore for AnyStore {
         delegate!(self, store => store.scope_memory_page(context, cursor, limit).await)
     }
 
+    async fn canonical_projection_units(
+        &self,
+        context: &ResolvedMemoryContext,
+    ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
+        delegate!(self, store => store.canonical_projection_units(context).await)
+    }
+
     async fn claim_reflect_jobs(
         &self,
         filter: JobFilter,
