@@ -218,3 +218,89 @@ Fresh proof after the final code change:
 
 The unrelated `.superpowers/sdd/progress.md` modification remains unstaged.
 No Task 4, P1 campaign, paid/model call, push, or deployment work was performed.
+
+## Fourth independent-review fix wave
+
+The final recovery audit found that a successful replacement or stale deletion
+still unlinked its detached backup. An editor that had opened the old inode
+before compile could write through that descriptor after validation, and those
+bytes would disappear when the descriptor closed. The Windows absent-output
+path also retained handles inside the populated staging subtree during its
+directory rename, which violates Windows rename constraints, and every atomic
+install error was incorrectly described as an output collision.
+
+The new tests were red before this fix wave. Replacement and deletion through a
+pre-opened writable descriptor had no durable recovery destination, a
+byte-identical compile replaced the managed inode, a later stability-sweep
+error omitted recovery provenance, a non-collision staging failure used the
+collision message, and the real CLI did not report a recovery path after a
+canonical change.
+
+- Changed and deleted validated inodes now move directly, with atomic
+  cross-directory no-replace semantics, into one lazy unique sibling
+  `.memphant-recovery-<uuid>/`. The original layout is preserved as
+  `MEMORY.md`, `memphant-export.json`, and `units/<uuid>.md`; no same-directory
+  disposable backup remains. Source and recovery directories are synced where
+  supported, `EXDEV` fails closed without copying, and B2 never prunes a
+  recovery tree.
+- Recovery is created only for the first changed or deleted managed file. Its
+  path is canonical and absolute. Unix creates the root and `units/` with mode
+  `0700`; Windows uses the output parent's inherited ACL and makes no stronger
+  privacy claim. Successful compile and every subsequent error, including
+  final validation failures, report `recovery=<absolute path>`. Operators may
+  remove recovery only after processes holding old files open have closed.
+- A byte-identical candidate is not rewritten. Compile freshly rereads its
+  no-follow regular file at that skip point and requires both the previously
+  validated identity and exact bytes to match. A no-op compile therefore keeps
+  every managed inode and creates no recovery directory.
+- The deterministic `write:<name>:recovered` and
+  `delete:<name>:recovered` hooks run only after the moved inode passed identity
+  and byte validation. Tests then rewrite through a descriptor opened before
+  compile and prove successful compile retains the late bytes at the durable
+  recovery path. Existing `:detached` hooks continue to prove target
+  reappearance is not overwritten.
+- `rename_noreplace` now accepts distinct retained source and target directory
+  capabilities. Unix passes both descriptors to `renameat_with`; Windows opens
+  the source relative to its retained directory and supplies the distinct
+  target handle as `FILE_RENAME_INFO.RootDirectory`. This matches the
+  [POSIX `renameat` descriptor contract](https://pubs.opengroup.org/onlinepubs/9799919799/functions/rename.html),
+  [`rustix` no-replace API](https://docs.rs/rustix/latest/rustix/fs/fn.renameat_with.html),
+  and Microsoft's
+  [`FILE_RENAME_INFO`](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_rename_info)
+  contract.
+- On Windows only, the fully rendered staging tree is validated and digested,
+  then every handle into that subtree is dropped before the no-replace rename.
+  The installed tree is reopened component-by-component from the retained
+  external parent; its first-component identity and two exact validation
+  sweeps must equal the staged snapshot. Unix continues retaining its stronger
+  subtree handles across the rename. The reopen protocol has a cross-platform
+  unit contract, plus Windows-only install and distinct-directory rename
+  contracts. Only target compilation, not Windows runtime execution, is
+  claimed on this macOS host.
+- Only `AlreadyExists` maps to output-collision wording. Unsupported and other
+  OS failures now state that the atomic install failed and name the retained
+  validated staging tree.
+
+Fresh proof after the final code change:
+
+- `cargo test -p memphant-cli`: 14 unit and 21 integration tests passed,
+  including 10 real-CLI compile contracts.
+- `cargo clippy -p memphant-cli --all-targets --all-features -- -D warnings`,
+  `cargo fmt --all --check`, and `git diff --check`: passed.
+- `python3 scripts/check_spec_drift.py`: skipped, not passed, because the
+  private Syndai specs are absent from this worktree.
+- `cargo check -p memphant-cli --target x86_64-pc-windows-msvc`: still stops
+  before MemPhant source compilation in transitive `ring 0.17.14` because this
+  macOS host has no MSVC SDK (`assert.h` missing, `VCINSTALLDIR=None`). A
+  temporary isolated crate containing the exact distinct-directory Windows
+  backend plus the close-stage/reopen-parent protocol passed
+  `RUSTUP_TOOLCHAIN=1.96.1-aarch64-apple-darwin cargo check --target x86_64-pc-windows-msvc`.
+  This is Windows-target compilation evidence only; no Windows runtime result
+  is claimed.
+
+The approved B2 design now records the durable recovery, no-op, permissions,
+operator-cleanup, and Windows handle lifecycle contracts. The implementation
+plan did not need a scope or task-boundary change.
+
+The unrelated `.superpowers/sdd/progress.md` modification remains unstaged.
+No Task 4, P1 campaign, paid/model call, push, or deployment work was performed.

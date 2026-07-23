@@ -93,6 +93,32 @@ async fn compile_is_a_deterministic_server_backed_projection_and_verify_is_compl
     let repeated = compile(&url, &binding, out.path(), &[]);
     assert_success(&repeated);
     assert_eq!(tree_bytes(out.path()), first);
+    assert!(
+        !String::from_utf8_lossy(&repeated.stdout).contains("recovery="),
+        "byte-identical compile unexpectedly reported recovery: {}",
+        String::from_utf8_lossy(&repeated.stdout)
+    );
+
+    seed_unit(
+        &state,
+        &binding,
+        UnitState::Active,
+        "decision:second-queue",
+        "Use a durable consumer cursor.",
+    )
+    .await;
+    let changed = compile(&url, &binding, out.path(), &[]);
+    assert_success(&changed);
+    let stdout = String::from_utf8_lossy(&changed.stdout);
+    let recovery = stdout
+        .split_ascii_whitespace()
+        .find_map(|field| field.strip_prefix("recovery="))
+        .expect("changed compile must report its durable recovery path");
+    let recovery = Path::new(recovery);
+    assert!(recovery.is_absolute(), "recovery path must be absolute");
+    assert!(recovery.is_dir(), "reported recovery path must exist");
+    assert!(recovery.join("MEMORY.md").is_file());
+    assert!(recovery.join("memphant-export.json").is_file());
 
     let legacy = compile(&url, &binding, out.path(), &["--source", "anything.json"]);
     assert!(!legacy.status.success());

@@ -139,10 +139,11 @@ against newer truth. Network retry is safe only with the identical
 idempotency-key/request-hash pair.
 
 After a successful commit the CLI fetches the new projection, replaces managed
-files with same-directory temporary files, syncs them, removes only consumed
-inbox files and previously manifested stale paths, and writes the manifest
-last. Compilation refuses to overwrite dirty local projections. Generated
-paths are never accepted from arbitrary footer input.
+files with same-directory temporary files, syncs them, moves changed and stale
+previous managed inodes into durable sibling recovery, removes only consumed
+inbox files, and writes the manifest last. Compilation refuses to overwrite
+dirty local projections. Generated paths are never accepted from arbitrary
+footer input.
 
 ## Filesystem safety
 
@@ -154,6 +155,23 @@ paths are never accepted from arbitrary footer input.
 - All content is rendered and validated before the first replacement.
 - Temporary files use `create_new` in the destination directory; files are
   `sync_all`ed before rename; the manifest is replaced last.
+- A byte-identical managed file is freshly rechecked for the validated identity
+  and exact bytes, then left on its existing inode. A no-op compile creates no
+  recovery artifact.
+- Before changing or deleting a managed file, compile atomically moves its
+  current inode with no-replace semantics into one lazy unique sibling
+  `.memphant-recovery-<uuid>/` outside the projection root. Recovery preserves
+  the original `MEMORY.md`, `memphant-export.json`, and `units/<uuid>.md`
+  layout. Source and recovery directories are synced where supported. A
+  cross-filesystem (`EXDEV`) move fails closed; there is no copy fallback.
+- Recovery directories use mode `0700` on Unix. Windows uses the inherited ACL
+  of the retained output parent; MemPhant does not claim to narrow an already
+  broader parent ACL without a platform ACL policy supplied by the operator.
+- Windows closes every handle into a completed absent-output staging subtree
+  before the atomic install, then reopens the installed tree from the retained
+  external parent and requires the staged identity and two exact validation
+  sweeps to match. Unix keeps its stronger retained-subtree handles throughout
+  the install.
 - Cleanup is limited to paths named by the old manifest and inbox paths consumed
   by the committed plan. Unknown user files are never deleted.
 
@@ -165,6 +183,10 @@ edits.
 ## UX and errors
 
 - `compile` reports the scope, snapshot, output root, and entry count.
+- When a compile changed or deleted managed files, success and every later
+  error report the absolute `recovery=<path>`. B2 never prunes recovery trees;
+  the operator may remove one only after all editors and other processes that
+  could still hold the old files open have closed them.
 - A dirty compile names every changed/missing/unexpected path and tells the user
   to run `sync` or restore it.
 - `sync` defaults to a JSON dry-run plan. Forget operations are labelled
