@@ -6,14 +6,15 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 #[cfg(windows)]
 use std::{ffi::OsStr, os::windows::ffi::OsStrExt, os::windows::io::AsRawHandle};
 
 use memphant_core::service::{canonical_projection_fingerprint, file_sync_plan_sha256};
 use memphant_types::{
     CanonicalProjectionResponse, CanonicalProjectionUnit, FileSyncOperation,
-    FileSyncOperationResult, FileSyncRequest, FileSyncResult, FileSyncUnitMetadata, MemoryKind,
-    UnitId,
+    FileSyncOperationResult, FileSyncRequest, FileSyncResult, FileSyncUnitMetadata,
+    MAX_FILE_SYNC_REQUEST_ENCODED_BYTES, MemoryKind, UnitId,
 };
 use serde::de::{self, DeserializeOwned, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -54,6 +55,8 @@ const INBOX_DIR: &str = "inbox";
 const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_MANAGED_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_DIRECTORY_ENTRIES: usize = 100_000;
+const DEFAULT_HTTP_TIMEOUT_MS: u64 = 30_000;
+const MAX_HTTP_TIMEOUT_MS: u64 = 300_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileIdentity {
@@ -214,6 +217,27 @@ enum SyncFailure {
     OutcomeUnknown(String),
     PostCommit(String),
     Error(String),
+}
+
+#[derive(Debug)]
+enum ProjectionFetchFailure {
+    Unavailable(String),
+    Status { status: u16, code: String },
+    Invalid(String),
+}
+
+impl fmt::Display for ProjectionFetchFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unavailable(error) | Self::Invalid(error) => formatter.write_str(error),
+            Self::Status { status, code } => {
+                write!(
+                    formatter,
+                    "projection request failed: status={status} code={code}"
+                )
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -440,17 +464,28 @@ fn sync(args: &[String]) -> Result<SyncRun, SyncFailure> {
     };
     let idempotency_key = format!("file-sync:{}:{}", plan.plan_sha256, Uuid::new_v4());
     let receipt = post_file_sync(&request, &idempotency_key)?;
-    validate_sync_receipt(&request, &receipt).map_err(SyncFailure::PostCommit)?;
-
-    let final_projection = fetch_projection(&args.context).map_err(SyncFailure::PostCommit)?;
-    validate_response_binding(&final_projection, &args.context).map_err(SyncFailure::PostCommit)?;
-    revalidate_sync_state(&state).map_err(|error| {
-        SyncFailure::PostCommit(format!(
-            "local projection changed while the committed batch was in flight: {}",
-            display_sync_failure(error)
+    validate_sync_receipt(&request, &receipt).map_err(|error| {
+        SyncFailure::OutcomeUnknown(format!(
+            "file-sync returned 200 but the receipt did not prove commit for plan {}: {error}",
+            request.plan_sha256
         ))
     })?;
-    let rendered = render_projection(&final_projection).map_err(SyncFailure::PostCommit)?;
+
+    let final_projection = fetch_projection(&args.context)
+        .map_err(|error| post_commit_failure(&receipt, error.to_string()))?;
+    validate_response_binding(&final_projection, &args.context)
+        .map_err(|error| post_commit_failure(&receipt, error))?;
+    revalidate_sync_state(&state).map_err(|error| {
+        post_commit_failure(
+            &receipt,
+            format!(
+                "local projection changed while the committed batch was in flight: {}",
+                display_sync_failure(error)
+            ),
+        )
+    })?;
+    let rendered = render_projection(&final_projection)
+        .map_err(|error| post_commit_failure(&receipt, error))?;
 
     let previous = ValidatedExport {
         manifest: state.snapshot.manifest.clone(),
@@ -465,7 +500,9 @@ fn sync(args: &[String]) -> Result<SyncRun, SyncFailure> {
         &state.snapshot.inbox_files,
         &mut |_| {},
     )
-    .map_err(|error| SyncFailure::PostCommit(format!("local projection update failed: {error}")))?;
+    .map_err(|error| {
+        post_commit_failure(&receipt, format!("local projection update failed: {error}"))
+    })?;
     let created = receipt
         .operations
         .iter()
@@ -488,6 +525,13 @@ fn sync(args: &[String]) -> Result<SyncRun, SyncFailure> {
     })
 }
 
+fn post_commit_failure(receipt: &FileSyncResult, error: String) -> SyncFailure {
+    SyncFailure::PostCommit(format!(
+        "committed_snapshot={}; {error}",
+        receipt.fingerprint
+    ))
+}
+
 fn display_sync_failure(error: SyncFailure) -> String {
     match error {
         SyncFailure::Invalid(findings) => findings.join("; "),
@@ -499,11 +543,13 @@ fn display_sync_failure(error: SyncFailure) -> String {
     }
 }
 
-fn classify_projection_failure(error: String) -> SyncFailure {
-    if error.contains("request failed") && !error.contains("status=") {
-        SyncFailure::Unavailable(error)
-    } else {
-        SyncFailure::Error(error)
+fn classify_projection_failure(error: ProjectionFetchFailure) -> SyncFailure {
+    match error {
+        ProjectionFetchFailure::Unavailable(error) => SyncFailure::Unavailable(error),
+        ProjectionFetchFailure::Status { status, code } => SyncFailure::Error(format!(
+            "projection request failed: status={status} code={code}"
+        )),
+        ProjectionFetchFailure::Invalid(error) => SyncFailure::Error(error),
     }
 }
 
@@ -515,7 +561,8 @@ fn compile(
     if let OutputState::Existing(previous) = &output {
         validate_manifest_binding(&previous.manifest, &args).map_err(CompileFailure::Dirty)?;
     }
-    let projection = fetch_projection(&args).map_err(CompileFailure::Error)?;
+    let projection =
+        fetch_projection(&args).map_err(|error| CompileFailure::Error(error.to_string()))?;
     validate_response_binding(&projection, &args).map_err(CompileFailure::Error)?;
     if let OutputState::Existing(previous) = &output {
         validate_manifest_response_context(&previous.manifest, &projection)
@@ -607,7 +654,31 @@ fn parse_context_args(args: &[String]) -> Result<CompileArgs, String> {
     })
 }
 
-fn fetch_projection(args: &CompileArgs) -> Result<CanonicalProjectionResponse, String> {
+fn http_agent() -> Result<ureq::Agent, String> {
+    let timeout_ms = match env::var("MEMPHANT_HTTP_TIMEOUT_MS") {
+        Ok(value) => value.parse::<u64>().map_err(|_| {
+            "MEMPHANT_HTTP_TIMEOUT_MS must be an integer number of milliseconds".to_string()
+        })?,
+        Err(env::VarError::NotPresent) => DEFAULT_HTTP_TIMEOUT_MS,
+        Err(env::VarError::NotUnicode(_)) => {
+            return Err("MEMPHANT_HTTP_TIMEOUT_MS must be valid UTF-8".to_string());
+        }
+    };
+    if !(1..=MAX_HTTP_TIMEOUT_MS).contains(&timeout_ms) {
+        return Err(format!(
+            "MEMPHANT_HTTP_TIMEOUT_MS must be between 1 and {MAX_HTTP_TIMEOUT_MS}"
+        ));
+    }
+    Ok(ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_millis(timeout_ms)))
+        .build()
+        .into())
+}
+
+fn fetch_projection(
+    args: &CompileArgs,
+) -> Result<CanonicalProjectionResponse, ProjectionFetchFailure> {
     let base = env::var("MEMPHANT_URL")
         .ok()
         .filter(|url| !url.trim().is_empty())
@@ -621,21 +692,18 @@ fn fetch_projection(args: &CompileArgs) -> Result<CanonicalProjectionResponse, S
         args.agent_node_id,
         args.subject_generation
     );
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .build()
-        .into();
+    let agent = http_agent().map_err(ProjectionFetchFailure::Invalid)?;
     let mut request = agent.get(&url);
     if let Ok(key) = env::var("MEMPHANT_API_KEY")
         && !key.is_empty()
     {
         request = request.header("authorization", format!("Bearer {key}"));
     }
-    let mut response = request
-        .call()
-        .map_err(|error| format!("projection request failed: {error}"))?;
+    let mut response = request.call().map_err(|error| {
+        ProjectionFetchFailure::Unavailable(format!("projection request unavailable: {error}"))
+    })?;
     let status = response.status().as_u16();
-    if !(200..300).contains(&status) {
+    if status != 200 {
         let body: Value = response
             .body_mut()
             .read_json()
@@ -644,14 +712,20 @@ fn fetch_projection(args: &CompileArgs) -> Result<CanonicalProjectionResponse, S
             .pointer("/error/code")
             .and_then(Value::as_str)
             .unwrap_or("remote_error");
-        return Err(format!(
-            "projection request failed: status={status} code={code}"
-        ));
+        return if status >= 500 {
+            Err(ProjectionFetchFailure::Unavailable(format!(
+                "projection request unavailable: status={status} code={code}"
+            )))
+        } else {
+            Err(ProjectionFetchFailure::Status {
+                status,
+                code: code.to_string(),
+            })
+        };
     }
-    response
-        .body_mut()
-        .read_json()
-        .map_err(|error| format!("projection response was not valid JSON: {error}"))
+    response.body_mut().read_json().map_err(|error| {
+        ProjectionFetchFailure::Invalid(format!("projection response was not valid JSON: {error}"))
+    })
 }
 
 fn inspect_sync_output(root: &Path) -> Result<SyncState, SyncFailure> {
@@ -684,6 +758,13 @@ fn scan_sync_handles(handles: &TreeHandles) -> Result<SyncSnapshot, Vec<String>>
     let manifest = strict_from_slice::<ExportManifest>(&manifest_bytes)
         .map_err(|error| vec![format!("{MANIFEST_FILE}: invalid JSON: {error}")])?;
     validate_manifest_fields(&manifest, &mut findings);
+    match canonical_manifest_bytes(&manifest) {
+        Ok(canonical) if canonical != manifest_bytes => findings.push(format!(
+            "{MANIFEST_FILE}: bytes are not the canonical generated serialization"
+        )),
+        Err(error) => findings.push(format!("{MANIFEST_FILE}: {error}")),
+        _ => {}
+    }
     let mut managed_files = BTreeMap::from([(
         MANIFEST_FILE.to_string(),
         ManagedFileSnapshot {
@@ -930,6 +1011,16 @@ fn parse_inbox(bytes: &[u8]) -> Result<(String, String), String> {
     if fact_key.trim() != fact_key {
         return Err("inbox fact key must not contain surrounding whitespace".to_string());
     }
+    if body.starts_with('\n')
+        || body
+            .lines()
+            .next()
+            .is_some_and(|line| line.trim().is_empty())
+    {
+        return Err(
+            "inbox body must begin immediately after exactly one blank separator line".to_string(),
+        );
+    }
     if body.trim().is_empty() {
         return Err("inbox body must not be blank".to_string());
     }
@@ -1021,29 +1112,30 @@ fn post_file_sync(
     request: &FileSyncRequest,
     idempotency_key: &str,
 ) -> Result<FileSyncResult, SyncFailure> {
+    let encoded = encode_file_sync_request(request)?;
     let base = env::var("MEMPHANT_URL")
         .ok()
         .filter(|url| !url.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_URL.to_string());
     let url = format!("{}/v1/file-sync", base.trim_end_matches('/'));
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .build()
-        .into();
-    let mut outbound = agent.post(&url).header("idempotency-key", idempotency_key);
+    let agent = http_agent().map_err(SyncFailure::Error)?;
+    let mut outbound = agent
+        .post(&url)
+        .header("idempotency-key", idempotency_key)
+        .header("content-type", "application/json");
     if let Ok(key) = env::var("MEMPHANT_API_KEY")
         && !key.is_empty()
     {
         outbound = outbound.header("authorization", format!("Bearer {key}"));
     }
-    let mut response = outbound.send_json(request).map_err(|error| {
+    let mut response = outbound.send(encoded.as_slice()).map_err(|error| {
         SyncFailure::OutcomeUnknown(format!(
             "file-sync transport failed for plan {}: {error}",
             request.plan_sha256
         ))
     })?;
     let status = response.status().as_u16();
-    if !(200..300).contains(&status) {
+    if status != 200 {
         let body: Value = response
             .body_mut()
             .read_json()
@@ -1056,6 +1148,12 @@ fn post_file_sync(
             .pointer("/error/message")
             .and_then(Value::as_str)
             .unwrap_or("file-sync request failed");
+        if (200..300).contains(&status) {
+            return Err(SyncFailure::OutcomeUnknown(format!(
+                "file-sync returned non-contract success status={status} plan={}",
+                request.plan_sha256
+            )));
+        }
         return match code {
             "sync_conflict" => Err(SyncFailure::Conflict(message.to_string())),
             "sync_invalid" => Err(SyncFailure::Invalid(vec![message.to_string()])),
@@ -1068,10 +1166,25 @@ fn post_file_sync(
             ))),
         };
     }
-    response
-        .body_mut()
-        .read_json()
-        .map_err(|error| SyncFailure::PostCommit(format!("committed receipt is invalid: {error}")))
+    response.body_mut().read_json().map_err(|error| {
+        SyncFailure::OutcomeUnknown(format!(
+            "file-sync returned 200 with an invalid receipt for plan {}: {error}",
+            request.plan_sha256
+        ))
+    })
+}
+
+fn encode_file_sync_request(request: &FileSyncRequest) -> Result<Vec<u8>, SyncFailure> {
+    let encoded = serde_json::to_vec(request)
+        .map_err(|error| SyncFailure::Error(format!("cannot encode file-sync request: {error}")))?;
+    if encoded.len() > MAX_FILE_SYNC_REQUEST_ENCODED_BYTES {
+        return Err(SyncFailure::Invalid(vec![format!(
+            "file-sync request is {} bytes and exceeds the {} byte limit",
+            encoded.len(),
+            MAX_FILE_SYNC_REQUEST_ENCODED_BYTES
+        )]));
+    }
+    Ok(encoded)
 }
 
 fn validate_sync_receipt(
@@ -1308,15 +1421,20 @@ fn render_projection(response: &CanonicalProjectionResponse) -> Result<RenderedP
             findings.join("; ")
         ));
     }
-    let mut manifest_bytes = serde_json::to_vec_pretty(&manifest)
-        .map_err(|error| format!("manifest serialization failed: {error}"))?;
-    manifest_bytes.push(b'\n');
+    let manifest_bytes = canonical_manifest_bytes(&manifest)?;
     Ok(RenderedProjection {
         memory,
         units,
         manifest,
         manifest_bytes,
     })
+}
+
+fn canonical_manifest_bytes(manifest: &ExportManifest) -> Result<Vec<u8>, String> {
+    let mut bytes = serde_json::to_vec_pretty(manifest)
+        .map_err(|error| format!("manifest serialization failed: {error}"))?;
+    bytes.push(b'\n');
+    Ok(bytes)
 }
 
 fn render_unit(generation: u64, item: &CanonicalProjectionUnit) -> Result<Vec<u8>, String> {
@@ -2161,6 +2279,13 @@ fn validate_export_handles(
         }
     };
     validate_manifest_fields(&manifest, &mut findings);
+    match canonical_manifest_bytes(&manifest) {
+        Ok(canonical) if canonical != manifest_bytes => findings.push(format!(
+            "{MANIFEST_FILE}: bytes are not the canonical generated serialization"
+        )),
+        Err(error) => findings.push(format!("{MANIFEST_FILE}: {error}")),
+        _ => {}
+    }
 
     let memory_bytes = match read_regular_at(&handles.root, MEMORY_FILE, MAX_MANAGED_FILE_BYTES) {
         Ok((bytes, identity)) => {
@@ -3749,14 +3874,14 @@ impl<'de> Visitor<'de> for StrictValueVisitor {
 #[cfg(test)]
 mod tests {
     use super::{
-        MEMORY_FILE, OutputState, canonical_projection_fingerprint, inspect_output,
-        is_safe_inbox_name, render_projection, replace_projection, replace_projection_with_hook,
-        sha256, validate_sync_receipt,
+        MEMORY_FILE, OutputState, canonical_projection_fingerprint, encode_file_sync_request,
+        inspect_output, is_safe_inbox_name, render_projection, replace_projection,
+        replace_projection_with_hook, sha256, validate_sync_receipt,
     };
     use memphant_types::{
         ActorId, AgentNodeId, CanonicalProjectionResponse, CanonicalProjectionUnit,
-        FileSyncOperation, FileSyncOperationResult, FileSyncRequest, FileSyncResult, MemoryKind,
-        ScopeId, SubjectId, TenantId, UnitId,
+        FileSyncOperation, FileSyncOperationResult, FileSyncRequest, FileSyncResult,
+        MAX_FILE_SYNC_REQUEST_ENCODED_BYTES, MemoryKind, ScopeId, SubjectId, TenantId, UnitId,
     };
 
     #[test]
@@ -3819,6 +3944,36 @@ mod tests {
                 .unwrap_err()
                 .contains("variants")
         );
+    }
+
+    #[test]
+    fn file_sync_request_limit_is_exact_encoded_json_bytes() {
+        let request = |body: String| FileSyncRequest {
+            subject_id: SubjectId::new(),
+            scope_id: ScopeId::new(),
+            actor_id: ActorId::new(),
+            agent_node_id: AgentNodeId::new(),
+            subject_generation: 0,
+            base_fingerprint: "a".repeat(64),
+            plan_sha256: "b".repeat(64),
+            observed_at: "2026-07-23T00:00:00Z".to_string(),
+            operations: vec![FileSyncOperation::Retain {
+                fact_key: "decision:test".to_string(),
+                predicate: "states".to_string(),
+                body,
+                confidence: 1.0,
+                valid_from: None,
+                valid_to: None,
+            }],
+        };
+        let empty = serde_json::to_vec(&request(String::new())).unwrap().len();
+        let at_limit = request("x".repeat(MAX_FILE_SYNC_REQUEST_ENCODED_BYTES - empty));
+        let encoded = encode_file_sync_request(&at_limit).unwrap();
+        assert_eq!(encoded.len(), MAX_FILE_SYNC_REQUEST_ENCODED_BYTES);
+
+        let over_limit = request("x".repeat(MAX_FILE_SYNC_REQUEST_ENCODED_BYTES - empty + 1));
+        let error = encode_file_sync_request(&over_limit).expect_err("oversize request accepted");
+        assert!(matches!(error, super::SyncFailure::Invalid(_)));
     }
 
     #[test]
@@ -3903,6 +4058,51 @@ mod tests {
             )
             .unwrap(),
             "late inbox edit"
+        );
+    }
+
+    #[test]
+    fn sync_preserves_original_and_substitute_when_source_path_changes_before_move() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("memory");
+        let rendered = rendered_projection(&[(1, "alpha")]);
+        let absent = inspect_output(&output).unwrap();
+        replace_projection(&output, &absent, &rendered).unwrap();
+        let OutputState::Existing(existing) = inspect_output(&output).unwrap() else {
+            panic!("expected existing projection");
+        };
+        let inbox = output.join(super::INBOX_DIR);
+        let source = inbox.join("new.md");
+        let preserved = inbox.join("original-preserved.md");
+        let original = b"# decision:new\n\nUse the original fact.\n";
+        let substitute = b"# decision:substitute\n\nDo not consume the substitute.\n";
+        std::fs::write(&source, original).unwrap();
+        let snapshot = super::scan_sync_handles(&existing.handles).unwrap();
+
+        let result = super::write_rendered_projection(
+            &existing.handles,
+            Some(&existing),
+            &rendered,
+            &snapshot.inbox_files,
+            &mut |point| {
+                if point == "recovery:created" {
+                    std::fs::rename(&source, &preserved).unwrap();
+                    std::fs::write(&source, substitute).unwrap();
+                }
+            },
+        );
+
+        let error = result.expect_err("a substituted source path was silently consumed");
+        assert!(error.contains("unexpected inode remains in durable recovery"));
+        assert_eq!(std::fs::read(&preserved).unwrap(), original);
+        assert_eq!(
+            std::fs::read(
+                find_recovery(directory.path())
+                    .join(super::INBOX_DIR)
+                    .join("new.md")
+            )
+            .unwrap(),
+            substitute
         );
     }
 

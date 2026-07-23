@@ -81,7 +81,8 @@ base and stores the complete context identity, schema/compiler version,
 canonical snapshot SHA-256, immutable per-unit metadata, semantic-body SHA-256,
 exact rendered-file SHA-256, relative UUID path, and `MEMORY.md` SHA-256. JSON
 objects and entry maps use deterministic ordering; Markdown uses exact LF
-rendering.
+rendering. Compile, sync, and verify share one canonical manifest serializer;
+valid JSON with different whitespace, key order, or trailing bytes fails closed.
 
 `MEMORY.md` is generated and never interpreted as a mutation. Existing unit
 edits may change only the body. Kind, fact key, predicate, confidence, validity,
@@ -100,7 +101,9 @@ and kind is `semantic`. When the H1 uniquely matches a projected fact key, sync
 inherits its predicate and confidence; this is the explicit contradiction path
 through normal admission. Procedural creation is excluded because the existing
 direct-unit contract cannot claim procedure validation. Validated procedures
-can still be compiled, corrected, or forgotten.
+can still be compiled, corrected, or forgotten. The grammar permits exactly one
+blank separator after the H1; a leading blank or whitespace-only first body
+line is invalid rather than part of the semantic body.
 
 ## Sync semantics
 
@@ -132,7 +135,14 @@ server:
 3. recomputes and compares the base projection fingerprint in that transaction;
 4. stages every correct, direct retain, and forget through the existing store
    operations;
-5. commits once, or rolls back every operation.
+5. encodes the final canonical projection and rejects it if it exceeds the
+   documented projection ceiling;
+6. commits once, or rolls back every operation.
+
+The CLI and route share one exact encoded-JSON request ceiling. The CLI checks
+the bytes it will transmit, and the route bounds the request body to the same
+value. An aggregate batch cannot evade the limit through several individually
+valid inbox files.
 
 A serialization failure or stale base is a conflict, never an automatic retry
 against newer truth. Network retry is safe only with the identical
@@ -142,7 +152,12 @@ request/key only within the invocation. It makes no cross-invocation replay
 claim because the observed timestamp is not persisted in the deterministic
 dry-run projection. A transport or untyped 5xx after POST is reported as
 outcome unknown; the operator reruns preflight rather than constructing a blind
-retry against possibly newer truth.
+retry against possibly newer truth. Projection GET and file-sync POST use one
+bounded client configured by `MEMPHANT_HTTP_TIMEOUT_MS` (30-second default,
+1-to-300-second accepted range). GET transport, timeout, and 5xx failures are
+reported as unavailable. Only an exact POST 200 with a matching typed receipt
+proves commit; any other 2xx, malformed 200 body, or receipt mismatch is outcome
+unknown.
 
 After a successful commit the CLI fetches the new projection, replaces managed
 files with same-directory temporary files, syncs them, moves changed and stale
@@ -257,7 +272,8 @@ edits.
 - `sync --apply` validates the committed receipt before local mutation, then
   fetches and compiles current canonical truth. It reports the receipt's
   committed snapshot and the final fetched snapshot separately because a later
-  canonical writer may legitimately commit between them.
+  canonical writer may legitimately commit between them. Every failure after a
+  proven receipt includes that committed snapshot.
 - Staleness is reported as `sync_conflict`; validation is `sync_invalid`; remote
   unavailability is distinct from either.
 - Secrets and bearer tokens never enter the projection or error output.
@@ -275,7 +291,11 @@ rollback, failure on operation N rolling back operations 1..N-1, tampered
 footers, duplicate IDs/paths, immutable metadata edits, traversal, symlinks,
 dirty `MEMORY.md`, malformed inbox files, zero-write validation failure, parent
 replacement before the first mutation, parent movement after recovery begins,
-and a component rename during anchor reopening.
+and a component rename during anchor reopening. Real CLI/Axum contracts also
+cover canonical-manifest byte drift, source-path substitution, projection 503
+and timeout classification, committed-response timeout, non-contract 2xx and
+malformed 200 receipts, aggregate request rejection before POST, and late
+transactional rollback after multiple operations were staged.
 The fast gate uses the real CLI binary and in-memory Axum app. A live-Postgres
 ignored contract proves serializable rollback, current-head visibility, and
 concurrent stale-base conflict through the standard ephemeral scratch database.

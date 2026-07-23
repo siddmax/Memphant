@@ -416,14 +416,10 @@ async fn compile_binds_an_existing_manifest_to_requested_and_server_context() {
     let server = tempfile::tempdir().unwrap();
     assert_success(&compile(&url, &binding, server.path(), &[]));
     let manifest_path = server.path().join("memphant-export.json");
-    let mut manifest: serde_json::Value =
-        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
-    manifest["tenant_id"] = serde_json::json!("00000000-0000-0000-0000-00000000dead");
-    fs::write(
-        &manifest_path,
-        format!("{}\n", serde_json::to_string_pretty(&manifest).unwrap()),
-    )
-    .unwrap();
+    let manifest = fs::read_to_string(&manifest_path).unwrap();
+    let changed = manifest.replace(TENANT, "00000000-0000-0000-0000-00000000dead");
+    assert_ne!(changed, manifest);
+    fs::write(&manifest_path, changed).unwrap();
     let wrong_server_context = compile(&url, &binding, server.path(), &[]);
     assert!(!wrong_server_context.status.success());
     assert!(

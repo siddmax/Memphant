@@ -13,6 +13,7 @@ use memphant_types::{
     ContextBindingAgentRef, ContextBindingEntityRef, ContextBindingRequest, ContextBindingResponse,
     ContextBindingScopeRef, MemoryKind, NewMemoryUnit, TenantId, TrustLevel, UnitState,
 };
+use sha2::{Digest, Sha256};
 
 const TENANT: &str = "00000000-0000-0000-0000-00000000b204";
 
@@ -119,18 +120,23 @@ async fn sync_round_trips_all_four_edit_classes_as_one_deterministic_plan() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sync_fails_closed_on_immutable_and_inbox_format_edits() {
-    let (url, binding, state) = spawn_server().await;
+    let (url, binding, state, posts) = spawn_counted_server("b2-invalid-edits").await;
     let id = seed_unit(&state, &binding, "profile:city", "City is Taipei.").await;
 
     for mutation in [
         "footer",
         "footer_whitespace",
         "manifest",
+        "manifest_whitespace",
+        "manifest_key_order",
+        "manifest_file_sha",
         "manifest_duplicate_key",
         "memory",
         "inbox_footer",
         "inbox_crlf",
         "inbox_blank",
+        "inbox_extra_blank",
+        "inbox_whitespace_first_line",
         "duplicate_inbox_key",
         "overlap_correct",
         "nested_inbox",
@@ -169,6 +175,36 @@ async fn sync_fails_closed_on_immutable_and_inbox_format_edits() {
                 )
                 .unwrap();
             }
+            "manifest_whitespace" => {
+                let path = out.path().join("memphant-export.json");
+                let mut bytes = fs::read(&path).unwrap();
+                bytes.push(b'\n');
+                fs::write(path, bytes).unwrap();
+            }
+            "manifest_key_order" => {
+                let path = out.path().join("memphant-export.json");
+                let text = fs::read_to_string(&path).unwrap();
+                let mut lines = text.lines().collect::<Vec<_>>();
+                lines.swap(1, 2);
+                fs::write(path, format!("{}\n", lines.join("\n"))).unwrap();
+            }
+            "manifest_file_sha" => {
+                let unit = out
+                    .path()
+                    .join("units")
+                    .join(format!("{}.md", id.as_uuid()));
+                replace_body(&unit, "City is Kyoto.");
+                let path = out.path().join("memphant-export.json");
+                let mut manifest: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                manifest["entries"][0]["file_sha256"] =
+                    serde_json::json!(sha256(&fs::read(unit).unwrap()));
+                fs::write(
+                    path,
+                    format!("{}\n", serde_json::to_string_pretty(&manifest).unwrap()),
+                )
+                .unwrap();
+            }
             "manifest_duplicate_key" => {
                 let path = out.path().join("memphant-export.json");
                 let text = fs::read_to_string(&path).unwrap();
@@ -192,6 +228,12 @@ async fn sync_fails_closed_on_immutable_and_inbox_format_edits() {
                 fs::write(out.path().join("inbox/bad.md"), "# bad\r\n\r\nbody\r\n").unwrap()
             }
             "inbox_blank" => fs::write(out.path().join("inbox/bad.md"), "# bad\n\n \n").unwrap(),
+            "inbox_extra_blank" => {
+                fs::write(out.path().join("inbox/bad.md"), "# bad\n\n\nbody\n").unwrap()
+            }
+            "inbox_whitespace_first_line" => {
+                fs::write(out.path().join("inbox/bad.md"), "# bad\n\n  \nbody\n").unwrap()
+            }
             "duplicate_inbox_key" => {
                 fs::write(out.path().join("inbox/one.md"), "# same\n\none\n").unwrap();
                 fs::write(out.path().join("inbox/two.md"), "# same\n\ntwo\n").unwrap();
@@ -221,15 +263,58 @@ async fn sync_fails_closed_on_immutable_and_inbox_format_edits() {
             _ => unreachable!(),
         }
         let before = tree_bytes(out.path());
-        let result = sync(&url, &binding, out.path(), true);
-        assert!(!result.status.success(), "{mutation} was accepted");
-        assert!(
-            String::from_utf8_lossy(&result.stderr).contains("sync=invalid"),
-            "{mutation}: {}",
-            String::from_utf8_lossy(&result.stderr)
-        );
-        assert_eq!(tree_bytes(out.path()), before, "{mutation} mutated files");
+        let posts_before = posts.load(Ordering::SeqCst);
+        for apply in [false, true] {
+            let result = sync(&url, &binding, out.path(), apply);
+            assert!(
+                !result.status.success(),
+                "{mutation} was accepted with apply={apply}"
+            );
+            assert!(
+                String::from_utf8_lossy(&result.stderr).contains("sync=invalid"),
+                "{mutation} apply={apply}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert_eq!(
+                tree_bytes(out.path()),
+                before,
+                "{mutation} mutated files with apply={apply}"
+            );
+            assert_eq!(
+                posts.load(Ordering::SeqCst),
+                posts_before,
+                "{mutation} reached POST with apply={apply}"
+            );
+        }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aggregate_oversize_inbox_batch_is_rejected_before_post() {
+    let (url, binding, _state, posts) = spawn_counted_server("b2-oversize-request").await;
+    let out = tempfile::tempdir().unwrap();
+    assert_success(&compile(&url, &binding, out.path()));
+    let body = "x".repeat(1_100_000);
+    for name in ["one", "two"] {
+        fs::write(
+            out.path().join("inbox").join(format!("{name}.md")),
+            format!("# decision:{name}\n\n{body}\n"),
+        )
+        .unwrap();
+    }
+    let before = tree_bytes(out.path());
+
+    let result = sync(&url, &binding, out.path(), true);
+
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("sync=invalid"), "{stderr}");
+    assert!(
+        stderr.contains("exceeds the 2097152 byte limit"),
+        "{stderr}"
+    );
+    assert_eq!(posts.load(Ordering::SeqCst), 0);
+    assert_eq!(tree_bytes(out.path()), before);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -251,6 +336,61 @@ async fn sync_reports_stale_base_without_local_or_remote_mutation() {
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("sync=conflict"));
     assert_eq!(tree_bytes(out.path()), before);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn late_server_failure_rolls_back_multi_operation_batch_and_keeps_local_tree() {
+    let (url, binding, state) = spawn_server().await;
+    let corrected = seed_unit(
+        &state,
+        &binding,
+        "decision:queue",
+        "Use the original queue policy.",
+    )
+    .await;
+    let out = tempfile::tempdir().unwrap();
+    assert_success(&compile(&url, &binding, out.path()));
+    replace_body(
+        &out.path()
+            .join("units")
+            .join(format!("{}.md", corrected.as_uuid())),
+        "Use the staged correction.",
+    );
+    fs::write(
+        out.path().join("inbox/new.md"),
+        "# decision:new\n\nThe staged retain must roll back too.\n",
+    )
+    .unwrap();
+    let before = tree_bytes(out.path());
+    state.store().fail_next_mutation_response();
+
+    let result = sync(&url, &binding, out.path(), true);
+
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("sync=outcome_unknown"));
+    assert_eq!(tree_bytes(out.path()), before);
+
+    let canonical = tempfile::tempdir().unwrap();
+    assert_success(&compile(&url, &binding, canonical.path()));
+    let units = fs::read_dir(canonical.path().join("units"))
+        .unwrap()
+        .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        units
+            .iter()
+            .any(|unit| unit.contains("Use the original queue policy."))
+    );
+    assert!(
+        !units
+            .iter()
+            .any(|unit| unit.contains("Use the staged correction."))
+    );
+    assert!(
+        !units
+            .iter()
+            .any(|unit| unit.contains("The staged retain must roll back too."))
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -357,6 +497,189 @@ async fn empty_apply_completes_preflight_without_posting_a_batch() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preflight_get_503_is_unavailable_without_post_or_local_mutation() {
+    let (binding, state) = bound_state("b2-preflight-503").await;
+    seed_unit(&state, &binding, "profile:city", "City is Taipei.").await;
+    let projections = Arc::new(AtomicUsize::new(0));
+    let posts = Arc::new(AtomicUsize::new(0));
+    let counted_projections = projections.clone();
+    let counted_posts = posts.clone();
+    let app = memphant_server::app(state).layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let projections = counted_projections.clone();
+            let posts = counted_posts.clone();
+            async move {
+                if request.uri().path().ends_with("/projection")
+                    && projections.fetch_add(1, Ordering::SeqCst) > 0
+                {
+                    return (
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        axum::Json(serde_json::json!({
+                            "error": {"code": "temporarily_unavailable"}
+                        })),
+                    )
+                        .into_response();
+                }
+                if request.uri().path() == "/v1/file-sync" {
+                    posts.fetch_add(1, Ordering::SeqCst);
+                }
+                next.run(request).await
+            }
+        },
+    ));
+    let url = serve(app).await;
+    let out = tempfile::tempdir().unwrap();
+    assert_success(&compile(&url, &binding, out.path()));
+    fs::write(
+        out.path().join("inbox/new.md"),
+        "# decision:new\n\nKeep this local.\n",
+    )
+    .unwrap();
+    let before = tree_bytes(out.path());
+
+    let result = sync(&url, &binding, out.path(), true);
+
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("sync=unavailable"));
+    assert_eq!(posts.load(Ordering::SeqCst), 0);
+    assert_eq!(tree_bytes(out.path()), before);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delayed_preflight_get_times_out_without_post_or_local_mutation() {
+    let (binding, state) = bound_state("b2-preflight-timeout").await;
+    seed_unit(&state, &binding, "profile:city", "City is Taipei.").await;
+    let projections = Arc::new(AtomicUsize::new(0));
+    let posts = Arc::new(AtomicUsize::new(0));
+    let counted_projections = projections.clone();
+    let counted_posts = posts.clone();
+    let app = memphant_server::app(state).layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let projections = counted_projections.clone();
+            let posts = counted_posts.clone();
+            async move {
+                if request.uri().path().ends_with("/projection")
+                    && projections.fetch_add(1, Ordering::SeqCst) > 0
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                }
+                if request.uri().path() == "/v1/file-sync" {
+                    posts.fetch_add(1, Ordering::SeqCst);
+                }
+                next.run(request).await
+            }
+        },
+    ));
+    let url = serve(app).await;
+    let out = tempfile::tempdir().unwrap();
+    assert_success(&compile(&url, &binding, out.path()));
+    fs::write(
+        out.path().join("inbox/new.md"),
+        "# decision:new\n\nKeep this local.\n",
+    )
+    .unwrap();
+    let before = tree_bytes(out.path());
+
+    let result = sync_with_timeout(&url, &binding, out.path(), true, "100");
+
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("sync=unavailable"));
+    assert_eq!(posts.load(Ordering::SeqCst), 0);
+    assert_eq!(tree_bytes(out.path()), before);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn committed_then_delayed_post_is_outcome_unknown_and_keeps_local_tree() {
+    let (binding, state) = bound_state("b2-post-timeout").await;
+    let app = memphant_server::app(state).layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| async move {
+            let is_sync = request.uri().path() == "/v1/file-sync";
+            let response = next.run(request).await;
+            if is_sync {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            }
+            response
+        },
+    ));
+    let url = serve(app).await;
+    let out = tempfile::tempdir().unwrap();
+    assert_success(&compile(&url, &binding, out.path()));
+    fs::write(
+        out.path().join("inbox/new.md"),
+        "# decision:timeout\n\nThe server commits before the reply delay.\n",
+    )
+    .unwrap();
+    let before = tree_bytes(out.path());
+
+    let result = sync_with_timeout(&url, &binding, out.path(), true, "100");
+
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("sync=outcome_unknown"));
+    assert_eq!(tree_bytes(out.path()), before);
+    let canonical = tempfile::tempdir().unwrap();
+    assert_success(&compile(&url, &binding, canonical.path()));
+    assert!(
+        fs::read_dir(canonical.path().join("units"))
+            .unwrap()
+            .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
+            .any(|unit| unit.contains("The server commits before the reply delay."))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_contract_success_and_invalid_200_receipts_are_outcome_unknown() {
+    for (label, status, commit) in [
+        ("accepted", axum::http::StatusCode::ACCEPTED, true),
+        ("invalid-json", axum::http::StatusCode::OK, false),
+    ] {
+        let (binding, state) = bound_state(&format!("b2-{label}-receipt")).await;
+        let app = memphant_server::app(state).layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| async move {
+                if request.uri().path() != "/v1/file-sync" {
+                    return next.run(request).await;
+                }
+                if !commit {
+                    return (status, "not a file-sync receipt").into_response();
+                }
+                let mut response = next.run(request).await;
+                *response.status_mut() = status;
+                response
+            },
+        ));
+        let url = serve(app).await;
+        let out = tempfile::tempdir().unwrap();
+        assert_success(&compile(&url, &binding, out.path()));
+        let body = format!("The {label} response is not a proven receipt.");
+        fs::write(
+            out.path().join("inbox/new.md"),
+            format!("# decision:{label}\n\n{body}\n"),
+        )
+        .unwrap();
+        let before = tree_bytes(out.path());
+
+        let result = sync(&url, &binding, out.path(), true);
+
+        assert!(!result.status.success());
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("sync=outcome_unknown"),
+            "{label}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(tree_bytes(out.path()), before, "{label}");
+        if commit {
+            let canonical = tempfile::tempdir().unwrap();
+            assert_success(&compile(&url, &binding, canonical.path()));
+            assert!(
+                fs::read_dir(canonical.path().join("units"))
+                    .unwrap()
+                    .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
+                    .any(|unit| unit.contains(&body))
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn post_commit_inbox_replacement_is_preserved_and_never_overwritten() {
     let (binding, state) = bound_state("b2-post-commit-edit").await;
     let out = tempfile::tempdir().unwrap();
@@ -384,10 +707,9 @@ async fn post_commit_inbox_replacement_is_preserved_and_never_overwritten() {
 
     let result = sync(&url, &binding, out.path(), true);
     assert!(!result.status.success());
-    assert!(
-        String::from_utf8_lossy(&result.stderr)
-            .contains("sync=post_commit_error remote_committed=true")
-    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("sync=post_commit_error remote_committed=true"));
+    assert!(stderr.contains("committed_snapshot="));
     assert_eq!(fs::read_to_string(&inbox).unwrap(), replacement);
 
     let canonical = tempfile::tempdir().unwrap();
@@ -533,6 +855,31 @@ async fn spawn_server() -> (
     (url, binding, state)
 }
 
+async fn spawn_counted_server(
+    label: &str,
+) -> (
+    String,
+    ContextBindingResponse,
+    AppState<memphant_core::InMemoryStore>,
+    Arc<AtomicUsize>,
+) {
+    let (binding, state) = bound_state(label).await;
+    let posts = Arc::new(AtomicUsize::new(0));
+    let counted = posts.clone();
+    let app = memphant_server::app(state.clone()).layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let counted = counted.clone();
+            async move {
+                if request.uri().path() == "/v1/file-sync" {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                }
+                next.run(request).await
+            }
+        },
+    ));
+    (serve(app).await, binding, state, posts)
+}
+
 async fn bound_state(
     label: &str,
 ) -> (
@@ -665,6 +1012,23 @@ fn sync(url: &str, binding: &ContextBindingResponse, out: &Path, apply: bool) ->
     )
 }
 
+fn sync_with_timeout(
+    url: &str,
+    binding: &ContextBindingResponse,
+    out: &Path,
+    apply: bool,
+    timeout_ms: &str,
+) -> Output {
+    cli_with_env(
+        url,
+        binding,
+        out,
+        "sync",
+        if apply { &["--apply"] } else { &[] },
+        &[("MEMPHANT_HTTP_TIMEOUT_MS", timeout_ms)],
+    )
+}
+
 fn cli(
     url: &str,
     binding: &ContextBindingResponse,
@@ -672,10 +1036,22 @@ fn cli(
     verb: &str,
     tail: &[&str],
 ) -> Output {
+    cli_with_env(url, binding, out, verb, tail, &[])
+}
+
+fn cli_with_env(
+    url: &str,
+    binding: &ContextBindingResponse,
+    out: &Path,
+    verb: &str,
+    tail: &[&str],
+    extra_env: &[(&str, &str)],
+) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_memphant-cli"));
     command
         .env("MEMPHANT_URL", url)
         .env_remove("MEMPHANT_API_KEY")
+        .envs(extra_env.iter().copied())
         .arg(verb)
         .args(["--agent-node"])
         .arg(binding.agent_node_id.as_uuid().to_string())
@@ -738,4 +1114,8 @@ fn assert_success(output: &Output) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
