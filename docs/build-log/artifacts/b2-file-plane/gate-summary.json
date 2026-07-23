@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "gate": "b2_file_plane_round_trip",
+  "status": "pass",
+  "tested_commit": "816eeebdeee1e1daf9c44c35cb4cc5c69db42447",
+  "tested_tree": "f5906af494e14cc246bf83f218e4f318a7a2dc36",
+  "inputs": {
+    "fixture": {
+      "path": "tests/fixtures/file-plane-n12.json",
+      "sha256": "eec33283f9acd2817471d284a79185eb132eb36072027f560ccbad7db33e9a59"
+    },
+    "gate_source": {
+      "path": "crates/memphant-cli/tests/file_plane_n12.rs",
+      "sha256": "30a60173f9da4ff6874a489e1dcf9536a9adabe40d01cb89d2e9ef61c88b75b2"
+    },
+    "spec_28": {
+      "path": "docs/superpowers/specs/memphant/28-syndai-code-contract.md",
+      "sha256": "271f48b7337b3e9231dcab017bd51f1be37b74ca68a69df5d882b506c6f7d622"
+    }
+  },
+  "coverage": {
+    "scopes": 12,
+    "passed": 12,
+    "failed": 0,
+    "families": {
+      "architecture": 3,
+      "compaction": 3,
+      "cross_agent": 3,
+      "composite": 3
+    },
+    "edit_classes": {
+      "mutation": 3,
+      "new_fact": 3,
+      "deletion": 3,
+      "contradiction": 3
+    }
+  },
+  "assertions": [
+    "distinct bound scope and seed unit identities",
+    "clean initial compile and verify",
+    "two byte-identical dry-run plans",
+    "one expected native operation per scope",
+    "canonical operation digest",
+    "atomic apply through the real CLI and Axum route",
+    "expected governed-store state and lineage edge",
+    "empty consumed inbox",
+    "empty post-apply sync plan",
+    "clean post-apply and fixed-point verification",
+    "byte-identical second compile and stable tree SHA-256"
+  ],
+  "verification": [
+    {
+      "command": "cargo test -p memphant-cli --test file_plane_n12 -- --nocapture",
+      "status": "pass",
+      "passed": 1,
+      "fixture_cases": 12
+    },
+    {
+      "command": "cargo test -p memphant-eval --test syndai_trace_compare",
+      "status": "pass",
+      "passed": 2
+    },
+    {
+      "command": "cargo test -p memphant-cli",
+      "status": "pass",
+      "passed": 66
+    },
+    {
+      "command": "bash scripts/with_scratch_db.sh postgres://memphant:memphant@localhost:5432/memphant MEMPHANT_TEST_DATABASE_URL cargo test -p memphant-store-postgres -p memphant-worker -- --ignored --test-threads=1",
+      "status": "pass",
+      "passed": 73
+    },
+    {
+      "command": "DATABASE_URL=postgres://memphant:memphant@localhost:5432/memphant bash scripts/e2e_probe.sh",
+      "status": "pass"
+    },
+    {
+      "command": "cargo test --all-targets --all-features",
+      "status": "pass",
+      "passed": 666,
+      "ignored": 88
+    },
+    {
+      "command": "python3 -m pytest tests/ -q",
+      "status": "fail",
+      "passed": 696,
+      "failed": 24,
+      "skipped": 10,
+      "classification": "outside B2 product gate; includes frozen campaign OpenAPI hash, stale runner signatures and pins, and missing Playwright"
+    },
+    {
+      "command": "python3 scripts/check_spec_drift.py",
+      "status": "skipped",
+      "reason": "private_specs_missing"
+    }
+  ],
+  "frozen_campaign": {
+    "changed": false,
+    "expected_openapi_sha256": "a5bac765d7c4c862a342d95b49049c27d3af57aea9f80af6d3a0a489ac055271",
+    "current_openapi_sha256": "919b53aea39c3fb2b95129131de627b638e43f8531207e5d6dab589b218c1da9"
+  },
+  "nonclaims": [
+    "no production deployment",
+    "no native Windows runtime proof",
+    "no multi-file filesystem transaction claim",
+    "no paid model call",
+    "no P1-T6 campaign mutation",
+    "no accuracy, Deep-promotion, or SOTA claim",
+    "no push"
+  ]
+}
