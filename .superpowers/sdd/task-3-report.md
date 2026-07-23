@@ -529,14 +529,57 @@ replacement`, proving the automatic restore path remained active.
   The regression contract plants an impostor there and proves output remains
   absent while both the displaced original and impostor stay in the confirmed
   durable recovery tree.
-- Cleanup removes only the unrelated prepared file when the output anchor is
-  still current. The failure reports that automatic restoration is disabled
-  and includes the confirmed recovery path; an unconfirmed path continues to
-  use last-known plus retained-data wording.
+- At this wave, cleanup still removed the unrelated prepared pathname when the
+  output anchor was current. The tenth review wave removes that unsafe
+  path-based unlink. Recovery diagnostics remain confirmed-path or truthful
+  last-known plus retained-data wording.
 
 Fresh proof after the final code change:
 
 - `cargo test -p memphant-cli`: 23 unit and 21 integration tests passed,
+  including 10 real-CLI compile contracts.
+- `cargo clippy -p memphant-cli --all-targets --all-features -- -D warnings`,
+  `cargo fmt --all --check`, and `git diff --check`: passed.
+- `python3 scripts/check_spec_drift.py`: skipped, not passed, because the
+  private Syndai specs are absent from this worktree.
+
+The unrelated `.superpowers/sdd/progress.md` modification remains unstaged.
+No Task 4, P1 campaign, paid/model call, push, or deployment work was performed.
+
+## Tenth independent-review fix wave
+
+The final cleanup audit found the same compare/use defect in failure-path
+prepared-file deletion. After a failure seam or check, compile called
+`remove_file` by the prepared name; a concurrent process could rename the real
+prepared inode aside, plant an unrelated file at that name, and have MemPhant
+delete the unrelated file.
+
+The deterministic contract was red first. At the post-validation-failure seam
+it renames MemPhant's prepared inode aside, plants a byte-distinct sentinel at
+the exact prepared name, and adds a second unrelated unknown file. Before the
+fix, the sentinel disappeared with `NotFound`, proving pathname cleanup deleted
+the replacement.
+
+- All five failure-path `remove_file(&prepared)` calls are removed. No
+  production `remove_file` call remains in the file-plane implementation.
+- The audit also covered three outer post-prepare `?` exits and the prepared
+  file's own write, sync, and metadata failures, all of which retained the
+  temporary name without saying so. Every failure after successful creation and
+  before the atomic install now reports
+  `prepared_name_last_known=<relative-name>` plus the portable
+  handle-bound-unlink cleanup-skipped reason.
+- The diagnostic is deliberately last-known: it does not claim that the name
+  still resolves to MemPhant's inode or that MemPhant owns whatever currently
+  occupies it. Normal success still atomically consumes the prepared name with
+  no-replace rename and retains its existing post-install identity check.
+- The regression contract proves the planted prepared-name sentinel and a
+  second unknown file survive byte-identically, MemPhant's prepared inode
+  remains under its displaced name, the recovered source remains durable, and
+  the output target remains absent.
+
+Fresh proof after the final code change:
+
+- `cargo test -p memphant-cli`: 24 unit and 21 integration tests passed,
   including 10 real-CLI compile contracts.
 - `cargo clippy -p memphant-cli --all-targets --all-features -- -D warnings`,
   `cargo fmt --all --check`, and `git diff --check`: passed.

@@ -193,9 +193,15 @@ footer input.
   pathname. The supported cross-platform rename APIs cannot atomically bind a
   no-replace move to a previously validated file handle, so a compare followed
   by a path-based rename would retain a substitution window. Compile instead
-  leaves the recovered inode and retained-inode count untouched, cleans only an
-  unrelated prepared file when its anchor remains current, and fails with the
-  confirmed recovery location for explicit operator recovery.
+  leaves the recovered inode and retained-inode count untouched and fails with
+  the confirmed recovery location for explicit operator recovery.
+- Once a prepared file exists, no failure path unlinks its pathname. Portable
+  APIs likewise cannot bind unlink atomically to the prepared file handle, so
+  cleanup could delete a replacement planted after validation. Failures report
+  `prepared_name_last_known=<relative-name>` and that cleanup was skipped; they
+  do not claim the pathname still names MemPhant's prepared inode. Successful
+  compilation still consumes the prepared name through the audited atomic
+  no-replace install.
 - Recovery directories use mode `0700` on Unix. Windows uses the inherited ACL
   of the retained output parent; MemPhant does not claim to narrow an already
   broader parent ACL without a platform ACL policy supplied by the operator.

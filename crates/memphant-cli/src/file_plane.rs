@@ -2136,6 +2136,16 @@ enum ManagedDirectory {
     Units,
 }
 
+fn prepared_cleanup_skipped(error: String, location: ManagedDirectory, prepared: &str) -> String {
+    let last_known = match location {
+        ManagedDirectory::Root => prepared.to_string(),
+        ManagedDirectory::Units => format!("{UNITS_DIR}/{prepared}"),
+    };
+    format!(
+        "{error}; prepared_name_last_known={last_known}; prepared cleanup skipped because portable atomic handle-bound unlink is unavailable"
+    )
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ManagedTarget<'a> {
     directory: &'a Dir,
@@ -2453,6 +2463,7 @@ fn create_recovery_area(
 fn prepare_file(
     directory: &Dir,
     bytes: &[u8],
+    location: ManagedDirectory,
     anchor: &OutputParentAnchor,
     anchor_parent: &Dir,
 ) -> Result<(String, FileIdentity), String> {
@@ -2464,9 +2475,27 @@ fn prepare_file(
         options.follow(FollowSymlinks::No);
         match directory.open_with(&temporary, &options) {
             Ok(mut file) => {
-                file.write_all(bytes).map_err(|error| error.to_string())?;
-                file.sync_all().map_err(|error| error.to_string())?;
-                let metadata = file.metadata().map_err(|error| error.to_string())?;
+                file.write_all(bytes).map_err(|error| {
+                    prepared_cleanup_skipped(
+                        format!("cannot write prepared file: {error}"),
+                        location,
+                        &temporary,
+                    )
+                })?;
+                file.sync_all().map_err(|error| {
+                    prepared_cleanup_skipped(
+                        format!("cannot sync prepared file: {error}"),
+                        location,
+                        &temporary,
+                    )
+                })?;
+                let metadata = file.metadata().map_err(|error| {
+                    prepared_cleanup_skipped(
+                        format!("cannot identify prepared file: {error}"),
+                        location,
+                        &temporary,
+                    )
+                })?;
                 return Ok((temporary, metadata_identity(&metadata)));
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -2541,25 +2570,18 @@ fn replace_managed_file(
         return Ok(false);
     }
 
-    let (prepared, prepared_identity) = prepare_file(directory, bytes, anchor, output_parent)?;
+    let (prepared, prepared_identity) =
+        prepare_file(directory, bytes, location, anchor, output_parent)?;
     let recovered = if let Some(expected) = expected {
         let recovery_was_empty = !recovery.contains_managed_data();
         let recovery_directory = match recovery.target(output_parent, location) {
             Ok(target) => target,
-            Err(error) => {
-                if anchor.ensure_current(output_parent).is_ok() {
-                    let _ = directory.remove_file(&prepared);
-                }
-                return Err(error);
-            }
+            Err(error) => return Err(prepared_cleanup_skipped(error, location, &prepared)),
         };
         if recovery_was_empty {
             hook("recovery:created");
             if let Err(error) = recovery.ensure(output_parent) {
-                if anchor.ensure_current(output_parent).is_ok() {
-                    let _ = directory.remove_file(&prepared);
-                }
-                return Err(error);
+                return Err(prepared_cleanup_skipped(error, location, &prepared));
             }
         }
         if let Err(error) = move_to_recovery(
@@ -2570,36 +2592,37 @@ fn replace_managed_file(
             output_parent,
             recovery,
         ) {
-            if anchor.ensure_current(output_parent).is_ok() {
-                let _ = directory.remove_file(&prepared);
-            }
-            return Err(error);
+            return Err(prepared_cleanup_skipped(error, location, &prepared));
         }
         hook(&format!("write:{name}:detached"));
         if let Err(error) = validate_detached_file(&recovery_directory, name, name, expected) {
             hook(&format!("write:{name}:validation_failed"));
-            if anchor.ensure_current(output_parent).is_ok() {
-                let _ = directory.remove_file(&prepared);
-            }
-            return Err(format!(
-                "cannot replace {name}: {error}; automatic restoration is disabled; recovered original remains in durable recovery"
+            return Err(prepared_cleanup_skipped(
+                format!(
+                    "cannot replace {name}: {error}; automatic restoration is disabled; recovered original remains in durable recovery"
+                ),
+                location,
+                &prepared,
             ));
         }
         hook(&format!("write:{name}:recovered"));
-        anchor.ensure_current(output_parent)?;
+        anchor
+            .ensure_current(output_parent)
+            .map_err(|error| prepared_cleanup_skipped(error, location, &prepared))?;
         true
     } else {
         hook(&format!("write:{name}:detached"));
-        anchor.ensure_current(output_parent)?;
+        anchor
+            .ensure_current(output_parent)
+            .map_err(|error| prepared_cleanup_skipped(error, location, &prepared))?;
         false
     };
 
-    anchor.ensure_current(output_parent)?;
+    anchor
+        .ensure_current(output_parent)
+        .map_err(|error| prepared_cleanup_skipped(error, location, &prepared))?;
     if let Err(error) = rename_noreplace(directory, &prepared, directory, name) {
-        if anchor.ensure_current(output_parent).is_ok() {
-            let _ = directory.remove_file(&prepared);
-        }
-        return Err(if recovered {
+        let error = if recovered {
             format!(
                 "cannot install prepared {name} without replacement: {error}; recovered original remains in durable recovery"
             )
@@ -2607,7 +2630,8 @@ fn replace_managed_file(
             format!(
                 "cannot install prepared {name} without replacement: {error}; prepared file was never installed"
             )
-        });
+        };
+        return Err(prepared_cleanup_skipped(error, location, &prepared));
     }
     sync_directory(directory)?;
 
@@ -3766,6 +3790,89 @@ mod tests {
             std::fs::read_to_string(recovery.join(super::UNITS_DIR).join(&unit_name)).unwrap(),
             "recovery source impostor"
         );
+    }
+
+    #[test]
+    fn validation_failure_never_unlinks_a_replaced_prepared_name() {
+        let directory = tempfile::tempdir().unwrap();
+        let parent = directory.path().join("output-parent");
+        std::fs::create_dir(&parent).unwrap();
+        let output = parent.join("memory");
+        let initial = rendered_projection(&[(1, "alpha before")]);
+        let absent = inspect_output(&output).unwrap();
+        replace_projection(&output, &absent, &initial).unwrap();
+        let existing = inspect_output(&output).unwrap();
+        let replacement = rendered_projection(&[(1, "alpha after")]);
+        let unit_path = replacement.units.keys().next().unwrap().clone();
+        let unit_name = std::path::Path::new(&unit_path)
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let detached = format!("write:{unit_name}:detached");
+        let validation_failed = format!("write:{unit_name}:validation_failed");
+        let displaced_prepared = "displaced-prepared";
+        let unrelated_unknown = "unrelated-unknown";
+        let mut corrupted = false;
+        let mut prepared_name = None;
+
+        let result = replace_projection_with_hook(&output, &existing, &replacement, |point| {
+            if point == detached && !corrupted {
+                std::fs::write(
+                    find_recovery(&parent)
+                        .join(super::UNITS_DIR)
+                        .join(&unit_name),
+                    "recovered original sentinel",
+                )
+                .unwrap();
+                corrupted = true;
+            } else if point == validation_failed && prepared_name.is_none() {
+                let units = output.join(super::UNITS_DIR);
+                let prepared = find_internal(&units, ".memphant-prepared-");
+                let name = prepared.file_name().unwrap().to_str().unwrap().to_string();
+                std::fs::rename(&prepared, units.join(displaced_prepared)).unwrap();
+                std::fs::write(&prepared, "prepared-name sentinel").unwrap();
+                std::fs::write(units.join(unrelated_unknown), "unrelated sentinel").unwrap();
+                prepared_name = Some(name);
+            }
+        });
+
+        let error = result.expect_err("validation failure cleaned a prepared pathname");
+        let prepared_name = prepared_name.expect("the post-validation seam did not run");
+        let units = output.join(super::UNITS_DIR);
+        assert_eq!(
+            std::fs::read_to_string(units.join(&prepared_name)).unwrap(),
+            "prepared-name sentinel"
+        );
+        assert_eq!(
+            std::fs::read(units.join(displaced_prepared)).unwrap(),
+            *replacement.units.get(&unit_path).unwrap()
+        );
+        assert_eq!(
+            std::fs::read_to_string(units.join(unrelated_unknown)).unwrap(),
+            "unrelated sentinel"
+        );
+        assert!(!output.join(&unit_path).exists());
+        assert_eq!(
+            std::fs::read_to_string(
+                find_recovery(&parent)
+                    .join(super::UNITS_DIR)
+                    .join(&unit_name)
+            )
+            .unwrap(),
+            "recovered original sentinel"
+        );
+        assert!(error.contains("prepared cleanup skipped"), "{error}");
+        assert!(
+            error.contains(&format!(
+                "prepared_name_last_known={}/{}",
+                super::UNITS_DIR,
+                prepared_name
+            )),
+            "{error}"
+        );
+        assert!(error.contains("recovery="), "{error}");
     }
 
     #[test]
