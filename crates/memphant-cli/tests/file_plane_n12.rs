@@ -28,7 +28,7 @@ struct GateFixture {
 #[serde(deny_unknown_fields)]
 struct GateCase {
     id: String,
-    family: Family,
+    scenario_theme: ScenarioTheme,
     edit_class: EditClass,
     seed_kind: SeedKind,
     seed_fact_key: String,
@@ -40,11 +40,11 @@ struct GateCase {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
 #[serde(rename_all = "snake_case")]
-enum Family {
-    Architecture,
-    Compaction,
-    CrossAgent,
-    Composite,
+enum ScenarioTheme {
+    ArchitectureDecision,
+    CompactionRehydration,
+    CrossAgentTransfer,
+    TaskPlusSemanticComposite,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd)]
@@ -79,14 +79,14 @@ async fn b2_file_plane_round_trips_balanced_n12_gate() {
     let url = serve(memphant_server::app(state.clone())).await;
 
     let mut passed = 0usize;
-    let mut family_counts = BTreeMap::new();
+    let mut theme_counts = BTreeMap::new();
     let mut edit_counts = BTreeMap::new();
     let mut runtime_scopes = BTreeSet::new();
     let mut runtime_units = BTreeSet::new();
 
     for (case, binding) in fixture.cases.iter().zip(&bindings) {
         assert!(runtime_scopes.insert(binding.scope_id.as_uuid().to_string()));
-        *family_counts.entry(case.family).or_insert(0usize) += 1;
+        *theme_counts.entry(case.scenario_theme).or_insert(0usize) += 1;
         *edit_counts.entry(case.edit_class).or_insert(0usize) += 1;
 
         let seed_id = seed_unit(&state, binding, case).await;
@@ -141,13 +141,13 @@ async fn b2_file_plane_round_trips_balanced_n12_gate() {
     }
 
     assert_eq!(passed, 12);
-    for family in [
-        Family::Architecture,
-        Family::Compaction,
-        Family::CrossAgent,
-        Family::Composite,
+    for theme in [
+        ScenarioTheme::ArchitectureDecision,
+        ScenarioTheme::CompactionRehydration,
+        ScenarioTheme::CrossAgentTransfer,
+        ScenarioTheme::TaskPlusSemanticComposite,
     ] {
-        assert_eq!(family_counts.get(&family), Some(&3));
+        assert_eq!(theme_counts.get(&theme), Some(&3));
     }
     for edit in [
         EditClass::Mutation,
@@ -193,7 +193,7 @@ fn assert_fixture_contract(fixture: &GateFixture) {
         }
     }
     assert!(fixture.cases.iter().any(|case| {
-        case.family == Family::CrossAgent
+        case.scenario_theme == ScenarioTheme::CrossAgentTransfer
             && case.edit_class == EditClass::Deletion
             && case.seed_kind == SeedKind::Procedural
     }));

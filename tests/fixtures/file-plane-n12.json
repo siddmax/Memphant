@@ -3,7 +3,7 @@
   "cases": [
     {
       "id": "arch-mutation",
-      "family": "architecture",
+      "scenario_theme": "architecture_decision",
       "edit_class": "mutation",
       "seed_kind": "semantic",
       "seed_fact_key": "importer:wake-up",
@@ -12,7 +12,7 @@
     },
     {
       "id": "arch-new-fact",
-      "family": "architecture",
+      "scenario_theme": "architecture_decision",
       "edit_class": "new_fact",
       "seed_kind": "semantic",
       "seed_fact_key": "importer:queue",
@@ -23,7 +23,7 @@
     },
     {
       "id": "arch-contradiction",
-      "family": "architecture",
+      "scenario_theme": "architecture_decision",
       "edit_class": "contradiction",
       "seed_kind": "semantic",
       "seed_fact_key": "importer:transport",
@@ -34,7 +34,7 @@
     },
     {
       "id": "compaction-mutation",
-      "family": "compaction",
+      "scenario_theme": "compaction_rehydration",
       "edit_class": "mutation",
       "seed_kind": "semantic",
       "seed_fact_key": "migration:next-step",
@@ -43,7 +43,7 @@
     },
     {
       "id": "compaction-new-fact",
-      "family": "compaction",
+      "scenario_theme": "compaction_rehydration",
       "edit_class": "new_fact",
       "seed_kind": "semantic",
       "seed_fact_key": "migration:task-state",
@@ -54,7 +54,7 @@
     },
     {
       "id": "compaction-deletion",
-      "family": "compaction",
+      "scenario_theme": "compaction_rehydration",
       "edit_class": "deletion",
       "seed_kind": "semantic",
       "seed_fact_key": "migration:obsolete-step",
@@ -62,7 +62,7 @@
     },
     {
       "id": "cross-agent-new-fact",
-      "family": "cross_agent",
+      "scenario_theme": "cross_agent_transfer",
       "edit_class": "new_fact",
       "seed_kind": "semantic",
       "seed_fact_key": "client:regenerate",
@@ -73,7 +73,7 @@
     },
     {
       "id": "cross-agent-deletion",
-      "family": "cross_agent",
+      "scenario_theme": "cross_agent_transfer",
       "edit_class": "deletion",
       "seed_kind": "procedural",
       "seed_fact_key": "client:legacy-regenerate",
@@ -81,7 +81,7 @@
     },
     {
       "id": "cross-agent-contradiction",
-      "family": "cross_agent",
+      "scenario_theme": "cross_agent_transfer",
       "edit_class": "contradiction",
       "seed_kind": "semantic",
       "seed_fact_key": "client:format-order",
@@ -92,7 +92,7 @@
     },
     {
       "id": "composite-mutation",
-      "family": "composite",
+      "scenario_theme": "task_plus_semantic_composite",
       "edit_class": "mutation",
       "seed_kind": "semantic",
       "seed_fact_key": "rollout:task-state",
@@ -101,7 +101,7 @@
     },
     {
       "id": "composite-deletion",
-      "family": "composite",
+      "scenario_theme": "task_plus_semantic_composite",
       "edit_class": "deletion",
       "seed_kind": "semantic",
       "seed_fact_key": "rollout:obsolete-constraint",
@@ -109,7 +109,7 @@
     },
     {
       "id": "composite-contradiction",
-      "family": "composite",
+      "scenario_theme": "task_plus_semantic_composite",
       "edit_class": "contradiction",
       "seed_kind": "semantic",
       "seed_fact_key": "rollout:resume-constraint",
