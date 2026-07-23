@@ -96,7 +96,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:17
+        image: pgvector/pgvector:0.8.5-pg17
         env:
           # POSTGRES_USER is a superuser in the official image — the migrations
           # need it to `create role memphant_app` etc. and the scratch-DB helper

@@ -4,6 +4,8 @@ use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::fd::AsFd;
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -29,6 +31,8 @@ use cap_std::fs::DirBuilderExt as _;
 #[cfg(windows)]
 use cap_std::fs::OpenOptionsExt as _;
 use cap_std::fs::{Dir, DirBuilder, OpenOptions};
+#[cfg(unix)]
+use rustix::fs::{Mode, OFlags, openat};
 #[cfg(any(
     target_vendor = "apple",
     target_os = "linux",
@@ -3061,12 +3065,18 @@ fn rename_noreplace(
 
 #[cfg(unix)]
 fn sync_directory(directory: &Dir) -> Result<(), String> {
-    directory
-        .try_clone()
-        .map_err(|error| error.to_string())?
-        .into_std_file()
-        .sync_all()
-        .map_err(|error| error.to_string())
+    // No-follow traversal uses O_PATH on Linux. Reopen `.` relative to the
+    // captured descriptor so fsync receives a syncable handle without
+    // resolving an ambient path or weakening the inode anchor.
+    let syncable: fs::File = openat(
+        directory.as_fd(),
+        ".",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| error.to_string())?
+    .into();
+    syncable.sync_all().map_err(|error| error.to_string())
 }
 
 #[cfg(not(unix))]
@@ -3918,9 +3928,21 @@ impl<'de> Visitor<'de> for StrictValueVisitor {
 mod tests {
     use super::{
         MEMORY_FILE, OutputState, canonical_projection_fingerprint, encode_file_sync_request,
-        inspect_output, is_safe_inbox_name, render_projection, replace_projection,
-        replace_projection_with_hook, sha256, validate_sync_receipt,
+        inspect_output, is_safe_inbox_name, open_directory_at, render_projection,
+        replace_projection, replace_projection_with_hook, sha256, sync_directory,
+        validate_sync_receipt,
     };
+
+    #[test]
+    fn nofollow_directory_handles_are_syncable() {
+        let temporary = tempfile::tempdir().unwrap();
+        let parent =
+            cap_std::fs::Dir::open_ambient_dir(temporary.path(), cap_std::ambient_authority())
+                .unwrap();
+        parent.create_dir("child").unwrap();
+        let child = open_directory_at(&parent, "child").unwrap();
+        sync_directory(&child).unwrap();
+    }
     use memphant_types::{
         ActorId, AgentNodeId, CanonicalProjectionResponse, CanonicalProjectionUnit,
         FileSyncOperation, FileSyncOperationResult, FileSyncRequest, FileSyncResult,
