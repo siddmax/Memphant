@@ -153,6 +153,34 @@ async fn ping_rejects_bootstrap_only_schema_until_required_revision_is_applied()
         "readiness error must name the required schema floor: {error}"
     );
 
+    let app_login = format!("mp_readiness_{}", Uuid::new_v4().simple());
+    let create_login = format!("create role {app_login} login password 'pg_contract_password'");
+    sqlx::query(sqlx::AssertSqlSafe(create_login.as_str()))
+        .execute(&pool)
+        .await
+        .expect("create app readiness login");
+    let grant_app = format!("grant memphant_app to {app_login}");
+    sqlx::query(sqlx::AssertSqlSafe(grant_app.as_str()))
+        .execute(&pool)
+        .await
+        .expect("grant app capability");
+    let (_, host) = database_url
+        .split_once('@')
+        .expect("database URL has credentials");
+    let scheme = if database_url.starts_with("postgresql://") {
+        "postgresql://"
+    } else {
+        "postgres://"
+    };
+    let app_database_url = format!("{scheme}{app_login}:pg_contract_password@{host}");
+    let app_store = PgStore::connect_worker(&app_database_url)
+        .await
+        .expect("connect least-privilege app store");
+    app_store
+        .ping()
+        .await
+        .expect_err("bootstrap-only schema must be unready under memphant_app");
+
     sqlx::raw_sql(MIGRATIONS[1].1)
         .execute(&pool)
         .await
@@ -161,6 +189,97 @@ async fn ping_rejects_bootstrap_only_schema_until_required_revision_is_applied()
         .ping()
         .await
         .expect("current schema revision is ready");
+    app_store
+        .ping()
+        .await
+        .expect("current schema revision is ready under memphant_app");
+
+    async fn readiness_as_app(pool: &sqlx::PgPool) -> (String, String, bool) {
+        let mut app_tx = pool.begin().await.expect("begin app-role readiness");
+        sqlx::query("set local role memphant_app")
+            .execute(&mut *app_tx)
+            .await
+            .expect("assume app role");
+        sqlx::query_as(
+            "select coalesce(max(version), ''),
+                    coalesce(max(schema_compat_revision) filter (
+                      where migration_kind in ('breaking', 'rewrite')
+                    ), ''),
+                    coalesce(bool_or(version = $1 and schema_compat_revision = $2), false)
+             from memphant.schema_migrations",
+        )
+        .bind(MIGRATIONS[1].0)
+        .bind(SCHEMA_COMPAT_REVISION)
+        .fetch_one(&mut *app_tx)
+        .await
+        .expect("app role can evaluate the compatibility handshake")
+    }
+
+    assert_eq!(
+        readiness_as_app(&pool).await,
+        (
+            MIGRATIONS[1].0.to_string(),
+            SCHEMA_COMPAT_REVISION.to_string(),
+            true,
+        ),
+        "the least-privilege app role sees the current compatible head and floor"
+    );
+
+    sqlx::query(
+        "insert into memphant.schema_migrations
+           (version, schema_compat_revision, migration_kind)
+         values ('20990101_001_future_additive', '20990101_001_future_additive', 'additive')",
+    )
+    .execute(&pool)
+    .await
+    .expect("record future additive migration");
+    assert_eq!(
+        readiness_as_app(&pool).await,
+        (
+            "20990101_001_future_additive".to_string(),
+            SCHEMA_COMPAT_REVISION.to_string(),
+            true,
+        ),
+        "an additive database head must not raise the effective compatibility floor"
+    );
+    app_store
+        .ping()
+        .await
+        .expect("future additive database head remains ready under memphant_app");
+
+    sqlx::query(
+        "insert into memphant.schema_migrations
+           (version, schema_compat_revision, migration_kind)
+         values ('20990101_002_future_breaking', '20990101_002_future_breaking', 'breaking')",
+    )
+    .execute(&pool)
+    .await
+    .expect("record future breaking migration");
+    assert_eq!(
+        readiness_as_app(&pool).await,
+        (
+            "20990101_002_future_breaking".to_string(),
+            "20990101_002_future_breaking".to_string(),
+            true,
+        ),
+        "the least-privilege app role sees the raised compatibility floor"
+    );
+    let error = app_store
+        .ping()
+        .await
+        .expect_err("future breaking database head must be unready under memphant_app");
+    assert!(
+        error.to_string().contains("20990101_002_future_breaking"),
+        "readiness error must name the incompatible database floor: {error}"
+    );
+
+    sqlx::query(
+        "delete from memphant.schema_migrations
+         where version in ('20990101_001_future_additive', '20990101_002_future_breaking')",
+    )
+    .execute(&pool)
+    .await
+    .expect("remove synthetic future migrations");
 
     let mut app_tx = pool.begin().await.expect("begin app-role readiness");
     sqlx::query("set local role memphant_app")
@@ -178,6 +297,13 @@ async fn ping_rejects_bootstrap_only_schema_until_required_revision_is_applied()
     .await
     .expect("app role can read the compatibility floor");
     assert!(app_ready);
+
+    app_store.pool().close().await;
+    let drop_login = format!("drop role {app_login}");
+    sqlx::query(sqlx::AssertSqlSafe(drop_login.as_str()))
+        .execute(&pool)
+        .await
+        .expect("drop app readiness login");
 }
 
 async fn fresh_tenant(store: &PgStore) -> TenantId {
@@ -1016,6 +1142,195 @@ async fn file_sync_transition_snapshot_and_forget_are_actor_bound() {
         UnitState::Active,
         "forget must not traverse through a foreign actor's unit"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn source_forget_does_not_cross_a_foreign_actor_bridge() {
+    use memphant_core::ForgetWrite;
+    use memphant_types::ForgetTarget;
+
+    let store = connect().await;
+    let tenant = fresh_tenant(&store).await;
+    let context = fresh_memory_context(&store, tenant).await;
+
+    let episode = retain_episode(
+        &store,
+        &context,
+        RetainRequest {
+            tenant_id: tenant,
+            data_subject_id: context.data_subject_id,
+            scope_id: context.scope_id,
+            actor_id: context.actor_id,
+            agent_node_id: context.agent_node_id,
+            subject_generation: context.subject_generation,
+            source_kind: "user".to_string(),
+            source_ref: format!("pg-contract:forget-episode:{}", Uuid::now_v7()),
+            observed_at: CLOCK.0.to_string(),
+            source_trust: TrustLevel::TrustedUser,
+            subject_hint: None,
+            subject: None,
+            predicate: None,
+            body: "Episode source for an actor-bound forget lineage.".to_string(),
+            compiler_version: "compiler-pg-contract".to_string(),
+        },
+    )
+    .await
+    .expect("retain episode source");
+    let resource = retain_resource(
+        &store,
+        &context,
+        RetainResourceRequest {
+            tenant_id: tenant,
+            data_subject_id: context.data_subject_id,
+            scope_id: context.scope_id,
+            actor_id: context.actor_id,
+            agent_node_id: context.agent_node_id,
+            subject_generation: context.subject_generation,
+            uri: format!("memphant://forget-resource/{}", Uuid::now_v7()),
+            source_ref: format!("pg-contract:forget-resource:{}", Uuid::now_v7()),
+            observed_at: CLOCK.0.to_string(),
+            kind: None,
+            content_hash: format!("sha256:{}", Uuid::now_v7()),
+            mime_type: "text/plain".to_string(),
+            revision: None,
+            body: Some("Resource source for an actor-bound forget lineage.".to_string()),
+            source_trust: TrustLevel::TrustedUser,
+            compiler_version: "compiler-pg-contract".to_string(),
+        },
+    )
+    .await
+    .expect("retain resource source");
+
+    for (label, target) in [
+        ("episode", ForgetTarget::Episode(episode.episode_id)),
+        ("resource", ForgetTarget::Resource(resource.resource_id)),
+    ] {
+        let mut tx = store.begin(&context).await.expect("begin lineage seed");
+        let mut source_unit = active_projection_unit(&context, &format!("{label}-source-unit"));
+        match target {
+            ForgetTarget::Episode(id) => source_unit.source_episode_id = Some(id),
+            ForgetTarget::Resource(id) => source_unit.source_resource_id = Some(id),
+            ForgetTarget::MemoryUnit(_) => unreachable!(),
+        }
+        let source_unit_id = store
+            .stage_memory_unit(&mut tx, source_unit)
+            .await
+            .expect("stage source-linked unit");
+        let foreign_bridge_id = store
+            .stage_memory_unit(
+                &mut tx,
+                active_projection_unit(&context, &format!("{label}-foreign-bridge")),
+            )
+            .await
+            .expect("stage future foreign bridge");
+        let own_grandchild_id = store
+            .stage_memory_unit(
+                &mut tx,
+                active_projection_unit(&context, &format!("{label}-owned-grandchild")),
+            )
+            .await
+            .expect("stage owned grandchild");
+        for (src_id, dst_id) in [
+            (foreign_bridge_id, source_unit_id),
+            (own_grandchild_id, foreign_bridge_id),
+        ] {
+            store
+                .stage_memory_edge(
+                    &mut tx,
+                    NewMemoryEdge {
+                        tenant_id: tenant,
+                        scope_id: context.scope_id,
+                        src_id,
+                        dst_id,
+                        kind: MemoryEdgeKind::Supersedes,
+                    },
+                )
+                .await
+                .expect("stage descendant edge");
+        }
+        store.commit(tx).await.expect("commit lineage seed");
+
+        let foreign_actor_id = Uuid::now_v7();
+        let mut raw_tx = store
+            .pool()
+            .begin()
+            .await
+            .expect("begin actor reassignment");
+        sqlx::query("select memphant.bind_tenant($1)")
+            .bind(tenant.as_uuid())
+            .execute(&mut *raw_tx)
+            .await
+            .expect("bind tenant");
+        sqlx::query(
+            "insert into memphant.actor
+               (id, tenant_id, data_subject_id, kind, external_ref, trust_level)
+             values ($1, $2, $3, 'user', $4, 'trusted_user')",
+        )
+        .bind(foreign_actor_id)
+        .bind(tenant.as_uuid())
+        .bind(context.data_subject_id.as_uuid())
+        .bind(format!(
+            "pg-contract:foreign-{label}-actor:{foreign_actor_id}"
+        ))
+        .execute(&mut *raw_tx)
+        .await
+        .expect("insert foreign actor");
+        sqlx::query(
+            "update memphant.memory_unit set actor_id = $7
+             where tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+               and scope_id = $4 and agent_node_id = $5 and id = $6",
+        )
+        .bind(tenant.as_uuid())
+        .bind(context.data_subject_id.as_uuid())
+        .bind(context.subject_generation as i64)
+        .bind(context.scope_id.as_uuid())
+        .bind(context.agent_node_id.as_uuid())
+        .bind(foreign_bridge_id.as_uuid())
+        .bind(foreign_actor_id)
+        .execute(&mut *raw_tx)
+        .await
+        .expect("reassign bridge actor");
+        raw_tx.commit().await.expect("commit actor reassignment");
+
+        let forgotten = store
+            .apply_forget(
+                &context,
+                ForgetWrite {
+                    target,
+                    now: CLOCK.0.to_string(),
+                },
+            )
+            .await
+            .expect("forget actor-owned source");
+        assert!(forgotten.invalidated_units.contains(&source_unit_id));
+        assert!(
+            !forgotten.invalidated_units.contains(&own_grandchild_id),
+            "{label} forget must stop before a foreign actor bridge"
+        );
+
+        let remaining = store
+            .fetch_units_by_ids(&context, &[source_unit_id, own_grandchild_id])
+            .await
+            .expect("fetch actor-owned lineage after forget");
+        assert_eq!(
+            remaining
+                .iter()
+                .find(|unit| unit.id == source_unit_id)
+                .expect("source unit remains addressable")
+                .state,
+            UnitState::Deleted
+        );
+        assert_eq!(
+            remaining
+                .iter()
+                .find(|unit| unit.id == own_grandchild_id)
+                .expect("owned grandchild remains addressable")
+                .state,
+            UnitState::Active,
+            "{label} forget must preserve an owned descendant behind a foreign actor"
+        );
+    }
 }
 
 #[tokio::test]

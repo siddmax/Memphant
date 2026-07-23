@@ -12,13 +12,14 @@ const WSA_BOOTSTRAP_SQL: &str =
 const FILE_SYNC_MUTATION_VERB_SQL: &str =
     include_str!("../../../memphant_migrations/versions/20260723_002_file_sync_mutation_verb.sql");
 
+/// Newest migration understood by this binary. Readiness permits a newer
+/// additive database head, but never a database compatibility floor above it.
+pub const MIGRATION_HEAD: &str = "20260723_002_file_sync_mutation_verb";
+
 /// Bundled migrations in apply order.
 pub const MIGRATIONS: &[(&str, &str)] = &[
     ("20260703_001_wsa_bootstrap", WSA_BOOTSTRAP_SQL),
-    (
-        "20260723_002_file_sync_mutation_verb",
-        FILE_SYNC_MUTATION_VERB_SQL,
-    ),
+    (MIGRATION_HEAD, FILE_SYNC_MUTATION_VERB_SQL),
 ];
 
 const REQUIRED_TABLES: &[&str] = &[

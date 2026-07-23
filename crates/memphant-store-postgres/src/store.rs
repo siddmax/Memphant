@@ -31,6 +31,8 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgRow};
 use sqlx::{AssertSqlSafe, PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
+use crate::MIGRATION_HEAD;
+
 /// RFC 3339 UTC projection used for every timestamptz read; writes bind RFC
 /// 3339 strings and cast `::timestamptz`.
 const TS_FMT: &str = r#"'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'"#;
@@ -5001,21 +5003,29 @@ impl MemoryStore for PgStore {
     }
 
     async fn ping(&self) -> Result<(), StoreError> {
-        let ready: bool = sqlx::query_scalar(
-            "select exists (
-               select 1 from memphant.schema_migrations
-               where version = $1 and schema_compat_revision = $1
-             )",
-        )
-        .bind(SCHEMA_COMPAT_REVISION)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(backend)?;
+        let (database_head, compatibility_floor, embedded_head_present): (String, String, bool) =
+            sqlx::query_as(
+                "select coalesce(max(version), ''),
+                        coalesce(max(schema_compat_revision) filter (
+                          where migration_kind in ('breaking', 'rewrite')
+                        ), ''),
+                        coalesce(bool_or(version = $1 and schema_compat_revision = $2), false)
+                 from memphant.schema_migrations",
+            )
+            .bind(MIGRATION_HEAD)
+            .bind(SCHEMA_COMPAT_REVISION)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(backend)?;
+        let ready = embedded_head_present
+            && database_head.as_str() >= MIGRATION_HEAD
+            && compatibility_floor.as_str() <= MIGRATION_HEAD;
         if ready {
             Ok(())
         } else {
             Err(StoreError::Backend(format!(
-                "database schema is below required compatibility revision {SCHEMA_COMPAT_REVISION}"
+                "database schema is incompatible with embedded migration head {MIGRATION_HEAD} \
+                 (database head {database_head}, compatibility floor {compatibility_floor})"
             )))
         }
     }

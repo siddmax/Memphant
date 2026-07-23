@@ -1,4 +1,7 @@
-use memphant_store_postgres::{Provider, lint_migration_sql, lint_migrations};
+use memphant_store_postgres::{
+    MIGRATION_HEAD, MIGRATIONS, Provider, lint_migration_sql, lint_migrations,
+};
+use memphant_types::SCHEMA_COMPAT_REVISION;
 
 #[test]
 fn bundled_wsa_migration_passes_all_provider_lints() {
@@ -9,10 +12,7 @@ fn bundled_wsa_migration_passes_all_provider_lints() {
 
 #[test]
 fn bundled_migrations_are_ordered_bootstrap_then_file_sync_forward_migration() {
-    let versions: Vec<_> = memphant_store_postgres::MIGRATIONS
-        .iter()
-        .map(|(version, _)| *version)
-        .collect();
+    let versions: Vec<_> = MIGRATIONS.iter().map(|(version, _)| *version).collect();
     assert_eq!(
         versions,
         [
@@ -20,6 +20,8 @@ fn bundled_migrations_are_ordered_bootstrap_then_file_sync_forward_migration() {
             "20260723_002_file_sync_mutation_verb"
         ]
     );
+    assert_eq!(MIGRATIONS.last().unwrap().0, MIGRATION_HEAD);
+    assert_eq!(MIGRATION_HEAD, SCHEMA_COMPAT_REVISION);
 }
 
 #[test]
