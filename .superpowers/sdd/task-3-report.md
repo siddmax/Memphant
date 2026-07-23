@@ -146,3 +146,75 @@ Fresh proof after the final code change:
 
 The unrelated `.superpowers/sdd/progress.md` modification remains unstaged.
 No Task 4, P1 campaign, paid/model call, push, or deployment work was performed.
+
+## Third independent-review fix wave
+
+The final Task 3 review found three narrower compare/use gaps. An absent output
+was still assembled through its final pathname before it was complete; managed
+replacement and stale cleanup checked a name before a later namespace mutation;
+and one exact validation pass could not establish that the completed tree had
+stabilized. The same review also found that canonical procedural units may omit
+predicate and confidence, and that `cap_std::Dir::rename` is replacing rather
+than no-replace on Windows.
+
+New deterministic hooks first reproduced all of these failures: a concurrent
+root appeared at the absent install point, a managed target reappeared between
+detach and prepared install, a stale target reappeared between detach and
+deletion, and a managed unit changed between the two intended final sweeps. A
+canonical procedural unit with absent optional predicate/confidence was also
+rejected before the metadata correction.
+
+- An absent output is now built as a unique sibling staging tree beneath the
+  retained existing parent. Every missing descendant, `units/`, `inbox/`, and
+  rendered byte is created and validated through retained capabilities before
+  one atomic no-replace install of the first missing component. If the final
+  name appears, it is left untouched and the fully validated staging tree is
+  retained for recovery. Nested absent paths use the same single install.
+- Managed replacement now syncs a unique prepared file, atomically detaches the
+  validated name to a unique no-replace backup, validates the detached identity
+  and exact bytes, then installs the prepared file with no-replace semantics.
+  A name that reappears is never overwritten and the prior validated backup is
+  retained. Stale cleanup uses the same detach-and-validate protocol and only
+  removes the detached backup if the original name remains absent.
+- Final validation performs two complete, exact sweeps of manifest, canonical
+  snapshot, capability bindings, managed identities, and managed bytes. The
+  two results must match, and no projection write occurs after the second
+  sweep. Manifest validation now requires fact key, predicate, and confidence
+  equality only when each canonical field is present.
+- Audited no-replace backends are target-specific. Supported Unix targets use
+  `rustix::fs::renameat_with(..., RenameFlags::NOREPLACE)`. Windows opens the
+  source without following reparse points and with `DELETE` access relative to
+  the retained capability, then calls `SetFileInformationByHandle` with
+  `FileRenameInfo`, the retained directory handle as `RootDirectory`, and
+  `ReplaceIfExists=false`. Both Windows target-exists codes normalize to
+  `AlreadyExists`. This follows Microsoft's
+  [`SetFileInformationByHandle`](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfileinformationbyhandle)
+  and [`FILE_RENAME_INFO`](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_rename_info)
+  contracts. Windows syncs every prepared file but deliberately does not call
+  unsupported `FlushFileBuffers` on cap-std's read-only directory handles.
+
+Fresh proof after the final code change:
+
+- `cargo test -p memphant-cli`: 10 unit and 21 integration tests passed. The
+  added unit contracts cover absent-root collision preservation, atomic nested
+  install, write and stale-delete compare/use collisions with recoverable
+  backups, exact post-manifest validation, the stable second sweep, and
+  optional procedural metadata.
+- `cargo clippy -p memphant-cli --all-targets --all-features -- -D warnings`,
+  `cargo fmt --all --check`, and `git diff --check`: passed.
+- `python3 scripts/check_spec_drift.py`: skipped, not passed, because the
+  private Syndai specs are absent from this worktree.
+- `cargo check -p memphant-cli --target x86_64-pc-windows-msvc`: still stops
+  before MemPhant source compilation because transitive `ring 0.17.14` invokes
+  the host C compiler without the MSVC SDK (`assert.h` is missing and
+  `VCINSTALLDIR=None`). To isolate the new code from that unrelated dependency,
+  a temporary crate with the exact Windows function and the same
+  `cap-std 4.0.2`, `cap-fs-ext 4.0.2`, and `windows-sys 0.61.2` dependencies was
+  checked with
+  `RUSTUP_TOOLCHAIN=1.96.1-aarch64-apple-darwin cargo check --target x86_64-pc-windows-msvc`;
+  it passed. This proves Windows-target source compilation only. No Windows
+  runtime rename test was executed on this macOS host, so runtime behavior is
+  not claimed.
+
+The unrelated `.superpowers/sdd/progress.md` modification remains unstaged.
+No Task 4, P1 campaign, paid/model call, push, or deployment work was performed.

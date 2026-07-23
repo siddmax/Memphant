@@ -2202,6 +2202,7 @@ dependencies = [
  "memphant-server",
  "memphant-store-postgres",
  "memphant-types",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -2209,6 +2210,7 @@ dependencies = [
  "tokio",
  "ureq",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

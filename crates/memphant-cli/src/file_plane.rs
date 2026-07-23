@@ -5,7 +5,8 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(windows)]
+use std::{ffi::OsStr, os::windows::ffi::OsStrExt, os::windows::io::AsRawHandle};
 
 use memphant_core::service::canonical_projection_fingerprint;
 use memphant_types::{CanonicalProjectionResponse, CanonicalProjectionUnit, MemoryKind, UnitId};
@@ -17,7 +18,24 @@ use uuid::Uuid;
 
 use cap_fs_ext::{DirExt, FollowSymlinks, MetadataExt, OpenOptionsFollowExt, OpenOptionsSyncExt};
 use cap_std::ambient_authority;
+#[cfg(windows)]
+use cap_std::fs::OpenOptionsExt as _;
 use cap_std::fs::{Dir, OpenOptions};
+#[cfg(any(
+    target_vendor = "apple",
+    target_os = "linux",
+    target_os = "android",
+    target_os = "redox"
+))]
+use rustix::fs::{RenameFlags, renameat_with};
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS};
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::{
+    DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+    FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileRenameInfo,
+    SetFileInformationByHandle,
+};
 
 const DEFAULT_URL: &str = "http://127.0.0.1:8080";
 const SCHEMA_VERSION: u32 = 1;
@@ -29,7 +47,6 @@ const INBOX_DIR: &str = "inbox";
 const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_MANAGED_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_DIRECTORY_ENTRIES: usize = 100_000;
-static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileIdentity {
@@ -44,7 +61,15 @@ struct ManagedFileSnapshot {
 }
 
 #[derive(Debug)]
+struct DirectoryBinding {
+    parent: Dir,
+    name: String,
+    identity: FileIdentity,
+}
+
+#[derive(Debug)]
 struct TreeHandles {
+    outer_bindings: Vec<DirectoryBinding>,
     parent: Dir,
     root_name: String,
     root: Dir,
@@ -471,6 +496,16 @@ fn render_projection(response: &CanonicalProjectionResponse) -> Result<RenderedP
         memory_sha256: sha256(&memory),
         entries,
     };
+    let mut findings = Vec::new();
+    validate_manifest_fields(&manifest, &mut findings);
+    if !findings.is_empty() {
+        findings.sort();
+        findings.dedup();
+        return Err(format!(
+            "projection metadata is invalid: {}",
+            findings.join("; ")
+        ));
+    }
     let mut manifest_bytes = serde_json::to_vec_pretty(&manifest)
         .map_err(|error| format!("manifest serialization failed: {error}"))?;
     manifest_bytes.push(b'\n');
@@ -545,6 +580,7 @@ impl TreeHandles {
         let inbox =
             open_directory_at(&root, INBOX_DIR).map_err(|error| format!("{INBOX_DIR}: {error}"))?;
         let handles = Self {
+            outer_bindings: Vec::new(),
             parent_identity: directory_identity(&parent)?,
             root_identity: directory_identity(&root)?,
             units_identity: directory_identity(&units)?,
@@ -560,6 +596,16 @@ impl TreeHandles {
     }
 
     fn ensure_bound(&self) -> Result<(), String> {
+        for binding in &self.outer_bindings {
+            let actual = directory_identity_at(&binding.parent, &binding.name)
+                .map_err(|error| format!("output ancestor {} changed: {error}", binding.name))?;
+            if actual != binding.identity {
+                return Err(format!(
+                    "output ancestor {} no longer names the installed directory",
+                    binding.name
+                ));
+            }
+        }
         if directory_identity(&self.parent)? != self.parent_identity {
             return Err("output parent handle changed identity".to_string());
         }
@@ -631,47 +677,29 @@ fn output_anchor(root: &Path) -> Result<(Dir, Vec<String>, FileIdentity), String
     Ok((parent, components, identity))
 }
 
-fn initialize_output_tree(output: &OutputState) -> Result<TreeHandles, String> {
-    let (parent, root_name, root) = match output {
-        OutputState::Absent(absent) => {
-            let mut current = absent
-                .parent
-                .try_clone()
-                .map_err(|error| error.to_string())?;
-            let mut result = None;
-            for (index, name) in absent.missing_components.iter().enumerate() {
-                current
-                    .create_dir(name)
-                    .map_err(|error| format!("cannot create output component {name}: {error}"))?;
-                sync_directory(&current)
-                    .map_err(|error| format!("cannot sync output parent: {error}"))?;
-                let next = open_directory_at(&current, name)?;
-                if index + 1 == absent.missing_components.len() {
-                    result = Some((current, name.clone(), next));
-                    break;
-                }
-                current = next;
-            }
-            result.ok_or_else(|| "output path has no missing component".to_string())?
-        }
-        OutputState::Empty(empty) => (
-            empty
-                .parent
-                .try_clone()
-                .map_err(|error| error.to_string())?,
-            empty.root_name.clone(),
-            empty.root.try_clone().map_err(|error| error.to_string())?,
-        ),
-        OutputState::Existing(_) => {
-            return Err("existing output tree does not need initialization".to_string());
-        }
-    };
+fn initialize_empty_output(empty: &EmptyOutput) -> Result<TreeHandles, String> {
+    let parent = empty
+        .parent
+        .try_clone()
+        .map_err(|error| error.to_string())?;
+    let root_name = empty.root_name.clone();
+    let root = empty.root.try_clone().map_err(|error| error.to_string())?;
+    initialize_root_directories(&root)?;
+    let handles = TreeHandles::from_root(parent, root_name, root)?;
+    ensure_initialized_tree(&handles)?;
+    Ok(handles)
+}
+
+fn initialize_root_directories(root: &Dir) -> Result<(), String> {
     for name in [UNITS_DIR, INBOX_DIR] {
         root.create_dir(name)
             .map_err(|error| format!("cannot create {name}: {error}"))?;
-        sync_directory(&root).map_err(|error| format!("cannot sync output root: {error}"))?;
+        sync_directory(root).map_err(|error| format!("cannot sync output root: {error}"))?;
     }
-    let handles = TreeHandles::from_root(parent, root_name, root)?;
+    Ok(())
+}
+
+fn ensure_initialized_tree(handles: &TreeHandles) -> Result<(), String> {
     let root_names = directory_names(&handles.root)?;
     if root_names != [INBOX_DIR.to_string(), UNITS_DIR.to_string()]
         || !directory_names(&handles.units)?.is_empty()
@@ -679,6 +707,105 @@ fn initialize_output_tree(output: &OutputState) -> Result<TreeHandles, String> {
     {
         return Err("new output tree changed before initialization".to_string());
     }
+    Ok(())
+}
+
+fn create_unique_directory(parent: &Dir, label: &str) -> Result<(String, Dir), String> {
+    for _ in 0..32 {
+        let name = format!(".memphant-{label}-{}", Uuid::new_v4());
+        match parent.create_dir(&name) {
+            Ok(()) => {
+                sync_directory(parent)
+                    .map_err(|error| format!("cannot sync staging parent: {error}"))?;
+                let directory = open_directory_at(parent, &name)?;
+                if directory_identity_at(parent, &name)? != directory_identity(&directory)? {
+                    return Err(format!("unique {label} directory changed while opening"));
+                }
+                return Ok((name, directory));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("cannot create unique {label} directory: {error}")),
+        }
+    }
+    Err(format!("cannot allocate unique {label} directory"))
+}
+
+fn build_and_install_absent_projection(
+    absent: &AbsentOutput,
+    rendered: &RenderedProjection,
+    hook: &mut impl FnMut(&str),
+) -> Result<TreeHandles, String> {
+    let first = absent
+        .missing_components
+        .first()
+        .ok_or_else(|| "output path has no missing component".to_string())?;
+    let (staging_name, staging_root) = create_unique_directory(&absent.parent, "stage")?;
+    let staging_identity = directory_identity(&staging_root)?;
+    let mut outer_bindings = Vec::new();
+
+    let (parent, root_name, root) = if absent.missing_components.len() == 1 {
+        (
+            absent
+                .parent
+                .try_clone()
+                .map_err(|error| error.to_string())?,
+            staging_name.clone(),
+            staging_root,
+        )
+    } else {
+        outer_bindings.push(DirectoryBinding {
+            parent: absent
+                .parent
+                .try_clone()
+                .map_err(|error| error.to_string())?,
+            name: staging_name.clone(),
+            identity: staging_identity,
+        });
+        let mut current = staging_root;
+        let mut result = None;
+        for (index, name) in absent.missing_components.iter().enumerate().skip(1) {
+            current
+                .create_dir(name)
+                .map_err(|error| format!("cannot create staging component {name}: {error}"))?;
+            sync_directory(&current)
+                .map_err(|error| format!("cannot sync staging component: {error}"))?;
+            let next = open_directory_at(&current, name)?;
+            if index + 1 == absent.missing_components.len() {
+                result = Some((current, name.clone(), next));
+                break;
+            }
+            outer_bindings.push(DirectoryBinding {
+                parent: current.try_clone().map_err(|error| error.to_string())?,
+                name: name.clone(),
+                identity: directory_identity(&next)?,
+            });
+            current = next;
+        }
+        result.ok_or_else(|| "cannot resolve staging output root".to_string())?
+    };
+
+    initialize_root_directories(&root)?;
+    let mut handles = TreeHandles::from_root(parent, root_name, root)?;
+    handles.outer_bindings = outer_bindings;
+    ensure_initialized_tree(&handles)?;
+    write_rendered_projection(&handles, None, rendered, hook)?;
+
+    hook("absent:before_install");
+    rename_noreplace(&absent.parent, &staging_name, first).map_err(|error| {
+        format!(
+            "output appeared before install; left it untouched and retained validated staging {staging_name}: {error}"
+        )
+    })?;
+    sync_directory(&absent.parent)
+        .map_err(|error| format!("cannot sync installed output parent: {error}"))?;
+
+    if absent.missing_components.len() == 1 {
+        handles.root_name = first.clone();
+    } else if let Some(binding) = handles.outer_bindings.first_mut() {
+        binding.name = first.clone();
+    }
+    handles.ensure_bound()?;
+    validate_rendered_projection_twice(&handles, rendered, hook)?;
     Ok(handles)
 }
 
@@ -1167,26 +1294,29 @@ fn validate_manifest_fields(manifest: &ExportManifest, findings: &mut Vec<String
         if !matches!(entry.kind, MemoryKind::Semantic | MemoryKind::Procedural) {
             findings.push(format!("{}: unsupported memory kind", entry.path));
         }
-        match entry.fact_key.as_deref() {
-            Some(value) if require_single_line("fact_key", value).is_ok() => {}
-            _ => findings.push(format!(
+        if let Some(value) = entry.fact_key.as_deref()
+            && require_single_line("fact_key", value).is_err()
+        {
+            findings.push(format!(
                 "{}: fact_key must be one non-empty line",
                 entry.path
-            )),
+            ));
         }
-        match entry.predicate.as_deref() {
-            Some(value) if require_single_line("predicate", value).is_ok() => {}
-            _ => findings.push(format!(
+        if let Some(value) = entry.predicate.as_deref()
+            && require_single_line("predicate", value).is_err()
+        {
+            findings.push(format!(
                 "{}: predicate must be one non-empty line",
                 entry.path
-            )),
+            ));
         }
-        match entry.confidence {
-            Some(value) if value.is_finite() && (0.0..=1.0).contains(&value) => {}
-            _ => findings.push(format!(
+        if let Some(value) = entry.confidence
+            && (!value.is_finite() || !(0.0..=1.0).contains(&value))
+        {
+            findings.push(format!(
                 "{}: confidence must be finite and within 0..=1",
                 entry.path
-            )),
+            ));
         }
         let valid_from =
             validate_timestamp(entry.valid_from.as_deref(), "valid_from", entry, findings);
@@ -1314,19 +1444,33 @@ fn replace_projection_with_hook(
     output
         .revalidate()
         .map_err(|findings| findings.join("; "))?;
+    if let OutputState::Absent(absent) = output {
+        build_and_install_absent_projection(absent, rendered, &mut after_mutation)?;
+        return Ok(());
+    }
     let previous = match output {
         OutputState::Existing(previous) => Some(previous.as_ref()),
-        OutputState::Absent(_) | OutputState::Empty(_) => None,
+        OutputState::Empty(_) => None,
+        OutputState::Absent(_) => unreachable!("absent output handled above"),
     };
-    let owned_handles = if previous.is_none() {
-        Some(initialize_output_tree(output)?)
-    } else {
-        None
+    let owned_handles = match output {
+        OutputState::Empty(empty) => Some(initialize_empty_output(empty)?),
+        OutputState::Existing(_) => None,
+        OutputState::Absent(_) => unreachable!("absent output handled above"),
     };
     let handles = previous
         .map(|validated| &validated.handles)
         .or(owned_handles.as_ref())
         .expect("existing or newly opened output handles");
+    write_rendered_projection(handles, previous, rendered, &mut after_mutation)
+}
+
+fn write_rendered_projection(
+    handles: &TreeHandles,
+    previous: Option<&ValidatedExport>,
+    rendered: &RenderedProjection,
+    after_mutation: &mut impl FnMut(&str),
+) -> Result<(), String> {
     handles.ensure_bound()?;
 
     for (path, bytes) in &rendered.units {
@@ -1335,20 +1479,22 @@ fn replace_projection_with_hook(
             .and_then(|name| name.to_str())
             .ok_or_else(|| format!("invalid rendered unit path {path}"))?;
         handles.ensure_bound()?;
-        write_atomic_at(
+        replace_managed_file(
             &handles.units,
             name,
             bytes,
             expected_managed_file(previous, path),
+            after_mutation,
         )?;
         after_mutation(path);
     }
     handles.ensure_bound()?;
-    write_atomic_at(
+    replace_managed_file(
         &handles.root,
         MEMORY_FILE,
         &rendered.memory,
         expected_managed_file(previous, MEMORY_FILE),
+        after_mutation,
     )?;
     after_mutation(MEMORY_FILE);
 
@@ -1361,38 +1507,51 @@ fn replace_projection_with_hook(
                     .and_then(|name| name.to_str())
                     .ok_or_else(|| format!("invalid stale unit path {}", entry.path))?;
                 handles.ensure_bound()?;
-                require_managed_file(
+                delete_managed_file(
                     &handles.units,
                     name,
-                    expected_managed_file(Some(previous), &entry.path),
+                    previous
+                        .managed_files
+                        .get(&entry.path)
+                        .ok_or_else(|| format!("missing validated state for {}", entry.path))?,
+                    after_mutation,
                 )?;
-                handles
-                    .units
-                    .remove_file(name)
-                    .map_err(|error| format!("cannot remove stale {}: {error}", entry.path))?;
-                sync_directory(&handles.units)
-                    .map_err(|error| format!("cannot sync {UNITS_DIR}: {error}"))?;
                 after_mutation(&entry.path);
             }
         }
     }
     handles.ensure_bound()?;
-    write_atomic_at(
+    replace_managed_file(
         &handles.root,
         MANIFEST_FILE,
         &rendered.manifest_bytes,
         expected_managed_file(previous, MANIFEST_FILE),
+        after_mutation,
     )?;
     after_mutation(MANIFEST_FILE);
     handles.ensure_bound()?;
-    let (actual_manifest, _, _) = validate_export_handles(handles, false).map_err(|findings| {
+    validate_rendered_projection_twice(handles, rendered, after_mutation)
+}
+
+fn validate_rendered_projection_twice(
+    handles: &TreeHandles,
+    rendered: &RenderedProjection,
+    hook: &mut impl FnMut(&str),
+) -> Result<(), String> {
+    let first = validate_export_handles(handles, false).map_err(|findings| {
         format!(
             "final rendered-tree validation failed: {}",
             findings.join("; ")
         )
     })?;
-    if actual_manifest != rendered.manifest {
+    if first.0 != rendered.manifest {
         return Err("final rendered tree differs from the canonical projection".to_string());
+    }
+    hook("final:between_sweeps");
+    let second = validate_export_handles(handles, false)
+        .map_err(|findings| format!("final stability sweep failed: {}", findings.join("; ")))?;
+    if second != first {
+        return Err("final rendered tree changed during the stability sweep".to_string());
     }
     Ok(())
 }
@@ -1415,34 +1574,149 @@ fn managed_identity_at(directory: &Dir, name: &str) -> Result<Option<FileIdentit
     }
 }
 
-fn require_managed_file(
+fn validate_detached_file(
     directory: &Dir,
-    name: &str,
-    expected: Option<&ManagedFileSnapshot>,
+    detached_name: &str,
+    original_name: &str,
+    expected: &ManagedFileSnapshot,
 ) -> Result<(), String> {
-    match expected {
-        None if managed_identity_at(directory, name)?.is_none() => Ok(()),
-        None => Err(format!(
-            "{name}: appeared after validation; refusing to overwrite it"
-        )),
-        Some(expected) => {
-            let max_bytes = if name == MANIFEST_FILE {
-                MAX_MANIFEST_BYTES
-            } else {
-                MAX_MANAGED_FILE_BYTES
-            };
-            let (bytes, identity) = read_regular_at(directory, name, max_bytes)?;
-            if identity == expected.identity && bytes == expected.bytes {
-                Ok(())
-            } else {
-                Err(format!(
-                    "{name}: changed after validation; refusing to overwrite or delete it"
-                ))
-            }
-        }
+    let max_bytes = if original_name == MANIFEST_FILE {
+        MAX_MANIFEST_BYTES
+    } else {
+        MAX_MANAGED_FILE_BYTES
+    };
+    let (bytes, identity) = read_regular_at(directory, detached_name, max_bytes)?;
+    if identity == expected.identity && bytes == expected.bytes {
+        Ok(())
+    } else {
+        Err(format!(
+            "{detached_name}: detached file differs from the validated snapshot"
+        ))
     }
 }
 
+#[cfg(any(
+    target_vendor = "apple",
+    target_os = "linux",
+    target_os = "android",
+    target_os = "redox"
+))]
+fn rename_noreplace(directory: &Dir, from: &str, to: &str) -> std::io::Result<()> {
+    Ok(renameat_with(
+        directory,
+        from,
+        directory,
+        to,
+        RenameFlags::NOREPLACE,
+    )?)
+}
+
+#[cfg(windows)]
+fn rename_noreplace(directory: &Dir, from: &str, to: &str) -> std::io::Result<()> {
+    fn is_relative_component(name: &str) -> bool {
+        let mut components = Path::new(name).components();
+        matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
+    }
+
+    if !is_relative_component(from) || !is_relative_component(to) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "atomic rename names must each be one relative path component",
+        ));
+    }
+
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .follow(FollowSymlinks::No)
+        .access_mode(DELETE | FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+    let source = directory.open_with(from, &options)?;
+
+    let target = OsStr::new(to).encode_wide().collect::<Vec<_>>();
+    let target_bytes = target
+        .len()
+        .checked_mul(std::mem::size_of::<u16>())
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "rename target too long")
+        })?;
+    let information_bytes = std::mem::offset_of!(FILE_RENAME_INFO, FileName)
+        .checked_add(target_bytes)
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "rename target too long")
+        })?;
+    let information_size = u32::try_from(information_bytes).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "rename target too long")
+    })?;
+    let slots = information_bytes.div_ceil(std::mem::size_of::<FILE_RENAME_INFO>());
+    let mut information = vec![FILE_RENAME_INFO::default(); slots];
+    let information_ptr = information.as_mut_ptr();
+
+    // SAFETY: `information` is aligned for FILE_RENAME_INFO and has at least
+    // `information_bytes` initialized bytes. The target UTF-16 slice is copied
+    // into the structure's documented flexible trailing array. Both handles
+    // stay alive for the call, and SetFileInformationByHandle only borrows the
+    // buffer for its duration.
+    let renamed = unsafe {
+        (*information_ptr).Anonymous.ReplaceIfExists = false;
+        (*information_ptr).RootDirectory = directory.as_raw_handle();
+        (*information_ptr).FileNameLength = target_bytes as u32;
+        std::ptr::copy_nonoverlapping(
+            target.as_ptr(),
+            std::ptr::addr_of_mut!((*information_ptr).FileName).cast::<u16>(),
+            target.len(),
+        );
+        SetFileInformationByHandle(
+            source.as_raw_handle(),
+            FileRenameInfo,
+            information_ptr.cast(),
+            information_size,
+        )
+    };
+    if renamed == 0 {
+        let error = std::io::Error::last_os_error();
+        if matches!(
+            error.raw_os_error(),
+            Some(code) if code == ERROR_ALREADY_EXISTS as i32 || code == ERROR_FILE_EXISTS as i32
+        ) {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                error,
+            ))
+        } else {
+            Err(error)
+        }
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(all(
+    unix,
+    not(any(
+        target_vendor = "apple",
+        target_os = "linux",
+        target_os = "android",
+        target_os = "redox"
+    ))
+))]
+fn rename_noreplace(_directory: &Dir, _from: &str, _to: &str) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "this Unix target has no audited atomic no-replace rename backend",
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn rename_noreplace(_directory: &Dir, _from: &str, _to: &str) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "this target has no audited atomic no-replace rename backend",
+    ))
+}
+
+#[cfg(unix)]
 fn sync_directory(directory: &Dir) -> Result<(), String> {
     directory
         .try_clone()
@@ -1452,40 +1726,138 @@ fn sync_directory(directory: &Dir) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-fn write_atomic_at(
-    directory: &Dir,
-    name: &str,
-    bytes: &[u8],
-    expected: Option<&ManagedFileSnapshot>,
-) -> Result<(), String> {
-    let mut attempts = 0;
-    let (temporary, mut file) = loop {
-        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let temporary = format!(".{name}.tmp-{}-{sequence}", std::process::id());
+#[cfg(not(unix))]
+fn sync_directory(_directory: &Dir) -> Result<(), String> {
+    // Windows does not support FlushFileBuffers on cap-std's read-only
+    // directory handles. Every prepared file is synced before the namespace
+    // operation; the supported best-effort directory barrier is therefore a
+    // non-failing no-op rather than an invalid read-only-directory flush.
+    Ok(())
+}
+
+fn unique_internal_name(label: &str) -> String {
+    format!(".memphant-{label}-{}", Uuid::new_v4())
+}
+
+fn prepare_file(directory: &Dir, bytes: &[u8]) -> Result<(String, FileIdentity), String> {
+    for _ in 0..32 {
+        let temporary = unique_internal_name("prepared");
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         options.follow(FollowSymlinks::No);
         match directory.open_with(&temporary, &options) {
-            Ok(file) => break (temporary, file),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempts < 32 => {
-                attempts += 1;
+            Ok(mut file) => {
+                file.write_all(bytes).map_err(|error| error.to_string())?;
+                file.sync_all().map_err(|error| error.to_string())?;
+                let metadata = file.metadata().map_err(|error| error.to_string())?;
+                return Ok((temporary, metadata_identity(&metadata)));
             }
-            Err(error) => return Err(format!("cannot create temporary file: {error}")),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("cannot create prepared file: {error}")),
         }
-    };
-    let result = (|| {
-        file.write_all(bytes).map_err(|error| error.to_string())?;
-        file.sync_all().map_err(|error| error.to_string())?;
-        require_managed_file(directory, name, expected)?;
-        directory
-            .rename(&temporary, directory, name)
-            .map_err(|error| error.to_string())?;
-        sync_directory(directory)
-    })();
-    if result.is_err() {
-        let _ = directory.remove_file(&temporary);
     }
-    result.map_err(|error| format!("cannot replace {name}: {error}"))
+    Err("cannot allocate unique prepared file".to_string())
+}
+
+fn detach_managed_file(directory: &Dir, name: &str) -> Result<String, String> {
+    for _ in 0..32 {
+        let backup = unique_internal_name("backup");
+        match rename_noreplace(directory, name, &backup) {
+            Ok(()) => {
+                sync_directory(directory)?;
+                return Ok(backup);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("cannot detach {name}: {error}")),
+        }
+    }
+    Err(format!("cannot allocate unique backup for {name}"))
+}
+
+fn restore_detached_file(directory: &Dir, backup: &str, name: &str) -> String {
+    match rename_noreplace(directory, backup, name) {
+        Ok(()) => match sync_directory(directory) {
+            Ok(()) => "validated name restored without replacement".to_string(),
+            Err(error) => format!("validated name restored but directory sync failed: {error}"),
+        },
+        Err(error) => format!("recoverable backup retained as {backup}: {error}"),
+    }
+}
+
+fn replace_managed_file(
+    directory: &Dir,
+    name: &str,
+    bytes: &[u8],
+    expected: Option<&ManagedFileSnapshot>,
+    hook: &mut impl FnMut(&str),
+) -> Result<(), String> {
+    let (prepared, prepared_identity) = prepare_file(directory, bytes)?;
+    let backup = if let Some(expected) = expected {
+        let backup = detach_managed_file(directory, name)?;
+        hook(&format!("write:{name}:detached"));
+        if let Err(error) = validate_detached_file(directory, &backup, name, expected) {
+            let recovery = restore_detached_file(directory, &backup, name);
+            let _ = directory.remove_file(&prepared);
+            return Err(format!("cannot replace {name}: {error}; {recovery}"));
+        }
+        Some(backup)
+    } else {
+        hook(&format!("write:{name}:detached"));
+        None
+    };
+
+    if let Err(error) = rename_noreplace(directory, &prepared, name) {
+        let recovery = backup
+            .as_deref()
+            .map(|backup| restore_detached_file(directory, backup, name))
+            .unwrap_or_else(|| "prepared file was never installed".to_string());
+        let _ = directory.remove_file(&prepared);
+        return Err(format!(
+            "cannot install prepared {name} without replacement: {error}; {recovery}"
+        ));
+    }
+    sync_directory(directory)?;
+
+    let installed = managed_identity_at(directory, name)?;
+    if installed != Some(prepared_identity) {
+        return Err(format!(
+            "installed {name} changed before settlement; {}",
+            backup
+                .as_deref()
+                .map(|backup| format!("recoverable backup retained as {backup}"))
+                .unwrap_or_else(|| "no prior file existed".to_string())
+        ));
+    }
+    if let Some(backup) = backup {
+        directory
+            .remove_file(&backup)
+            .map_err(|error| format!("cannot remove settled backup {backup}: {error}"))?;
+        sync_directory(directory)?;
+    }
+    Ok(())
+}
+
+fn delete_managed_file(
+    directory: &Dir,
+    name: &str,
+    expected: &ManagedFileSnapshot,
+    hook: &mut impl FnMut(&str),
+) -> Result<(), String> {
+    let backup = detach_managed_file(directory, name)?;
+    hook(&format!("delete:{name}:detached"));
+    if let Err(error) = validate_detached_file(directory, &backup, name, expected) {
+        let recovery = restore_detached_file(directory, &backup, name);
+        return Err(format!("cannot delete {name}: {error}; {recovery}"));
+    }
+    if managed_identity_at(directory, name)?.is_some() {
+        return Err(format!(
+            "{name} reappeared after detach; concurrent path left untouched and recoverable backup retained as {backup}"
+        ));
+    }
+    directory
+        .remove_file(&backup)
+        .map_err(|error| format!("cannot remove detached {name} backup {backup}: {error}"))?;
+    sync_directory(directory)
 }
 
 fn collect_name_mismatches(
@@ -1710,6 +2082,99 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_noreplace_backend_preserves_an_existing_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("source"), "source").unwrap();
+        std::fs::write(directory.path().join("destination"), "destination").unwrap();
+        std::fs::create_dir(directory.path().join("source-directory")).unwrap();
+        std::fs::write(
+            directory.path().join("source-directory").join("source"),
+            "source",
+        )
+        .unwrap();
+        std::fs::create_dir(directory.path().join("destination-directory")).unwrap();
+        std::fs::write(
+            directory
+                .path()
+                .join("destination-directory")
+                .join("destination"),
+            "destination",
+        )
+        .unwrap();
+        let capability =
+            cap_std::fs::Dir::open_ambient_dir(directory.path(), cap_std::ambient_authority())
+                .unwrap();
+
+        let file_error = super::rename_noreplace(&capability, "source", "destination").unwrap_err();
+        let directory_error =
+            super::rename_noreplace(&capability, "source-directory", "destination-directory")
+                .unwrap_err();
+
+        assert_eq!(file_error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(directory_error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("source")).unwrap(),
+            "source"
+        );
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("destination")).unwrap(),
+            "destination"
+        );
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("source-directory").join("source"))
+                .unwrap(),
+            "source"
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                directory
+                    .path()
+                    .join("destination-directory")
+                    .join("destination")
+            )
+            .unwrap(),
+            "destination"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_noreplace_backend_moves_files_and_directories() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("source-file"), "source").unwrap();
+        std::fs::create_dir(directory.path().join("source-directory")).unwrap();
+        std::fs::write(
+            directory.path().join("source-directory").join("sentinel"),
+            "sentinel",
+        )
+        .unwrap();
+        let capability =
+            cap_std::fs::Dir::open_ambient_dir(directory.path(), cap_std::ambient_authority())
+                .unwrap();
+
+        super::rename_noreplace(&capability, "source-file", "destination-file").unwrap();
+        super::rename_noreplace(&capability, "source-directory", "destination-directory").unwrap();
+
+        assert!(!directory.path().join("source-file").exists());
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("destination-file")).unwrap(),
+            "source"
+        );
+        assert!(!directory.path().join("source-directory").exists());
+        assert_eq!(
+            std::fs::read_to_string(
+                directory
+                    .path()
+                    .join("destination-directory")
+                    .join("sentinel")
+            )
+            .unwrap(),
+            "sentinel"
+        );
+    }
+
     #[test]
     fn compile_refuses_a_managed_file_replaced_during_writes() {
         let directory = tempfile::tempdir().unwrap();
@@ -1733,10 +2198,100 @@ mod tests {
         });
 
         let error = result.unwrap_err();
-        assert!(error.contains("changed after validation"), "{error}");
+        assert!(error.contains("detached file differs"), "{error}");
         assert_eq!(
             std::fs::read_to_string(victim).unwrap(),
             "concurrent sentinel"
+        );
+    }
+
+    #[test]
+    fn compile_never_opens_an_absent_root_after_creating_its_name() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("memory");
+        let displaced = directory.path().join("displaced-memory");
+        let absent = inspect_output(&output).unwrap();
+        let rendered = rendered_projection(&[(1, "alpha")]);
+        let result = replace_projection_with_hook(&output, &absent, &rendered, |point| {
+            if point == "absent:before_install" {
+                if output.exists() {
+                    std::fs::rename(&output, &displaced).unwrap();
+                }
+                std::fs::create_dir(&output).unwrap();
+                std::fs::write(output.join("sentinel"), "concurrent root").unwrap();
+            }
+        });
+
+        assert!(result.is_err(), "concurrent root was accepted");
+        assert_eq!(
+            super::directory_names(
+                &cap_std::fs::Dir::open_ambient_dir(&output, cap_std::ambient_authority()).unwrap()
+            )
+            .unwrap(),
+            ["sentinel"]
+        );
+        assert_eq!(
+            std::fs::read_to_string(output.join("sentinel")).unwrap(),
+            "concurrent root"
+        );
+        let staging = find_internal(directory.path(), ".memphant-stage-");
+        assert!(super::verify_export(&staging).is_ok());
+    }
+
+    #[test]
+    fn compile_atomically_installs_a_nested_absent_projection() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("missing/parents/memory");
+        let absent = inspect_output(&output).unwrap();
+        let rendered = rendered_projection(&[(1, "nested projection")]);
+
+        replace_projection(&output, &absent, &rendered).unwrap();
+
+        assert!(super::verify_export(&output).is_ok());
+        assert!(std::fs::read_dir(directory.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".memphant-stage-")
+        }));
+    }
+
+    #[test]
+    fn compile_does_not_overwrite_a_target_changed_after_the_old_check() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("memory");
+        let initial = rendered_projection(&[(1, "alpha before")]);
+        let absent = inspect_output(&output).unwrap();
+        replace_projection(&output, &absent, &initial).unwrap();
+        let existing = inspect_output(&output).unwrap();
+        let replacement = rendered_projection(&[(1, "alpha after")]);
+        let unit_path = replacement.units.keys().next().unwrap().clone();
+        let unit_name = std::path::Path::new(&unit_path)
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let victim = output.join(&unit_path);
+        let event = format!("write:{unit_name}:detached");
+
+        let result = replace_projection_with_hook(&output, &existing, &replacement, |point| {
+            if point == event {
+                std::fs::write(&victim, "compare-use sentinel").unwrap();
+            }
+        });
+
+        assert!(result.is_err(), "compare/use replacement was accepted");
+        assert_eq!(
+            std::fs::read_to_string(victim).unwrap(),
+            "compare-use sentinel"
+        );
+        let backup = find_internal(&output.join(super::UNITS_DIR), ".memphant-backup-");
+        assert!(
+            std::fs::read_to_string(backup)
+                .unwrap()
+                .contains("alpha before")
         );
     }
 
@@ -1762,11 +2317,45 @@ mod tests {
         });
 
         let error = result.unwrap_err();
-        assert!(error.contains("changed after validation"), "{error}");
+        assert!(error.contains("detached file differs"), "{error}");
         assert_eq!(
             std::fs::read_to_string(victim).unwrap(),
             "concurrent stale sentinel"
         );
+    }
+
+    #[test]
+    fn compile_does_not_delete_a_target_changed_after_the_old_check() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("memory");
+        let initial = rendered_projection(&[(1, "alpha"), (2, "beta")]);
+        let absent = inspect_output(&output).unwrap();
+        replace_projection(&output, &absent, &initial).unwrap();
+        let existing = inspect_output(&output).unwrap();
+        let replacement = rendered_projection(&[(1, "alpha")]);
+        let stale_path = initial.units.keys().nth(1).unwrap().clone();
+        let stale_name = std::path::Path::new(&stale_path)
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let victim = output.join(&stale_path);
+        let event = format!("delete:{stale_name}:detached");
+
+        let result = replace_projection_with_hook(&output, &existing, &replacement, |point| {
+            if point == event {
+                std::fs::write(&victim, "delete-use sentinel").unwrap();
+            }
+        });
+
+        assert!(result.is_err(), "compare/use deletion was accepted");
+        assert_eq!(
+            std::fs::read_to_string(victim).unwrap(),
+            "delete-use sentinel"
+        );
+        let backup = find_internal(&output.join(super::UNITS_DIR), ".memphant-backup-");
+        assert!(std::fs::read_to_string(backup).unwrap().contains("beta"));
     }
 
     #[test]
@@ -1797,6 +2386,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn compile_requires_a_stable_second_sweep_before_success() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("memory");
+        let initial = rendered_projection(&[(1, "alpha before")]);
+        let absent = inspect_output(&output).unwrap();
+        replace_projection(&output, &absent, &initial).unwrap();
+        let existing = inspect_output(&output).unwrap();
+        let replacement = rendered_projection(&[(1, "alpha after")]);
+        let unit = output.join(replacement.units.keys().next().unwrap());
+
+        let result = replace_projection_with_hook(&output, &existing, &replacement, |point| {
+            if point == "final:between_sweeps" {
+                std::fs::write(&unit, "between-sweeps sentinel").unwrap();
+            }
+        });
+
+        let error = result.unwrap_err();
+        assert!(error.contains("final stability sweep failed"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(unit).unwrap(),
+            "between-sweeps sentinel"
+        );
+    }
+
+    #[test]
+    fn compile_and_verify_accept_optional_procedural_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("memory");
+        let body = "Run the recovery procedure.";
+        let items = vec![CanonicalProjectionUnit {
+            unit_id: UnitId::from_u128(1),
+            kind: MemoryKind::Procedural,
+            fact_key: Some("procedure:recovery".to_string()),
+            predicate: None,
+            body: body.to_string(),
+            confidence: None,
+            valid_from: None,
+            valid_to: None,
+            body_sha256: sha256(body.as_bytes()),
+        }];
+        let fingerprint = canonical_projection_fingerprint(&items).unwrap();
+        let rendered = render_projection(&CanonicalProjectionResponse {
+            tenant_id: TenantId::new(),
+            subject_id: SubjectId::new(),
+            actor_id: ActorId::new(),
+            scope_id: ScopeId::new(),
+            agent_node_id: AgentNodeId::new(),
+            subject_generation: 0,
+            evaluated_at: "2026-07-23T00:00:00Z".to_string(),
+            items,
+            fingerprint,
+        })
+        .unwrap();
+        let absent = inspect_output(&output).unwrap();
+
+        replace_projection(&output, &absent, &rendered).unwrap();
+
+        assert!(super::verify_export(&output).is_ok());
+    }
+
     fn rendered_projection(items: &[(u128, &str)]) -> super::RenderedProjection {
         let items = items
             .iter()
@@ -1825,5 +2475,19 @@ mod tests {
             fingerprint,
         })
         .unwrap()
+    }
+
+    fn find_internal(directory: &std::path::Path, prefix: &str) -> std::path::PathBuf {
+        let matches = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(prefix))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(matches.len(), 1, "expected one {prefix} artifact");
+        matches.into_iter().next().unwrap()
     }
 }
