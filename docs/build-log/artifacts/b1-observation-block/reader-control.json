@@ -1,0 +1,316 @@
+{
+  "benchmark": "longmemeval_reader_qa",
+  "engine": "codex",
+  "reader": "gpt-5.6-sol (codex exec headless (read-only sandbox, final message only))",
+  "judge": "gpt-5.6-sol (canonical task-specific LongMemEval prompt; answer field only; abstention = abstain true plus answer null)",
+  "reader_model_id": "gpt-5.6-sol",
+  "judge_model_id": "gpt-5.6-sol",
+  "judge_profile": "longmemeval",
+  "prompt_version": 1,
+  "routing": null,
+  "reasoning_effort": "high",
+  "runtime": "postgres",
+  "label": "b1-observation-block-control-n12-codex-sol",
+  "evidence_path": "docs/build-log/artifacts/b1-observation-block/reader-evidence-control.private.jsonl",
+  "retrieval_report": null,
+  "retrieval_report_sha256": null,
+  "command": "scripts/run_reader.py --engine codex --model gpt-5.6-sol --judge-model gpt-5.6-sol --reasoning-effort high --prompt-version 1 --evidence docs/build-log/artifacts/b1-observation-block/reader-evidence-control.private.jsonl --out docs/build-log/artifacts/b1-observation-block/reader-control.json --label b1-observation-block-control-n12-codex-sol --cache-dir docs/build-log/artifacts/b1-observation-block/reader-cache-codex-sol --max-calls 30 --seed 20260713",
+  "generated_at_unix": 1784771682,
+  "expected_n": 12,
+  "source_expected_n": 12,
+  "evaluated_expected_n": 12,
+  "smoke_only": false,
+  "complete": true,
+  "promotion_ineligible": false,
+  "errors": {
+    "reader": 0,
+    "parse": 0,
+    "judge": 0
+  },
+  "evidence_sha256": "2dea49a17be8a91b86a7ce37ace3b08aebd92c57548f43985ae66a6c32b66eb8",
+  "source_evidence_sha256": "2dea49a17be8a91b86a7ce37ace3b08aebd92c57548f43985ae66a6c32b66eb8",
+  "evaluated_evidence_sha256": "2dea49a17be8a91b86a7ce37ace3b08aebd92c57548f43985ae66a6c32b66eb8",
+  "question_set_sha256": "e44fa2ffbc34aee0354bfa2c0eb78203126b5669583971aa4051aa2a528884dd",
+  "evaluator_fingerprint": {
+    "engine": "codex",
+    "reader_model_id": "gpt-5.6-sol",
+    "judge_model_id": "gpt-5.6-sol",
+    "judge_profile": "longmemeval",
+    "fallback_policy": "none_fail_closed",
+    "reasoning_effort": "high",
+    "evaluator_source_sha256": "d8a3d172e8875bd7afa0dbee511a503797f50459eae5deab354bb3dc7634c99e",
+    "source_evidence_sha256": "2dea49a17be8a91b86a7ce37ace3b08aebd92c57548f43985ae66a6c32b66eb8",
+    "retrieval_report_sha256": null,
+    "prompt_version": 1,
+    "active_reader_prompt_sha256": "60a7d7da236692982f9ad7d127bc5fcf358edbd07a5f7eb55ca540dd5b68c7fb",
+    "judge_system_prompt_sha256": "c3d0e432b72e5403f81418091ed404d1a42409a1d02ca5468df91d2f9a3652d3",
+    "prompt_sha256": {
+      "v1": "60a7d7da236692982f9ad7d127bc5fcf358edbd07a5f7eb55ca540dd5b68c7fb",
+      "v2": "eeb2e2c42a4d603f90ef3bd75f380e3d946b047ffb68649c26fdc6136d41ae99",
+      "v3_terse": "97eeeae3e9cffe3485d7fa19db8eeedb6407bbd9c5f3759980c89621786327e1"
+    },
+    "response_contract": {
+      "reader": {
+        "response_format": "prompt_enforced_json",
+        "parser": "strict_json_v1",
+        "decoding": {
+          "provider_defaults": true
+        }
+      },
+      "judge": {
+        "response_format": "prompt_enforced_enum",
+        "parser": "normalized_exact_yes_no_v1",
+        "decoding": {
+          "provider_defaults": true
+        }
+      }
+    },
+    "judge_prompt_sha256": {
+      "single-session-user": "42e567b7f67a9c001e634236078c71f14b5e7661d4e5a8dc7493471cf0ece374",
+      "single-session-assistant": "42e567b7f67a9c001e634236078c71f14b5e7661d4e5a8dc7493471cf0ece374",
+      "multi-session": "42e567b7f67a9c001e634236078c71f14b5e7661d4e5a8dc7493471cf0ece374",
+      "temporal-reasoning": "5c4f15a19a217224fb2c451c3d763919ff6fe1eb2e5a18a2305cf5cf614ec259",
+      "knowledge-update": "58c620e234ed7c670ef1b1bf99055e1633253dce508c0a0918f60511ebb326d0",
+      "single-session-preference": "ba78c2df4509bb1614c6a9c2d406e918dbdf5b4017af04b19aab6ac28adb2220"
+    },
+    "sha256": "cd042f33016eb9b9fc3b0dacccabc71cf83a00a6aef4234aabe8f79e193074cd"
+  },
+  "aborted": null,
+  "fresh_calls": 15,
+  "cached_calls": 0,
+  "overall": {
+    "n": 12,
+    "n_scored": 12,
+    "qa_accuracy": 0.0
+  },
+  "strata": {
+    "knowledge-update": {
+      "n": 2,
+      "n_scored": 2,
+      "qa_accuracy": 0.0
+    },
+    "multi-session": {
+      "n": 3,
+      "n_scored": 3,
+      "qa_accuracy": 0.0
+    },
+    "single-session-assistant": {
+      "n": 1,
+      "n_scored": 1,
+      "qa_accuracy": 0.0
+    },
+    "single-session-preference": {
+      "n": 2,
+      "n_scored": 2,
+      "qa_accuracy": 0.0
+    },
+    "single-session-user": {
+      "n": 3,
+      "n_scored": 3,
+      "qa_accuracy": 0.0
+    },
+    "temporal-reasoning": {
+      "n": 1,
+      "n_scored": 1,
+      "qa_accuracy": 0.0
+    }
+  },
+  "per_question": [
+    {
+      "question_id": "001be529",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "question": "How long did I wait for the decision on my asylum application?",
+      "question_date": "2023/05/30 (Tue) 10:18",
+      "gold_answer": "over a year",
+      "notes": "The evidence contains no asylum application timeline or decision dates.",
+      "answer": null,
+      "abstain": true,
+      "judge_method": "abstention_exact",
+      "correct": false,
+      "reader_error": null,
+      "parse_error": null,
+      "judge_error": null
+    },
+    {
+      "question_id": "0977f2af",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "question": "What new kitchen gadget did I invest in before getting the Air Fryer?",
+      "question_date": "2023/05/31 (Wed) 07:54",
+      "gold_answer": "Instant Pot",
+      "notes": "The evidence only states that the Air Fryer was obtained yesterday; it does not identify any earlier kitchen gadget.",
+      "answer": null,
+      "abstain": true,
+      "judge_method": "abstention_exact",
+      "correct": false,
+      "reader_error": null,
+      "parse_error": null,
+      "judge_error": null
+    },
+    {
+      "question_id": "09ba9854",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "question": "How much will I save by taking the train from the airport to my hotel instead of a taxi?",
+      "question_date": "2023/05/30 (Tue) 11:49",
+      "gold_answer": "$50",
+      "notes": "Taxi is $60; train is $20\u2013$30.",
+      "answer": "About $30\u2013$40",
+      "abstain": false,
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null,
+      "parse_error": null,
+      "judge_error": null
+    },
+    {
+      "question_id": "0a34ad58",
+      "question_type": "single-session-preference",
+      "is_abstention": false,
+      "question": "I\u2019m a bit anxious about getting around Tokyo. Do you have any helpful tips?",
+      "question_date": "2023/05/30 (Tue) 22:40",
+      "gold_answer": "The user would prefer responses that utilize their existing resources, such as their Suica card and TripIt app, to provide personalized tips for navigating Tokyo's public transportation. They might not prefer general tips or recommendations that do not take into account their prior preparations.",
+      "notes": "The evidence contains no information about navigating Tokyo.",
+      "answer": null,
+      "abstain": true,
+      "judge_method": "abstention_exact",
+      "correct": false,
+      "reader_error": null,
+      "parse_error": null,
+      "judge_error": null
+    },
+    {
+      "question_id": "0bc8ad93",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "question": "I mentioned visiting a museum two months ago. Did I visit with a friend or not?",
+      "question_date": "2023/03/11 (Sat) 05:28",
+      "gold_answer": "No, you did not visit with a friend.",
+      "notes": "The Science Museum visit was with a friend who is a chemistry professor.",
+      "answer": "Yes, with a friend.",
+      "abstain": false,
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null,
+      "parse_error": null,
+      "judge_error": null
+    },
+    {
+      "question_id": "184da446",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "question": "How many pages of 'A Short History of Nearly Everything' have I read so far?",
+      "question_date": "2023/06/17 (Sat) 04:02",
+      "gold_answer": "220",
+      "notes": "The evidence mentions pages and other book titles, but not progress in 'A Short History of Nearly Everything'.",
+      "answer": null,
+      "abstain": true,
+      "judge_method": "abstention_exact",
+      "correct": false,
+      "reader_error": null,
+      "parse_error": null,
+      "judge_error": null
+    },
+    {
+      "question_id": "19b5f2b3",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "question": "How long was I in Japan for?",
+      "question_date": "2023/05/30 (Tue) 20:50",
+      "gold_answer": "two weeks",
+      "notes": "The evidence contains no information about a trip to Japan.",
+      "answer": null,
+      "abstain": true,
+      "judge_method": "abstention_exact",
+      "correct": false,
+      "reader_error": null,
+      "parse_error": null,
+      "judge_error": null
+    },
+    {
+      "question_id": "1da05512",
+      "question_type": "single-session-preference",
+      "is_abstention": false,
+      "question": "I'm trying to decide whether to buy a NAS device now or wait. What do you think?",
+      "question_date": "2023/05/30 (Tue) 15:33",
+      "gold_answer": "The user would prefer responses that take into account their current home network storage capacity issues and recent reliance on external hard drives, highlighting the potential benefits of a NAS device in addressing these specific needs. They might not prefer responses that ignore their current storage challenges or fail to consider their recent tech upgrades and priorities. Preferred responses would utilize the user's previous mentions of storage capacity issues and tech investments to inform their decision.",
+      "notes": "The evidence lists NAS selection factors but gives no urgency, budget, or current storage needs.",
+      "answer": null,
+      "abstain": true,
+      "judge_method": "abstention_exact",
+      "correct": false,
+      "reader_error": null,
+      "parse_error": null,
+      "judge_error": null
+    },
+    {
+      "question_id": "1e043500",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "question": "What is the name of the playlist I created on Spotify?",
+      "question_date": "2023/05/30 (Tue) 19:19",
+      "gold_answer": "Summer Vibes",
+      "notes": "The evidence does not mention a Spotify playlist name.",
+      "answer": null,
+      "abstain": true,
+      "judge_method": "abstention_exact",
+      "correct": false,
+      "reader_error": null,
+      "parse_error": null,
+      "judge_error": null
+    },
+    {
+      "question_id": "2ce6a0f2",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "question": "How many different art-related events did I attend in the past month?",
+      "question_date": "2023/03/08 (Wed) 23:27",
+      "gold_answer": 4,
+      "notes": "March 3 lecture and February 10 exhibition.",
+      "answer": "2",
+      "abstain": false,
+      "judge_method": "llm_judge",
+      "correct": false,
+      "reader_error": null,
+      "parse_error": null,
+      "judge_error": null
+    },
+    {
+      "question_id": "58470ed2",
+      "question_type": "single-session-assistant",
+      "is_abstention": false,
+      "question": "I was going through our previous conversation about The Library of Babel, and I wanted to confirm - what did Borges say about the center and circumference of the Library?",
+      "question_date": "2023/05/30 (Tue) 23:56",
+      "gold_answer": "According to Borges, 'The Library is a sphere whose exact center is any one of its hexagons and whose circumference is inaccessible.'",
+      "notes": "The evidence does not mention the Library\u2019s center or circumference.",
+      "answer": null,
+      "abstain": true,
+      "judge_method": "abstention_exact",
+      "correct": false,
+      "reader_error": null,
+      "parse_error": null,
+      "judge_error": null
+    },
+    {
+      "question_id": "61f8c8f8",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "question": "How much faster did I finish the 5K run compared to my previous year's time?",
+      "question_date": "2023/10/01 (Sun) 23:53",
+      "gold_answer": "10 minutes",
+      "notes": "The current 5K time is 35 minutes, but the previous year's time is not provided.",
+      "answer": null,
+      "abstain": true,
+      "judge_method": "abstention_exact",
+      "correct": false,
+      "reader_error": null,
+      "parse_error": null,
+      "judge_error": null
+    }
+  ],
+  "paired_vs_baseline": null,
+  "baseline_validation_error": null,
+  "paired_adjudication_invalid": false,
+  "reader_report_sha256": "eb0d3ee765435cad5a86d8e556677656d801fb52d3575f6fbf8537ab09d42340"
+}

@@ -317,7 +317,16 @@ team verdict). Each item carries an n=12-style falsification gate.
    no read path, no write path. The 1-week estimate must budget for building
    the verb + recall injection + reflect-worker generation swap, not just
    flipping a flag. Gate: n=12 from the displacement/reader failure classes;
-   ≥+2 net flips.
+   ≥+2 net flips. **OUTCOME (2026-07-22): REJECTED / DELETED.** The real
+   packaged Postgres path and strict contracts passed, but the paired n=12
+   reader gate produced 0/12 in both arms (net flips 0; zero evaluator errors)
+   under the same high-reasoning Sol-family reader/judge. The preregistered
+   OpenRouter Sol Pro endpoint was unroutable under strict-schema parameters,
+   so the valid same-engine fallback can reject but cannot promote the lever.
+   Root cause: a 300-token newest-raw-unit prefix mostly repeats one irrelevant
+   session and attacks neither displacement nor adequate-pack reader failure.
+   The implementation and eval flag were deleted; `scope_block` stays dormant.
+   Proof: `docs/build-log/2026-07-22-b1-observation-block.md`.
 2. **B2 — File plane as projection** (experimental P4): extend the dormant
    `compile` CLI; unit-id+hash footers; hash-detected human edits re-ingested
    via admission control. Gate: 4-edit-class round-trip + compile∘sync∘compile

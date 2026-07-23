@@ -1,0 +1,296 @@
+{
+  "benchmark": "longmemeval_retrieval_only",
+  "dataset_path": "docs/build-log/artifacts/b1-observation-block/development-n12.private.json",
+  "dataset_sha256": "c9d283ded7eb516121b076efe9f81b20d9960d2929e03cbe947edc7b719021ed",
+  "dataset_questions": 12,
+  "sample_seed": 20260713,
+  "sample_n": 12,
+  "k": 10,
+  "fusion_algorithm": "weighted-rrf",
+  "fusion_passes": [
+    "exact",
+    "lexical",
+    "semantic",
+    "temporal",
+    "edge",
+    "vector"
+  ],
+  "channel_diagnostics": [
+    {
+      "trace_channel": "edge",
+      "candidate_rows": 0,
+      "queries_with_candidates": 0,
+      "min_score": null,
+      "max_score": null
+    },
+    {
+      "trace_channel": "exact",
+      "candidate_rows": 0,
+      "queries_with_candidates": 0,
+      "min_score": null,
+      "max_score": null
+    },
+    {
+      "trace_channel": "lexical",
+      "candidate_rows": 1110,
+      "queries_with_candidates": 12,
+      "min_score": 0.012820513,
+      "max_score": 0.3194131
+    },
+    {
+      "trace_channel": "temporal",
+      "candidate_rows": 0,
+      "queries_with_candidates": 0,
+      "min_score": null,
+      "max_score": null
+    },
+    {
+      "trace_channel": "vector",
+      "candidate_rows": 555,
+      "queries_with_candidates": 12,
+      "min_score": 0.3023417,
+      "max_score": 0.797122
+    }
+  ],
+  "runtime": "postgres",
+  "retrieval_only": true,
+  "embeddings": "fastembed:bge-small-en-v1.5",
+  "ingestion": "one episode per haystack session, chronological by haystack_dates; turns concatenated as `role: content`; body prefixed with [session <id>] [date <date>]",
+  "reflect": "MemoryService::reflect (worker claim/complete path), synchronous after ingestion",
+  "granularity": "session",
+  "turns_window": 4,
+  "budget_tokens": 8192,
+  "recall_pool_depth": 64,
+  "sibling_gather": false,
+  "session_quota": null,
+  "pack_render_cap": null,
+  "temporal_grounding": false,
+  "fact_extraction": false,
+  "runtime_chunks": true,
+  "embed_model": "small",
+  "embedding_dimensions": 384,
+  "cross_rerank": false,
+  "mode": "fast",
+  "disabled": "rerank",
+  "command": "target/release/memphant-eval bench-lme --database-url postgres://memphant:memphant@localhost:5432/memphant_scratch_96722_1784770754 --data docs/build-log/artifacts/b1-observation-block/development-n12.private.json --sample 12 --seed 20260713 --k 10 --disable rerank --budget-tokens 8192 --pool 64 --embed-model small --observation-block --emit-qa docs/build-log/artifacts/b1-observation-block/reader-evidence-treatment.private.jsonl --out docs/build-log/artifacts/b1-observation-block/treatment-retrieval.json",
+  "generated_at_unix": 1784770868,
+  "overall": {
+    "question_type": "overall",
+    "n": 12,
+    "n_scored": 12,
+    "recall_at_5": 0.5,
+    "recall_at_10": 0.5,
+    "mean_reciprocal_rank": 0.5,
+    "abstention_n": 0,
+    "abstention_correct": 0
+  },
+  "strata": [
+    {
+      "question_type": "knowledge-update",
+      "n": 2,
+      "n_scored": 2,
+      "recall_at_5": 0.5,
+      "recall_at_10": 0.5,
+      "mean_reciprocal_rank": 0.5,
+      "abstention_n": 0,
+      "abstention_correct": 0
+    },
+    {
+      "question_type": "multi-session",
+      "n": 3,
+      "n_scored": 3,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "mean_reciprocal_rank": 1.0,
+      "abstention_n": 0,
+      "abstention_correct": 0
+    },
+    {
+      "question_type": "single-session-assistant",
+      "n": 1,
+      "n_scored": 1,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "mean_reciprocal_rank": 1.0,
+      "abstention_n": 0,
+      "abstention_correct": 0
+    },
+    {
+      "question_type": "single-session-preference",
+      "n": 2,
+      "n_scored": 2,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "mean_reciprocal_rank": 0.0,
+      "abstention_n": 0,
+      "abstention_correct": 0
+    },
+    {
+      "question_type": "single-session-user",
+      "n": 3,
+      "n_scored": 3,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "mean_reciprocal_rank": 0.0,
+      "abstention_n": 0,
+      "abstention_correct": 0
+    },
+    {
+      "question_type": "temporal-reasoning",
+      "n": 1,
+      "n_scored": 1,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "mean_reciprocal_rank": 1.0,
+      "abstention_n": 0,
+      "abstention_correct": 0
+    }
+  ],
+  "per_question": [
+    {
+      "question_id": "001be529",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "hit_at_5": false,
+      "hit_at_10": false,
+      "abstention_correct": null,
+      "first_answer_rank": null,
+      "returned_items": 7,
+      "degraded": false,
+      "ingested_sessions": 51
+    },
+    {
+      "question_id": "0977f2af",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "hit_at_5": true,
+      "hit_at_10": true,
+      "abstention_correct": null,
+      "first_answer_rank": 1,
+      "returned_items": 5,
+      "degraded": false,
+      "ingested_sessions": 44
+    },
+    {
+      "question_id": "09ba9854",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "hit_at_5": true,
+      "hit_at_10": true,
+      "abstention_correct": null,
+      "first_answer_rank": 1,
+      "returned_items": 3,
+      "degraded": false,
+      "ingested_sessions": 44
+    },
+    {
+      "question_id": "0a34ad58",
+      "question_type": "single-session-preference",
+      "is_abstention": false,
+      "hit_at_5": false,
+      "hit_at_10": false,
+      "abstention_correct": null,
+      "first_answer_rank": null,
+      "returned_items": 4,
+      "degraded": false,
+      "ingested_sessions": 42
+    },
+    {
+      "question_id": "0bc8ad93",
+      "question_type": "temporal-reasoning",
+      "is_abstention": false,
+      "hit_at_5": true,
+      "hit_at_10": true,
+      "abstention_correct": null,
+      "first_answer_rank": 1,
+      "returned_items": 4,
+      "degraded": false,
+      "ingested_sessions": 47
+    },
+    {
+      "question_id": "184da446",
+      "question_type": "knowledge-update",
+      "is_abstention": false,
+      "hit_at_5": false,
+      "hit_at_10": false,
+      "abstention_correct": null,
+      "first_answer_rank": null,
+      "returned_items": 3,
+      "degraded": false,
+      "ingested_sessions": 42
+    },
+    {
+      "question_id": "19b5f2b3",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "hit_at_5": false,
+      "hit_at_10": false,
+      "abstention_correct": null,
+      "first_answer_rank": null,
+      "returned_items": 2,
+      "degraded": false,
+      "ingested_sessions": 43
+    },
+    {
+      "question_id": "1da05512",
+      "question_type": "single-session-preference",
+      "is_abstention": false,
+      "hit_at_5": false,
+      "hit_at_10": false,
+      "abstention_correct": null,
+      "first_answer_rank": null,
+      "returned_items": 3,
+      "degraded": false,
+      "ingested_sessions": 47
+    },
+    {
+      "question_id": "1e043500",
+      "question_type": "single-session-user",
+      "is_abstention": false,
+      "hit_at_5": false,
+      "hit_at_10": false,
+      "abstention_correct": null,
+      "first_answer_rank": null,
+      "returned_items": 5,
+      "degraded": false,
+      "ingested_sessions": 50
+    },
+    {
+      "question_id": "2ce6a0f2",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "hit_at_5": true,
+      "hit_at_10": true,
+      "abstention_correct": null,
+      "first_answer_rank": 1,
+      "returned_items": 4,
+      "degraded": false,
+      "ingested_sessions": 47
+    },
+    {
+      "question_id": "58470ed2",
+      "question_type": "single-session-assistant",
+      "is_abstention": false,
+      "hit_at_5": true,
+      "hit_at_10": true,
+      "abstention_correct": null,
+      "first_answer_rank": 1,
+      "returned_items": 8,
+      "degraded": false,
+      "ingested_sessions": 50
+    },
+    {
+      "question_id": "61f8c8f8",
+      "question_type": "multi-session",
+      "is_abstention": false,
+      "hit_at_5": true,
+      "hit_at_10": true,
+      "abstention_correct": null,
+      "first_answer_rank": 1,
+      "returned_items": 8,
+      "degraded": false,
+      "ingested_sessions": 48
+    }
+  ],
+  "paired_vs_baseline": null
+}
