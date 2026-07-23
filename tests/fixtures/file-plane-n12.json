@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "arch-mutation",
+      "family": "architecture",
+      "edit_class": "mutation",
+      "seed_kind": "semantic",
+      "seed_fact_key": "importer:wake-up",
+      "seed_body": "ADR-14 uses a polling loop to wake importer workers.",
+      "edited_body": "ADR-14 uses Postgres LISTEN/NOTIFY to wake importer workers."
+    },
+    {
+      "id": "arch-new-fact",
+      "family": "architecture",
+      "edit_class": "new_fact",
+      "seed_kind": "semantic",
+      "seed_fact_key": "importer:queue",
+      "seed_body": "Importer jobs use a durable Postgres queue.",
+      "edited_fact_key": "importer:claim-order",
+      "edited_body": "Importer workers claim jobs in creation order.",
+      "inbox_name": "claim-order.md"
+    },
+    {
+      "id": "arch-contradiction",
+      "family": "architecture",
+      "edit_class": "contradiction",
+      "seed_kind": "semantic",
+      "seed_fact_key": "importer:transport",
+      "seed_body": "Importer notifications use Redis pub/sub.",
+      "edited_fact_key": "importer:transport",
+      "edited_body": "Importer notifications use Postgres LISTEN/NOTIFY, not Redis.",
+      "inbox_name": "transport-decision.md"
+    },
+    {
+      "id": "compaction-mutation",
+      "family": "compaction",
+      "edit_class": "mutation",
+      "seed_kind": "semantic",
+      "seed_fact_key": "migration:next-step",
+      "seed_body": "The next migration step is editing the schema.",
+      "edited_body": "The next migration step is backfilling the events table."
+    },
+    {
+      "id": "compaction-new-fact",
+      "family": "compaction",
+      "edit_class": "new_fact",
+      "seed_kind": "semantic",
+      "seed_fact_key": "migration:task-state",
+      "seed_body": "The importer v2 migration is active.",
+      "edited_fact_key": "migration:rollback-constraint",
+      "edited_body": "Every importer ALTER ships with a rollback.",
+      "inbox_name": "rollback-constraint.md"
+    },
+    {
+      "id": "compaction-deletion",
+      "family": "compaction",
+      "edit_class": "deletion",
+      "seed_kind": "semantic",
+      "seed_fact_key": "migration:obsolete-step",
+      "seed_body": "The next step is rebuilding the retired v1 index."
+    },
+    {
+      "id": "cross-agent-new-fact",
+      "family": "cross_agent",
+      "edit_class": "new_fact",
+      "seed_kind": "semantic",
+      "seed_fact_key": "client:regenerate",
+      "seed_body": "Run scripts/gen_client.sh and then cargo fmt.",
+      "edited_fact_key": "client:commit-rule",
+      "edited_body": "Commit regenerated client files together.",
+      "inbox_name": "commit-rule.md"
+    },
+    {
+      "id": "cross-agent-deletion",
+      "family": "cross_agent",
+      "edit_class": "deletion",
+      "seed_kind": "procedural",
+      "seed_fact_key": "client:legacy-regenerate",
+      "seed_body": "Hand-edit the generated API client files."
+    },
+    {
+      "id": "cross-agent-contradiction",
+      "family": "cross_agent",
+      "edit_class": "contradiction",
+      "seed_kind": "semantic",
+      "seed_fact_key": "client:format-order",
+      "seed_body": "Commit generated files before running cargo fmt.",
+      "edited_fact_key": "client:format-order",
+      "edited_body": "Run cargo fmt before committing generated files.",
+      "inbox_name": "format-order.md"
+    },
+    {
+      "id": "composite-mutation",
+      "family": "composite",
+      "edit_class": "mutation",
+      "seed_kind": "semantic",
+      "seed_fact_key": "rollout:task-state",
+      "seed_body": "The checkout retry rollout is paused at 25 percent.",
+      "edited_body": "The checkout retry rollout is paused at 50 percent."
+    },
+    {
+      "id": "composite-deletion",
+      "family": "composite",
+      "edit_class": "deletion",
+      "seed_kind": "semantic",
+      "seed_fact_key": "rollout:obsolete-constraint",
+      "seed_body": "Resume the rollout when CPU usage is below 80 percent."
+    },
+    {
+      "id": "composite-contradiction",
+      "family": "composite",
+      "edit_class": "contradiction",
+      "seed_kind": "semantic",
+      "seed_fact_key": "rollout:resume-constraint",
+      "seed_body": "Resume the rollout when the error budget reaches 99 percent.",
+      "edited_fact_key": "rollout:resume-constraint",
+      "edited_body": "Resume the rollout only when the error budget exceeds 99.9 percent.",
+      "inbox_name": "resume-constraint.md"
+    }
+  ]
+}
