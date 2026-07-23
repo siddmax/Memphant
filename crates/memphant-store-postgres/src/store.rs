@@ -809,6 +809,33 @@ impl PgStore {
         rows.iter().map(Self::unit_from_row).collect()
     }
 
+    async fn fetch_scope_open_units_tx(
+        tx: &mut Transaction<'static, Postgres>,
+        context: &ResolvedMemoryContext,
+    ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
+        let kinds: Vec<String> = MemoryKind::ALL
+            .into_iter()
+            .filter(|kind| context.allows(*kind, context.scope_id, context.agent_node_id))
+            .map(|kind| enum_str(&kind).to_string())
+            .collect();
+        Self::fetch_units_where(
+            tx,
+            "tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+             and scope_id = $4 and agent_node_id = $5 and kind = any($6)
+             and transaction_to is null",
+            "order by id",
+            vec![
+                Bind::Uuid(context.tenant_id.as_uuid()),
+                Bind::Uuid(context.data_subject_id.as_uuid()),
+                Bind::I64(context.subject_generation as i64),
+                Bind::Uuid(context.scope_id.as_uuid()),
+                Bind::Uuid(context.agent_node_id.as_uuid()),
+                Bind::TextVec(kinds),
+            ],
+        )
+        .await
+    }
+
     /// Deletes composition-derived dependents of the given source units;
     /// returns the ids transitioned.
     async fn delete_composed_dependents(
@@ -2188,27 +2215,14 @@ impl MemoryStore for PgStore {
         // scope ever grows large enough that per-write scans hurt, narrow to the
         // incoming candidates' fact_keys (dedup/supersede only touch those).
         let mut tx = self.tenant_tx(context.tenant_id).await?;
-        let kinds: Vec<String> = MemoryKind::ALL
-            .into_iter()
-            .filter(|kind| context.allows(*kind, context.scope_id, context.agent_node_id))
-            .map(|kind| enum_str(&kind).to_string())
-            .collect();
-        Self::fetch_units_where(
-            &mut tx,
-            "tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
-             and scope_id = $4 and agent_node_id = $5 and kind = any($6)
-             and transaction_to is null",
-            "order by id",
-            vec![
-                Bind::Uuid(context.tenant_id.as_uuid()),
-                Bind::Uuid(context.data_subject_id.as_uuid()),
-                Bind::I64(context.subject_generation as i64),
-                Bind::Uuid(context.scope_id.as_uuid()),
-                Bind::Uuid(context.agent_node_id.as_uuid()),
-                Bind::TextVec(kinds),
-            ],
-        )
-        .await
+        Self::fetch_scope_open_units_tx(&mut tx, context).await
+    }
+
+    async fn fetch_scope_open_units_in_tx(
+        &self,
+        txn: &mut Self::Txn,
+    ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
+        Self::fetch_scope_open_units_tx(&mut txn.tx, &txn.context).await
     }
 
     async fn fetch_vector_candidates(

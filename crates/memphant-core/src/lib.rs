@@ -1137,6 +1137,13 @@ pub trait MemoryStore: Send + Sync {
         &self,
         context: &ResolvedMemoryContext,
     ) -> impl Future<Output = Result<Vec<StoredMemoryUnit>, StoreError>> + Send;
+    /// Transaction-scoped form of the complete open-scope compiler snapshot.
+    /// File sync uses this after its whole-batch serializable claim so every
+    /// admission decision is protected by the same database snapshot.
+    fn fetch_scope_open_units_in_tx(
+        &self,
+        tx: &mut Self::Txn,
+    ) -> impl Future<Output = Result<Vec<StoredMemoryUnit>, StoreError>> + Send;
     /// The recall vector family: the nearest units to `query_vec` under the
     /// ACTIVE embedding profile, each with its cosine DISTANCE (pgvector `<=>`;
     /// the in-memory store returns `1 - cosine`). Core scores the vector
@@ -2726,6 +2733,29 @@ fn in_memory_canonical_projection_units(
     units
 }
 
+fn in_memory_scope_open_units(
+    state: &InMemoryState,
+    context: &ResolvedMemoryContext,
+) -> Vec<StoredMemoryUnit> {
+    let mut units = state
+        .memory_units
+        .get(&context.tenant_id)
+        .into_iter()
+        .flatten()
+        .filter(|unit| {
+            unit.data_subject_id == context.data_subject_id
+                && unit.subject_generation == context.subject_generation
+                && unit.scope_id == context.scope_id
+                && unit.agent_node_id == context.agent_node_id
+                && context.allows(unit.kind, unit.scope_id, unit.agent_node_id)
+                && unit.transaction_to.is_none()
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    units.sort_unstable_by_key(|unit| unit.id.as_uuid());
+    units
+}
+
 impl MemoryStore for InMemoryStore {
     type Txn = InMemoryTxn;
 
@@ -3434,24 +3464,16 @@ impl MemoryStore for InMemoryStore {
     ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
         let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
         state.validate_context(context)?;
-        Ok(state
-            .memory_units
-            .get(&context.tenant_id)
-            .map(|units| {
-                units
-                    .iter()
-                    .filter(|unit| {
-                        unit.data_subject_id == context.data_subject_id
-                            && unit.subject_generation == context.subject_generation
-                            && unit.scope_id == context.scope_id
-                            && unit.agent_node_id == context.agent_node_id
-                            && context.allows(unit.kind, unit.scope_id, unit.agent_node_id)
-                            && unit.transaction_to.is_none()
-                    })
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default())
+        Ok(in_memory_scope_open_units(&state, context))
+    }
+
+    async fn fetch_scope_open_units_in_tx(
+        &self,
+        tx: &mut Self::Txn,
+    ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
+        let context = tx.context.clone();
+        let state = self.staged_state(tx)?;
+        Ok(in_memory_scope_open_units(state, &context))
     }
 
     async fn fetch_vector_candidates(
@@ -9861,7 +9883,6 @@ pub(crate) async fn prepare_compiled_write<S>(
 where
     S: MemoryStore,
 {
-    let now = clock.now_rfc3339();
     // The write compiler dedups/supersedes against the WHOLE open scope — a
     // bounded recall pool would silently miss aged units and let a duplicate
     // subject collide with the open-subject unique index (spec: supersedence is
@@ -9902,7 +9923,35 @@ where
     {
         return Ok(PreparedCompiledWrite::Existing(existing));
     }
-    let mut working = store.fetch_scope_open_units(context).await?;
+    let working = store.fetch_scope_open_units(context).await?;
+    prepare_compiled_write_from_snapshot(input, embedder, clock, context, working).await
+}
+
+/// Runs compiler admission from one caller-owned complete open-scope snapshot.
+/// This function performs no store reads, allowing file sync to source every
+/// mutable admission input from its already-open serializable transaction.
+pub(crate) async fn prepare_compiled_write_from_snapshot(
+    input: ReflectInput,
+    embedder: &dyn EmbeddingProvider,
+    clock: &dyn Clock,
+    context: &ResolvedMemoryContext,
+    mut working: Vec<StoredMemoryUnit>,
+) -> Result<PreparedCompiledWrite, CoreError> {
+    if context.tenant_id != input.tenant_id
+        || context.data_subject_id != input.data_subject_id
+        || context.actor_id != input.actor_id
+        || context.scope_id != input.scope_id
+        || context.agent_node_id != input.agent_node_id
+    {
+        return Err(StoreError::Conflict(
+            "reflect input does not match memory context".to_string(),
+        )
+        .into());
+    }
+    if context.subject_generation != input.subject_generation {
+        return Err(StoreError::Conflict("subject generation is stale".to_string()).into());
+    }
+    let now = clock.now_rfc3339();
     let originals: HashMap<UnitId, (UnitState, Option<String>)> = working
         .iter()
         .map(|unit| (unit.id, (unit.state, unit.transaction_to.clone())))
@@ -9913,7 +9962,12 @@ where
 
     let candidates = input.candidates.clone();
     for candidate in candidates {
-        if candidate.body.split_whitespace().count() < 3 {
+        // Explicit direct/structured facts already carry caller-validated
+        // identity and may legitimately be terse (for example "Busy."). Keep
+        // the historical noise floor only for unkeyed extraction candidates.
+        if candidate.body.trim().is_empty()
+            || (candidate.fact_key.is_none() && candidate.body.split_whitespace().count() < 3)
+        {
             actions.push(AdmissionAction::Reject);
             continue;
         }

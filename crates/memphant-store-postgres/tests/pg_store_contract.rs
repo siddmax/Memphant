@@ -17,7 +17,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use memphant_core::service::MemoryService;
+use memphant_core::service::{MemoryService, file_sync_plan_sha256};
 use memphant_core::{
     FixedClock, JobFilter, MemoryStore, NoopEmbedding, StructuredStateOp, StructuredStateOperation,
     StructuredStateProvider, StructuredStateProviderError, StructuredStateProviderIdentity,
@@ -27,13 +27,14 @@ use memphant_core::{
 use memphant_store_postgres::PgStore;
 use memphant_store_testkit::StoreHarness;
 use memphant_types::{
-    ContextBindingAccessPolicy, ContextBindingAgentRef, ContextBindingEntityRef,
-    ContextBindingRequest, ContextBindingScopeRef, FileSyncOperation, FileSyncRequest, JobId,
-    MarkOutcome, MemoryKind, NewMemoryUnit, RecallHttpRequest, RecallMode, RecallRequest,
-    RecallTime, ReflectCandidate, ReflectInput, ReflectJob, ReflectJobKind, ResolvedMemoryContext,
-    RetainEpisodeHttpRequest, RetainEpisodeHttpResponse, RetainEpisodePayload, RetainPayload,
-    RetainRequest, RetainResourceRequest, RetainUnitPayload, ReviewEvent, TenantId, TrustLevel,
-    UnitState,
+    CanonicalProjectionUnit, ContextBindingAccessPolicy, ContextBindingAgentRef,
+    ContextBindingEntityRef, ContextBindingRequest, ContextBindingScopeRef, FileSyncOperation,
+    FileSyncOperationResult, FileSyncRequest, FileSyncResult, FileSyncUnitMetadata, JobId,
+    MarkOutcome, MemoryEdgeKind, MemoryKind, NewMemoryUnit, RecallHttpRequest, RecallMode,
+    RecallRequest, RecallTime, ReflectCandidate, ReflectInput, ReflectJob, ReflectJobKind,
+    ResolvedMemoryContext, RetainEpisodeHttpRequest, RetainEpisodeHttpResponse,
+    RetainEpisodePayload, RetainPayload, RetainRequest, RetainResourceRequest, RetainUnitPayload,
+    ReviewEvent, TenantId, TrustLevel, UnitState,
 };
 use uuid::Uuid;
 
@@ -167,7 +168,6 @@ fn file_sync_request(
     base_fingerprint: String,
     operations: Vec<FileSyncOperation>,
 ) -> FileSyncRequest {
-    use sha2::{Digest, Sha256};
     FileSyncRequest {
         subject_id: context.data_subject_id,
         scope_id: context.scope_id,
@@ -175,12 +175,22 @@ fn file_sync_request(
         agent_node_id: context.agent_node_id,
         subject_generation: context.subject_generation,
         base_fingerprint,
-        plan_sha256: format!(
-            "{:x}",
-            Sha256::digest(serde_json::to_vec(&operations).unwrap())
-        ),
+        plan_sha256: file_sync_plan_sha256(&operations).unwrap(),
         observed_at: CLOCK.0.to_string(),
         operations,
+    }
+}
+
+fn file_sync_metadata(unit: &CanonicalProjectionUnit) -> FileSyncUnitMetadata {
+    FileSyncUnitMetadata {
+        unit_id: unit.unit_id,
+        kind: unit.kind,
+        fact_key: unit.fact_key.clone(),
+        predicate: unit.predicate.clone(),
+        confidence: unit.confidence,
+        valid_from: unit.valid_from.clone(),
+        valid_to: unit.valid_to.clone(),
+        body_sha256: unit.body_sha256.clone(),
     }
 }
 
@@ -191,12 +201,117 @@ async fn file_sync_is_atomic_rejects_stale_base_and_serializes_concurrent_batche
     let tenant = fresh_tenant(&store).await;
     let context = fresh_memory_context(&store, tenant).await;
     let mut seed = store.begin(&context).await.unwrap();
-    let mut seed_unit = active_projection_unit(&context, "seed file-sync unit");
-    seed_unit.fact_key = Some("profile:seed-file-sync".to_string());
-    store.stage_memory_unit(&mut seed, seed_unit).await.unwrap();
+    let mut city = active_projection_unit(&context, "I live in Oslo.");
+    city.fact_key = Some("profile:city".to_string());
+    let city_id = store.stage_memory_unit(&mut seed, city).await.unwrap();
+    let mut status = active_projection_unit(&context, "Free.");
+    status.fact_key = Some("profile:status".to_string());
+    let status_id = store.stage_memory_unit(&mut seed, status).await.unwrap();
+    let mut pet = active_projection_unit(&context, "I have a cat.");
+    pet.fact_key = Some("profile:pet".to_string());
+    let pet_id = store.stage_memory_unit(&mut seed, pet).await.unwrap();
     store.commit(seed).await.unwrap();
     let service = service(store.clone());
     let base = service.canonical_projection(&context).await.unwrap();
+    let city_metadata = file_sync_metadata(
+        base.items
+            .iter()
+            .find(|unit| unit.unit_id == city_id)
+            .unwrap(),
+    );
+    let pet_metadata = file_sync_metadata(
+        base.items
+            .iter()
+            .find(|unit| unit.unit_id == pet_id)
+            .unwrap(),
+    );
+    let mixed = file_sync_request(
+        &context,
+        base.fingerprint,
+        vec![
+            FileSyncOperation::Correct {
+                base: city_metadata,
+                body: "I live in Lima.".to_string(),
+            },
+            FileSyncOperation::Retain {
+                fact_key: "profile:status".to_string(),
+                predicate: "states".to_string(),
+                body: "Busy.".to_string(),
+                confidence: 1.0,
+                valid_from: None,
+                valid_to: None,
+            },
+            FileSyncOperation::Forget { base: pet_metadata },
+        ],
+    );
+    let first = service
+        .file_sync(&context, "pg-file-sync-mixed", mixed.clone())
+        .await
+        .expect("mixed file-sync batch");
+    let replay = service
+        .file_sync(&context, "pg-file-sync-mixed", mixed)
+        .await
+        .expect("exact file-sync replay");
+    assert_eq!(first.body(), replay.body());
+    let receipt: FileSyncResult = serde_json::from_slice(first.body()).unwrap();
+    let [
+        FileSyncOperationResult::Correct {
+            memory_unit_id: corrected,
+            created: corrected_ids,
+        },
+        FileSyncOperationResult::Retain {
+            created: retained_ids,
+        },
+        FileSyncOperationResult::Forget {
+            memory_unit_id: forgotten,
+            ..
+        },
+    ] = &receipt.operations[..]
+    else {
+        panic!("mixed receipt must preserve operation order and kinds");
+    };
+    assert_eq!(*corrected, city_id);
+    assert_eq!(*forgotten, pet_id);
+    assert!(!corrected_ids.is_empty());
+    assert!(!retained_ids.is_empty());
+    let after_mixed = service.canonical_projection(&context).await.unwrap();
+    assert_eq!(after_mixed.fingerprint, receipt.fingerprint);
+    let bodies = after_mixed
+        .items
+        .iter()
+        .map(|unit| unit.body.as_str())
+        .collect::<Vec<_>>();
+    assert!(bodies.contains(&"Busy."));
+    assert!(bodies.contains(&"I live in Lima."));
+    assert!(!bodies.contains(&"I have a cat."));
+    let status_replacement_id = after_mixed
+        .items
+        .iter()
+        .find(|unit| unit.fact_key.as_deref() == Some("profile:status"))
+        .expect("current retained status")
+        .unit_id;
+    assert!(retained_ids.contains(&status_replacement_id));
+    let edge_time = RecallTime {
+        evaluated_at: CLOCK.0.to_string(),
+        transaction_as_of: CLOCK.0.to_string(),
+        valid_at: CLOCK.0.to_string(),
+    };
+    let edges = store
+        .fetch_edges(&context, &[status_replacement_id], &edge_time)
+        .await
+        .expect("native contradiction edges");
+    assert!(edges.iter().any(|edge| {
+        edge.kind == MemoryEdgeKind::Contradicts
+            && edge.src_id == status_id
+            && edge.dst_id == status_replacement_id
+    }));
+    assert!(edges.iter().any(|edge| {
+        edge.kind == MemoryEdgeKind::Supersedes
+            && edge.src_id == status_replacement_id
+            && edge.dst_id == status_id
+    }));
+
+    let base = after_mixed;
     sqlx::query(
         "create function memphant.test_file_sync_fail_op_n() returns trigger language plpgsql as $$
          begin

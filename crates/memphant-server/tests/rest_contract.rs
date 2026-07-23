@@ -1,7 +1,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use memphant_core::service::MemoryService;
+use memphant_core::service::{MemoryService, file_sync_plan_sha256};
 use memphant_core::{
     FixedClock, InMemoryStore, MemoryStore, NoopEmbedding,
     service::MAX_CANONICAL_PROJECTION_ENCODED_BYTES,
@@ -51,7 +51,6 @@ fn file_sync_request(
     base_fingerprint: String,
     operations: Vec<FileSyncOperation>,
 ) -> FileSyncRequest {
-    use sha2::{Digest, Sha256};
     FileSyncRequest {
         subject_id: binding.subject_id,
         scope_id: binding.scope_id,
@@ -59,10 +58,7 @@ fn file_sync_request(
         agent_node_id: binding.agent_node_id,
         subject_generation: binding.subject_generation,
         base_fingerprint,
-        plan_sha256: format!(
-            "{:x}",
-            Sha256::digest(serde_json::to_vec(&operations).unwrap())
-        ),
+        plan_sha256: file_sync_plan_sha256(&operations).unwrap(),
         observed_at: REST_TEST_CLOCK.0.to_string(),
         operations,
     }

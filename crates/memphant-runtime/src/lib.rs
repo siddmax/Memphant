@@ -729,6 +729,17 @@ impl MemoryStore for AnyStore {
         delegate!(self, store => store.fetch_scope_open_units(context).await)
     }
 
+    async fn fetch_scope_open_units_in_tx(
+        &self,
+        tx: &mut Self::Txn,
+    ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
+        match (self, tx) {
+            (Self::Mem(store), AnyTxn::Mem(tx)) => store.fetch_scope_open_units_in_tx(tx).await,
+            (Self::Pg(store), AnyTxn::Pg(tx)) => store.fetch_scope_open_units_in_tx(tx).await,
+            _ => txn_mismatch(),
+        }
+    }
+
     async fn fetch_vector_candidates(
         &self,
         context: &ResolvedMemoryContext,

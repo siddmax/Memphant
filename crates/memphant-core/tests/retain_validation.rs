@@ -3,8 +3,8 @@ use std::sync::Arc;
 use memphant_core::service::MemoryService;
 use memphant_core::{FixedClock, InMemoryStore, NoopEmbedding};
 use memphant_types::{
-    MemoryKind, ResolvedMemoryContext, RetainEpisodeHttpRequest, RetainPayload, RetainUnitPayload,
-    TenantId, TrustLevel,
+    MemoryKind, ResolvedMemoryContext, RetainEpisodeHttpRequest, RetainEpisodeHttpResponse,
+    RetainPayload, RetainUnitPayload, TenantId, TrustLevel,
 };
 
 const CLOCK: FixedClock = FixedClock("2030-01-01T00:00:00Z");
@@ -60,6 +60,27 @@ async fn retain_rejects_invalid_provenance_confidence_and_valid_time() {
     assert_eq!(stored.confidence, Some(0.9));
     assert_eq!(stored.predicate.as_deref(), Some("lives_in"));
 
+    let mut short = base.clone();
+    short.source_ref = "short-direct-unit".to_string();
+    let RetainPayload::Unit(unit) = &mut short.payload else {
+        unreachable!()
+    };
+    unit.fact_key = "profile:greeting".to_string();
+    unit.predicate = "states".to_string();
+    unit.body = "Hi.".to_string();
+    let short_response = service
+        .retain(
+            &context,
+            "valid-short-direct-unit",
+            TrustLevel::TrustedUser,
+            short,
+        )
+        .await
+        .expect("short explicit direct unit must be admitted");
+    let short_result: RetainEpisodeHttpResponse =
+        serde_json::from_slice(short_response.body()).unwrap();
+    assert_eq!(short_result.unit_ids.len(), 1);
+
     let mut cases = Vec::new();
 
     let mut request = base.clone();
@@ -94,6 +115,12 @@ async fn retain_rejects_invalid_provenance_confidence_and_valid_time() {
         request,
         "invalid request: unit retain requires an explicit fact_key and predicate",
     ));
+    let mut request = base.clone();
+    let RetainPayload::Unit(unit) = &mut request.payload else {
+        unreachable!()
+    };
+    unit.body = "  ".to_string();
+    cases.push((request, "retain body cannot be empty"));
     let mut request = base.clone();
     let RetainPayload::Unit(unit) = &mut request.payload else {
         unreachable!()

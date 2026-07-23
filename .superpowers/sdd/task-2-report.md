@@ -97,3 +97,67 @@ Postgres contract and all focused gates above are green. Private spec mirroring
 was unavailable at the recorded path, so drift was skipped rather than passed.
 The unrelated `.superpowers/sdd/progress.md` modification remains preserved and
 unstaged.
+
+## Review follow-up: replay ordering and protected admission snapshot
+
+### Red proof
+
+The review regressions were added before their seams existed. Running
+`cargo test -p memphant-core file_sync -- --nocapture` failed to compile on the
+three missing structural contracts: `prepare_compiled_write_from_snapshot`,
+`MemoryStore::fetch_scope_open_units_in_tx`, and
+`file_sync_plan_sha256`. The replay regression uses a one-shot embedder whose
+second call fails, so the former prepare-before-claim ordering would also fail
+an exact replay instead of returning its stored receipt.
+
+### Root-cause fixes
+
+- File sync now opens its serializable transaction and claims the whole batch
+  before any compiler or embedding work. A committed replay returns immediately;
+  an executing request checks the in-transaction base and immutable metadata
+  before preparation. Stale bases likewise perform no provider work.
+- Added a mandatory transaction-scoped full-open-scope read to every store
+  implementation. The compiler now has one shared snapshot-driven admission
+  helper: existing native paths fetch their current full scope then delegate,
+  while file sync supplies the snapshot read from its serializable transaction.
+  Sequential plan operations see preceding staged changes through that same
+  transaction.
+- Added a concurrency regression with a belief that is open and admission-
+  relevant but intentionally absent from the canonical file projection. The
+  protected transaction snapshot stays stable, while an unprotected live read
+  demonstrably changes the native edge decision; the in-memory serializable
+  commit detects the concurrent context change.
+- Added public `file_sync_plan_sha256`, used by the service and all Task 2 test
+  request builders. Its typed ordered JSON digest is pinned to
+  `7c3fc04bc305ea5a0a54deb5c4f96fbd305d6001cb902c82dbff4a80ffda80d9`
+  for the fixed short-retain fixture.
+- Explicit keyed direct facts now accept any nonblank body, including `Hi.` and
+  `Busy.`. The historical three-word noise floor remains only for unkeyed
+  extraction candidates, preserving the write-compiler golden contract.
+- Expanded the single scratch-Postgres contract to assert a committed mixed
+  correct/short-retain/forget batch, exact replay bytes, native contradicts and
+  supersedes edges, operation-N rollback, stale-base zero writes, and exactly
+  one winner from concurrent same-base batches.
+
+### Follow-up verification
+
+- `cargo test -p memphant-types file_sync -- --nocapture` - 1 passed.
+- `cargo test -p memphant-core` - the full package passed, including 102 library
+  tests and every integration/doc test; no ignored/paid provider lane was run.
+- `cargo test -p memphant-server --test rest_contract file_sync -- --nocapture`
+  - 1 passed.
+- `bash scripts/with_scratch_db.sh postgres://memphant:memphant@localhost:5432/memphant MEMPHANT_TEST_DATABASE_URL cargo test -p memphant-store-postgres --test pg_store_contract file_sync_is_atomic_rejects_stale_base_and_serializes_concurrent_batches -- --ignored --exact --test-threads=1 --nocapture`
+  - 1 passed against a real ephemeral migrated Postgres database; this was not
+  skipped.
+- `python3 scripts/check_memphant_migration_contract.py` - clean.
+- `python3 -m pytest tests/test_wsa_migration_contract.py -q` - 35 passed, 1
+  skipped.
+- `cargo test -p memphant-store-postgres provider_lint -- --nocapture` - 5
+  provider-lint tests passed.
+- Touched-package all-target/all-feature clippy with `-D warnings`,
+  `cargo fmt --check`, and `git diff --check` passed.
+
+The API schema did not change in this follow-up, so the generated OpenAPI file
+was intentionally not regenerated. The prior exact private-spec drift skip and
+non-claim remain unchanged. No paid or network provider calls, Task 3 work,
+push, or deployment were performed.
