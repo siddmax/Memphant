@@ -293,11 +293,15 @@ edits.
 
 ## Acceptance gate
 
-The deterministic n=12 gate uses three instances of each spec-28 coding
-continuity family. Across the 12 bound scopes it applies exactly one of four
-edit classes per scope: body mutation, new fact, deletion, or contradiction.
-It proves the canonical correct/retain/forget/contradiction effects, an empty
-post-apply plan, a byte-identical second compile, and clean verification.
+The deterministic n=12 gate uses three file-edit scenarios themed after each
+spec-28 coding-continuity family. Across the 12 bound scopes it applies exactly
+one of four edit classes per scope: body mutation, new fact, deletion, or
+contradiction. It proves the canonical correct/retain/forget/contradiction
+effects, an empty post-apply plan, a byte-identical second compile, and clean
+verification. It does not exercise the families' later-query/forbidden-text,
+tight-budget, sibling-agent, or episodic-plus-semantic/subquery recall
+predicates; those are covered once each by the separate
+`syndai_trace_compare` fixture suite.
 
 Focused negative contracts cover historical-row exclusion, stale snapshot
 rollback, failure on operation N rolling back operations 1..N-1, tampered
@@ -322,4 +326,6 @@ concurrent stale-base conflict through the standard ephemeral scratch database.
   provenance path.
 - No procedural validation shortcut.
 - No MCP resource exposure (B3).
-- No paid model calls and no change to the P1-T6 campaign.
+- No paid/model calls and no mutation of the immutable `run-65981e4f` root or
+  P1 worktree. The transient local adapter-lock edit is restored, rebased out,
+  and byte-identical to base in the final tree.

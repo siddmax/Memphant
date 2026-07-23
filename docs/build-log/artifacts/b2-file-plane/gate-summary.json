@@ -2,16 +2,17 @@
   "schema_version": 1,
   "gate": "b2_file_plane_round_trip",
   "status": "pass",
-  "tested_commit": "816eeebdeee1e1daf9c44c35cb4cc5c69db42447",
-  "tested_tree": "f5906af494e14cc246bf83f218e4f318a7a2dc36",
+  "repository_gate_status": "unmet",
+  "tested_commit": "4672d364742280f1d066461b53bd9a6bd829bbfa",
+  "tested_tree": "9e7dcfa931208202c5b3385f0eb12a2b3ec141e7",
   "inputs": {
     "fixture": {
       "path": "tests/fixtures/file-plane-n12.json",
-      "sha256": "eec33283f9acd2817471d284a79185eb132eb36072027f560ccbad7db33e9a59"
+      "sha256": "e53f01e7cde720988598594ec8788f269aabfd8f9090410260a4339dd3d7cf81"
     },
     "gate_source": {
       "path": "crates/memphant-cli/tests/file_plane_n12.rs",
-      "sha256": "30a60173f9da4ff6874a489e1dcf9536a9adabe40d01cb89d2e9ef61c88b75b2"
+      "sha256": "89f778c5f2fe9b155c05ce4efc5e8c3b88015296135c6ba12e2add3763ac0a8f"
     },
     "spec_28": {
       "path": "docs/superpowers/specs/memphant/28-syndai-code-contract.md",
@@ -22,18 +23,19 @@
     "scopes": 12,
     "passed": 12,
     "failed": 0,
-    "families": {
-      "architecture": 3,
-      "compaction": 3,
-      "cross_agent": 3,
-      "composite": 3
+    "scenario_themes": {
+      "architecture_decision": 3,
+      "compaction_rehydration": 3,
+      "cross_agent_transfer": 3,
+      "task_plus_semantic_composite": 3
     },
     "edit_classes": {
       "mutation": 3,
       "new_fact": 3,
       "deletion": 3,
       "contradiction": 3
-    }
+    },
+    "claim_boundary": "The n=12 gate proves file edits on continuity-themed scopes, not the recall-specific spec-28 predicates. The separate syndai_trace_compare suite executes each of the four recall fixtures once."
   },
   "assertions": [
     "distinct bound scope and seed unit identities",
@@ -46,7 +48,15 @@
     "empty consumed inbox",
     "empty post-apply sync plan",
     "clean post-apply and fixed-point verification",
-    "byte-identical second compile and stable tree SHA-256"
+    "byte-identical second compile and stable tree SHA-256",
+    "resolved memory-kind policy enforced by canonical projection and retain",
+    "API-key trust ceiling enforced for file-sync retain",
+    "file-sync transition state and edges actor-bound",
+    "memory-unit, episode, and resource forget recursion stops at foreign actor boundaries in both stores",
+    "equivalent UTC metadata canonicalized before projection fingerprinting",
+    "historical bootstrap upgraded by an ordered forward migration",
+    "readiness binds embedded head, database head, and the authoritative recorded compatibility floor under memphant_app",
+    "lock creation documented before projection verification"
   ],
   "verification": [
     {
@@ -56,46 +66,149 @@
       "fixture_cases": 12
     },
     {
-      "command": "cargo test -p memphant-eval --test syndai_trace_compare",
+      "command": "cargo test -p memphant-eval --test syndai_trace_compare -- --nocapture",
       "status": "pass",
-      "passed": 2
+      "passed": 2,
+      "spec_28_fixtures": 4
+    },
+    {
+      "command": "cargo test -p memphant-cli --test help_contract -- --nocapture",
+      "status": "pass",
+      "passed": 3
     },
     {
       "command": "cargo test -p memphant-cli",
       "status": "pass",
-      "passed": 66
+      "passed": 69
+    },
+    {
+      "command": "cargo test -p memphant-server --test auth_contract file_sync_ -- --nocapture",
+      "status": "pass",
+      "passed": 2
+    },
+    {
+      "command": "cargo test -p memphant-core --lib canonical_projection_ -- --nocapture",
+      "status": "pass",
+      "passed": 5
+    },
+    {
+      "command": "cargo test -p memphant-core --lib file_sync_transition_snapshot_is_actor_bound -- --nocapture",
+      "status": "pass",
+      "passed": 1
+    },
+    {
+      "command": "cargo test -p memphant-core --lib file_sync_retain_requires_semantic_policy_and_trusted_direct_provenance -- --nocapture",
+      "status": "pass",
+      "passed": 1
+    },
+    {
+      "command": "cargo test -p memphant-core --lib foreign_actor_bridge -- --nocapture",
+      "status": "pass",
+      "passed": 3,
+      "targets": [
+        "memory_unit",
+        "episode",
+        "resource"
+      ]
+    },
+    {
+      "command": "bash scripts/with_scratch_db.sh postgres://memphant:memphant@localhost:5432/memphant MEMPHANT_TEST_DATABASE_URL cargo test -p memphant-store-postgres --test pg_store_contract file_sync_ -- --ignored --test-threads=1",
+      "status": "pass",
+      "passed": 4
+    },
+    {
+      "command": "bash scripts/with_scratch_db.sh postgres://memphant:memphant@localhost:5432/memphant MEMPHANT_TEST_DATABASE_URL cargo test -p memphant-store-postgres ping_rejects_bootstrap_only_schema_until_required_revision_is_applied -- --ignored --test-threads=1",
+      "status": "pass",
+      "passed": 1,
+      "role": "memphant_app",
+      "states": [
+        "bootstrap_behind_rejected",
+        "current_ready",
+        "future_additive_same_floor_ready",
+        "future_breaking_or_mislabeled_advanced_floor_rejected"
+      ]
+    },
+    {
+      "command": "bash scripts/with_scratch_db.sh postgres://memphant:memphant@localhost:5432/memphant MEMPHANT_TEST_DATABASE_URL python3 -m pytest tests/test_wsa_migration_contract.py::test_live_forward_migration_upgrades_applied_bootstrap_atomically -q",
+      "status": "pass",
+      "passed": 1
     },
     {
       "command": "bash scripts/with_scratch_db.sh postgres://memphant:memphant@localhost:5432/memphant MEMPHANT_TEST_DATABASE_URL cargo test -p memphant-store-postgres -p memphant-worker -- --ignored --test-threads=1",
       "status": "pass",
-      "passed": 73
+      "passed": 77
     },
     {
       "command": "DATABASE_URL=postgres://memphant:memphant@localhost:5432/memphant bash scripts/e2e_probe.sh",
       "status": "pass"
     },
     {
-      "command": "cargo test --all-targets --all-features",
-      "status": "pass",
-      "passed": 666,
-      "ignored": 88
+      "command": "cargo fmt --check",
+      "status": "pass"
     },
     {
-      "command": "python3 -m pytest tests/ -q",
-      "status": "fail",
-      "passed": 696,
-      "failed": 24,
-      "skipped": 10,
-      "classification": "outside B2 product gate; includes frozen campaign OpenAPI hash, stale runner signatures and pins, and missing Playwright"
+      "command": "cargo clippy --all-targets --all-features -- -D warnings",
+      "status": "pass"
+    },
+    {
+      "command": "cargo test --all-targets --all-features -q",
+      "status": "pass",
+      "passed": 678,
+      "ignored": 92
+    },
+    {
+      "command": "cargo test --doc",
+      "status": "pass",
+      "failed": 0
+    },
+    {
+      "command": "cargo run -p memphant-cli -- db lint --provider plain-postgres",
+      "status": "pass"
+    },
+    {
+      "command": "cargo run -p memphant-cli -- db lint --provider supabase",
+      "status": "pass"
+    },
+    {
+      "command": "cargo run -p memphant-cli -- db lint --provider neon",
+      "status": "pass"
+    },
+    {
+      "command": "python3 scripts/apply_memphant_migrations.py --database-url postgres://memphant.invalid/memphant --dry-run",
+      "status": "pass",
+      "planned_migrations": 2
     },
     {
       "command": "python3 scripts/check_spec_drift.py",
       "status": "skipped",
+      "exit_code": 0,
       "reason": "private_specs_missing"
+    },
+    {
+      "command": "python3 -m pytest tests/ spikes/python-retain/test_spike.py -q",
+      "status": "unmet",
+      "exit_code": 4,
+      "reason": "spikes/python-retain/test_spike.py does not exist; collection did not start"
+    },
+    {
+      "command": "python3 -m pytest tests/ -q",
+      "status": "unmet",
+      "passed": 697,
+      "failed": 24,
+      "skipped": 11,
+      "classification": "15 stale r15 runner contracts, 6 stale breadcrumb runner contracts, 1 stale embedder-arm pin, 1 frozen campaign OpenAPI lock assertion, and 1 missing Playwright installation"
     }
   ],
   "frozen_campaign": {
-    "changed": false,
+    "immutable_run_root_touched": false,
+    "p1_worktree_touched": false,
+    "adapter_lock_matches_base_in_final_tree": true,
+    "transient_local_edit_disclosed": true,
+    "transient_commits": [
+      "9485d2fd",
+      "13e8b795"
+    ],
+    "transient_commits_rebased_out": true,
     "expected_openapi_sha256": "a5bac765d7c4c862a342d95b49049c27d3af57aea9f80af6d3a0a489ac055271",
     "current_openapi_sha256": "919b53aea39c3fb2b95129131de627b638e43f8531207e5d6dab589b218c1da9"
   },
@@ -103,9 +216,11 @@
     "no production deployment",
     "no native Windows runtime proof",
     "no multi-file filesystem transaction claim",
-    "no paid model call",
-    "no P1-T6 campaign mutation",
-    "no accuracy, Deep-promotion, or SOTA claim",
+    "no paid or model call",
+    "no immutable campaign-root or P1-worktree mutation",
+    "no accuracy, Deep-promotion, SOTA, or cutover claim",
+    "full Python repository gate is not green",
+    "private spec mirror parity is not proven",
     "no push"
   ]
 }

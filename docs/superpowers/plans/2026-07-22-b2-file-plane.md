@@ -21,7 +21,9 @@ MemPhant store/service and testkit infrastructure.
 ## Global constraints
 
 - Canonical Postgres is the only source of truth; files are a projection.
-- B2 only: no B3/MCP work and no P1-T6 campaign mutation or paid calls.
+- B2 only: no B3/MCP work, paid/model call, immutable `run-65981e4f`
+  mutation, or P1-worktree mutation. A transient local adapter-lock edit was
+  restored and rebased out; the final file must equal base.
 - Remove the pre-production JSON `--source` exporter; add no compatibility shim.
 - Project only current file-visible semantic heads and validated procedures.
 - Reads are complete one-snapshot responses with an explicit byte ceiling; no
@@ -140,9 +142,11 @@ MemPhant store/service and testkit infrastructure.
 - Add: `docs/build-log/artifacts/b2-file-plane/gate-summary.json`
 - Modify: `docs/superpowers/specs/memphant/STATUS.md`
 
-1. Add the 12-scope fixture: three deterministic instances of each spec-28
-   coding-continuity family, evenly assigned to mutation, append, delete, and
-   contradiction edit classes.
+1. Add the 12-scope fixture: three deterministic file-edit scenarios themed
+   after each spec-28 coding-continuity family, evenly assigned to mutation,
+   append, delete, and contradiction edit classes. This gate proves file-plane
+   behavior only; the spec-28 recall predicates stay in the separate
+   `syndai_trace_compare` suite.
 2. Add a failing gate that seeds canonical direct units, compiles every scope,
    applies its edit, asserts the expected correct/retain/forget/contradiction
    store effect, recompiles, checks an empty sync plan and byte-identical second
@@ -163,6 +167,8 @@ MemPhant store/service and testkit infrastructure.
 2. Run an independent whole-branch specification and code-quality review. Fix
    every critical/important finding in one reviewed fix wave.
 3. Re-run fresh full verification after the last code change.
-4. Confirm the B2 worktree is clean, the P1 worktree dirty state is unchanged,
-   no campaign/paid artifacts changed, and no commits were pushed.
+4. Confirm the B2 worktree is clean, the immutable campaign root and P1
+   worktree are untouched, the transient adapter-lock edit is disclosed and
+   absent from the final tree, no paid/model call occurred, and no commits were
+   pushed.
 5. Mark B2 complete and stop. Do not begin B3.
