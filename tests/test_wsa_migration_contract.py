@@ -141,6 +141,7 @@ def test_file_sync_verb_is_forward_migrated_without_rewriting_bootstrap() -> Non
     assert "drop constraint mutation_ledger_verb_check" in forward
     assert "add constraint mutation_ledger_verb_check" in forward
     assert "'file_sync'" in forward
+    assert "grant select on memphant.schema_migrations" in forward
 
 
 def test_subject_owned_roots_are_deleted_by_one_composite_subject_cascade() -> None:

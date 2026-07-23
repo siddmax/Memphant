@@ -25,7 +25,7 @@ use memphant_core::{
     StructuredStateRequest, canonical_mutation_request_hash, derive_fact_key, recall,
     reflect_recorded, retain_episode, retain_resource,
 };
-use memphant_store_postgres::PgStore;
+use memphant_store_postgres::{MIGRATIONS, PgStore};
 use memphant_store_testkit::StoreHarness;
 use memphant_types::{
     CanonicalProjectionUnit, ContextBindingAccessPolicy, ContextBindingAgentRef,
@@ -35,7 +35,7 @@ use memphant_types::{
     RecallMode, RecallRequest, RecallTime, ReflectCandidate, ReflectInput, ReflectJob,
     ReflectJobKind, ResolvedMemoryContext, RetainEpisodeHttpRequest, RetainEpisodeHttpResponse,
     RetainEpisodePayload, RetainPayload, RetainRequest, RetainResourceRequest, RetainUnitPayload,
-    ReviewEvent, TenantId, TrustLevel, UnitState,
+    ReviewEvent, SCHEMA_COMPAT_REVISION, TenantId, TrustLevel, UnitState,
 };
 use uuid::Uuid;
 
@@ -123,6 +123,61 @@ fn db_url() -> String {
 
 async fn connect() -> PgStore {
     PgStore::connect(&db_url()).await.expect("connect PgStore")
+}
+
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn ping_rejects_bootstrap_only_schema_until_required_revision_is_applied() {
+    let database_url = db_url();
+    let pool = sqlx::PgPool::connect(&database_url)
+        .await
+        .expect("connect migration test pool");
+    sqlx::raw_sql("drop schema memphant cascade")
+        .execute(&pool)
+        .await
+        .expect("reset scratch schema");
+    sqlx::raw_sql(MIGRATIONS[0].1)
+        .execute(&pool)
+        .await
+        .expect("apply bootstrap only");
+
+    let store = PgStore::connect(&database_url)
+        .await
+        .expect("connect bootstrap-only store");
+    let error = store
+        .ping()
+        .await
+        .expect_err("bootstrap-only schema must be unready");
+    assert!(
+        error.to_string().contains(SCHEMA_COMPAT_REVISION),
+        "readiness error must name the required schema floor: {error}"
+    );
+
+    sqlx::raw_sql(MIGRATIONS[1].1)
+        .execute(&pool)
+        .await
+        .expect("apply required forward migration");
+    store
+        .ping()
+        .await
+        .expect("current schema revision is ready");
+
+    let mut app_tx = pool.begin().await.expect("begin app-role readiness");
+    sqlx::query("set local role memphant_app")
+        .execute(&mut *app_tx)
+        .await
+        .expect("assume app role");
+    let app_ready: bool = sqlx::query_scalar(
+        "select exists (
+           select 1 from memphant.schema_migrations
+           where version = $1 and schema_compat_revision = $1
+         )",
+    )
+    .bind(SCHEMA_COMPAT_REVISION)
+    .fetch_one(&mut *app_tx)
+    .await
+    .expect("app role can read the compatibility floor");
+    assert!(app_ready);
 }
 
 async fn fresh_tenant(store: &PgStore) -> TenantId {
@@ -820,7 +875,7 @@ async fn canonical_projection_respects_resolved_kind_policy() {
 
 #[tokio::test]
 #[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
-async fn file_sync_transition_snapshot_is_actor_bound() {
+async fn file_sync_transition_snapshot_and_forget_are_actor_bound() {
     let store = connect().await;
     let tenant = fresh_tenant(&store).await;
     let context = fresh_memory_context(&store, tenant).await;
@@ -839,19 +894,28 @@ async fn file_sync_transition_snapshot_is_actor_bound() {
         )
         .await
         .expect("stage future foreign unit");
-    store
-        .stage_memory_edge(
+    let peer_id = store
+        .stage_memory_unit(
             &mut tx,
-            NewMemoryEdge {
-                tenant_id: tenant,
-                scope_id: context.scope_id,
-                src_id: own_id,
-                dst_id: foreign_id,
-                kind: MemoryEdgeKind::SameSubject,
-            },
+            active_projection_unit(&context, "actor-owned-peer"),
         )
         .await
-        .expect("stage cross-actor edge");
+        .expect("stage owned peer");
+    for (src_id, dst_id) in [(own_id, foreign_id), (foreign_id, peer_id)] {
+        store
+            .stage_memory_edge(
+                &mut tx,
+                NewMemoryEdge {
+                    tenant_id: tenant,
+                    scope_id: context.scope_id,
+                    src_id,
+                    dst_id,
+                    kind: MemoryEdgeKind::Supersedes,
+                },
+            )
+            .await
+            .expect("stage supersedes bridge");
+    }
     store.commit(tx).await.expect("commit snapshot seed");
 
     let foreign_actor_id = Uuid::now_v7();
@@ -904,9 +968,54 @@ async fn file_sync_transition_snapshot_is_actor_bound() {
             .iter()
             .map(|unit| unit.id)
             .collect::<Vec<_>>(),
-        vec![own_id]
+        vec![own_id, peer_id]
     );
     assert!(snapshot.edges.is_empty());
+
+    let service = service(store.clone());
+    let projection = service.canonical_projection(&context).await.unwrap();
+    let own = file_sync_metadata(
+        projection
+            .items
+            .iter()
+            .find(|unit| unit.unit_id == own_id)
+            .expect("owned unit in projection"),
+    );
+    service
+        .file_sync(
+            &context,
+            "pg-file-sync-actor-bridge-forget",
+            file_sync_request(
+                &context,
+                projection.fingerprint,
+                vec![FileSyncOperation::Forget { base: own }],
+            ),
+        )
+        .await
+        .expect("actor-bound forget");
+    let after = store
+        .fetch_file_sync_transition_snapshot(&context)
+        .await
+        .expect("post-forget actor-bound snapshot");
+    assert_eq!(
+        after
+            .units
+            .iter()
+            .find(|unit| unit.id == own_id)
+            .unwrap()
+            .state,
+        UnitState::Deleted
+    );
+    assert_eq!(
+        after
+            .units
+            .iter()
+            .find(|unit| unit.id == peer_id)
+            .unwrap()
+            .state,
+        UnitState::Active,
+        "forget must not traverse through a foreign actor's unit"
+    );
 }
 
 #[tokio::test]

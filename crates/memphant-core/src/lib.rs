@@ -1648,8 +1648,8 @@ pub trait MemoryStore: Send + Sync {
         agent_node_id: AgentNodeId,
     ) -> impl Future<Output = Result<ResolvedMemoryContext, StoreError>> + Send;
 
-    /// Backend liveness probe (`select 1` in Postgres; always healthy for the
-    /// in-memory store).
+    /// Backend readiness probe. Postgres verifies the required schema
+    /// compatibility floor; the in-memory store is always ready.
     fn ping(&self) -> impl Future<Output = Result<(), StoreError>> + Send;
     /// Reflect jobs dead-lettered after exhausting their claim attempts.
     fn dead_letter_count(&self) -> impl Future<Output = Result<u64, StoreError>> + Send;

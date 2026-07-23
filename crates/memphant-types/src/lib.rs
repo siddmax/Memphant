@@ -1452,7 +1452,7 @@ pub struct RetainResourceOutcome {
 pub const ENGINE_VERSION: &str = "0.1.0-ws0";
 pub const COMPILER_VERSION: &str = "compiler-0.1.0-ws0";
 pub const TRACE_SCHEMA_VERSION: &str = "trace-0.1.0-ws0";
-pub const SCHEMA_COMPAT_REVISION: &str = "schema-compat-0";
+pub const SCHEMA_COMPAT_REVISION: &str = "20260723_002_file_sync_mutation_verb";
 pub const METHODOLOGY_VERSION: &str = "memphant-methodology-2026-07-03";
 pub const EXPORT_SCHEMA_VERSION: &str = "export-0.1.0-ws0";
 

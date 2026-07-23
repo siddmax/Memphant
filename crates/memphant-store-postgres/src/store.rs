@@ -20,9 +20,9 @@ use memphant_types::{
     DeepSnapshotEntry, DeepSnapshotSourceKind, EdgeId, EpisodeId, ForgetTarget, JobId, MemoryKind,
     NewEpisode, NewMemoryEdge, NewMemoryUnit, NewResource, QueuedReflectJob, RecallTime,
     RecordMaterial, ReflectJob, ReflectJobKind, ReflectTrace, ResolvedMemorySource, ResourceAcl,
-    ResourceId, RetainOutcome, RetrievalTrace, ScopeId, StoredCitation, StoredEpisode,
-    StoredMemoryEdge, StoredMemoryUnit, StoredResource, SubjectId, TenantId, TraceId, TrustLevel,
-    UnitId, agent_level_allows_memory_kind,
+    ResourceId, RetainOutcome, RetrievalTrace, SCHEMA_COMPAT_REVISION, ScopeId, StoredCitation,
+    StoredEpisode, StoredMemoryEdge, StoredMemoryUnit, StoredResource, SubjectId, TenantId,
+    TraceId, TrustLevel, UnitId, agent_level_allows_memory_kind,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -3205,9 +3205,17 @@ impl MemoryStore for PgStore {
                     "with recursive lineage(id) as (
                        values ($2::uuid)
                        union
-                       select case when edge.src_id = lineage.id then edge.dst_id else edge.src_id end
+                       select neighbor.id
                        from memphant.memory_edge edge join lineage
                          on edge.src_id = lineage.id or edge.dst_id = lineage.id
+                       join memphant.memory_unit neighbor
+                         on neighbor.tenant_id = $1
+                        and neighbor.id = case
+                          when edge.src_id = lineage.id then edge.dst_id else edge.src_id end
+                        and neighbor.data_subject_id = $3
+                        and neighbor.subject_generation = $4
+                        and neighbor.scope_id = $5 and neighbor.agent_node_id = $6
+                        and neighbor.actor_id = $7
                        where edge.tenant_id = $1 and edge.data_subject_id = $3
                          and edge.subject_generation = $4 and edge.scope_id = $5
                          and edge.agent_node_id = $6 and edge.kind = 'supersedes'
@@ -3219,6 +3227,7 @@ impl MemoryStore for PgStore {
                 .bind(context.subject_generation as i64)
                 .bind(context.scope_id.as_uuid())
                 .bind(context.agent_node_id.as_uuid())
+                .bind(context.actor_id.as_uuid())
                 .fetch_all(&mut **tx)
                 .await
                 .map_err(backend)?;
@@ -3265,9 +3274,15 @@ impl MemoryStore for PgStore {
                              and agent_node_id = $5 and actor_id = $6
                              and {column} = $7
                            union
-                           select edge.src_id
+                           select child.id
                            from memphant.memory_edge edge join lineage
                              on edge.dst_id = lineage.id
+                           join memphant.memory_unit child
+                             on child.tenant_id = $1 and child.id = edge.src_id
+                            and child.data_subject_id = $2
+                            and child.subject_generation = $3
+                            and child.scope_id = $4 and child.agent_node_id = $5
+                            and child.actor_id = $6
                            where edge.tenant_id = $1 and edge.data_subject_id = $2
                              and edge.subject_generation = $3 and edge.scope_id = $4
                              and edge.agent_node_id = $5 and edge.kind = 'supersedes'
@@ -4986,11 +5001,23 @@ impl MemoryStore for PgStore {
     }
 
     async fn ping(&self) -> Result<(), StoreError> {
-        sqlx::query("select 1")
-            .execute(&self.pool)
-            .await
-            .map_err(backend)?;
-        Ok(())
+        let ready: bool = sqlx::query_scalar(
+            "select exists (
+               select 1 from memphant.schema_migrations
+               where version = $1 and schema_compat_revision = $1
+             )",
+        )
+        .bind(SCHEMA_COMPAT_REVISION)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(backend)?;
+        if ready {
+            Ok(())
+        } else {
+            Err(StoreError::Backend(format!(
+                "database schema is below required compatibility revision {SCHEMA_COMPAT_REVISION}"
+            )))
+        }
     }
 
     async fn dead_letter_count(&self) -> Result<u64, StoreError> {

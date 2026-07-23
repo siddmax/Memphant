@@ -13,8 +13,8 @@ use memphant_types::{
     ForgetRequest, ForgetSelector, HealthResponse, MAX_FILE_SYNC_REQUEST_ENCODED_BYTES,
     MarkOutcome, MarkRequest, MemoryKind, NewMemoryUnit, RecallHttpRequest, RecallResponse,
     ReflectRequest, RetainEpisodeHttpRequest, RetainEpisodeHttpResponse, RetainEpisodePayload,
-    RetainPayload, RetainResourcePayload, RetainUnitPayload, ScopeId, ScopeMemoryResponse,
-    TenantId, TrustLevel, UnitState,
+    RetainPayload, RetainResourcePayload, RetainUnitPayload, SCHEMA_COMPAT_REVISION, ScopeId,
+    ScopeMemoryResponse, TenantId, TrustLevel, UnitState,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -674,6 +674,7 @@ async fn rest_examples_round_trip_through_retain_reflect_recall_trace_and_mutati
     let health: HealthResponse = json_request(&app, "GET", "/v1/health", None::<()>).await.1;
     assert_eq!(health.status, "ok");
     assert_eq!(health.store, "memory");
+    assert_eq!(health.schema_compat_revision, SCHEMA_COMPAT_REVISION);
 
     let retained: RetainEpisodeHttpResponse = json_request(
         &app,

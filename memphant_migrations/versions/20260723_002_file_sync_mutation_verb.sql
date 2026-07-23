@@ -12,3 +12,6 @@ values (
 on conflict (version) do update
 set schema_compat_revision = excluded.schema_compat_revision,
     migration_kind = excluded.migration_kind;
+
+grant select on memphant.schema_migrations
+  to memphant_app, memphant_worker, memphant_readonly;
