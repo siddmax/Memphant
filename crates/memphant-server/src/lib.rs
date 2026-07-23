@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{FromRequest, FromRequestParts, Path, Query, Request, State};
+use axum::extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Path, Query, Request, State};
 use axum::http::request::Parts;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -17,10 +17,10 @@ use memphant_core::{
 use memphant_types::{
     ActorId, AgentNodeId, CanonicalProjectionResponse, ContextBindingRequest,
     ContextBindingResponse, CorrectRequest, ENGINE_VERSION, ErrorBody, ErrorEnvelope,
-    FileSyncRequest, FileSyncResult, HealthResponse, MarkRequest, RecallHttpRequest,
-    ReflectAccepted, ReflectRequest, RetainEpisodeHttpRequest, RetainEpisodeHttpResponse,
-    RetrievalTrace, SCHEMA_COMPAT_REVISION, ScopeId, ScopeMemoryResponse, SubjectId,
-    TRACE_SCHEMA_VERSION, TenantId, TrustLevel,
+    FileSyncRequest, FileSyncResult, HealthResponse, MAX_FILE_SYNC_REQUEST_ENCODED_BYTES,
+    MarkRequest, RecallHttpRequest, ReflectAccepted, ReflectRequest, RetainEpisodeHttpRequest,
+    RetainEpisodeHttpResponse, RetrievalTrace, SCHEMA_COMPAT_REVISION, ScopeId,
+    ScopeMemoryResponse, SubjectId, TRACE_SCHEMA_VERSION, TenantId, TrustLevel,
 };
 use schemars::JsonSchema;
 use schemars::generate::{SchemaGenerator, SchemaSettings};
@@ -289,7 +289,11 @@ pub fn app<S: MutationLedgerStore + 'static>(state: AppState<S>) -> Router {
         .route(CORRECT_PATH, post(correct_handler::<S>))
         .route(FORGET_PATH, post(forget_handler::<S>))
         .route(MARK_PATH, post(mark_handler::<S>))
-        .route(FILE_SYNC_PATH, post(file_sync_handler::<S>))
+        .route(
+            FILE_SYNC_PATH,
+            post(file_sync_handler::<S>)
+                .layer(DefaultBodyLimit::max(MAX_FILE_SYNC_REQUEST_ENCODED_BYTES)),
+        )
         .route(TRACE_PATH, get(trace_handler::<S>))
         .route(SCOPE_MEMORY_PATH, get(scope_memory_handler::<S>))
         .route(

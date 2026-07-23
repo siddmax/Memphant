@@ -10,10 +10,11 @@ use memphant_types::{
     ActorId, CanonicalProjectionResponse, ContextBindingAgentRef, ContextBindingEntityRef,
     ContextBindingRequest, ContextBindingResponse, ContextBindingScopeRef, CorrectRequest,
     CorrectSelector, CorrectionPayload, FileSyncOperation, FileSyncRequest, FileSyncResult,
-    ForgetRequest, ForgetSelector, HealthResponse, MarkOutcome, MarkRequest, MemoryKind,
-    NewMemoryUnit, RecallHttpRequest, RecallResponse, ReflectRequest, RetainEpisodeHttpRequest,
-    RetainEpisodeHttpResponse, RetainEpisodePayload, RetainPayload, RetainResourcePayload,
-    RetainUnitPayload, ScopeId, ScopeMemoryResponse, TenantId, TrustLevel, UnitState,
+    ForgetRequest, ForgetSelector, HealthResponse, MAX_FILE_SYNC_REQUEST_ENCODED_BYTES,
+    MarkOutcome, MarkRequest, MemoryKind, NewMemoryUnit, RecallHttpRequest, RecallResponse,
+    ReflectRequest, RetainEpisodeHttpRequest, RetainEpisodeHttpResponse, RetainEpisodePayload,
+    RetainPayload, RetainResourcePayload, RetainUnitPayload, ScopeId, ScopeMemoryResponse,
+    TenantId, TrustLevel, UnitState,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -44,6 +45,52 @@ fn add_idempotency_header(
         );
     }
     builder
+}
+
+#[tokio::test]
+async fn file_sync_route_enforces_its_exact_encoded_body_ceiling() {
+    async fn rejection_for(body_len: usize) -> (StatusCode, Value) {
+        let mut body = vec![b' '; body_len];
+        body[0] = b'{';
+        body[1] = b'}';
+        let response = dev_app(tenant(96_501))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/file-sync")
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "file-sync-body-ceiling")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        (status, body)
+    }
+
+    let (status, body) = rejection_for(MAX_FILE_SYNC_REQUEST_ENCODED_BYTES).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "sync_invalid");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("missing field")
+    );
+
+    let (status, body) = rejection_for(MAX_FILE_SYNC_REQUEST_ENCODED_BYTES + 1).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "sync_invalid");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("length limit exceeded")
+    );
 }
 
 fn file_sync_request(

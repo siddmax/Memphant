@@ -46,6 +46,8 @@ pub const DEFAULT_STRUCTURED_STATE_PREFETCH_CONCURRENCY: usize = 4;
 pub const MAX_STRUCTURED_STATE_PREFETCH_CONCURRENCY: usize = 16;
 /// The maximum encoded JSON payload returned by the canonical projection read.
 pub const MAX_CANONICAL_PROJECTION_ENCODED_BYTES: usize = 1_048_576;
+/// Maximum-length future timestamp emitted by the canonical Jiff formatter.
+const MAX_CANONICAL_PROJECTION_TIMESTAMP: &str = "9999-12-30T22:00:00.999999999Z";
 
 #[cfg(test)]
 mod canonical_projection_store_tests {
@@ -684,6 +686,46 @@ mod file_sync_tests {
             last_reinforced_at: None,
             reinforcement_count: 0,
         }
+    }
+
+    fn projection_unit(fact_key: &str, body: &str, unit_id: u128) -> CanonicalProjectionUnit {
+        CanonicalProjectionUnit {
+            unit_id: UnitId::from_u128(unit_id),
+            kind: MemoryKind::Semantic,
+            fact_key: Some(fact_key.to_string()),
+            predicate: Some("states".to_string()),
+            body: body.to_string(),
+            confidence: Some(1.0),
+            valid_from: None,
+            valid_to: None,
+            body_sha256: format!("{:x}", Sha256::digest(body.as_bytes())),
+        }
+    }
+
+    fn body_for_projection_size(
+        context: &ResolvedMemoryContext,
+        mut items: Vec<CanonicalProjectionUnit>,
+        adjustable_item: usize,
+        target_bytes: usize,
+    ) -> String {
+        let response = CanonicalProjectionResponse {
+            tenant_id: context.tenant_id,
+            subject_id: context.data_subject_id,
+            actor_id: context.actor_id,
+            scope_id: context.scope_id,
+            agent_node_id: context.agent_node_id,
+            subject_generation: context.subject_generation,
+            evaluated_at: MAX_CANONICAL_PROJECTION_TIMESTAMP.to_string(),
+            fingerprint: "0".repeat(64),
+            items: items.clone(),
+        };
+        let fixed_bytes = serde_json::to_vec(&response).unwrap().len();
+        let body = "x".repeat(target_bytes - fixed_bytes);
+        items[adjustable_item].body_sha256 = format!("{:x}", Sha256::digest(body.as_bytes()));
+        items[adjustable_item].body = body.clone();
+        let response = CanonicalProjectionResponse { items, ..response };
+        assert_eq!(serde_json::to_vec(&response).unwrap().len(), target_bytes);
+        body
     }
 
     #[test]
@@ -1662,6 +1704,125 @@ mod file_sync_tests {
     }
 
     #[tokio::test]
+    async fn file_sync_enforces_the_exact_final_projection_ceiling_atomically() {
+        assert_eq!(
+            jiff::Timestamp::MAX.to_string(),
+            MAX_CANONICAL_PROJECTION_TIMESTAMP
+        );
+        let store = InMemoryStore::default();
+        let under_context = context(&store, "projection-size-under").await;
+        let service = MemoryService::new(Arc::new(store), Arc::new(CLOCK), Arc::new(NoopEmbedding));
+        let base = service.canonical_projection(&under_context).await.unwrap();
+        let first_fact_key = "profile:projection-size-first";
+        let second_fact_key = "profile:projection-size-second";
+        let first_body = "The first staged retain must roll back.";
+        let second_body = body_for_projection_size(
+            &under_context,
+            vec![
+                projection_unit(first_fact_key, first_body, 1),
+                projection_unit(second_fact_key, "", 2),
+            ],
+            1,
+            MAX_CANONICAL_PROJECTION_ENCODED_BYTES - 1,
+        );
+        service
+            .file_sync(
+                &under_context,
+                "file-sync-projection-size-under",
+                request(
+                    &under_context,
+                    base.fingerprint,
+                    vec![
+                        FileSyncOperation::Retain {
+                            fact_key: first_fact_key.to_string(),
+                            predicate: "states".to_string(),
+                            body: first_body.to_string(),
+                            confidence: 1.0,
+                            valid_from: None,
+                            valid_to: None,
+                        },
+                        FileSyncOperation::Retain {
+                            fact_key: second_fact_key.to_string(),
+                            predicate: "states".to_string(),
+                            body: second_body,
+                            confidence: 1.0,
+                            valid_from: None,
+                            valid_to: None,
+                        },
+                    ],
+                ),
+            )
+            .await
+            .unwrap();
+        let mut projection = service.canonical_projection(&under_context).await.unwrap();
+        projection.evaluated_at = MAX_CANONICAL_PROJECTION_TIMESTAMP.to_string();
+        assert_eq!(projection.items.len(), 2);
+        assert_eq!(
+            serde_json::to_vec(&projection).unwrap().len(),
+            MAX_CANONICAL_PROJECTION_ENCODED_BYTES - 1
+        );
+
+        let store = InMemoryStore::default();
+        let over_context = context(&store, "projection-size-over").await;
+        let service = MemoryService::new(
+            Arc::new(store.clone()),
+            Arc::new(CLOCK),
+            Arc::new(NoopEmbedding),
+        );
+        let base = service.canonical_projection(&over_context).await.unwrap();
+        let before_units = store.memory_units(over_context.tenant_id);
+        let second_body = body_for_projection_size(
+            &over_context,
+            vec![
+                projection_unit(first_fact_key, first_body, 1),
+                projection_unit(second_fact_key, "", 2),
+            ],
+            1,
+            MAX_CANONICAL_PROJECTION_ENCODED_BYTES + 1,
+        );
+        let error = service
+            .file_sync(
+                &over_context,
+                "file-sync-projection-size-over",
+                request(
+                    &over_context,
+                    base.fingerprint.clone(),
+                    vec![
+                        FileSyncOperation::Retain {
+                            fact_key: first_fact_key.to_string(),
+                            predicate: "states".to_string(),
+                            body: first_body.to_string(),
+                            confidence: 1.0,
+                            valid_from: None,
+                            valid_to: None,
+                        },
+                        FileSyncOperation::Retain {
+                            fact_key: second_fact_key.to_string(),
+                            predicate: "states".to_string(),
+                            body: second_body,
+                            confidence: 1.0,
+                            valid_from: None,
+                            valid_to: None,
+                        },
+                    ],
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ServiceError::ProjectionTooLarge {
+                max_bytes: MAX_CANONICAL_PROJECTION_ENCODED_BYTES
+            }
+        ));
+        assert_eq!(store.memory_units(over_context.tenant_id), before_units);
+        assert_eq!(
+            service.canonical_projection(&over_context).await.unwrap(),
+            base
+        );
+    }
+
+    #[tokio::test]
     async fn file_sync_rejects_duplicate_new_fact_and_duplicate_unit_touches_prewrite() {
         let store = InMemoryStore::default();
         let context = context(&store, "duplicates").await;
@@ -1806,6 +1967,36 @@ fn projection_items(units: Vec<StoredMemoryUnit>) -> Vec<CanonicalProjectionUnit
             valid_to: unit.valid_to,
         })
         .collect()
+}
+
+fn canonical_projection_response(
+    context: &ResolvedMemoryContext,
+    evaluated_at: String,
+    items: Vec<CanonicalProjectionUnit>,
+) -> Result<CanonicalProjectionResponse, ServiceError> {
+    let response = CanonicalProjectionResponse {
+        tenant_id: context.tenant_id,
+        subject_id: context.data_subject_id,
+        actor_id: context.actor_id,
+        scope_id: context.scope_id,
+        agent_node_id: context.agent_node_id,
+        subject_generation: context.subject_generation,
+        evaluated_at,
+        fingerprint: canonical_projection_fingerprint(&items)?,
+        items,
+    };
+    if serde_json::to_vec(&response)
+        .map_err(|error| {
+            ServiceError::Invalid(format!("canonical projection cannot be encoded: {error}"))
+        })?
+        .len()
+        > MAX_CANONICAL_PROJECTION_ENCODED_BYTES
+    {
+        return Err(ServiceError::ProjectionTooLarge {
+            max_bytes: MAX_CANONICAL_PROJECTION_ENCODED_BYTES,
+        });
+    }
+    Ok(response)
 }
 
 fn is_sha256(value: &str) -> bool {
@@ -4115,8 +4306,14 @@ impl<S: MemoryStore> MemoryService<S> {
                 return Err(sync_store_error(error));
             }
         };
-        let final_fingerprint = match canonical_projection_fingerprint(&final_items) {
-            Ok(fingerprint) => fingerprint,
+        // Use the longest future canonical timestamp so the committed state
+        // cannot make the immediate projection GET cross the encoded ceiling.
+        let final_projection = match canonical_projection_response(
+            context,
+            MAX_CANONICAL_PROJECTION_TIMESTAMP.to_string(),
+            final_items,
+        ) {
+            Ok(projection) => projection,
             Err(error) => {
                 let _ = self.store.rollback(tx).await;
                 return Err(error);
@@ -4126,7 +4323,7 @@ impl<S: MemoryStore> MemoryService<S> {
             200,
             &FileSyncResult {
                 base_fingerprint: request.base_fingerprint,
-                fingerprint: final_fingerprint,
+                fingerprint: final_projection.fingerprint,
                 evaluated_at: final_evaluated_at,
                 plan_sha256: request.plan_sha256,
                 operations: results,
@@ -4255,29 +4452,7 @@ impl<S: MemoryStore> MemoryService<S> {
                 .canonical_projection_units(context, &evaluated_at)
                 .await?,
         );
-        let response = CanonicalProjectionResponse {
-            tenant_id: context.tenant_id,
-            subject_id: context.data_subject_id,
-            actor_id: context.actor_id,
-            scope_id: context.scope_id,
-            agent_node_id: context.agent_node_id,
-            subject_generation: context.subject_generation,
-            evaluated_at,
-            fingerprint: canonical_projection_fingerprint(&items)?,
-            items,
-        };
-        if serde_json::to_vec(&response)
-            .map_err(|error| {
-                ServiceError::Invalid(format!("canonical projection cannot be encoded: {error}"))
-            })?
-            .len()
-            > MAX_CANONICAL_PROJECTION_ENCODED_BYTES
-        {
-            return Err(ServiceError::ProjectionTooLarge {
-                max_bytes: MAX_CANONICAL_PROJECTION_ENCODED_BYTES,
-            });
-        }
-        Ok(response)
+        canonical_projection_response(context, evaluated_at, items)
     }
 
     /// One worker tick: claims up to `batch` reflect jobs (unfiltered across

@@ -1684,7 +1684,6 @@ pub trait MutationLedgerStore: MemoryStore {
 pub struct InMemoryStore {
     inner: Arc<Mutex<InMemoryState>>,
     mutation_locks: Arc<Mutex<HashMap<MutationLockKey, Weak<AsyncMutex<()>>>>>,
-    #[cfg(test)]
     fail_next_mutation_response: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(test)]
     deep_snapshot_reads: Arc<std::sync::atomic::AtomicUsize>,
@@ -2474,8 +2473,9 @@ pub struct InMemoryTxn {
 }
 
 impl InMemoryStore {
-    #[cfg(test)]
-    pub(crate) fn fail_next_mutation_response(&self) {
+    /// In-process fault-injection seam for asserting rollback after mutation
+    /// writes are staged. This has no server or other remote trigger.
+    pub fn fail_next_mutation_response(&self) {
         self.fail_next_mutation_response
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
@@ -2904,7 +2904,6 @@ impl MutationLedgerStore for InMemoryStore {
         tx: &mut Self::Txn,
         response: MutationResponse,
     ) -> Result<(), StoreError> {
-        #[cfg(test)]
         if self
             .fail_next_mutation_response
             .swap(false, std::sync::atomic::Ordering::SeqCst)

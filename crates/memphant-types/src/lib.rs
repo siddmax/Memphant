@@ -1882,6 +1882,9 @@ pub struct CanonicalProjectionResponse {
     pub fingerprint: String,
 }
 
+/// Maximum encoded JSON body accepted by `POST /v1/file-sync`.
+pub const MAX_FILE_SYNC_REQUEST_ENCODED_BYTES: usize = 2_097_152;
+
 /// Immutable fields copied from one canonical projection unit. File sync uses
 /// this shape to prove that a correction or forget still targets the exact
 /// unit the local file was compiled from.
