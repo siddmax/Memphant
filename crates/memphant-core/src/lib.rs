@@ -1124,17 +1124,23 @@ pub(crate) fn apply_unit_forget_transition(
         return Err(StoreError::NotFound("forget target"));
     }
 
+    let actor_owned_ids: HashSet<_> = units
+        .iter()
+        .filter(|unit| unit_matches_context(unit, context))
+        .map(|unit| unit.id)
+        .collect();
     let mut lineage = HashSet::from([target]);
     loop {
         let before = lineage.len();
-        for edge in edges
-            .iter()
-            .filter(|edge| edge.kind == MemoryEdgeKind::Supersedes)
-        {
-            if lineage.contains(&edge.src_id) {
+        for edge in edges.iter().filter(|edge| {
+            edge.tenant_id == context.tenant_id
+                && edge.scope_id == context.scope_id
+                && edge.kind == MemoryEdgeKind::Supersedes
+        }) {
+            if lineage.contains(&edge.src_id) && actor_owned_ids.contains(&edge.dst_id) {
                 lineage.insert(edge.dst_id);
             }
-            if lineage.contains(&edge.dst_id) {
+            if lineage.contains(&edge.dst_id) && actor_owned_ids.contains(&edge.src_id) {
                 lineage.insert(edge.src_id);
             }
         }
@@ -4463,14 +4469,25 @@ impl MemoryStore for InMemoryStore {
                 }
             }
         }
-        if let Some(edges) = state.memory_edges.get(&context.tenant_id) {
+        if let (Some(edges), Some(units)) = (
+            state.memory_edges.get(&context.tenant_id),
+            state.memory_units.get(&context.tenant_id),
+        ) {
+            let actor_owned_ids: HashSet<_> = units
+                .iter()
+                .filter(|unit| unit_matches_context(unit, &context))
+                .map(|unit| unit.id)
+                .collect();
             loop {
                 let before = memory_lineage.len();
-                for edge in edges
-                    .iter()
-                    .filter(|edge| edge.kind == MemoryEdgeKind::Supersedes)
-                {
-                    if memory_lineage.contains(&edge.dst_id) {
+                for edge in edges.iter().filter(|edge| {
+                    edge.tenant_id == context.tenant_id
+                        && edge.scope_id == context.scope_id
+                        && edge.kind == MemoryEdgeKind::Supersedes
+                }) {
+                    if memory_lineage.contains(&edge.dst_id)
+                        && actor_owned_ids.contains(&edge.src_id)
+                    {
                         memory_lineage.insert(edge.src_id);
                     }
                 }
@@ -11477,6 +11494,237 @@ mod in_memory_mutation_retention_tests {
             .unwrap();
         store.commit(tx).await.unwrap();
         id
+    }
+
+    #[derive(Clone, Copy)]
+    enum ActorBridgeForgetSource {
+        MemoryUnit,
+        Episode,
+        Resource,
+    }
+
+    fn actor_bridge_unit(
+        context: &ResolvedMemoryContext,
+        label: &str,
+        target: Option<ForgetTarget>,
+    ) -> NewMemoryUnit {
+        let mut unit = NewMemoryUnit {
+            tenant_id: context.tenant_id,
+            data_subject_id: context.data_subject_id,
+            scope_id: context.scope_id,
+            agent_node_id: context.agent_node_id,
+            subject_generation: context.subject_generation,
+            kind: MemoryKind::Semantic,
+            state: UnitState::Active,
+            fact_key: Some(format!("actor-bridge:{label}")),
+            predicate: Some("states".to_string()),
+            body: format!("Actor bridge fixture {label}."),
+            confidence: Some(1.0),
+            trust_level: TrustLevel::TrustedUser,
+            churn_class: None,
+            freshness_due_at: None,
+            actor_id: Some(context.actor_id),
+            source_kind: Some("user".to_string()),
+            source_ref: format!("test:actor-bridge:{label}"),
+            observed_at: "2026-07-15T00:00:00Z".to_string(),
+            source_episode_id: None,
+            source_resource_id: None,
+            deletion_generation: None,
+            contextual_chunks: Vec::new(),
+            valid_from: None,
+            valid_to: None,
+            transaction_from: None,
+            transaction_to: None,
+        };
+        match target {
+            Some(ForgetTarget::Episode(id)) => unit.source_episode_id = Some(id),
+            Some(ForgetTarget::Resource(id)) => unit.source_resource_id = Some(id),
+            Some(ForgetTarget::MemoryUnit(_)) | None => {}
+        }
+        unit
+    }
+
+    async fn assert_forget_stops_at_foreign_actor_bridge(source: ActorBridgeForgetSource) {
+        let store = InMemoryStore::default();
+        let context = bound_context(&store).await;
+        let label = match source {
+            ActorBridgeForgetSource::MemoryUnit => "memory-unit",
+            ActorBridgeForgetSource::Episode => "episode",
+            ActorBridgeForgetSource::Resource => "resource",
+        };
+        let source_target = match source {
+            ActorBridgeForgetSource::MemoryUnit => None,
+            ActorBridgeForgetSource::Episode => {
+                let mut tx = store.begin(&context).await.unwrap();
+                let outcome = store
+                    .stage_episode(
+                        &mut tx,
+                        NewEpisode {
+                            tenant_id: context.tenant_id,
+                            data_subject_id: context.data_subject_id,
+                            scope_id: context.scope_id,
+                            actor_id: context.actor_id,
+                            agent_node_id: context.agent_node_id,
+                            subject_generation: context.subject_generation,
+                            source_kind: "user".to_string(),
+                            source_ref: "test:actor-bridge:episode".to_string(),
+                            observed_at: "2026-07-15T00:00:00Z".to_string(),
+                            source_trust: TrustLevel::TrustedUser,
+                            dedup_key: "test:actor-bridge:episode".to_string(),
+                            body: "Episode actor bridge fixture.".to_string(),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                store.commit(tx).await.unwrap();
+                Some(ForgetTarget::Episode(outcome.episode_id))
+            }
+            ActorBridgeForgetSource::Resource => {
+                let mut tx = store.begin(&context).await.unwrap();
+                let id = store
+                    .stage_resource(
+                        &mut tx,
+                        NewResource {
+                            tenant_id: context.tenant_id,
+                            data_subject_id: context.data_subject_id,
+                            scope_id: context.scope_id,
+                            actor_id: context.actor_id,
+                            agent_node_id: context.agent_node_id,
+                            subject_generation: context.subject_generation,
+                            uri: "memphant://actor-bridge/resource".to_string(),
+                            source_ref: "test:actor-bridge:resource".to_string(),
+                            observed_at: "2026-07-15T00:00:00Z".to_string(),
+                            kind: memphant_types::ResourceKind::Document,
+                            content_hash: "sha256:actor-bridge-resource".to_string(),
+                            mime_type: "text/plain".to_string(),
+                            revision: None,
+                            body: Some("Resource actor bridge fixture.".to_string()),
+                            source_trust: TrustLevel::TrustedUser,
+                            acl: ResourceAcl::default(),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                store.commit(tx).await.unwrap();
+                Some(ForgetTarget::Resource(id))
+            }
+        };
+
+        let mut tx = store.begin(&context).await.unwrap();
+        let root_id = store
+            .stage_memory_unit(
+                &mut tx,
+                actor_bridge_unit(&context, &format!("{label}-root"), source_target),
+            )
+            .await
+            .unwrap();
+        let foreign_bridge_id = store
+            .stage_memory_unit(
+                &mut tx,
+                actor_bridge_unit(&context, &format!("{label}-foreign"), None),
+            )
+            .await
+            .unwrap();
+        let own_grandchild_id = store
+            .stage_memory_unit(
+                &mut tx,
+                actor_bridge_unit(&context, &format!("{label}-grandchild"), None),
+            )
+            .await
+            .unwrap();
+        for (src_id, dst_id) in [
+            (foreign_bridge_id, root_id),
+            (own_grandchild_id, foreign_bridge_id),
+        ] {
+            store
+                .stage_memory_edge(
+                    &mut tx,
+                    NewMemoryEdge {
+                        tenant_id: context.tenant_id,
+                        scope_id: context.scope_id,
+                        src_id,
+                        dst_id,
+                        kind: MemoryEdgeKind::Supersedes,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        store.commit(tx).await.unwrap();
+
+        store
+            .inner
+            .lock()
+            .unwrap()
+            .memory_units
+            .get_mut(&context.tenant_id)
+            .unwrap()
+            .iter_mut()
+            .find(|unit| unit.id == foreign_bridge_id)
+            .unwrap()
+            .actor_id = Some(ActorId::new());
+
+        let outcome = if matches!(source, ActorBridgeForgetSource::MemoryUnit) {
+            let mut state = store.inner.lock().unwrap();
+            let InMemoryState {
+                memory_units,
+                memory_edges,
+                ..
+            } = &mut *state;
+            let invalidated_units = apply_unit_forget_transition(
+                memory_units.get_mut(&context.tenant_id).unwrap(),
+                memory_edges.get(&context.tenant_id).unwrap(),
+                &context,
+                root_id,
+                "2026-07-15T00:00:00Z",
+                Some(1),
+            )
+            .unwrap();
+            ForgetOutcome {
+                deletion_generation: 1,
+                invalidated_units,
+            }
+        } else {
+            store
+                .apply_forget(
+                    &context,
+                    ForgetWrite {
+                        target: source_target.unwrap_or(ForgetTarget::MemoryUnit(root_id)),
+                        now: "2026-07-15T00:00:00Z".to_string(),
+                    },
+                )
+                .await
+                .unwrap()
+        };
+        assert!(outcome.invalidated_units.contains(&root_id));
+        assert!(
+            !outcome.invalidated_units.contains(&own_grandchild_id),
+            "{label} forget crossed a foreign actor bridge"
+        );
+        assert_eq!(
+            store
+                .memory_units(context.tenant_id)
+                .into_iter()
+                .find(|unit| unit.id == own_grandchild_id)
+                .unwrap()
+                .state,
+            UnitState::Active
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_unit_forget_stops_at_foreign_actor_bridge() {
+        assert_forget_stops_at_foreign_actor_bridge(ActorBridgeForgetSource::MemoryUnit).await;
+    }
+
+    #[tokio::test]
+    async fn episode_forget_stops_at_foreign_actor_bridge() {
+        assert_forget_stops_at_foreign_actor_bridge(ActorBridgeForgetSource::Episode).await;
+    }
+
+    #[tokio::test]
+    async fn resource_forget_stops_at_foreign_actor_bridge() {
+        assert_forget_stops_at_foreign_actor_bridge(ActorBridgeForgetSource::Resource).await;
     }
 
     fn correction(id: UnitId, value: &str) -> CorrectionWrite {

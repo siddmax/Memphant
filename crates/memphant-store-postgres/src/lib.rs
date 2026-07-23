@@ -13,7 +13,7 @@ const FILE_SYNC_MUTATION_VERB_SQL: &str =
     include_str!("../../../memphant_migrations/versions/20260723_002_file_sync_mutation_verb.sql");
 
 /// Newest migration understood by this binary. Readiness permits a newer
-/// additive database head, but never a database compatibility floor above it.
+/// database head only while its recorded compatibility floor remains here.
 pub const MIGRATION_HEAD: &str = "20260723_002_file_sync_mutation_verb";
 
 /// Bundled migrations in apply order.

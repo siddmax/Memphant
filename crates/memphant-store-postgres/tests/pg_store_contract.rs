@@ -202,9 +202,7 @@ async fn ping_rejects_bootstrap_only_schema_until_required_revision_is_applied()
             .expect("assume app role");
         sqlx::query_as(
             "select coalesce(max(version), ''),
-                    coalesce(max(schema_compat_revision) filter (
-                      where migration_kind in ('breaking', 'rewrite')
-                    ), ''),
+                    coalesce(max(schema_compat_revision), ''),
                     coalesce(bool_or(version = $1 and schema_compat_revision = $2), false)
              from memphant.schema_migrations",
         )
@@ -228,8 +226,9 @@ async fn ping_rejects_bootstrap_only_schema_until_required_revision_is_applied()
     sqlx::query(
         "insert into memphant.schema_migrations
            (version, schema_compat_revision, migration_kind)
-         values ('20990101_001_future_additive', '20990101_001_future_additive', 'additive')",
+         values ('20990101_001_future_additive', $1, 'additive')",
     )
+    .bind(SCHEMA_COMPAT_REVISION)
     .execute(&pool)
     .await
     .expect("record future additive migration");
@@ -250,7 +249,40 @@ async fn ping_rejects_bootstrap_only_schema_until_required_revision_is_applied()
     sqlx::query(
         "insert into memphant.schema_migrations
            (version, schema_compat_revision, migration_kind)
-         values ('20990101_002_future_breaking', '20990101_002_future_breaking', 'breaking')",
+         values (
+           '20990101_002_mislabeled_incompatible',
+           '20990101_002_mislabeled_incompatible',
+           'additive'
+         )",
+    )
+    .execute(&pool)
+    .await
+    .expect("record migration whose declared kind understates its compatibility floor");
+    assert_eq!(
+        readiness_as_app(&pool).await,
+        (
+            "20990101_002_mislabeled_incompatible".to_string(),
+            "20990101_002_mislabeled_incompatible".to_string(),
+            true,
+        ),
+        "schema_compat_revision is authoritative even when migration_kind is wrong"
+    );
+    app_store
+        .ping()
+        .await
+        .expect_err("an advanced compatibility floor must fail closed regardless of kind");
+    sqlx::query(
+        "delete from memphant.schema_migrations
+         where version = '20990101_002_mislabeled_incompatible'",
+    )
+    .execute(&pool)
+    .await
+    .expect("remove mislabeled migration fixture");
+
+    sqlx::query(
+        "insert into memphant.schema_migrations
+           (version, schema_compat_revision, migration_kind)
+         values ('20990101_003_future_breaking', '20990101_003_future_breaking', 'breaking')",
     )
     .execute(&pool)
     .await
@@ -258,8 +290,8 @@ async fn ping_rejects_bootstrap_only_schema_until_required_revision_is_applied()
     assert_eq!(
         readiness_as_app(&pool).await,
         (
-            "20990101_002_future_breaking".to_string(),
-            "20990101_002_future_breaking".to_string(),
+            "20990101_003_future_breaking".to_string(),
+            "20990101_003_future_breaking".to_string(),
             true,
         ),
         "the least-privilege app role sees the raised compatibility floor"
@@ -269,13 +301,13 @@ async fn ping_rejects_bootstrap_only_schema_until_required_revision_is_applied()
         .await
         .expect_err("future breaking database head must be unready under memphant_app");
     assert!(
-        error.to_string().contains("20990101_002_future_breaking"),
+        error.to_string().contains("20990101_003_future_breaking"),
         "readiness error must name the incompatible database floor: {error}"
     );
 
     sqlx::query(
         "delete from memphant.schema_migrations
-         where version in ('20990101_001_future_additive', '20990101_002_future_breaking')",
+         where version in ('20990101_001_future_additive', '20990101_003_future_breaking')",
     )
     .execute(&pool)
     .await

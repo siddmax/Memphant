@@ -5006,9 +5006,7 @@ impl MemoryStore for PgStore {
         let (database_head, compatibility_floor, embedded_head_present): (String, String, bool) =
             sqlx::query_as(
                 "select coalesce(max(version), ''),
-                        coalesce(max(schema_compat_revision) filter (
-                          where migration_kind in ('breaking', 'rewrite')
-                        ), ''),
+                        coalesce(max(schema_compat_revision), ''),
                         coalesce(bool_or(version = $1 and schema_compat_revision = $2), false)
                  from memphant.schema_migrations",
             )
