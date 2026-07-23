@@ -88,13 +88,16 @@ not runnable here (named for honesty).
 | V5 context-prepend (lite header) | 0.792 | 0.607 | no lift (needs LLM-generated context, not a header) |
 | V2 RRF hybrid (prod default) | 0.833 | 0.635 | |
 | **V3 tuned convex fusion** | **0.847** | **0.672** | **WINNER — beats RRF +0.014 R@5 / +0.037 MRR** |
-| V6 ColBERT MaxSim (late-interaction) | _running_ | | Jina ColBERT v2, full-pool MaxSim |
+| V6 ColBERT MaxSim (late-interaction) | BLOCKED | | Jina ColBERT v2 multi-vector endpoint hard-403'd (Cloudflare WAF) at benchmark volume after 13/24 questions — not completable through this API; not chased (lowest-value cell: ColBERT targets top-48 recall, already 1.000) |
 
 **Verdict:** **convex score fusion > RRF** (confirms Bruch et al. — score magnitude separates
 near-duplicates that RRF's rank-only discards). Pre-registered SKIPs held up: **MMR hurts**
 single-gold recall (unproven→harmful, as the research warned), **instruction-prompting hurts**
 on a non-instruction-tuned embedder, **cheap context-prepend gives nothing** (the real
 contextual-retrieval win needs an LLM pass — deferred). HyDE/SPLADE/MUVERA skipped per research.
+**V6 ColBERT blocked by the provider's WAF** (see table) — a self-hosted answerai-colbert-small
+would sidestep the block but needs local ONNX plumbing (follow-up); at R@48=1.000 it is unlikely
+to change the verdict since the ranking bottleneck is owned by the cross-encoder reranker.
 
 ---
 
