@@ -9,8 +9,12 @@ use std::process::ExitCode;
 #[cfg(windows)]
 use std::{ffi::OsStr, os::windows::ffi::OsStrExt, os::windows::io::AsRawHandle};
 
-use memphant_core::service::canonical_projection_fingerprint;
-use memphant_types::{CanonicalProjectionResponse, CanonicalProjectionUnit, MemoryKind, UnitId};
+use memphant_core::service::{canonical_projection_fingerprint, file_sync_plan_sha256};
+use memphant_types::{
+    CanonicalProjectionResponse, CanonicalProjectionUnit, FileSyncOperation,
+    FileSyncOperationResult, FileSyncRequest, FileSyncResult, FileSyncUnitMetadata, MemoryKind,
+    UnitId,
+};
 use serde::de::{self, DeserializeOwned, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Number, Value};
@@ -89,6 +93,8 @@ struct RecoveryArea {
     root: Dir,
     units: Dir,
     units_identity: FileIdentity,
+    inbox: Dir,
+    inbox_identity: FileIdentity,
 }
 
 #[derive(Debug)]
@@ -163,6 +169,51 @@ struct CompileArgs {
     agent_node_id: Uuid,
     subject_generation: u64,
     out: PathBuf,
+}
+
+#[derive(Debug)]
+struct SyncArgs {
+    context: CompileArgs,
+    apply: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct SyncSnapshot {
+    manifest: ExportManifest,
+    managed_files: BTreeMap<String, ManagedFileSnapshot>,
+    inbox_files: BTreeMap<String, ManagedFileSnapshot>,
+    operations: Vec<FileSyncOperation>,
+}
+
+#[derive(Debug)]
+struct SyncState {
+    handles: TreeHandles,
+    snapshot: SyncSnapshot,
+}
+
+#[derive(Debug, Serialize)]
+struct SyncPlan {
+    schema_version: u32,
+    subject_id: String,
+    scope_id: String,
+    actor_id: String,
+    agent_node_id: String,
+    subject_generation: u64,
+    base_fingerprint: String,
+    plan_sha256: String,
+    operations: Vec<FileSyncOperation>,
+    destructive: Vec<String>,
+    consumed_inbox: Vec<String>,
+}
+
+#[derive(Debug)]
+enum SyncFailure {
+    Invalid(Vec<String>),
+    Conflict(String),
+    Unavailable(String),
+    OutcomeUnknown(String),
+    PostCommit(String),
+    Error(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -255,6 +306,207 @@ pub(crate) fn run_compile(args: &[String]) -> ExitCode {
     }
 }
 
+pub(crate) fn run_sync(args: &[String]) -> ExitCode {
+    match sync(args) {
+        Ok(SyncRun::Plan(plan)) => match serde_json::to_string_pretty(&plan) {
+            Ok(json) => {
+                println!("{json}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("sync=error");
+                eprintln!("cannot encode sync plan: {error}");
+                ExitCode::from(1)
+            }
+        },
+        Ok(SyncRun::Noop(plan)) => {
+            println!(
+                "sync=noop scope={} snapshot={} plan={}",
+                plan.scope_id, plan.base_fingerprint, plan.plan_sha256
+            );
+            ExitCode::SUCCESS
+        }
+        Ok(SyncRun::Applied {
+            scope_id,
+            plan_sha256,
+            committed_fingerprint,
+            final_fingerprint,
+            operations,
+            created,
+            recovery,
+        }) => {
+            let created = if created.is_empty() {
+                "-".to_string()
+            } else {
+                created.join(",")
+            };
+            if let Some(recovery) = recovery {
+                println!(
+                    "sync=applied scope={scope_id} plan={plan_sha256} committed_snapshot={committed_fingerprint} final_snapshot={final_fingerprint} operations={operations} created={created} recovery={}",
+                    recovery.display()
+                );
+            } else {
+                println!(
+                    "sync=applied scope={scope_id} plan={plan_sha256} committed_snapshot={committed_fingerprint} final_snapshot={final_fingerprint} operations={operations} created={created}"
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(SyncFailure::Invalid(findings)) => {
+            eprintln!("sync=invalid");
+            for finding in findings {
+                eprintln!("{finding}");
+            }
+            ExitCode::from(1)
+        }
+        Err(SyncFailure::Conflict(error)) => {
+            eprintln!("sync=conflict");
+            eprintln!("{error}");
+            ExitCode::from(1)
+        }
+        Err(SyncFailure::Unavailable(error)) => {
+            eprintln!("sync=unavailable");
+            eprintln!("{error}");
+            ExitCode::from(1)
+        }
+        Err(SyncFailure::OutcomeUnknown(error)) => {
+            eprintln!("sync=outcome_unknown");
+            eprintln!("{error}");
+            eprintln!(
+                "the request may have committed; do not construct a different request against this local tree"
+            );
+            ExitCode::from(1)
+        }
+        Err(SyncFailure::PostCommit(error)) => {
+            eprintln!("sync=post_commit_error remote_committed=true");
+            eprintln!("{error}");
+            eprintln!("canonical memory committed; local projection was not reported clean");
+            ExitCode::from(1)
+        }
+        Err(SyncFailure::Error(error)) => {
+            eprintln!("sync=error");
+            eprintln!("{error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+#[derive(Debug)]
+enum SyncRun {
+    Plan(SyncPlan),
+    Noop(SyncPlan),
+    Applied {
+        scope_id: Uuid,
+        plan_sha256: String,
+        committed_fingerprint: String,
+        final_fingerprint: String,
+        operations: usize,
+        created: Vec<String>,
+        recovery: Option<PathBuf>,
+    },
+}
+
+fn sync(args: &[String]) -> Result<SyncRun, SyncFailure> {
+    let args = parse_sync_args(args).map_err(SyncFailure::Error)?;
+    let state = inspect_sync_output(&args.context.out)?;
+    validate_manifest_binding(&state.snapshot.manifest, &args.context)
+        .map_err(SyncFailure::Invalid)?;
+
+    let projection = fetch_projection(&args.context).map_err(classify_projection_failure)?;
+    validate_response_binding(&projection, &args.context)
+        .map_err(|error| SyncFailure::Invalid(vec![error]))?;
+    validate_sync_base(&state.snapshot.manifest, &projection)?;
+    revalidate_sync_state(&state)?;
+
+    let plan = sync_plan(&state.snapshot).map_err(SyncFailure::Error)?;
+    if !args.apply {
+        return Ok(SyncRun::Plan(plan));
+    }
+    if plan.operations.is_empty() {
+        return Ok(SyncRun::Noop(plan));
+    }
+
+    revalidate_sync_state(&state)?;
+    let request = FileSyncRequest {
+        subject_id: projection.subject_id,
+        scope_id: projection.scope_id,
+        actor_id: projection.actor_id,
+        agent_node_id: projection.agent_node_id,
+        subject_generation: projection.subject_generation,
+        base_fingerprint: plan.base_fingerprint.clone(),
+        plan_sha256: plan.plan_sha256.clone(),
+        observed_at: jiff::Timestamp::now().to_string(),
+        operations: plan.operations.clone(),
+    };
+    let idempotency_key = format!("file-sync:{}:{}", plan.plan_sha256, Uuid::new_v4());
+    let receipt = post_file_sync(&request, &idempotency_key)?;
+    validate_sync_receipt(&request, &receipt).map_err(SyncFailure::PostCommit)?;
+
+    let final_projection = fetch_projection(&args.context).map_err(SyncFailure::PostCommit)?;
+    validate_response_binding(&final_projection, &args.context).map_err(SyncFailure::PostCommit)?;
+    revalidate_sync_state(&state).map_err(|error| {
+        SyncFailure::PostCommit(format!(
+            "local projection changed while the committed batch was in flight: {}",
+            display_sync_failure(error)
+        ))
+    })?;
+    let rendered = render_projection(&final_projection).map_err(SyncFailure::PostCommit)?;
+
+    let previous = ValidatedExport {
+        manifest: state.snapshot.manifest.clone(),
+        snapshot_sha256: String::new(),
+        handles: state.handles,
+        managed_files: state.snapshot.managed_files,
+    };
+    let outcome = write_rendered_projection(
+        &previous.handles,
+        Some(&previous),
+        &rendered,
+        &state.snapshot.inbox_files,
+        &mut |_| {},
+    )
+    .map_err(|error| SyncFailure::PostCommit(format!("local projection update failed: {error}")))?;
+    let created = receipt
+        .operations
+        .iter()
+        .flat_map(|operation| match operation {
+            FileSyncOperationResult::Correct { created, .. }
+            | FileSyncOperationResult::Retain { created } => created.as_slice(),
+            FileSyncOperationResult::Forget { .. } => &[],
+        })
+        .map(|id| id.as_uuid().to_string())
+        .collect();
+
+    Ok(SyncRun::Applied {
+        scope_id: args.context.scope_id,
+        plan_sha256: plan.plan_sha256,
+        committed_fingerprint: receipt.fingerprint,
+        final_fingerprint: final_projection.fingerprint,
+        operations: receipt.operations.len(),
+        created,
+        recovery: outcome.recovery,
+    })
+}
+
+fn display_sync_failure(error: SyncFailure) -> String {
+    match error {
+        SyncFailure::Invalid(findings) => findings.join("; "),
+        SyncFailure::Conflict(error)
+        | SyncFailure::Unavailable(error)
+        | SyncFailure::OutcomeUnknown(error)
+        | SyncFailure::PostCommit(error)
+        | SyncFailure::Error(error) => error,
+    }
+}
+
+fn classify_projection_failure(error: String) -> SyncFailure {
+    if error.contains("request failed") && !error.contains("status=") {
+        SyncFailure::Unavailable(error)
+    } else {
+        SyncFailure::Error(error)
+    }
+}
+
 fn compile(
     args: &[String],
 ) -> Result<(Uuid, PathBuf, String, usize, Option<PathBuf>), CompileFailure> {
@@ -283,6 +535,36 @@ fn compile(
 }
 
 fn parse_compile_args(args: &[String]) -> Result<CompileArgs, String> {
+    parse_context_args(args)
+}
+
+fn parse_sync_args(args: &[String]) -> Result<SyncArgs, String> {
+    let mut context = Vec::new();
+    let mut apply = false;
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "--apply" {
+            if apply {
+                return Err("duplicate flag --apply".to_string());
+            }
+            apply = true;
+            index += 1;
+        } else {
+            let value = args
+                .get(index + 1)
+                .ok_or_else(|| format!("missing value for {}", args[index]))?;
+            context.push(args[index].clone());
+            context.push(value.clone());
+            index += 2;
+        }
+    }
+    Ok(SyncArgs {
+        context: parse_context_args(&context)?,
+        apply,
+    })
+}
+
+fn parse_context_args(args: &[String]) -> Result<CompileArgs, String> {
     let mut flags = BTreeMap::new();
     let mut index = 0;
     while index < args.len() {
@@ -370,6 +652,472 @@ fn fetch_projection(args: &CompileArgs) -> Result<CanonicalProjectionResponse, S
         .body_mut()
         .read_json()
         .map_err(|error| format!("projection response was not valid JSON: {error}"))
+}
+
+fn inspect_sync_output(root: &Path) -> Result<SyncState, SyncFailure> {
+    let handles = TreeHandles::open(root)
+        .map_err(|error| SyncFailure::Invalid(vec![format!("output root: {error}")]))?;
+    let snapshot = scan_sync_handles(&handles).map_err(SyncFailure::Invalid)?;
+    Ok(SyncState { handles, snapshot })
+}
+
+fn revalidate_sync_state(state: &SyncState) -> Result<(), SyncFailure> {
+    let current = scan_sync_handles(&state.handles).map_err(SyncFailure::Invalid)?;
+    if current == state.snapshot {
+        Ok(())
+    } else {
+        Err(SyncFailure::Invalid(vec![
+            "local projection changed during sync; rerun sync from the new tree".to_string(),
+        ]))
+    }
+}
+
+fn scan_sync_handles(handles: &TreeHandles) -> Result<SyncSnapshot, Vec<String>> {
+    let mut findings = Vec::new();
+    if let Err(error) = handles.ensure_bound() {
+        return Err(vec![error]);
+    }
+
+    let (manifest_bytes, manifest_identity) =
+        read_regular_at(&handles.root, MANIFEST_FILE, MAX_MANIFEST_BYTES)
+            .map_err(|error| vec![format!("{MANIFEST_FILE}: {error}")])?;
+    let manifest = strict_from_slice::<ExportManifest>(&manifest_bytes)
+        .map_err(|error| vec![format!("{MANIFEST_FILE}: invalid JSON: {error}")])?;
+    validate_manifest_fields(&manifest, &mut findings);
+    let mut managed_files = BTreeMap::from([(
+        MANIFEST_FILE.to_string(),
+        ManagedFileSnapshot {
+            identity: manifest_identity,
+            bytes: manifest_bytes,
+        },
+    )]);
+
+    match read_regular_at(&handles.root, MEMORY_FILE, MAX_MANAGED_FILE_BYTES) {
+        Ok((bytes, identity)) => {
+            if sha256(&bytes) != manifest.memory_sha256
+                || Uuid::parse_str(&manifest.scope_id)
+                    .ok()
+                    .map(|scope| render_memory(scope, &manifest.snapshot_sha256, &manifest.entries))
+                    .as_deref()
+                    != Some(bytes.as_slice())
+            {
+                findings.push(format!(
+                    "{MEMORY_FILE}: immutable generated index differs from manifest"
+                ));
+            }
+            managed_files.insert(
+                MEMORY_FILE.to_string(),
+                ManagedFileSnapshot { identity, bytes },
+            );
+        }
+        Err(error) => findings.push(format!("{MEMORY_FILE}: {error}")),
+    }
+
+    let mut operations = Vec::new();
+    let mut expected_units = BTreeSet::new();
+    let mut operation_fact_keys = BTreeSet::new();
+    for entry in &manifest.entries {
+        let expected_path = format!("{UNITS_DIR}/{}.md", entry.unit_id);
+        if entry.path != expected_path || !is_safe_relative_unit_path(&entry.path) {
+            findings.push(format!("{}: path must be {expected_path}", entry.path));
+            continue;
+        }
+        let name = format!("{}.md", entry.unit_id);
+        expected_units.insert(name.clone());
+        let Ok(unit_id) = Uuid::parse_str(&entry.unit_id) else {
+            continue;
+        };
+        let base = file_sync_metadata(entry, UnitId::from_u128(unit_id.as_u128()));
+        match handles.units.symlink_metadata(&name) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if let Some(fact_key) = &entry.fact_key {
+                    operation_fact_keys.insert(fact_key.clone());
+                }
+                operations.push(FileSyncOperation::Forget { base });
+            }
+            Err(error) => findings.push(format!("{}: cannot inspect: {error}", entry.path)),
+            Ok(metadata) if !metadata.is_file() || metadata.is_symlink() => findings.push(format!(
+                "{}: expected a non-symlink regular file",
+                entry.path
+            )),
+            Ok(_) => match read_regular_at(&handles.units, &name, MAX_MANAGED_FILE_BYTES) {
+                Err(error) => findings.push(format!("{}: {error}", entry.path)),
+                Ok((bytes, identity)) => {
+                    let parsed = parse_unit(&bytes);
+                    managed_files.insert(
+                        entry.path.clone(),
+                        ManagedFileSnapshot {
+                            identity,
+                            bytes: bytes.clone(),
+                        },
+                    );
+                    match parsed {
+                        Err(error) => findings.push(format!("{}: {error}", entry.path)),
+                        Ok((body, footer)) => {
+                            let mut footer_findings = Vec::new();
+                            validate_footer(
+                                entry,
+                                manifest.subject_generation,
+                                &footer,
+                                &mut footer_findings,
+                            );
+                            findings.extend(footer_findings);
+                            let expected = CanonicalProjectionUnit {
+                                unit_id: base.unit_id,
+                                kind: entry.kind,
+                                fact_key: entry.fact_key.clone(),
+                                predicate: entry.predicate.clone(),
+                                body: body.clone(),
+                                confidence: entry.confidence,
+                                valid_from: entry.valid_from.clone(),
+                                valid_to: entry.valid_to.clone(),
+                                body_sha256: entry.body_sha256.clone(),
+                            };
+                            match render_unit(manifest.subject_generation, &expected) {
+                                Ok(expected_bytes) if expected_bytes != bytes => {
+                                    findings.push(format!(
+                                        "{}: only the exact semantic body may change",
+                                        entry.path
+                                    ))
+                                }
+                                Err(error) => findings.push(format!("{}: {error}", entry.path)),
+                                _ => {}
+                            }
+                            if sha256(body.as_bytes()) != entry.body_sha256 {
+                                if body.trim().is_empty() {
+                                    findings.push(format!(
+                                        "{}: corrected body must not be blank",
+                                        entry.path
+                                    ));
+                                } else {
+                                    if let Some(fact_key) = &entry.fact_key {
+                                        operation_fact_keys.insert(fact_key.clone());
+                                    }
+                                    operations.push(FileSyncOperation::Correct { base, body });
+                                }
+                            } else if sha256(&bytes) != entry.file_sha256 {
+                                findings.push(format!(
+                                    "{}: bytes differ without a semantic body change",
+                                    entry.path
+                                ));
+                            }
+                        }
+                    }
+                }
+            },
+        }
+    }
+
+    let units_names = directory_names(&handles.units).unwrap_or_else(|error| {
+        findings.push(format!("{UNITS_DIR}: {error}"));
+        Vec::new()
+    });
+    for name in &units_names {
+        if !expected_units.contains(name) {
+            findings.push(format!("{UNITS_DIR}/{name}: unexpected path"));
+        }
+    }
+
+    let manifest_by_fact_key = manifest
+        .entries
+        .iter()
+        .filter_map(|entry| entry.fact_key.as_ref().map(|key| (key, entry)))
+        .collect::<BTreeMap<_, _>>();
+    let mut inbox_files = BTreeMap::new();
+    let mut inbox_fact_keys = BTreeSet::new();
+    let inbox_names = directory_names(&handles.inbox).unwrap_or_else(|error| {
+        findings.push(format!("{INBOX_DIR}: {error}"));
+        Vec::new()
+    });
+    for name in &inbox_names {
+        let path = format!("{INBOX_DIR}/{name}");
+        if !is_safe_inbox_name(name) {
+            findings.push(format!("{path}: unexpected or reserved path"));
+            continue;
+        }
+        match read_regular_at(&handles.inbox, name, MAX_MANAGED_FILE_BYTES) {
+            Err(error) => findings.push(format!("{path}: {error}")),
+            Ok((bytes, identity)) => {
+                inbox_files.insert(
+                    path.clone(),
+                    ManagedFileSnapshot {
+                        identity,
+                        bytes: bytes.clone(),
+                    },
+                );
+                match parse_inbox(&bytes) {
+                    Err(error) => findings.push(format!("{path}: {error}")),
+                    Ok((fact_key, body)) => {
+                        if !inbox_fact_keys.insert(fact_key.clone()) {
+                            findings.push(format!("{path}: duplicate inbox fact_key {fact_key}"));
+                            continue;
+                        }
+                        if operation_fact_keys.contains(&fact_key) {
+                            findings.push(format!(
+                                "{path}: fact_key {fact_key} is already corrected or forgotten by this plan"
+                            ));
+                            continue;
+                        }
+                        let inherited = manifest_by_fact_key.get(&fact_key);
+                        operations.push(FileSyncOperation::Retain {
+                            fact_key,
+                            predicate: inherited
+                                .and_then(|entry| entry.predicate.clone())
+                                .unwrap_or_else(|| "states".to_string()),
+                            body,
+                            confidence: inherited.and_then(|entry| entry.confidence).unwrap_or(1.0),
+                            valid_from: None,
+                            valid_to: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    let root_names = directory_names(&handles.root).unwrap_or_else(|error| {
+        findings.push(format!("output root: {error}"));
+        Vec::new()
+    });
+    collect_name_mismatches(
+        &root_names,
+        &BTreeSet::from([
+            MEMORY_FILE.to_string(),
+            MANIFEST_FILE.to_string(),
+            UNITS_DIR.to_string(),
+            INBOX_DIR.to_string(),
+        ]),
+        false,
+        ".",
+        &mut findings,
+    );
+    if let Err(error) = handles.ensure_bound() {
+        findings.push(error);
+    }
+    if findings.is_empty() {
+        Ok(SyncSnapshot {
+            manifest,
+            managed_files,
+            inbox_files,
+            operations,
+        })
+    } else {
+        findings.sort();
+        findings.dedup();
+        Err(findings)
+    }
+}
+
+fn parse_inbox(bytes: &[u8]) -> Result<(String, String), String> {
+    let text = std::str::from_utf8(bytes).map_err(|_| "file is not UTF-8".to_string())?;
+    if text.contains('\r') {
+        return Err("inbox files must use LF line endings".to_string());
+    }
+    if !text.ends_with('\n') || text.ends_with("\n\n") {
+        return Err("inbox file must end in exactly one LF".to_string());
+    }
+    if text.contains("<!-- memphant") {
+        return Err("inbox file must be footer-free".to_string());
+    }
+    let (heading, body) = text
+        .strip_suffix('\n')
+        .and_then(|text| text.split_once("\n\n"))
+        .ok_or_else(|| "inbox file must contain an H1, one blank line, then a body".to_string())?;
+    let fact_key = heading
+        .strip_prefix("# ")
+        .ok_or_else(|| "inbox file must start with one H1 fact key".to_string())?;
+    require_single_line("inbox fact key", fact_key)?;
+    if fact_key.trim() != fact_key {
+        return Err("inbox fact key must not contain surrounding whitespace".to_string());
+    }
+    if body.trim().is_empty() {
+        return Err("inbox body must not be blank".to_string());
+    }
+    Ok((fact_key.to_string(), body.to_string()))
+}
+
+fn file_sync_metadata(entry: &ManifestEntry, unit_id: UnitId) -> FileSyncUnitMetadata {
+    FileSyncUnitMetadata {
+        unit_id,
+        kind: entry.kind,
+        fact_key: entry.fact_key.clone(),
+        predicate: entry.predicate.clone(),
+        confidence: entry.confidence,
+        valid_from: entry.valid_from.clone(),
+        valid_to: entry.valid_to.clone(),
+        body_sha256: entry.body_sha256.clone(),
+    }
+}
+
+fn validate_sync_base(
+    manifest: &ExportManifest,
+    projection: &CanonicalProjectionResponse,
+) -> Result<(), SyncFailure> {
+    validate_manifest_response_context(manifest, projection).map_err(SyncFailure::Invalid)?;
+    if manifest.snapshot_sha256 != projection.fingerprint {
+        return Err(SyncFailure::Conflict(format!(
+            "manifest base {} no longer matches canonical projection {}",
+            manifest.snapshot_sha256, projection.fingerprint
+        )));
+    }
+    if manifest.entries.len() != projection.items.len() {
+        return Err(SyncFailure::Invalid(vec![
+            "manifest entries do not match the canonical base projection".to_string(),
+        ]));
+    }
+    for (entry, item) in manifest.entries.iter().zip(&projection.items) {
+        let unit_id = Uuid::parse_str(&entry.unit_id)
+            .map(|id| UnitId::from_u128(id.as_u128()))
+            .map_err(|_| {
+                SyncFailure::Invalid(vec![format!("{}: invalid canonical unit_id", entry.path)])
+            })?;
+        let base = file_sync_metadata(entry, unit_id);
+        if base.unit_id != item.unit_id
+            || base.kind != item.kind
+            || base.fact_key != item.fact_key
+            || base.predicate != item.predicate
+            || base.confidence != item.confidence
+            || base.valid_from != item.valid_from
+            || base.valid_to != item.valid_to
+            || base.body_sha256 != item.body_sha256
+        {
+            return Err(SyncFailure::Invalid(vec![format!(
+                "{}: immutable manifest metadata differs from the canonical base",
+                entry.path
+            )]));
+        }
+    }
+    Ok(())
+}
+
+fn sync_plan(snapshot: &SyncSnapshot) -> Result<SyncPlan, String> {
+    let plan_sha256 =
+        file_sync_plan_sha256(&snapshot.operations).map_err(|error| error.to_string())?;
+    Ok(SyncPlan {
+        schema_version: SCHEMA_VERSION,
+        subject_id: snapshot.manifest.subject_id.clone(),
+        scope_id: snapshot.manifest.scope_id.clone(),
+        actor_id: snapshot.manifest.actor_id.clone(),
+        agent_node_id: snapshot.manifest.agent_node_id.clone(),
+        subject_generation: snapshot.manifest.subject_generation,
+        base_fingerprint: snapshot.manifest.snapshot_sha256.clone(),
+        plan_sha256,
+        operations: snapshot.operations.clone(),
+        destructive: snapshot
+            .operations
+            .iter()
+            .filter_map(|operation| match operation {
+                FileSyncOperation::Forget { base } => {
+                    Some(format!("forget:{}", base.unit_id.as_uuid()))
+                }
+                _ => None,
+            })
+            .collect(),
+        consumed_inbox: snapshot.inbox_files.keys().cloned().collect(),
+    })
+}
+
+fn post_file_sync(
+    request: &FileSyncRequest,
+    idempotency_key: &str,
+) -> Result<FileSyncResult, SyncFailure> {
+    let base = env::var("MEMPHANT_URL")
+        .ok()
+        .filter(|url| !url.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_URL.to_string());
+    let url = format!("{}/v1/file-sync", base.trim_end_matches('/'));
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let mut outbound = agent.post(&url).header("idempotency-key", idempotency_key);
+    if let Ok(key) = env::var("MEMPHANT_API_KEY")
+        && !key.is_empty()
+    {
+        outbound = outbound.header("authorization", format!("Bearer {key}"));
+    }
+    let mut response = outbound.send_json(request).map_err(|error| {
+        SyncFailure::OutcomeUnknown(format!(
+            "file-sync transport failed for plan {}: {error}",
+            request.plan_sha256
+        ))
+    })?;
+    let status = response.status().as_u16();
+    if !(200..300).contains(&status) {
+        let body: Value = response
+            .body_mut()
+            .read_json()
+            .unwrap_or_else(|_| serde_json::json!({}));
+        let code = body
+            .pointer("/error/code")
+            .and_then(Value::as_str)
+            .unwrap_or("remote_error");
+        let message = body
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .unwrap_or("file-sync request failed");
+        return match code {
+            "sync_conflict" => Err(SyncFailure::Conflict(message.to_string())),
+            "sync_invalid" => Err(SyncFailure::Invalid(vec![message.to_string()])),
+            _ if status >= 500 => Err(SyncFailure::OutcomeUnknown(format!(
+                "file-sync server failed after dispatch: status={status} code={code} plan={}",
+                request.plan_sha256
+            ))),
+            _ => Err(SyncFailure::Error(format!(
+                "file-sync request failed: status={status} code={code}"
+            ))),
+        };
+    }
+    response
+        .body_mut()
+        .read_json()
+        .map_err(|error| SyncFailure::PostCommit(format!("committed receipt is invalid: {error}")))
+}
+
+fn validate_sync_receipt(
+    request: &FileSyncRequest,
+    receipt: &FileSyncResult,
+) -> Result<(), String> {
+    if receipt.base_fingerprint != request.base_fingerprint
+        || receipt.plan_sha256 != request.plan_sha256
+        || receipt.operations.len() != request.operations.len()
+    {
+        return Err("committed receipt does not match the submitted batch".to_string());
+    }
+    require_sha256("receipt fingerprint", &receipt.fingerprint)?;
+    if !(receipt.evaluated_at.ends_with('Z') || receipt.evaluated_at.ends_with("+00:00"))
+        || receipt.evaluated_at.parse::<jiff::Timestamp>().is_err()
+    {
+        return Err("committed receipt evaluated_at must be RFC3339 UTC".to_string());
+    }
+    let mut created_ids = BTreeSet::new();
+    for (operation, result) in request.operations.iter().zip(&receipt.operations) {
+        let matches = match (operation, result) {
+            (
+                FileSyncOperation::Correct { base, .. },
+                FileSyncOperationResult::Correct {
+                    memory_unit_id,
+                    created,
+                },
+            ) => {
+                !created.is_empty()
+                    && created.iter().all(|id| created_ids.insert(id.as_uuid()))
+                    && base.unit_id == *memory_unit_id
+            }
+            (FileSyncOperation::Retain { .. }, FileSyncOperationResult::Retain { created }) => {
+                !created.is_empty() && created.iter().all(|id| created_ids.insert(id.as_uuid()))
+            }
+            (
+                FileSyncOperation::Forget { base },
+                FileSyncOperationResult::Forget { memory_unit_id, .. },
+            ) => base.unit_id == *memory_unit_id,
+            _ => false,
+        };
+        if !matches {
+            return Err("committed receipt operation variants do not match the plan".to_string());
+        }
+    }
+    Ok(())
 }
 
 fn validate_response_binding(
@@ -993,7 +1741,7 @@ fn build_and_install_absent_projection(
     )?;
     handles.outer_bindings = outer_bindings;
     ensure_initialized_tree(&handles)?;
-    let staged = write_rendered_projection(&handles, None, rendered, hook)?;
+    let staged = write_rendered_projection(&handles, None, rendered, &BTreeMap::new(), hook)?;
     if staged.recovery.is_some() {
         return Err("new projection unexpectedly created durable recovery".to_string());
     }
@@ -1795,19 +2543,61 @@ fn replace_projection_with_hook(
         .map(|validated| &validated.handles)
         .or(owned_handles.as_ref())
         .expect("existing or newly opened output handles");
-    write_rendered_projection(handles, previous, rendered, &mut after_mutation)
-        .map(|outcome| outcome.recovery)
+    write_rendered_projection(
+        handles,
+        previous,
+        rendered,
+        &BTreeMap::new(),
+        &mut after_mutation,
+    )
+    .map(|outcome| outcome.recovery)
 }
 
 fn write_rendered_projection(
     handles: &TreeHandles,
     previous: Option<&ValidatedExport>,
     rendered: &RenderedProjection,
+    consumed_inbox: &BTreeMap<String, ManagedFileSnapshot>,
     after_mutation: &mut impl FnMut(&str),
 ) -> Result<ProjectionWriteOutcome, String> {
     let mut recovery = RecoverySession::new(&handles.anchor);
     let result = (|| {
         handles.ensure_bound()?;
+
+        for (path, expected) in consumed_inbox {
+            let name = Path::new(path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| format!("invalid consumed inbox path {path}"))?;
+            validate_current_file(&handles.inbox, name, expected)?;
+            let recovery_was_empty = !recovery.contains_managed_data();
+            let recovery_directory =
+                recovery.target(&handles.anchor_parent, ManagedDirectory::Inbox)?;
+            if recovery_was_empty {
+                after_mutation("recovery:created");
+                recovery.ensure(&handles.anchor_parent)?;
+            }
+            move_to_recovery(
+                &handles.inbox,
+                name,
+                &recovery_directory,
+                &handles.anchor,
+                &handles.anchor_parent,
+                &mut recovery,
+            )?;
+            after_mutation(&format!("consume:{name}:detached"));
+            if let Err(error) = validate_detached_file(&recovery_directory, name, name, expected) {
+                return Err(format!(
+                    "cannot consume {path}: {error}; unexpected inode remains in durable recovery"
+                ));
+            }
+            if managed_identity_at(&handles.inbox, name)?.is_some() {
+                return Err(format!(
+                    "{path} reappeared after recovery move; concurrent path was left untouched"
+                ));
+            }
+            after_mutation(&format!("consume:{name}:recovered"));
+        }
 
         for (path, bytes) in &rendered.units {
             let name = Path::new(path)
@@ -1855,21 +2645,25 @@ fn write_rendered_projection(
                         .and_then(|name| name.to_str())
                         .ok_or_else(|| format!("invalid stale unit path {}", entry.path))?;
                     handles.ensure_bound()?;
-                    delete_managed_file(
-                        ManagedTarget {
-                            directory: &handles.units,
-                            name,
-                            location: ManagedDirectory::Units,
-                        },
-                        previous
-                            .managed_files
-                            .get(&entry.path)
-                            .ok_or_else(|| format!("missing validated state for {}", entry.path))?,
-                        &handles.anchor_parent,
-                        &handles.anchor,
-                        &mut recovery,
-                        after_mutation,
-                    )?;
+                    if let Some(expected) = previous.managed_files.get(&entry.path) {
+                        delete_managed_file(
+                            ManagedTarget {
+                                directory: &handles.units,
+                                name,
+                                location: ManagedDirectory::Units,
+                            },
+                            expected,
+                            &handles.anchor_parent,
+                            &handles.anchor,
+                            &mut recovery,
+                            after_mutation,
+                        )?;
+                    } else if managed_identity_at(&handles.units, name)?.is_some() {
+                        return Err(format!(
+                            "{} reappeared after the sync plan observed it missing",
+                            entry.path
+                        ));
+                    }
                     after_mutation(&entry.path);
                 }
             }
@@ -2134,12 +2928,14 @@ fn unique_internal_name(label: &str) -> String {
 enum ManagedDirectory {
     Root,
     Units,
+    Inbox,
 }
 
 fn prepared_cleanup_skipped(error: String, location: ManagedDirectory, prepared: &str) -> String {
     let last_known = match location {
         ManagedDirectory::Root => prepared.to_string(),
         ManagedDirectory::Units => format!("{UNITS_DIR}/{prepared}"),
+        ManagedDirectory::Inbox => format!("{INBOX_DIR}/{prepared}"),
     };
     format!(
         "{error}; prepared_name_last_known={last_known}; prepared cleanup skipped because portable atomic handle-bound unlink is unavailable"
@@ -2176,6 +2972,7 @@ impl RecoverySession {
         match location {
             ManagedDirectory::Root => area.root.try_clone().map_err(|error| error.to_string()),
             ManagedDirectory::Units => area.units.try_clone().map_err(|error| error.to_string()),
+            ManagedDirectory::Inbox => area.inbox.try_clone().map_err(|error| error.to_string()),
         }
     }
 
@@ -2241,6 +3038,19 @@ impl RecoveryArea {
             })?;
         if units_path_identity != self.units_identity {
             return Err("durable recovery units path changed identity".to_string());
+        }
+        let inbox_handle_identity = directory_identity(&self.inbox).map_err(|error| {
+            format!("durable recovery inbox handle could not be confirmed: {error}")
+        })?;
+        if inbox_handle_identity != self.inbox_identity {
+            return Err("durable recovery inbox handle changed identity".to_string());
+        }
+        let inbox_path_identity =
+            directory_identity_at(&self.root, INBOX_DIR).map_err(|error| {
+                format!("durable recovery inbox path could not be confirmed: {error}")
+            })?;
+        if inbox_path_identity != self.inbox_identity {
+            return Err("durable recovery inbox path changed identity".to_string());
         }
         Ok(())
     }
@@ -2376,6 +3186,34 @@ fn create_recovery_area(
                         },
                     );
                 }
+                anchor
+                    .ensure_current(output_parent)
+                    .map_err(|error| last_known_recovery(error, &path, false))?;
+                if let Err(error) = root.create_dir_with(INBOX_DIR, &private_dir_builder()) {
+                    return Err(
+                        if ensure_recovery_current(
+                            anchor,
+                            output_parent,
+                            &name,
+                            &path,
+                            identity,
+                            &root,
+                        )
+                        .is_ok()
+                        {
+                            format!(
+                                "cannot create recovery inbox directory: {error}; recovery={}",
+                                path.display()
+                            )
+                        } else {
+                            last_known_recovery(
+                                format!("cannot create recovery inbox directory: {error}"),
+                                &path,
+                                false,
+                            )
+                        },
+                    );
+                }
                 if let Err(error) = sync_directory(&root) {
                     return Err(
                         if ensure_recovery_current(
@@ -2439,6 +3277,26 @@ fn create_recovery_area(
                         ));
                     }
                 };
+                let inbox = match open_directory_at(&root, INBOX_DIR) {
+                    Ok(inbox) => inbox,
+                    Err(error) => {
+                        return Err(last_known_recovery(
+                            format!("cannot open recovery inbox directory: {error}"),
+                            &path,
+                            false,
+                        ));
+                    }
+                };
+                let inbox_identity = match directory_identity(&inbox) {
+                    Ok(identity) => identity,
+                    Err(error) => {
+                        return Err(last_known_recovery(
+                            format!("cannot identify recovery inbox directory: {error}"),
+                            &path,
+                            false,
+                        ));
+                    }
+                };
                 let area = RecoveryArea {
                     name,
                     path,
@@ -2446,6 +3304,8 @@ fn create_recovery_area(
                     root,
                     units,
                     units_identity,
+                    inbox,
+                    inbox_identity,
                 };
                 area.ensure_current(anchor, output_parent)
                     .map_err(|error| last_known_recovery(error, &area.path, false))?;
@@ -2891,10 +3751,11 @@ mod tests {
     use super::{
         MEMORY_FILE, OutputState, canonical_projection_fingerprint, inspect_output,
         is_safe_inbox_name, render_projection, replace_projection, replace_projection_with_hook,
-        sha256,
+        sha256, validate_sync_receipt,
     };
     use memphant_types::{
-        ActorId, AgentNodeId, CanonicalProjectionResponse, CanonicalProjectionUnit, MemoryKind,
+        ActorId, AgentNodeId, CanonicalProjectionResponse, CanonicalProjectionUnit,
+        FileSyncOperation, FileSyncOperationResult, FileSyncRequest, FileSyncResult, MemoryKind,
         ScopeId, SubjectId, TenantId, UnitId,
     };
 
@@ -2913,6 +3774,136 @@ mod tests {
         ] {
             assert!(!is_safe_inbox_name(name), "reserved inbox name {name}");
         }
+    }
+
+    #[test]
+    fn committed_receipts_must_match_operation_count_and_variant() {
+        let operation = FileSyncOperation::Retain {
+            fact_key: "decision:test".to_string(),
+            predicate: "states".to_string(),
+            body: "Use the tested path.".to_string(),
+            confidence: 1.0,
+            valid_from: None,
+            valid_to: None,
+        };
+        let request = FileSyncRequest {
+            subject_id: SubjectId::new(),
+            scope_id: ScopeId::new(),
+            actor_id: ActorId::new(),
+            agent_node_id: AgentNodeId::new(),
+            subject_generation: 0,
+            base_fingerprint: "a".repeat(64),
+            plan_sha256: "b".repeat(64),
+            observed_at: "2026-07-23T00:00:00Z".to_string(),
+            operations: vec![operation],
+        };
+        let mut receipt = FileSyncResult {
+            base_fingerprint: request.base_fingerprint.clone(),
+            fingerprint: "c".repeat(64),
+            evaluated_at: "2026-07-23T00:00:00Z".to_string(),
+            plan_sha256: request.plan_sha256.clone(),
+            operations: Vec::new(),
+        };
+        assert!(
+            validate_sync_receipt(&request, &receipt)
+                .unwrap_err()
+                .contains("does not match")
+        );
+        receipt.operations = vec![FileSyncOperationResult::Forget {
+            memory_unit_id: UnitId::new(),
+            deletion_generation: 1,
+            invalidated: Vec::new(),
+        }];
+        assert!(
+            validate_sync_receipt(&request, &receipt)
+                .unwrap_err()
+                .contains("variants")
+        );
+    }
+
+    #[test]
+    fn sync_refuses_a_replaced_recovery_inbox_before_consuming_a_fact() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("memory");
+        let rendered = rendered_projection(&[(1, "alpha")]);
+        let absent = inspect_output(&output).unwrap();
+        replace_projection(&output, &absent, &rendered).unwrap();
+        let OutputState::Existing(existing) = inspect_output(&output).unwrap() else {
+            panic!("expected existing projection");
+        };
+        std::fs::write(
+            output.join(super::INBOX_DIR).join("new.md"),
+            "# decision:new\n\nUse the new path.\n",
+        )
+        .unwrap();
+        let snapshot = super::scan_sync_handles(&existing.handles).unwrap();
+
+        let result = super::write_rendered_projection(
+            &existing.handles,
+            Some(&existing),
+            &rendered,
+            &snapshot.inbox_files,
+            &mut |point| {
+                if point == "recovery:created" {
+                    let recovery = find_recovery(directory.path());
+                    std::fs::rename(
+                        recovery.join(super::INBOX_DIR),
+                        recovery.join("displaced-inbox"),
+                    )
+                    .unwrap();
+                    std::fs::create_dir(recovery.join(super::INBOX_DIR)).unwrap();
+                }
+            },
+        );
+
+        let error = result.expect_err("replaced recovery inbox was accepted");
+        assert!(error.contains("durable recovery inbox path changed identity"));
+        assert!(output.join(super::INBOX_DIR).join("new.md").is_file());
+    }
+
+    #[test]
+    fn sync_retains_a_late_inbox_write_in_durable_recovery() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("memory");
+        let rendered = rendered_projection(&[(1, "alpha")]);
+        let absent = inspect_output(&output).unwrap();
+        replace_projection(&output, &absent, &rendered).unwrap();
+        let OutputState::Existing(existing) = inspect_output(&output).unwrap() else {
+            panic!("expected existing projection");
+        };
+        let inbox = output.join(super::INBOX_DIR).join("new.md");
+        std::fs::write(&inbox, "# decision:new\n\nUse the new path.\n").unwrap();
+        let mut held = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&inbox)
+            .unwrap();
+        let snapshot = super::scan_sync_handles(&existing.handles).unwrap();
+
+        let result = super::write_rendered_projection(
+            &existing.handles,
+            Some(&existing),
+            &rendered,
+            &snapshot.inbox_files,
+            &mut |point| {
+                if point == "consume:new.md:detached" {
+                    held.set_len(0).unwrap();
+                    std::io::Write::write_all(&mut held, b"late inbox edit").unwrap();
+                    held.sync_all().unwrap();
+                }
+            },
+        );
+
+        let error = result.expect_err("late inbox edit was silently consumed");
+        assert!(error.contains("unexpected inode remains in durable recovery"));
+        assert_eq!(
+            std::fs::read_to_string(
+                find_recovery(directory.path())
+                    .join(super::INBOX_DIR)
+                    .join("new.md")
+            )
+            .unwrap(),
+            "late inbox edit"
+        );
     }
 
     #[cfg(windows)]
@@ -3539,7 +4530,7 @@ mod tests {
                 .unwrap()
             )
             .unwrap(),
-            [super::UNITS_DIR]
+            [super::INBOX_DIR, super::UNITS_DIR]
         );
         assert!(
             std::fs::read_dir(displaced_recovery.join(super::UNITS_DIR))

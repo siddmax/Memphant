@@ -136,7 +136,13 @@ server:
 
 A serialization failure or stale base is a conflict, never an automatic retry
 against newer truth. Network retry is safe only with the identical
-idempotency-key/request-hash pair.
+idempotency-key/request-hash pair. The CLI therefore uses a fresh
+plan-digest-plus-UUID key for each apply invocation and retains that exact
+request/key only within the invocation. It makes no cross-invocation replay
+claim because the observed timestamp is not persisted in the deterministic
+dry-run projection. A transport or untyped 5xx after POST is reported as
+outcome unknown; the operator reruns preflight rather than constructing a blind
+retry against possibly newer truth.
 
 After a successful commit the CLI fetches the new projection, replaces managed
 files with same-directory temporary files, syncs them, moves changed and stale
@@ -217,6 +223,13 @@ footer input.
   128-bit `FileIdInfo` before release. No general ReFS identity claim is made.
 - Cleanup is limited to paths named by the old manifest and inbox paths consumed
   by the committed plan. Unknown user files are never deleted.
+- Consumed inbox files are not directly unlinked. After the committed receipt
+  and a fresh exact local revalidation, each planned inode is moved with
+  no-replace semantics to the recovery inbox under its original slug, then
+  checked for the planned identity and bytes. The recovery inbox handle and
+  root/name binding are retained and validated exactly like the recovery units
+  directory; a substitution or late descriptor write fails post-commit with
+  the data retained in recovery.
 
 Manifest-last is crash-detectable, not a claim that many filesystem renames are
 one transaction. A mixed tree never verifies clean and is repaired only from a
@@ -241,7 +254,10 @@ edits.
   to run `sync` or restore it.
 - `sync` defaults to a JSON dry-run plan. Forget operations are labelled
   destructive.
-- `sync --apply` reports created replacement IDs and the final snapshot.
+- `sync --apply` validates the committed receipt before local mutation, then
+  fetches and compiles current canonical truth. It reports the receipt's
+  committed snapshot and the final fetched snapshot separately because a later
+  canonical writer may legitimately commit between them.
 - Staleness is reported as `sync_conflict`; validation is `sync_invalid`; remote
   unavailability is distinct from either.
 - Secrets and bearer tokens never enter the projection or error output.

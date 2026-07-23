@@ -17,6 +17,9 @@ fn main() -> ExitCode {
     if args.first().is_some_and(|verb| verb == "compile") {
         return file_plane::run_compile(&args[1..]);
     }
+    if args.first().is_some_and(|verb| verb == "sync") {
+        return file_plane::run_sync(&args[1..]);
+    }
     if let Some(verb) = args.first().map(String::as_str)
         && matches!(
             verb,
@@ -106,7 +109,7 @@ fn main() -> ExitCode {
         }
         _ => {
             eprintln!(
-                "usage: memphant <compile|verify|lock|retain|recall|reflect|correct|forget|mark|trace|db|admin> [options]; memory context commands use --subject-id <uuid> --scope <uuid> --actor <uuid> --agent-node <uuid> --subject-generation <n> (env: MEMPHANT_URL, MEMPHANT_API_KEY)"
+                "usage: memphant <compile|sync|verify|lock|retain|recall|reflect|correct|forget|mark|trace|db|admin> [options]; memory context commands use --subject-id <uuid> --scope <uuid> --actor <uuid> --agent-node <uuid> --subject-generation <n> (env: MEMPHANT_URL, MEMPHANT_API_KEY)"
             );
             ExitCode::from(2)
         }
