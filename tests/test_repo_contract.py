@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 STATUS_PHASE_RE = re.compile(r"^>?\s*# CURRENT PHASE: `([^`]+)`$", re.MULTILINE)
 REMOVED_PRIVATE_WORKTREE = "/Users/sidsharma/Syndai/.wt/codex-memphant-cross-repo"
 REMOVED_LINKED_MANIFEST = ".codex/linked-repos.json"
+CAMPAIGN_PATH_RE = re.compile(r"docs/build-log/artifacts/p1-t6/[A-Za-z0-9._/-]+")
 
 
 def test_memphant_lock_has_required_schema_keys() -> None:
@@ -161,6 +162,16 @@ def test_handoff_docs_mirror_status_phase() -> None:
         assert f"Current STATUS mirror: {status_phase.group(1)}" in text, handoff
         for phrase in stale_active_phrases:
             assert phrase not in active_text, f"{handoff}: {phrase}"
+
+
+def test_authoritative_handoff_references_existing_campaign_paths() -> None:
+    handoff = (ROOT / "docs/handoff/NEXT-SESSION-PROMPT.md").read_text(encoding="utf-8")
+    missing = sorted(
+        path for path in set(CAMPAIGN_PATH_RE.findall(handoff)) if not (ROOT / path).exists()
+    )
+
+    assert ".codex/worktrees/" not in handoff
+    assert missing == []
 
 
 def test_status_cannot_claim_complete_while_runtime_is_in_memory() -> None:
