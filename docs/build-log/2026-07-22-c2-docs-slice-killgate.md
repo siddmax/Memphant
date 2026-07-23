@@ -69,29 +69,33 @@ max-pool**, not whole bodies. So (b) was run with the strongest possible arm:
 `--resource-chunks` (12.2% of the re-pinned corpus's sections exceed the
 ~2000-char 512-token wall, so chunk granularity is the fair test).
 
-Result: **corroborating, not verdict-bearing** (kill-gate (a) already dropped
-C2). The MemPhant base and byo-chunk-rerank arms run on the re-pinned corpus and
-are scored pooled over v1+v2 (n=120) by
-`docs/build-log/artifacts/p1-c2-killgate/score_killgate_b.py`; the closure
-metric is `(rerank − base) / (syndai − base)` on hit@10, bar 0.5. Independent
-of the exact figure, the (a) finding already establishes why a *rank-compressed*
-rerank fails: 23/26 winning-flip golds are in the 16–64 band (in the r15 64-pool
-— that is how the full-pool rerank originally won them — but outside the top-16
-head that rank-compression reranks). Kill-gate (b) tests the complementary
-question — whether reranking the *full* narrowed pool (byo MiniLM-int8, chunk
-granularity, candidate_limit 64) closes ≥half the retrieval deficit vs the
-incumbent — on the re-pinned corpus. The numeric (b) closure is archived
-alongside the scorer when the arms complete; it does not change the DROP, which
-rests on (a): the *ceiling* C2 was scoped to (top-16 rank-compression, the only
-config under the 1.5 s bar with the retired 13 s model) cannot reach the win.
+Result: **not run to completion — deliberately abandoned as corroborating-only.**
+Kill-gate (a) already dropped C2 (§8 rule is OR), so (b) could only corroborate,
+never overturn. The leg was set up (MemPhant base + byo-chunk-rerank arms on the
+re-pinned corpus, scored pooled over v1+v2 by
+`docs/build-log/artifacts/p1-c2-killgate/score_killgate_b.py` with the closure
+metric `(rerank − base) / (syndai − base)` on hit@10, bar 0.5, incumbent
+reference = the committed 0.200 hit@10) but the ~50-min-per-arm modernbert drains
+kept dying on machine-sleep across session restarts, and re-running them for a
+number that cannot move the verdict was not worth the spend. The scorer and
+launchers are archived for anyone who wants to close it later.
 
-Live Syndai incumbent re-run was blocked by a Syndai dev-DB migration drift
-(`knowledge_source_versions.content_sha256` absent; alembic head newer than the
-column-adding migration — a Syndai-checkout maintenance state, and per AGENTS.md
-the Syndai repo is used strictly as-is). The gap math therefore uses the
-committed 2026-07-11 gate figure (Syndai 0.200 hit@10 on the near-identical docs
-corpus) as the incumbent reference, which the plan's own 0.050→0.217 deficit is
-built on.
+The (a) finding already establishes why a *rank-compressed* rerank fails: 23/26
+winning-flip golds are in the 16–64 band (in the r15 64-pool — that is how the
+full-pool rerank originally won them — but outside the top-16 head that
+rank-compression reranks). (b) would have tested the complementary question —
+whether reranking the *full* narrowed pool (byo MiniLM-int8, chunk granularity,
+candidate_limit 64) closes ≥half the retrieval deficit — but the DROP rests on
+(a): the *ceiling* C2 was scoped to (top-16 rank-compression, the only config
+under the 1.5 s bar with the retired 13 s model) cannot reach the win.
+
+(A live Syndai incumbent re-run for (b) would also have been blocked by a Syndai
+dev-DB migration drift — `knowledge_source_versions.content_sha256` absent,
+alembic head newer than the column-adding migration, a Syndai-checkout
+maintenance state, and per AGENTS.md the Syndai repo is used strictly as-is — so
+the scorer was wired to fall back to the committed 2026-07-11 gate figure, Syndai
+0.200 hit@10 on the near-identical docs corpus, which the plan's own 0.050→0.217
+deficit is built on.)
 
 ## Also landed (free, cutover-safety net, valuable regardless of the verdict)
 
