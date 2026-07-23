@@ -13,6 +13,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATIONS = ROOT / "memphant_migrations" / "versions"
 BOOTSTRAP = MIGRATIONS / "20260703_001_wsa_bootstrap.sql"
+FILE_SYNC_FORWARD = MIGRATIONS / "20260723_002_file_sync_mutation_verb.sql"
 
 
 def _load_script(name: str):
@@ -129,6 +130,19 @@ def test_mutation_ledger_is_receipt_safe_and_exactly_24_hour_scoped() -> None:
     assert "foreign key (tenant_id, data_subject_id)" not in block
 
 
+def test_file_sync_verb_is_forward_migrated_without_rewriting_bootstrap() -> None:
+    bootstrap_block = _load_script("check_memphant_migration_contract.py").table_block(
+        sql_text().lower(), "mutation_ledger"
+    )
+
+    assert "'file_sync'" not in bootstrap_block
+    assert FILE_SYNC_FORWARD.exists()
+    forward = FILE_SYNC_FORWARD.read_text(encoding="utf-8").lower()
+    assert "drop constraint mutation_ledger_verb_check" in forward
+    assert "add constraint mutation_ledger_verb_check" in forward
+    assert "'file_sync'" in forward
+
+
 def test_subject_owned_roots_are_deleted_by_one_composite_subject_cascade() -> None:
     sql = sql_text().lower()
     expected_fk = (
@@ -240,7 +254,7 @@ def test_migration_class_script_accepts_additive_bootstrap() -> None:
     assert "migration_class=clean" in result.stdout
 
 
-def test_apply_runner_dry_run_reports_ordered_bootstrap() -> None:
+def test_apply_runner_dry_run_reports_ordered_migrations() -> None:
     result = subprocess.run(
         [
             "python3",
@@ -256,9 +270,10 @@ def test_apply_runner_dry_run_reports_ordered_bootstrap() -> None:
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "migration_plan=1" in result.stdout
-    assert "20260703_001_wsa_bootstrap.sql" in result.stdout
-    assert "20260709_002_runtime_reconciliation.sql" not in result.stdout
+    assert "migration_plan=2" in result.stdout
+    assert result.stdout.index("20260703_001_wsa_bootstrap.sql") < result.stdout.index(
+        "20260723_002_file_sync_mutation_verb.sql"
+    )
 
 
 def test_apply_runner_executes_migration_and_ledger_in_one_transaction(
@@ -296,14 +311,14 @@ def test_apply_runner_executes_migration_and_ledger_in_one_transaction(
     assert result.returncode == 0, result.stdout + result.stderr
     calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
     mutation_calls = [call for call in calls if "--file" in call]
-    assert len(mutation_calls) == 1
-    call = mutation_calls[0]
-    assert "ON_ERROR_STOP=1" in call
-    assert "--single-transaction" in call
-    assert "--file" in call
-    assert "--command" in call
-    assert "insert into memphant.schema_migrations" in call[call.index("--command") + 1]
-    assert len(calls) == 2, "ledger must not execute in a second psql process"
+    assert len(mutation_calls) == 2
+    for call in mutation_calls:
+        assert "ON_ERROR_STOP=1" in call
+        assert "--single-transaction" in call
+        assert "--file" in call
+        assert "--command" in call
+        assert "insert into memphant.schema_migrations" in call[call.index("--command") + 1]
+    assert len(calls) == 3, "ledger must not execute in a second psql process"
 
 
 def test_apply_runner_failure_keeps_migration_and_ledger_in_same_failed_transaction(
@@ -459,6 +474,74 @@ def test_failed_migration_rolls_back_object_and_ledger(tmp_path: Path) -> None:
     )
 
     assert readback.stdout.strip() == "t|0"
+
+
+@pytest.mark.skipif(
+    not os.environ.get("MEMPHANT_TEST_DATABASE_URL"),
+    reason="requires scratch Postgres",
+)
+def test_live_forward_migration_upgrades_applied_bootstrap_atomically() -> None:
+    database_url = os.environ["MEMPHANT_TEST_DATABASE_URL"]
+    runner = _load_script("apply_memphant_migrations.py")
+
+    database_name = runner.psql(
+        database_url,
+        "--quiet",
+        "--tuples-only",
+        "--no-align",
+        "--command",
+        "select current_database()",
+    )
+    assert database_name.returncode == 0, database_name.stderr
+    assert database_name.stdout.strip().startswith("memphant_scratch_")
+
+    reset = runner.psql(database_url, "--command", "drop schema memphant cascade")
+    assert reset.returncode == 0, reset.stderr
+    runner.apply_migration(database_url, BOOTSTRAP)
+
+    insert_file_sync = (
+        "insert into memphant.tenant (id, slug, plan, region) "
+        "values ('00000000-0000-0000-0000-000000000001', 'upgrade-test', 'test', 'local'); "
+        "insert into memphant.mutation_ledger "
+        "(tenant_id, verb, idempotency_key, data_subject_id, subject_generation, "
+        "request_hash, state) values "
+        "('00000000-0000-0000-0000-000000000001', 'file_sync', 'upgrade-test', "
+        "'00000000-0000-0000-0000-000000000002', 0, decode(repeat('00', 32), 'hex'), "
+        "'pending')"
+    )
+    rejected = runner.psql(database_url, "--command", insert_file_sync)
+    assert rejected.returncode != 0
+    assert "mutation_ledger_verb_check" in rejected.stderr
+
+    upgrade = subprocess.run(
+        [
+            "python3",
+            "scripts/apply_memphant_migrations.py",
+            "--database-url",
+            database_url,
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert upgrade.returncode == 0, upgrade.stdout + upgrade.stderr
+    assert "migration_apply=complete applied=1 skipped=1" in upgrade.stdout
+
+    accepted = runner.psql(database_url, "--command", insert_file_sync)
+    assert accepted.returncode == 0, accepted.stderr
+    readback = runner.psql(
+        database_url,
+        "--quiet",
+        "--tuples-only",
+        "--no-align",
+        "--command",
+        "select count(*) from memphant.schema_migrations "
+        "where version in ('20260703_001_wsa_bootstrap', "
+        "'20260723_002_file_sync_mutation_verb')",
+    )
+    assert readback.returncode == 0, readback.stderr
+    assert readback.stdout.strip() == "2"
 
 
 def test_wsa_bootstrap_has_schema_migration_compat_floor() -> None:

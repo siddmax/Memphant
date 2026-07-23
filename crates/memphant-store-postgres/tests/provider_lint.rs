@@ -8,12 +8,18 @@ fn bundled_wsa_migration_passes_all_provider_lints() {
 }
 
 #[test]
-fn bundled_migrations_are_one_fresh_bootstrap() {
+fn bundled_migrations_are_ordered_bootstrap_then_file_sync_forward_migration() {
     let versions: Vec<_> = memphant_store_postgres::MIGRATIONS
         .iter()
         .map(|(version, _)| *version)
         .collect();
-    assert_eq!(versions, ["20260703_001_wsa_bootstrap"]);
+    assert_eq!(
+        versions,
+        [
+            "20260703_001_wsa_bootstrap",
+            "20260723_002_file_sync_mutation_verb"
+        ]
+    );
 }
 
 #[test]
