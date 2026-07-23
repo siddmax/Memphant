@@ -38,6 +38,8 @@ EXPECTED_API_ARMS = {
     "voyage-code-3",
     "voyage-context-4",
     "gemini-embedding-001",
+    "gemini-embedding-2",
+    "jina-v5-small",
     "openai-text-embedding-3-small",
 }
 
@@ -124,6 +126,8 @@ def test_check_embed_model_key_noop_for_none_and_local_arms(grt, monkeypatch):
     [
         ("voyage-4-large", "VOYAGE_API_KEY"),
         ("gemini-embedding-001", "GEMINI_API_KEY"),
+        ("gemini-embedding-2", "GEMINI_API_KEY"),
+        ("jina-v5-small", "JINA_API_KEY"),
         ("openai-text-embedding-3-small", "OPENAI_API_KEY"),
     ],
 )

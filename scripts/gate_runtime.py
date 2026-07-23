@@ -56,6 +56,8 @@ API_KEY_ENV_BY_ARM = {
     "voyage-code-3": "VOYAGE_API_KEY",
     "voyage-context-4": "VOYAGE_API_KEY",
     "gemini-embedding-001": "GEMINI_API_KEY",
+    "gemini-embedding-2": "GEMINI_API_KEY",
+    "jina-v5-small": "JINA_API_KEY",
     "openai-text-embedding-3-small": "OPENAI_API_KEY",
 }
 

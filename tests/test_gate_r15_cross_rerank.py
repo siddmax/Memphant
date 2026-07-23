@@ -263,6 +263,15 @@ class _Client:
         return self.trace_response
 
 
+CTX = {
+    "subject_id": "11111111-1111-4111-8111-111111111111",
+    "scope_id": "22222222-2222-4222-8222-222222222222",
+    "actor_id": "33333333-3333-4333-8333-333333333333",
+    "agent_node_id": "44444444-4444-4444-8444-444444444444",
+    "subject_generation": 0,
+}
+
+
 def test_recall_fetches_trace_and_returns_exact_reranker_facts(gr, monkeypatch):
     trace = _trace()
     client = _Client(
@@ -277,7 +286,7 @@ def test_recall_fetches_trace_and_returns_exact_reranker_facts(gr, monkeypatch):
     ticks = iter((1_000_000, 4_100_000, 6_100_000))
     monkeypatch.setattr(gr.time, "perf_counter_ns", lambda: next(ticks))
     bodies, trace_id, facts, post_ms, trace_read_ms, recall_e2e_ms = gr.recall(
-        client, "question", 10, 8192, "deep", cross_rerank=True,
+        client, CTX, "question", 10, 8192, "deep", cross_rerank=True,
         expected_rerank_config={
             "candidate_limit": 32, "max_length": 512, "batch_size": 8,
         },
@@ -285,7 +294,11 @@ def test_recall_fetches_trace_and_returns_exact_reranker_facts(gr, monkeypatch):
 
     assert bodies == ["answer"]
     assert trace_id == trace["id"]
-    assert client.get_paths == [f"/v1/traces/{trace['id']}"]
+    assert client.get_paths == [
+        f"/v1/traces/{trace['id']}?subject_id={CTX['subject_id']}"
+        f"&scope_id={CTX['scope_id']}&actor_id={CTX['actor_id']}"
+        f"&agent_node_id={CTX['agent_node_id']}&subject_generation=0"
+    ]
     assert facts == {**trace["cross_rerank"], "cross_rerank_ms": 17}
     assert post_ms == 4
     assert trace_read_ms == 2
@@ -341,7 +354,7 @@ def test_cross_rerank_recall_fails_closed_on_missing_or_malformed_trace_facts(
 
     with pytest.raises(RuntimeError, match=match):
         gr.recall(
-            client, "question", 10, 8192, "deep", cross_rerank=True,
+            client, CTX, "question", 10, 8192, "deep", cross_rerank=True,
             expected_rerank_config={
                 "candidate_limit": 32, "max_length": 512, "batch_size": 8,
             },
@@ -357,7 +370,7 @@ def test_cross_rerank_recall_fails_closed_on_reranker_failure(gr, failure):
 
     with pytest.raises(RuntimeError, match="reranker failure"):
         gr.recall(
-            client, "question", 10, 8192, "deep", cross_rerank=True,
+            client, CTX, "question", 10, 8192, "deep", cross_rerank=True,
             expected_rerank_config={
                 "candidate_limit": 32, "max_length": 512, "batch_size": 8,
             },
@@ -372,7 +385,7 @@ def test_recall_fails_closed_when_response_is_degraded(gr):
 
     with pytest.raises(RuntimeError, match="degraded"):
         gr.recall(
-            client, "question", 10, 8192, "deep", cross_rerank=True,
+            client, CTX, "question", 10, 8192, "deep", cross_rerank=True,
             expected_rerank_config={
                 "candidate_limit": 32, "max_length": 512, "batch_size": 8,
             },
@@ -387,7 +400,7 @@ def test_rerank_off_allows_absent_optional_facts_but_still_requires_trace(gr):
     )
 
     bodies, actual_trace_id, facts, post_ms, trace_read_ms, recall_e2e_ms = gr.recall(
-        client, "question", 10, 8192, "deep", cross_rerank=False
+        client, CTX, "question", 10, 8192, "deep", cross_rerank=False
     )
 
     assert bodies == ["answer"]
@@ -410,7 +423,7 @@ def test_cross_rerank_rejects_zero_candidates_and_requested_config_mismatch(gr):
         )
         with pytest.raises(RuntimeError, match=match):
             gr.recall(
-                client, "question", 10, 8192, "deep", cross_rerank=True,
+                client, CTX, "question", 10, 8192, "deep", cross_rerank=True,
                 expected_rerank_config={
                     "candidate_limit": 32, "max_length": 512, "batch_size": 8,
                 },
@@ -656,12 +669,13 @@ def test_negative_recall_wires_public_bitemporal_query_fields_without_labels(gr)
             return {"degraded": False, "trace_id": "trace-1", "items": []}
 
         def get(self, path):
-            assert path == "/v1/traces/trace-1"
+            assert path.startswith("/v1/traces/trace-1?")
             return {"id": "trace-1"}
 
     client = CaptureClient()
     gr.recall(
         client,
+        CTX,
         "question only",
         10,
         100,
@@ -714,6 +728,7 @@ def test_stale_fixture_uses_public_direct_unit_valid_interval(gr):
     client = CaptureClient()
     gr.ingest_negative_document(
         client,
+        CTX,
         {
             "document_id": "stale",
             "body": "old canary",
@@ -721,10 +736,9 @@ def test_stale_fixture_uses_public_direct_unit_valid_interval(gr):
             "valid_from": "2025-01-01T00:00:00Z",
             "valid_to": "2025-06-01T00:00:00Z",
         },
-        gr.SCOPE_ID,
     )
 
     assert client.path == "/v1/episodes"
-    assert "resource" not in client.payload
-    assert client.payload["unit"]["valid_from"] == "2025-01-01T00:00:00Z"
-    assert client.payload["unit"]["valid_to"] == "2025-06-01T00:00:00Z"
+    assert "resource" not in client.payload["payload"]
+    assert client.payload["payload"]["unit"]["valid_from"] == "2025-01-01T00:00:00Z"
+    assert client.payload["payload"]["unit"]["valid_to"] == "2025-06-01T00:00:00Z"

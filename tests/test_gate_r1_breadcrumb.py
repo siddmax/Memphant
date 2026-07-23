@@ -30,6 +30,13 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+CTX = {
+    "subject_id": "11111111-1111-4111-8111-111111111111",
+    "scope_id": "22222222-2222-4222-8222-222222222222",
+    "actor_id": "33333333-3333-4333-8333-333333333333",
+    "agent_node_id": "44444444-4444-4444-8444-444444444444",
+    "subject_generation": 0,
+}
 
 
 def _load(name: str, rel: str):
@@ -132,20 +139,20 @@ def _make_section(gc, heading_path, body="Some section body text."):
 def test_ingest_section_breadcrumb_true_prefixes_body(gc, gr):
     section = _make_section(gc, ["Firebase Test Lab Blaze", "Cost model"])
     client = FakeApiClient()
-    gr.ingest_section(client, section, breadcrumb=True)
+    gr.ingest_section(client, CTX, section, breadcrumb=True)
     assert len(client.posts) == 1
     _, payload = client.posts[0]
     expected_body = "Section path: Firebase Test Lab Blaze > Cost model\n\n" + section.body
-    assert payload["resource"]["body"] == expected_body
-    assert payload["resource"]["content_hash"] == "sha256:" + hashlib.sha256(expected_body.encode()).hexdigest()
+    assert payload["payload"]["resource"]["body"] == expected_body
+    assert payload["payload"]["resource"]["content_hash"] == "sha256:" + hashlib.sha256(expected_body.encode()).hexdigest()
 
 
 def test_ingest_section_breadcrumb_false_leaves_body_verbatim(gc, gr):
     section = _make_section(gc, ["Firebase Test Lab Blaze", "Cost model"])
     client = FakeApiClient()
-    gr.ingest_section(client, section, breadcrumb=False)
+    gr.ingest_section(client, CTX, section, breadcrumb=False)
     _, payload = client.posts[0]
-    assert payload["resource"]["body"] == section.body
+    assert payload["payload"]["resource"]["body"] == section.body
 
 
 def test_ingest_section_defaults_to_no_breadcrumb(gc, gr):
@@ -153,25 +160,25 @@ def test_ingest_section_defaults_to_no_breadcrumb(gc, gr):
     unaffected."""
     section = _make_section(gc, ["Heading"])
     client = FakeApiClient()
-    gr.ingest_section(client, section)
+    gr.ingest_section(client, CTX, section)
     _, payload = client.posts[0]
-    assert payload["resource"]["body"] == section.body
+    assert payload["payload"]["resource"]["body"] == section.body
 
 
 def test_ingest_section_breadcrumb_true_with_truly_empty_heading_path_prepends_nothing(gc, gr):
     section = _make_section(gc, [])
     client = FakeApiClient()
-    gr.ingest_section(client, section, breadcrumb=True)
+    gr.ingest_section(client, CTX, section, breadcrumb=True)
     _, payload = client.posts[0]
-    assert payload["resource"]["body"] == section.body
+    assert payload["payload"]["resource"]["body"] == section.body
 
 
 def test_ingest_section_breadcrumb_true_with_preamble_sentinel_gets_prefixed(gc, gr):
     section = _make_section(gc, ["(preamble)"])
     client = FakeApiClient()
-    gr.ingest_section(client, section, breadcrumb=True)
+    gr.ingest_section(client, CTX, section, breadcrumb=True)
     _, payload = client.posts[0]
-    assert payload["resource"]["body"] == "Section path: (preamble)\n\n" + section.body
+    assert payload["payload"]["resource"]["body"] == "Section path: (preamble)\n\n" + section.body
 
 
 def test_ingest_section_uri_unaffected_by_breadcrumb(gc, gr):
@@ -179,11 +186,11 @@ def test_ingest_section_uri_unaffected_by_breadcrumb(gc, gr):
     must be identical with breadcrumb on or off."""
     section = _make_section(gc, ["Heading"])
     client = FakeApiClient()
-    gr.ingest_section(client, section, breadcrumb=True)
-    uri_on = client.posts[0][1]["resource"]["uri"]
+    gr.ingest_section(client, CTX, section, breadcrumb=True)
+    uri_on = client.posts[0][1]["payload"]["resource"]["uri"]
     client2 = FakeApiClient()
-    gr.ingest_section(client2, section, breadcrumb=False)
-    uri_off = client2.posts[0][1]["resource"]["uri"]
+    gr.ingest_section(client2, CTX, section, breadcrumb=False)
+    uri_off = client2.posts[0][1]["payload"]["resource"]["uri"]
     assert uri_on == uri_off == section.uri()
 
 
