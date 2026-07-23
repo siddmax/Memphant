@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
+use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::io::{Read, Write};
@@ -62,6 +63,12 @@ struct ManagedFileSnapshot {
     bytes: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutputParentAnchor {
+    path: PathBuf,
+    identity: FileIdentity,
+}
+
 type ExactProjectionSnapshot = (
     ExportManifest,
     String,
@@ -76,14 +83,16 @@ struct ProjectionWriteOutcome {
 
 #[derive(Debug)]
 struct RecoveryArea {
+    name: String,
     path: PathBuf,
+    identity: FileIdentity,
     root: Dir,
     units: Dir,
 }
 
 #[derive(Debug)]
 struct RecoverySession {
-    output_root: PathBuf,
+    anchor: OutputParentAnchor,
     area: Option<RecoveryArea>,
 }
 
@@ -96,6 +105,8 @@ struct DirectoryBinding {
 
 #[derive(Debug)]
 struct TreeHandles {
+    anchor: OutputParentAnchor,
+    anchor_parent: Dir,
     outer_bindings: Vec<DirectoryBinding>,
     parent: Dir,
     root_name: String,
@@ -118,17 +129,19 @@ struct ValidatedExport {
 
 #[derive(Debug)]
 struct AbsentOutput {
+    anchor: OutputParentAnchor,
+    anchor_parent: Dir,
     parent: Dir,
     missing_components: Vec<String>,
-    parent_identity: FileIdentity,
 }
 
 #[derive(Debug)]
 struct EmptyOutput {
+    anchor: OutputParentAnchor,
+    anchor_parent: Dir,
     parent: Dir,
     root_name: String,
     root: Dir,
-    parent_identity: FileIdentity,
     root_identity: FileIdentity,
     root_names: Vec<String>,
 }
@@ -600,12 +613,13 @@ fn escape_link_text(value: &str) -> String {
 
 impl TreeHandles {
     fn open(root: &Path) -> Result<Self, String> {
-        let (mut current, components, _) = output_anchor(root)?;
+        let (mut current, components, anchor) = output_anchor(root)?;
+        let anchor_parent = current.try_clone().map_err(|error| error.to_string())?;
         for (index, name) in components.iter().enumerate() {
             if index + 1 == components.len() {
                 let root_dir = open_directory_at(&current, name)
                     .map_err(|error| format!("output root: {error}"))?;
-                return Self::from_root(current, name.clone(), root_dir);
+                return Self::from_root(current, name.clone(), root_dir, anchor_parent, anchor);
             }
             current = open_directory_at(&current, name)
                 .map_err(|error| format!("output component {name}: {error}"))?;
@@ -613,12 +627,20 @@ impl TreeHandles {
         Err("output root may not be the filesystem root".to_string())
     }
 
-    fn from_root(parent: Dir, root_name: String, root: Dir) -> Result<Self, String> {
+    fn from_root(
+        parent: Dir,
+        root_name: String,
+        root: Dir,
+        anchor_parent: Dir,
+        anchor: OutputParentAnchor,
+    ) -> Result<Self, String> {
         let units =
             open_directory_at(&root, UNITS_DIR).map_err(|error| format!("{UNITS_DIR}: {error}"))?;
         let inbox =
             open_directory_at(&root, INBOX_DIR).map_err(|error| format!("{INBOX_DIR}: {error}"))?;
         let handles = Self {
+            anchor,
+            anchor_parent,
             outer_bindings: Vec::new(),
             parent_identity: directory_identity(&parent)?,
             root_identity: directory_identity(&root)?,
@@ -635,6 +657,7 @@ impl TreeHandles {
     }
 
     fn ensure_bound(&self) -> Result<(), String> {
+        self.anchor.ensure_current(&self.anchor_parent)?;
         for binding in &self.outer_bindings {
             let actual = directory_identity_at(&binding.parent, &binding.name)
                 .map_err(|error| format!("output ancestor {} changed: {error}", binding.name))?;
@@ -667,7 +690,105 @@ impl TreeHandles {
     }
 }
 
-fn output_anchor(root: &Path) -> Result<(Dir, Vec<String>, FileIdentity), String> {
+impl OutputParentAnchor {
+    fn ensure_current(&self, retained_parent: &Dir) -> Result<(), String> {
+        let retained_identity = directory_identity(retained_parent)
+            .map_err(|error| format!("output parent changed: {error}"))?;
+        if retained_identity != self.identity {
+            return Err(
+                "output parent changed: retained handle identity differs from inspection"
+                    .to_string(),
+            );
+        }
+        let reopened = open_absolute_directory_nofollow(&self.path)
+            .map_err(|error| format!("output parent changed: {error}"))?;
+        let reopened_identity = directory_identity(&reopened)
+            .map_err(|error| format!("output parent changed: {error}"))?;
+        if reopened_identity != retained_identity {
+            return Err(
+                "output parent changed: captured path no longer names the retained parent"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+fn open_absolute_directory_nofollow(path: &Path) -> Result<Dir, String> {
+    open_absolute_directory_nofollow_with_hook(path, |_| {})
+}
+
+fn absolute_directory_components(path: &Path) -> Result<(PathBuf, Vec<OsString>), String> {
+    if !path.is_absolute() {
+        return Err("captured output parent is not absolute".to_string());
+    }
+    let mut root = PathBuf::new();
+    let mut names = Vec::new();
+    let mut saw_root = false;
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) if names.is_empty() && !saw_root => {
+                root.push(component.as_os_str());
+            }
+            Component::RootDir if names.is_empty() => {
+                root.push(component.as_os_str());
+                saw_root = true;
+            }
+            Component::Normal(name) => names.push(name.to_os_string()),
+            Component::CurDir => {}
+            Component::Prefix(_) | Component::RootDir | Component::ParentDir => {
+                return Err("captured output parent contains traversal".to_string());
+            }
+        }
+    }
+    if root.as_os_str().is_empty() || !saw_root {
+        return Err("captured output parent has no filesystem root".to_string());
+    }
+    Ok((root, names))
+}
+
+fn open_absolute_directory_nofollow_with_hook(
+    path: &Path,
+    mut after_open: impl FnMut(&std::ffi::OsStr),
+) -> Result<Dir, String> {
+    let (root, names) = absolute_directory_components(path)?;
+    let mut current = Dir::open_ambient_dir(&root, ambient_authority())
+        .map_err(|error| format!("cannot open captured filesystem root: {error}"))?;
+    let mut bindings = Vec::new();
+    for name in names {
+        let next = open_directory_at(&current, &name).map_err(|error| {
+            format!(
+                "cannot reopen captured output parent component {} without following links: {error}",
+                name.to_string_lossy()
+            )
+        })?;
+        let identity = directory_identity(&next)?;
+        bindings.push((
+            current.try_clone().map_err(|error| error.to_string())?,
+            name.clone(),
+            identity,
+        ));
+        current = next;
+        after_open(&name);
+    }
+    for (parent, name, expected) in bindings {
+        let actual = directory_identity_at(&parent, &name).map_err(|error| {
+            format!(
+                "captured output parent component {} changed during reopen: {error}",
+                name.to_string_lossy()
+            )
+        })?;
+        if actual != expected {
+            return Err(format!(
+                "captured output parent component {} changed during reopen",
+                name.to_string_lossy()
+            ));
+        }
+    }
+    Ok(current)
+}
+
+fn output_anchor(root: &Path) -> Result<(Dir, Vec<String>, OutputParentAnchor), String> {
     if root
         .components()
         .any(|component| matches!(component, Component::ParentDir))
@@ -709,28 +830,50 @@ fn output_anchor(root: &Path) -> Result<(Dir, Vec<String>, FileIdentity), String
     }
     let ancestor = fs::canonicalize(&ancestor)
         .map_err(|error| format!("cannot resolve output parent: {error}"))?;
-    let parent = Dir::open_ambient_dir(&ancestor, ambient_authority())
+    let parent = open_absolute_directory_nofollow(&ancestor)
         .map_err(|error| format!("cannot safely open output parent: {error}"))?;
     let identity = directory_identity(&parent)?;
     components.reverse();
-    Ok((parent, components, identity))
+    Ok((
+        parent,
+        components,
+        OutputParentAnchor {
+            path: ancestor,
+            identity,
+        },
+    ))
 }
 
 fn initialize_empty_output(empty: &EmptyOutput) -> Result<TreeHandles, String> {
+    empty.anchor.ensure_current(&empty.anchor_parent)?;
     let parent = empty
         .parent
         .try_clone()
         .map_err(|error| error.to_string())?;
     let root_name = empty.root_name.clone();
     let root = empty.root.try_clone().map_err(|error| error.to_string())?;
-    initialize_root_directories(&root)?;
-    let handles = TreeHandles::from_root(parent, root_name, root)?;
+    initialize_root_directories(&root, &empty.anchor, &empty.anchor_parent)?;
+    let handles = TreeHandles::from_root(
+        parent,
+        root_name,
+        root,
+        empty
+            .anchor_parent
+            .try_clone()
+            .map_err(|error| error.to_string())?,
+        empty.anchor.clone(),
+    )?;
     ensure_initialized_tree(&handles)?;
     Ok(handles)
 }
 
-fn initialize_root_directories(root: &Dir) -> Result<(), String> {
+fn initialize_root_directories(
+    root: &Dir,
+    anchor: &OutputParentAnchor,
+    anchor_parent: &Dir,
+) -> Result<(), String> {
     for name in [UNITS_DIR, INBOX_DIR] {
+        anchor.ensure_current(anchor_parent)?;
         root.create_dir(name)
             .map_err(|error| format!("cannot create {name}: {error}"))?;
         sync_directory(root).map_err(|error| format!("cannot sync output root: {error}"))?;
@@ -749,8 +892,14 @@ fn ensure_initialized_tree(handles: &TreeHandles) -> Result<(), String> {
     Ok(())
 }
 
-fn create_unique_directory(parent: &Dir, label: &str) -> Result<(String, Dir), String> {
+fn create_unique_directory(
+    parent: &Dir,
+    label: &str,
+    anchor: &OutputParentAnchor,
+    anchor_parent: &Dir,
+) -> Result<(String, Dir), String> {
     for _ in 0..32 {
+        anchor.ensure_current(anchor_parent)?;
         let name = format!(".memphant-{label}-{}", Uuid::new_v4());
         match parent.create_dir(&name) {
             Ok(()) => {
@@ -770,7 +919,6 @@ fn create_unique_directory(parent: &Dir, label: &str) -> Result<(String, Dir), S
 }
 
 fn build_and_install_absent_projection(
-    output_root: &Path,
     absent: &AbsentOutput,
     rendered: &RenderedProjection,
     hook: &mut impl FnMut(&str),
@@ -779,7 +927,12 @@ fn build_and_install_absent_projection(
         .missing_components
         .first()
         .ok_or_else(|| "output path has no missing component".to_string())?;
-    let (staging_name, staging_root) = create_unique_directory(&absent.parent, "stage")?;
+    let (staging_name, staging_root) = create_unique_directory(
+        &absent.parent,
+        "stage",
+        &absent.anchor,
+        &absent.anchor_parent,
+    )?;
     let staging_identity = directory_identity(&staging_root)?;
     let mut outer_bindings = Vec::new();
 
@@ -804,6 +957,7 @@ fn build_and_install_absent_projection(
         let mut current = staging_root;
         let mut result = None;
         for (index, name) in absent.missing_components.iter().enumerate().skip(1) {
+            absent.anchor.ensure_current(&absent.anchor_parent)?;
             current
                 .create_dir(name)
                 .map_err(|error| format!("cannot create staging component {name}: {error}"))?;
@@ -824,11 +978,20 @@ fn build_and_install_absent_projection(
         result.ok_or_else(|| "cannot resolve staging output root".to_string())?
     };
 
-    initialize_root_directories(&root)?;
-    let mut handles = TreeHandles::from_root(parent, root_name, root)?;
+    initialize_root_directories(&root, &absent.anchor, &absent.anchor_parent)?;
+    let mut handles = TreeHandles::from_root(
+        parent,
+        root_name,
+        root,
+        absent
+            .anchor_parent
+            .try_clone()
+            .map_err(|error| error.to_string())?,
+        absent.anchor.clone(),
+    )?;
     handles.outer_bindings = outer_bindings;
     ensure_initialized_tree(&handles)?;
-    let staged = write_rendered_projection(output_root, &handles, None, rendered, hook)?;
+    let staged = write_rendered_projection(&handles, None, rendered, hook)?;
     if staged.recovery.is_some() {
         return Err("new projection unexpectedly created durable recovery".to_string());
     }
@@ -860,14 +1023,26 @@ fn absent_install_error(error: std::io::Error, staging_name: &str) -> String {
 fn open_installed_tree_from_parent(
     parent: &Dir,
     components: &[String],
+    anchor: &OutputParentAnchor,
+    anchor_parent: &Dir,
 ) -> Result<TreeHandles, String> {
+    anchor.ensure_current(anchor_parent)?;
+    let retained_anchor = anchor_parent
+        .try_clone()
+        .map_err(|error| error.to_string())?;
     let mut current = parent.try_clone().map_err(|error| error.to_string())?;
     let mut outer_bindings = Vec::new();
     for (index, name) in components.iter().enumerate() {
         let next = open_directory_at(&current, name)
             .map_err(|error| format!("installed output component {name}: {error}"))?;
         if index + 1 == components.len() {
-            let mut handles = TreeHandles::from_root(current, name.clone(), next)?;
+            let mut handles = TreeHandles::from_root(
+                current,
+                name.clone(),
+                next,
+                retained_anchor,
+                anchor.clone(),
+            )?;
             handles.outer_bindings = outer_bindings;
             handles.ensure_bound()?;
             return Ok(handles);
@@ -895,6 +1070,7 @@ fn install_staged_projection(
     hook: &mut impl FnMut(&str),
 ) -> Result<(), String> {
     hook("absent:before_install");
+    absent.anchor.ensure_current(&absent.anchor_parent)?;
     rename_noreplace(&absent.parent, staging_name, &absent.parent, first)
         .map_err(|error| absent_install_error(error, staging_name))?;
     sync_directory(&absent.parent)
@@ -933,6 +1109,7 @@ fn install_staged_projection(
     // handles, so dropping this aggregate closes every staging descendant.
     drop(handles);
     hook("absent:before_install");
+    absent.anchor.ensure_current(&absent.anchor_parent)?;
     rename_noreplace(&absent.parent, staging_name, &absent.parent, first)
         .map_err(|error| absent_install_error(error, staging_name))?;
     sync_directory(&absent.parent)
@@ -941,10 +1118,15 @@ fn install_staged_projection(
     if directory_identity_at(&absent.parent, first)? != staging_identity {
         return Err("installed output identity differs from validated staging".to_string());
     }
-    let handles = open_installed_tree_from_parent(&absent.parent, &absent.missing_components)
-        .map_err(|error| {
-            format!("installed output could not be reopened from retained parent: {error}")
-        })?;
+    let handles = open_installed_tree_from_parent(
+        &absent.parent,
+        &absent.missing_components,
+        &absent.anchor,
+        &absent.anchor_parent,
+    )
+    .map_err(|error| {
+        format!("installed output could not be reopened from retained parent: {error}")
+    })?;
     let installed = validate_rendered_projection_twice(&handles, rendered, hook)?;
     if &installed != staged_snapshot {
         return Err("installed output differs from the validated staging tree".to_string());
@@ -973,11 +1155,10 @@ impl OutputState {
         match self {
             Self::Existing(existing) => existing.revalidate(),
             Self::Absent(absent) => {
-                if directory_identity(&absent.parent).map_err(|error| vec![error])?
-                    != absent.parent_identity
-                {
-                    return Err(vec!["output parent handle changed identity".to_string()]);
-                }
+                absent
+                    .anchor
+                    .ensure_current(&absent.anchor_parent)
+                    .map_err(|error| vec![error])?;
                 let first = absent
                     .missing_components
                     .first()
@@ -995,8 +1176,8 @@ impl OutputState {
             }
             Self::Empty(empty) => {
                 let mut findings = Vec::new();
-                if directory_identity(&empty.parent).ok() != Some(empty.parent_identity) {
-                    findings.push("output parent handle changed identity".to_string());
+                if let Err(error) = empty.anchor.ensure_current(&empty.anchor_parent) {
+                    findings.push(error);
                 }
                 if directory_identity(&empty.root).ok() != Some(empty.root_identity) {
                     findings.push("output root handle changed identity".to_string());
@@ -1104,16 +1285,18 @@ fn directory_names(directory: &Dir) -> Result<Vec<String>, String> {
 }
 
 fn inspect_output(root: &Path) -> Result<OutputState, CompileFailure> {
-    let (mut current, components, _) = output_anchor(root).map_err(CompileFailure::Error)?;
+    let (mut current, components, anchor) = output_anchor(root).map_err(CompileFailure::Error)?;
+    let anchor_parent = current
+        .try_clone()
+        .map_err(|error| CompileFailure::Error(error.to_string()))?;
     for (index, name) in components.iter().enumerate() {
         match current.symlink_metadata(name) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let current_identity =
-                    directory_identity(&current).map_err(CompileFailure::Error)?;
                 return Ok(OutputState::Absent(AbsentOutput {
+                    anchor,
+                    anchor_parent,
                     parent: current,
                     missing_components: components[index..].to_vec(),
-                    parent_identity: current_identity,
                 }));
             }
             Err(error) => {
@@ -1139,7 +1322,8 @@ fn inspect_output(root: &Path) -> Result<OutputState, CompileFailure> {
             })?;
             if names.is_empty() {
                 return Ok(OutputState::Empty(EmptyOutput {
-                    parent_identity: directory_identity(&current).map_err(CompileFailure::Error)?,
+                    anchor,
+                    anchor_parent,
                     root_identity: directory_identity(&next).map_err(CompileFailure::Error)?,
                     parent: current,
                     root_name: name.clone(),
@@ -1147,8 +1331,9 @@ fn inspect_output(root: &Path) -> Result<OutputState, CompileFailure> {
                     root_names: names,
                 }));
             }
-            let handles = TreeHandles::from_root(current, name.clone(), next)
-                .map_err(|error| CompileFailure::Dirty(vec![error]))?;
+            let handles =
+                TreeHandles::from_root(current, name.clone(), next, anchor_parent, anchor)
+                    .map_err(|error| CompileFailure::Dirty(vec![error]))?;
             let (manifest, snapshot_sha256, managed_files) =
                 validate_export_handles(&handles, false).map_err(CompileFailure::Dirty)?;
             return Ok(OutputState::Existing(Box::new(ValidatedExport {
@@ -1579,7 +1764,7 @@ fn replace_projection(
 }
 
 fn replace_projection_with_hook(
-    root: &Path,
+    _root: &Path,
     output: &OutputState,
     rendered: &RenderedProjection,
     mut after_mutation: impl FnMut(&str),
@@ -1587,8 +1772,12 @@ fn replace_projection_with_hook(
     output
         .revalidate()
         .map_err(|findings| findings.join("; "))?;
+    after_mutation("parent:before_first_mutation");
+    output
+        .revalidate()
+        .map_err(|findings| findings.join("; "))?;
     if let OutputState::Absent(absent) = output {
-        return build_and_install_absent_projection(root, absent, rendered, &mut after_mutation);
+        return build_and_install_absent_projection(absent, rendered, &mut after_mutation);
     }
     let previous = match output {
         OutputState::Existing(previous) => Some(previous.as_ref()),
@@ -1604,18 +1793,17 @@ fn replace_projection_with_hook(
         .map(|validated| &validated.handles)
         .or(owned_handles.as_ref())
         .expect("existing or newly opened output handles");
-    write_rendered_projection(root, handles, previous, rendered, &mut after_mutation)
+    write_rendered_projection(handles, previous, rendered, &mut after_mutation)
         .map(|outcome| outcome.recovery)
 }
 
 fn write_rendered_projection(
-    root: &Path,
     handles: &TreeHandles,
     previous: Option<&ValidatedExport>,
     rendered: &RenderedProjection,
     after_mutation: &mut impl FnMut(&str),
 ) -> Result<ProjectionWriteOutcome, String> {
-    let mut recovery = RecoverySession::new(root);
+    let mut recovery = RecoverySession::new(&handles.anchor);
     let result = (|| {
         handles.ensure_bound()?;
 
@@ -1633,7 +1821,8 @@ fn write_rendered_projection(
                 },
                 bytes,
                 expected_managed_file(previous, path),
-                &handles.parent,
+                &handles.anchor_parent,
+                &handles.anchor,
                 &mut recovery,
                 after_mutation,
             )?;
@@ -1648,7 +1837,8 @@ fn write_rendered_projection(
             },
             &rendered.memory,
             expected_managed_file(previous, MEMORY_FILE),
-            &handles.parent,
+            &handles.anchor_parent,
+            &handles.anchor,
             &mut recovery,
             after_mutation,
         )?;
@@ -1673,7 +1863,8 @@ fn write_rendered_projection(
                             .managed_files
                             .get(&entry.path)
                             .ok_or_else(|| format!("missing validated state for {}", entry.path))?,
-                        &handles.parent,
+                        &handles.anchor_parent,
+                        &handles.anchor,
                         &mut recovery,
                         after_mutation,
                     )?;
@@ -1690,7 +1881,8 @@ fn write_rendered_projection(
             },
             &rendered.manifest_bytes,
             expected_managed_file(previous, MANIFEST_FILE),
-            &handles.parent,
+            &handles.anchor_parent,
+            &handles.anchor,
             &mut recovery,
             after_mutation,
         )?;
@@ -1699,11 +1891,14 @@ fn write_rendered_projection(
         validate_rendered_projection_twice(handles, rendered, after_mutation)
     })();
     match result {
-        Ok(snapshot) => Ok(ProjectionWriteOutcome {
-            snapshot,
-            recovery: recovery.path().map(Path::to_path_buf),
-        }),
-        Err(error) => Err(recovery.annotate(error)),
+        Ok(snapshot) => match recovery.confirmed_path(&handles.anchor_parent) {
+            Ok(path) => Ok(ProjectionWriteOutcome {
+                snapshot,
+                recovery: path,
+            }),
+            Err(error) => Err(recovery.annotate(&handles.anchor_parent, error)),
+        },
+        Err(error) => Err(recovery.annotate(&handles.anchor_parent, error)),
     }
 }
 
@@ -1947,66 +2142,110 @@ struct ManagedTarget<'a> {
 }
 
 impl RecoverySession {
-    fn new(output_root: &Path) -> Self {
+    fn new(anchor: &OutputParentAnchor) -> Self {
         Self {
-            output_root: output_root.to_path_buf(),
+            anchor: anchor.clone(),
             area: None,
         }
     }
 
     fn ensure(&mut self, output_parent: &Dir) -> Result<&RecoveryArea, String> {
         if self.area.is_none() {
-            self.area = Some(create_recovery_area(output_parent, &self.output_root)?);
+            self.area = Some(create_recovery_area(output_parent, &self.anchor)?);
         }
-        Ok(self.area.as_ref().expect("recovery area initialized"))
+        let area = self.area.as_ref().expect("recovery area initialized");
+        area.ensure_current(&self.anchor, output_parent)?;
+        Ok(area)
     }
 
-    fn target(
-        &mut self,
-        output_parent: &Dir,
-        location: ManagedDirectory,
-        name: &str,
-    ) -> Result<(Dir, PathBuf), String> {
+    fn target(&mut self, output_parent: &Dir, location: ManagedDirectory) -> Result<Dir, String> {
         let area = self.ensure(output_parent)?;
-        let (directory, path) = match location {
-            ManagedDirectory::Root => (
-                area.root.try_clone().map_err(|error| error.to_string())?,
-                area.path.join(name),
-            ),
-            ManagedDirectory::Units => (
-                area.units.try_clone().map_err(|error| error.to_string())?,
-                area.path.join(UNITS_DIR).join(name),
-            ),
-        };
-        Ok((directory, path))
+        match location {
+            ManagedDirectory::Root => area.root.try_clone().map_err(|error| error.to_string()),
+            ManagedDirectory::Units => area.units.try_clone().map_err(|error| error.to_string()),
+        }
     }
 
-    fn path(&self) -> Option<&Path> {
-        self.area.as_ref().map(|area| area.path.as_path())
-    }
-
-    fn annotate(&self, error: String) -> String {
-        match self.path() {
-            Some(path) if !error.contains("recovery=") => {
-                format!("{error}; recovery={}", path.display())
+    fn confirmed_path(&self, output_parent: &Dir) -> Result<Option<PathBuf>, String> {
+        match &self.area {
+            Some(area) => {
+                area.ensure_current(&self.anchor, output_parent)?;
+                Ok(Some(area.path.clone()))
             }
-            _ => error,
+            None => Ok(None),
+        }
+    }
+
+    fn annotate(&self, output_parent: &Dir, error: String) -> String {
+        match &self.area {
+            Some(area) if area.ensure_current(&self.anchor, output_parent).is_ok() => {
+                if error.contains("recovery=") {
+                    error
+                } else {
+                    format!("{error}; recovery={}", area.path.display())
+                }
+            }
+            Some(area) => last_known_recovery(error, &area.path),
+            None => error,
         }
     }
 }
 
-fn absolute_output_parent(output_root: &Path) -> Result<PathBuf, String> {
-    let absolute = if output_root.is_absolute() {
-        output_root.to_path_buf()
+impl RecoveryArea {
+    fn ensure_current(
+        &self,
+        anchor: &OutputParentAnchor,
+        output_parent: &Dir,
+    ) -> Result<(), String> {
+        ensure_recovery_current(
+            anchor,
+            output_parent,
+            &self.name,
+            &self.path,
+            self.identity,
+            &self.root,
+        )
+    }
+}
+
+fn ensure_recovery_current(
+    anchor: &OutputParentAnchor,
+    output_parent: &Dir,
+    name: &str,
+    path: &Path,
+    identity: FileIdentity,
+    root: &Dir,
+) -> Result<(), String> {
+    anchor.ensure_current(output_parent)?;
+    if directory_identity(root)? != identity {
+        return Err("durable recovery handle changed identity".to_string());
+    }
+    if directory_identity_at(output_parent, name)? != identity {
+        return Err("durable recovery name changed identity".to_string());
+    }
+    let reopened = open_absolute_directory_nofollow(path)
+        .map_err(|error| format!("durable recovery path changed: {error}"))?;
+    if directory_identity(&reopened)? != identity {
+        return Err("durable recovery path no longer names the retained directory".to_string());
+    }
+    anchor.ensure_current(output_parent)?;
+    Ok(())
+}
+
+fn last_known_recovery(error: String, path: &Path) -> String {
+    let error = if error.contains("output parent changed") {
+        error
     } else {
-        std::env::current_dir()
-            .map_err(|error| error.to_string())?
-            .join(output_root)
+        format!("{error}; output parent changed")
     };
-    let parent = absolute
-        .parent()
-        .ok_or_else(|| "output root may not be the filesystem root".to_string())?;
-    fs::canonicalize(parent).map_err(|error| format!("cannot resolve output parent: {error}"))
+    if error.contains("recovery_last_known=") {
+        error
+    } else {
+        format!(
+            "{error}; recovery_last_known={}; recovery was retained under that parent",
+            path.display()
+        )
+    }
 }
 
 fn private_dir_builder() -> DirBuilder {
@@ -2022,60 +2261,151 @@ fn private_dir_builder() -> DirBuilder {
     }
 }
 
-fn create_recovery_area(output_parent: &Dir, output_root: &Path) -> Result<RecoveryArea, String> {
-    let parent_path = absolute_output_parent(output_root)?;
+fn create_recovery_area(
+    output_parent: &Dir,
+    anchor: &OutputParentAnchor,
+) -> Result<RecoveryArea, String> {
     for _ in 0..32 {
+        anchor.ensure_current(output_parent)?;
         let name = unique_internal_name("recovery");
-        let path = parent_path.join(&name);
+        let path = anchor.path.join(&name);
         match output_parent.create_dir_with(&name, &private_dir_builder()) {
             Ok(()) => {
-                sync_directory(output_parent).map_err(|error| {
-                    format!(
-                        "cannot sync recovery parent: {error}; recovery={}",
-                        path.display()
-                    )
-                })?;
-                let root = open_directory_at(output_parent, &name).map_err(|error| {
-                    format!(
-                        "cannot open durable recovery directory: {error}; recovery={}",
-                        path.display()
-                    )
-                })?;
-                root.create_dir_with(UNITS_DIR, &private_dir_builder())
-                    .map_err(|error| {
-                        format!(
-                            "cannot create recovery units directory: {error}; recovery={}",
-                            path.display()
+                if let Err(error) = sync_directory(output_parent) {
+                    return Err(last_known_recovery(
+                        format!("cannot sync recovery parent: {error}"),
+                        &path,
+                    ));
+                }
+                let root = match open_directory_at(output_parent, &name) {
+                    Ok(root) => root,
+                    Err(error) => {
+                        return Err(last_known_recovery(
+                            format!("cannot open durable recovery directory: {error}"),
+                            &path,
+                        ));
+                    }
+                };
+                let identity = match directory_identity(&root) {
+                    Ok(identity) => identity,
+                    Err(error) => {
+                        return Err(last_known_recovery(
+                            format!("cannot identify durable recovery directory: {error}"),
+                            &path,
+                        ));
+                    }
+                };
+                if let Err(error) =
+                    ensure_recovery_current(anchor, output_parent, &name, &path, identity, &root)
+                {
+                    return Err(last_known_recovery(error, &path));
+                }
+                anchor
+                    .ensure_current(output_parent)
+                    .map_err(|error| last_known_recovery(error, &path))?;
+                if let Err(error) = root.create_dir_with(UNITS_DIR, &private_dir_builder()) {
+                    return Err(
+                        if ensure_recovery_current(
+                            anchor,
+                            output_parent,
+                            &name,
+                            &path,
+                            identity,
+                            &root,
                         )
-                    })?;
-                sync_directory(&root).map_err(|error| {
-                    format!(
-                        "cannot sync durable recovery directory: {error}; recovery={}",
-                        path.display()
-                    )
-                })?;
-                let units = open_directory_at(&root, UNITS_DIR).map_err(|error| {
-                    format!(
-                        "cannot open recovery units directory: {error}; recovery={}",
-                        path.display()
-                    )
-                })?;
-                return Ok(RecoveryArea { path, root, units });
+                        .is_ok()
+                        {
+                            format!(
+                                "cannot create recovery units directory: {error}; recovery={}",
+                                path.display()
+                            )
+                        } else {
+                            last_known_recovery(
+                                format!("cannot create recovery units directory: {error}"),
+                                &path,
+                            )
+                        },
+                    );
+                }
+                if let Err(error) = sync_directory(&root) {
+                    return Err(
+                        if ensure_recovery_current(
+                            anchor,
+                            output_parent,
+                            &name,
+                            &path,
+                            identity,
+                            &root,
+                        )
+                        .is_ok()
+                        {
+                            format!(
+                                "cannot sync durable recovery directory: {error}; recovery={}",
+                                path.display()
+                            )
+                        } else {
+                            last_known_recovery(
+                                format!("cannot sync durable recovery directory: {error}"),
+                                &path,
+                            )
+                        },
+                    );
+                }
+                let units = match open_directory_at(&root, UNITS_DIR) {
+                    Ok(units) => units,
+                    Err(error) => {
+                        return Err(
+                            if ensure_recovery_current(
+                                anchor,
+                                output_parent,
+                                &name,
+                                &path,
+                                identity,
+                                &root,
+                            )
+                            .is_ok()
+                            {
+                                format!(
+                                    "cannot open recovery units directory: {error}; recovery={}",
+                                    path.display()
+                                )
+                            } else {
+                                last_known_recovery(
+                                    format!("cannot open recovery units directory: {error}"),
+                                    &path,
+                                )
+                            },
+                        );
+                    }
+                };
+                let area = RecoveryArea {
+                    name,
+                    path,
+                    identity,
+                    root,
+                    units,
+                };
+                area.ensure_current(anchor, output_parent)
+                    .map_err(|error| last_known_recovery(error, &area.path))?;
+                return Ok(area);
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => {
-                return Err(format!(
-                    "cannot create durable recovery directory: {error}; recovery={}",
-                    path.display()
-                ));
+                return Err(format!("cannot create durable recovery directory: {error}"));
             }
         }
     }
     Err("cannot allocate unique durable recovery directory".to_string())
 }
 
-fn prepare_file(directory: &Dir, bytes: &[u8]) -> Result<(String, FileIdentity), String> {
+fn prepare_file(
+    directory: &Dir,
+    bytes: &[u8],
+    anchor: &OutputParentAnchor,
+    anchor_parent: &Dir,
+) -> Result<(String, FileIdentity), String> {
     for _ in 0..32 {
+        anchor.ensure_current(anchor_parent)?;
         let temporary = unique_internal_name("prepared");
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
@@ -2098,7 +2428,10 @@ fn move_to_recovery(
     source_directory: &Dir,
     source_name: &str,
     recovery_directory: &Dir,
+    anchor: &OutputParentAnchor,
+    anchor_parent: &Dir,
 ) -> Result<(), String> {
+    anchor.ensure_current(anchor_parent)?;
     rename_noreplace(
         source_directory,
         source_name,
@@ -2113,7 +2446,16 @@ fn move_to_recovery(
     })
 }
 
-fn restore_recovered_file(recovery_directory: &Dir, source_directory: &Dir, name: &str) -> String {
+fn restore_recovered_file(
+    recovery_directory: &Dir,
+    source_directory: &Dir,
+    name: &str,
+    anchor: &OutputParentAnchor,
+    anchor_parent: &Dir,
+) -> String {
+    if let Err(error) = anchor.ensure_current(anchor_parent) {
+        return format!("durable recovery retained without restore because {error}");
+    }
     match rename_noreplace(recovery_directory, name, source_directory, name) {
         Ok(()) => {
             let source_sync = sync_directory(source_directory);
@@ -2121,7 +2463,7 @@ fn restore_recovered_file(recovery_directory: &Dir, source_directory: &Dir, name
             match (source_sync, recovery_sync) {
                 (Ok(()), Ok(())) => "validated name restored without replacement".to_string(),
                 (source, recovery) => format!(
-                    "validated name restored but directory sync failed: source={source:?} recovery={recovery:?}"
+                    "validated name restored but directory sync failed: source_sync={source:?} recovery_sync={recovery:?}"
                 ),
             }
         }
@@ -2154,6 +2496,7 @@ fn replace_managed_file(
     bytes: &[u8],
     expected: Option<&ManagedFileSnapshot>,
     output_parent: &Dir,
+    anchor: &OutputParentAnchor,
     recovery: &mut RecoverySession,
     hook: &mut impl FnMut(&str),
 ) -> Result<bool, String> {
@@ -2169,46 +2512,56 @@ fn replace_managed_file(
         return Ok(false);
     }
 
-    let (prepared, prepared_identity) = prepare_file(directory, bytes)?;
+    let (prepared, prepared_identity) = prepare_file(directory, bytes, anchor, output_parent)?;
     let recovered = if let Some(expected) = expected {
-        let (recovery_directory, recovery_path) =
-            match recovery.target(output_parent, location, name) {
-                Ok(target) => target,
-                Err(error) => {
+        let recovery_directory = match recovery.target(output_parent, location) {
+            Ok(target) => target,
+            Err(error) => {
+                if anchor.ensure_current(output_parent).is_ok() {
                     let _ = directory.remove_file(&prepared);
-                    return Err(error);
                 }
-            };
-        if let Err(error) = move_to_recovery(directory, name, &recovery_directory) {
-            let _ = directory.remove_file(&prepared);
+                return Err(error);
+            }
+        };
+        if let Err(error) =
+            move_to_recovery(directory, name, &recovery_directory, anchor, output_parent)
+        {
+            if anchor.ensure_current(output_parent).is_ok() {
+                let _ = directory.remove_file(&prepared);
+            }
             return Err(error);
         }
         hook(&format!("write:{name}:detached"));
         if let Err(error) = validate_detached_file(&recovery_directory, name, name, expected) {
-            let restoration = restore_recovered_file(&recovery_directory, directory, name);
-            let _ = directory.remove_file(&prepared);
-            return Err(format!(
-                "cannot replace {name}: {error}; {restoration}; recovered path={}",
-                recovery_path.display()
-            ));
+            let restoration =
+                restore_recovered_file(&recovery_directory, directory, name, anchor, output_parent);
+            if anchor.ensure_current(output_parent).is_ok() {
+                let _ = directory.remove_file(&prepared);
+            }
+            return Err(format!("cannot replace {name}: {error}; {restoration}"));
         }
         hook(&format!("write:{name}:recovered"));
-        Some(recovery_path)
+        anchor.ensure_current(output_parent)?;
+        true
     } else {
         hook(&format!("write:{name}:detached"));
-        None
+        anchor.ensure_current(output_parent)?;
+        false
     };
 
+    anchor.ensure_current(output_parent)?;
     if let Err(error) = rename_noreplace(directory, &prepared, directory, name) {
-        let _ = directory.remove_file(&prepared);
-        return Err(match recovered {
-            Some(path) => format!(
-                "cannot install prepared {name} without replacement: {error}; recovered original={}",
-                path.display()
-            ),
-            None => format!(
+        if anchor.ensure_current(output_parent).is_ok() {
+            let _ = directory.remove_file(&prepared);
+        }
+        return Err(if recovered {
+            format!(
+                "cannot install prepared {name} without replacement: {error}; recovered original remains in durable recovery"
+            )
+        } else {
+            format!(
                 "cannot install prepared {name} without replacement: {error}; prepared file was never installed"
-            ),
+            )
         });
     }
     sync_directory(directory)?;
@@ -2217,10 +2570,11 @@ fn replace_managed_file(
     if installed != Some(prepared_identity) {
         return Err(format!(
             "installed {name} changed before settlement; {}",
-            recovered
-                .as_ref()
-                .map(|path| format!("recovered original retained as {}", path.display()))
-                .unwrap_or_else(|| "no prior file existed".to_string())
+            if recovered {
+                "recovered original retained in durable recovery"
+            } else {
+                "no prior file existed"
+            }
         ));
     }
     Ok(true)
@@ -2230,6 +2584,7 @@ fn delete_managed_file(
     target: ManagedTarget<'_>,
     expected: &ManagedFileSnapshot,
     output_parent: &Dir,
+    anchor: &OutputParentAnchor,
     recovery: &mut RecoverySession,
     hook: &mut impl FnMut(&str),
 ) -> Result<(), String> {
@@ -2238,21 +2593,19 @@ fn delete_managed_file(
         name,
         location,
     } = target;
-    let (recovery_directory, recovery_path) = recovery.target(output_parent, location, name)?;
-    move_to_recovery(directory, name, &recovery_directory)?;
+    let recovery_directory = recovery.target(output_parent, location)?;
+    move_to_recovery(directory, name, &recovery_directory, anchor, output_parent)?;
     hook(&format!("delete:{name}:detached"));
     if let Err(error) = validate_detached_file(&recovery_directory, name, name, expected) {
-        let restoration = restore_recovered_file(&recovery_directory, directory, name);
-        return Err(format!(
-            "cannot delete {name}: {error}; {restoration}; recovered path={}",
-            recovery_path.display()
-        ));
+        let restoration =
+            restore_recovered_file(&recovery_directory, directory, name, anchor, output_parent);
+        return Err(format!("cannot delete {name}: {error}; {restoration}"));
     }
     hook(&format!("delete:{name}:recovered"));
+    anchor.ensure_current(output_parent)?;
     if managed_identity_at(directory, name)?.is_some() {
         return Err(format!(
-            "{name} reappeared after recovery move; concurrent path left untouched and recovered original retained as {}",
-            recovery_path.display()
+            "{name} reappeared after recovery move; concurrent path left untouched and recovered original retained in durable recovery"
         ));
     }
     Ok(())
@@ -2698,9 +3051,13 @@ mod tests {
             OutputState::Absent(absent) => absent,
             _ => unreachable!("test begins with an absent output"),
         };
-        let reopened =
-            super::open_installed_tree_from_parent(&absent.parent, &absent.missing_components)
-                .unwrap();
+        let reopened = super::open_installed_tree_from_parent(
+            &absent.parent,
+            &absent.missing_components,
+            &absent.anchor,
+            &absent.anchor_parent,
+        )
+        .unwrap();
         fn no_hook(_: &str) {}
         let mut no_hook: fn(&str) = no_hook;
         let reopened_snapshot =
@@ -2909,6 +3266,164 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(recovery.join(super::UNITS_DIR).join(stale_name)).unwrap(),
             "late deletion edit"
+        );
+    }
+
+    #[test]
+    fn anchor_reopen_rejects_a_component_renamed_during_the_walk() {
+        let directory = tempfile::tempdir().unwrap();
+        let parent = directory.path().join("output-parent");
+        let displaced_parent = directory.path().join("displaced-output-parent");
+        std::fs::create_dir(&parent).unwrap();
+        let anchor = std::fs::canonicalize(&parent).unwrap();
+        let mut swapped = false;
+
+        let error = super::open_absolute_directory_nofollow_with_hook(&anchor, |component| {
+            if component == std::ffi::OsStr::new("output-parent") && !swapped {
+                std::fs::rename(&parent, &displaced_parent).unwrap();
+                std::fs::create_dir(&parent).unwrap();
+                swapped = true;
+            }
+        })
+        .unwrap_err();
+
+        assert!(error.contains("changed during reopen"), "{error}");
+        assert!(parent.is_dir());
+        assert!(displaced_parent.is_dir());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_anchor_parser_retains_verbatim_disk_and_unc_roots() {
+        let (disk_root, disk_names) =
+            super::absolute_directory_components(std::path::Path::new(r"\\?\C:\parent\memory"))
+                .unwrap();
+        assert_eq!(disk_root, std::path::Path::new(r"\\?\C:\"));
+        assert_eq!(
+            disk_names,
+            [
+                std::ffi::OsString::from("parent"),
+                std::ffi::OsString::from("memory")
+            ]
+        );
+
+        let (unc_root, unc_names) = super::absolute_directory_components(std::path::Path::new(
+            r"\\?\UNC\server\share\parent\memory",
+        ))
+        .unwrap();
+        assert_eq!(unc_root, std::path::Path::new(r"\\?\UNC\server\share\"));
+        assert_eq!(
+            unc_names,
+            [
+                std::ffi::OsString::from("parent"),
+                std::ffi::OsString::from("memory")
+            ]
+        );
+    }
+
+    #[test]
+    fn compile_refuses_a_parent_swap_before_its_first_mutation() {
+        let directory = tempfile::tempdir().unwrap();
+        let parent = directory.path().join("output-parent");
+        let displaced_parent = directory.path().join("displaced-output-parent");
+        std::fs::create_dir(&parent).unwrap();
+        let output = parent.join("memory");
+        let initial = rendered_projection(&[(1, "alpha before")]);
+        let absent = inspect_output(&output).unwrap();
+        replace_projection(&output, &absent, &initial).unwrap();
+        let existing = inspect_output(&output).unwrap();
+        let original_unit = initial.units.keys().next().unwrap();
+        let original_bytes = std::fs::read(output.join(original_unit)).unwrap();
+        let replacement = rendered_projection(&[(1, "alpha after")]);
+        let mut swapped = false;
+
+        let result = replace_projection_with_hook(&output, &existing, &replacement, |point| {
+            if point == "parent:before_first_mutation" && !swapped {
+                std::fs::rename(&parent, &displaced_parent).unwrap();
+                std::fs::create_dir(&parent).unwrap();
+                std::fs::write(parent.join("sentinel"), "replacement parent").unwrap();
+                swapped = true;
+            }
+        });
+
+        let error = result.expect_err("a replaced output-parent anchor was accepted");
+        assert!(error.contains("output parent changed"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(parent.join("sentinel")).unwrap(),
+            "replacement parent"
+        );
+        assert_eq!(
+            std::fs::read(displaced_parent.join("memory").join(original_unit)).unwrap(),
+            original_bytes
+        );
+        assert!(recovery_directories(&parent).is_empty());
+        assert!(recovery_directories(&displaced_parent).is_empty());
+    }
+
+    #[test]
+    fn compile_reports_only_last_known_recovery_after_its_parent_moves() {
+        let directory = tempfile::tempdir().unwrap();
+        let parent = directory.path().join("output-parent");
+        let displaced_parent = directory.path().join("displaced-output-parent");
+        std::fs::create_dir(&parent).unwrap();
+        let canonical_parent = std::fs::canonicalize(&parent).unwrap();
+        let output = parent.join("memory");
+        let initial = rendered_projection(&[(1, "alpha before")]);
+        let absent = inspect_output(&output).unwrap();
+        replace_projection(&output, &absent, &initial).unwrap();
+        let existing = inspect_output(&output).unwrap();
+        let replacement = rendered_projection(&[(1, "alpha after")]);
+        let unit_path = replacement.units.keys().next().unwrap().clone();
+        let unit_name = std::path::Path::new(&unit_path)
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let event = format!("write:{unit_name}:recovered");
+        let mut swapped = false;
+
+        let result = replace_projection_with_hook(&output, &existing, &replacement, |point| {
+            if point == event && !swapped {
+                std::fs::rename(&parent, &displaced_parent).unwrap();
+                std::fs::create_dir(&parent).unwrap();
+                std::fs::write(parent.join("sentinel"), "replacement parent").unwrap();
+                swapped = true;
+            }
+        });
+
+        let error = result.expect_err("compile succeeded after its output parent moved");
+        assert!(error.contains("output parent changed"), "{error}");
+        assert!(
+            error.contains("recovery was retained under that parent"),
+            "{error}"
+        );
+        let last_known = error
+            .split(';')
+            .map(str::trim)
+            .find_map(|part| part.strip_prefix("recovery_last_known="))
+            .expect("a moved recovery must be reported only as last-known");
+        assert!(
+            last_known.starts_with(canonical_parent.to_str().unwrap()),
+            "last-known path must use the captured parent: {last_known}"
+        );
+        assert!(!std::path::Path::new(last_known).exists());
+        assert!(
+            !error
+                .split(';')
+                .map(str::trim)
+                .any(|part| part.starts_with("recovery=")),
+            "a stale recovery pathname was reported as current: {error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(parent.join("sentinel")).unwrap(),
+            "replacement parent"
+        );
+        let recovery = find_recovery(&displaced_parent);
+        assert!(
+            std::fs::read_to_string(recovery.join(super::UNITS_DIR).join(unit_name))
+                .unwrap()
+                .contains("alpha before")
         );
     }
 

@@ -304,3 +304,75 @@ plan did not need a scope or task-boundary change.
 
 The unrelated `.superpowers/sdd/progress.md` modification remains unstaged.
 No Task 4, P1 campaign, paid/model call, push, or deployment work was performed.
+
+## Fifth independent-review fix wave
+
+The final pathname audit found that durable recovery derived its absolute path
+by canonicalizing `output_root.parent()` again after inspection, even though
+all mutations continued through the retained original parent capability. If an
+ancestor was renamed and replaced, compile could mutate the detached original
+tree, return success, and label a path under the replacement parent as current
+recovery.
+
+Two deterministic contracts were red before this fix. A parent replacement at
+the intended pre-mutation seam was never observed and compile succeeded; a
+parent move after the first recovered inode also succeeded and returned a stale
+`recovery=` path. A third race contract covers a component renamed after it was
+opened during pathname traversal but before the reopen completed.
+
+- Inspection now captures one canonical absolute existing output-parent anchor
+  and its identity. `AbsentOutput`, `EmptyOutput`, and all staged, installed,
+  and existing `TreeHandles` carry that same anchor and a retained anchor
+  handle. Recovery derives its path only from this captured value; no mutation
+  path canonicalizes the parent again.
+- Before every namespace mutation and during both final validation sweeps,
+  compile reopens the exact captured anchor from the filesystem/share root. It
+  opens each normal component separately with `open_dir_nofollow`, retains each
+  parent/name/identity binding, revalidates every binding after reaching the
+  final directory, and compares that identity with the inspection-time retained
+  parent. The deterministic during-walk rename contract proves traversal cannot
+  continue through a detached component and falsely accept it.
+- A parent change before the first mutation now fails with zero writes and no
+  recovery. A parent change after recovery begins makes success impossible;
+  cleanup/restoration also refuses further namespace mutation through the
+  detached handles.
+- `recovery=<absolute path>` is emitted only after both the captured anchor and
+  recovery parent/name still identity-match the retained recovery handle. If
+  that cannot be established, the error instead emits
+  `recovery_last_known=<captured path>` plus `output parent changed; recovery
+  was retained under that parent`. It never presents the stale pathname as
+  current.
+- The path splitter preserves Windows disk, verbatim-disk, UNC, and
+  verbatim-UNC filesystem/share roots before no-follow component traversal.
+  Current Windows identity evidence remains limited: `cap-fs-ext` supplies the
+  volume serial plus 64-bit file index, while Microsoft's
+  [`BY_HANDLE_FILE_INFORMATION`](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/ns-fileapi-by_handle_file_information)
+  documentation says that identifier is not guaranteed unique on ReFS. Native
+  Windows runtime proof and 128-bit `FileIdInfo` support for ReFS remain release
+  predicates; no general Windows filesystem identity claim is made.
+- The implementation follows `cap-std`'s retained-directory capability model,
+  the documented POSIX trailing-component `O_NOFOLLOW` boundary, and Windows
+  `FILE_FLAG_OPEN_REPARSE_POINT`; the component-by-component walk closes the
+  earlier-component gap rather than relying on a multi-component no-follow
+  open.
+
+Fresh proof after the final code change:
+
+- `cargo test -p memphant-cli`: 17 unit and 21 integration tests passed,
+  including 10 real-CLI compile contracts.
+- `cargo clippy -p memphant-cli --all-targets --all-features -- -D warnings`,
+  `cargo fmt --all --check`, and `git diff --check`: passed.
+- `python3 scripts/check_spec_drift.py`: skipped, not passed, because the
+  private Syndai specs are absent from this worktree.
+- `cargo check -p memphant-cli --target x86_64-pc-windows-msvc` remains blocked
+  before MemPhant source compilation by transitive `ring 0.17.14` because this
+  macOS host lacks the MSVC SDK (`assert.h` missing, `VCINSTALLDIR=None`). A
+  temporary isolated crate containing the exact anchor splitter, per-component
+  no-follow walker, retained binding revalidation, and Windows verbatim path
+  inputs passed
+  `RUSTUP_TOOLCHAIN=1.96.1-aarch64-apple-darwin cargo check --target x86_64-pc-windows-msvc`.
+  This is source-compilation evidence only; no Windows runtime result is
+  claimed.
+
+The unrelated `.superpowers/sdd/progress.md` modification remains unstaged.
+No Task 4, P1 campaign, paid/model call, push, or deployment work was performed.

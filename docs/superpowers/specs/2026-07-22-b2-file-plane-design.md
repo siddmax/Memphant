@@ -147,6 +147,18 @@ footer input.
 
 ## Filesystem safety
 
+- Inspection resolves one canonical absolute existing output-parent anchor,
+  records its directory identity, and retains its handle. `AbsentOutput`,
+  `EmptyOutput`, and every installed or staged `TreeHandles` instance carry
+  that same anchor; compile never canonicalizes the output parent again.
+- Before every namespace mutation and in both final validation sweeps, compile
+  reopens the captured anchor from the filesystem or share root. It opens every
+  normal component separately without following links, retains each parent /
+  component / identity binding until it reaches the anchor, rechecks all of
+  those bindings, and requires the final identity to equal the inspection-time
+  retained handle. A renamed or replaced parent therefore fails before the
+  next mutation; a change before the first mutation produces zero writes and
+  no recovery tree.
 - Managed paths are exactly `units/<lowercase canonical UUID>.md`.
 - Inbox paths are one flat safe component under `inbox/`; nested, absolute,
   dot-segment, non-UTF-8, and reserved paths fail.
@@ -164,6 +176,12 @@ footer input.
   the original `MEMORY.md`, `memphant-export.json`, and `units/<uuid>.md`
   layout. Source and recovery directories are synced where supported. A
   cross-filesystem (`EXDEV`) move fails closed; there is no copy fallback.
+- The recovery pathname is derived only from the captured canonical anchor.
+  After recovery creation and before reporting it as current, compile requires
+  both the captured anchor identity and the retained parent/name identity to
+  match the retained recovery handle. If the parent changes after recovery has
+  received an inode, compile cannot succeed and retains that inode through the
+  recovery handle/name under the moved parent.
 - Recovery directories use mode `0700` on Unix. Windows uses the inherited ACL
   of the retained output parent; MemPhant does not claim to narrow an already
   broader parent ACL without a platform ACL policy supplied by the operator.
@@ -172,6 +190,11 @@ footer input.
   external parent and requires the staged identity and two exact validation
   sweeps to match. Unix keeps its stronger retained-subtree handles throughout
   the install.
+- The current Windows `FileIdentity` uses `cap-fs-ext`'s volume serial plus
+  64-bit file index. The identity/race contract is therefore scoped to Windows
+  filesystems that provide stable 64-bit IDs; native Windows runtime proof is
+  still required, and ReFS support requires migration to and validation of
+  128-bit `FileIdInfo` before release. No general ReFS identity claim is made.
 - Cleanup is limited to paths named by the old manifest and inbox paths consumed
   by the committed plan. Unknown user files are never deleted.
 
@@ -183,10 +206,15 @@ edits.
 ## UX and errors
 
 - `compile` reports the scope, snapshot, output root, and entry count.
-- When a compile changed or deleted managed files, success and every later
-  error report the absolute `recovery=<path>`. B2 never prunes recovery trees;
-  the operator may remove one only after all editors and other processes that
-  could still hold the old files open have closed them.
+- When a compile changed or deleted managed files, success and later errors use
+  absolute `recovery=<path>` only while the captured anchor and recovery name
+  still identity-match their retained handles. If either pathname can no
+  longer be confirmed, failure instead reports
+  `recovery_last_known=<captured-path>` and `output parent changed; recovery was
+  retained under that parent`; it never presents the stale path as current. B2
+  never prunes recovery trees; the operator may remove one only after all
+  editors and other processes that could still hold the old files open have
+  closed them.
 - A dirty compile names every changed/missing/unexpected path and tells the user
   to run `sync` or restore it.
 - `sync` defaults to a JSON dry-run plan. Forget operations are labelled
@@ -207,7 +235,9 @@ post-apply plan, a byte-identical second compile, and clean verification.
 Focused negative contracts cover historical-row exclusion, stale snapshot
 rollback, failure on operation N rolling back operations 1..N-1, tampered
 footers, duplicate IDs/paths, immutable metadata edits, traversal, symlinks,
-dirty `MEMORY.md`, malformed inbox files, and zero-write validation failure.
+dirty `MEMORY.md`, malformed inbox files, zero-write validation failure, parent
+replacement before the first mutation, parent movement after recovery begins,
+and a component rename during anchor reopening.
 The fast gate uses the real CLI binary and in-memory Axum app. A live-Postgres
 ignored contract proves serializable rollback, current-head visibility, and
 concurrent stale-base conflict through the standard ephemeral scratch database.
