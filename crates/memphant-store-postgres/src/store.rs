@@ -865,7 +865,7 @@ impl PgStore {
         let units = Self::fetch_units_where(
             tx,
             "tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
-             and scope_id = $4 and agent_node_id = $5",
+             and scope_id = $4 and agent_node_id = $5 and actor_id = $6",
             "order by id",
             vec![
                 Bind::Uuid(context.tenant_id.as_uuid()),
@@ -873,9 +873,14 @@ impl PgStore {
                 Bind::I64(context.subject_generation as i64),
                 Bind::Uuid(context.scope_id.as_uuid()),
                 Bind::Uuid(context.agent_node_id.as_uuid()),
+                Bind::Uuid(context.actor_id.as_uuid()),
             ],
         )
         .await?;
+        let unit_ids = units
+            .iter()
+            .map(|unit| unit.id.as_uuid())
+            .collect::<Vec<_>>();
         let rows = sqlx::query(
             r#"select id, tenant_id, scope_id, src_id, dst_id, kind,
                       to_char(transaction_from at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as transaction_from,
@@ -883,6 +888,7 @@ impl PgStore {
                from memphant.memory_edge
                where tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
                  and scope_id = $4 and agent_node_id = $5
+                 and src_id = any($6) and dst_id = any($6)
                order by id"#,
         )
         .bind(context.tenant_id.as_uuid())
@@ -890,6 +896,7 @@ impl PgStore {
         .bind(context.subject_generation as i64)
         .bind(context.scope_id.as_uuid())
         .bind(context.agent_node_id.as_uuid())
+        .bind(unit_ids)
         .fetch_all(&mut **tx)
         .await
         .map_err(backend)?;
@@ -3574,6 +3581,11 @@ impl MemoryStore for PgStore {
         evaluated_at: &str,
     ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
         let mut tx = self.tenant_tx(context.tenant_id).await?;
+        let kinds = [MemoryKind::Semantic, MemoryKind::Procedural]
+            .into_iter()
+            .filter(|kind| context.allows(*kind, context.scope_id, context.agent_node_id))
+            .map(|kind| enum_str(&kind).to_string())
+            .collect::<Vec<_>>();
         Self::fetch_units_where(
             &mut tx,
             "tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
@@ -3583,6 +3595,7 @@ impl MemoryStore for PgStore {
              and (transaction_to is null or $7::timestamptz < transaction_to)
              and (valid_from is null or valid_from <= $7::timestamptz)
              and (valid_to is null or $7::timestamptz < valid_to)
+             and kind = any($9)
              and (
                (kind = 'semantic' and state = any($8))
                or (kind = 'procedural' and state = 'validated')
@@ -3597,6 +3610,7 @@ impl MemoryStore for PgStore {
                 Bind::Uuid(context.actor_id.as_uuid()),
                 Bind::Text(evaluated_at.to_string()),
                 Bind::TextVec(vec!["active".to_string(), "validated".to_string()]),
+                Bind::TextVec(kinds),
             ],
         )
         .await
@@ -3608,6 +3622,11 @@ impl MemoryStore for PgStore {
         evaluated_at: &str,
     ) -> Result<Vec<StoredMemoryUnit>, StoreError> {
         let context = &txn.context;
+        let kinds = [MemoryKind::Semantic, MemoryKind::Procedural]
+            .into_iter()
+            .filter(|kind| context.allows(*kind, context.scope_id, context.agent_node_id))
+            .map(|kind| enum_str(&kind).to_string())
+            .collect::<Vec<_>>();
         Self::fetch_units_where(
             &mut txn.tx,
             "tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
@@ -3617,6 +3636,7 @@ impl MemoryStore for PgStore {
              and (transaction_to is null or $7::timestamptz < transaction_to)
              and (valid_from is null or valid_from <= $7::timestamptz)
              and (valid_to is null or $7::timestamptz < valid_to)
+             and kind = any($9)
              and (
                (kind = 'semantic' and state = any($8))
                or (kind = 'procedural' and state = 'validated')
@@ -3631,6 +3651,7 @@ impl MemoryStore for PgStore {
                 Bind::Uuid(context.actor_id.as_uuid()),
                 Bind::Text(evaluated_at.to_string()),
                 Bind::TextVec(vec!["active".to_string(), "validated".to_string()]),
+                Bind::TextVec(kinds),
             ],
         )
         .await

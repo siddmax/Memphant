@@ -339,6 +339,86 @@ mod canonical_projection_store_tests {
         );
     }
 
+    #[tokio::test]
+    async fn canonical_projection_canonicalizes_equivalent_utc_metadata() {
+        let store = InMemoryStore::default();
+        let context = context(&store).await;
+        let mut tx = store.begin(&context).await.expect("begin");
+        let mut semantic = unit(
+            &context,
+            MemoryKind::Semantic,
+            UnitState::Active,
+            "policy-hidden-semantic",
+        );
+        semantic.valid_from = Some("2026-07-01T00:00:00+00:00".to_string());
+        semantic.valid_to = Some("2026-08-01T00:00:00+00:00".to_string());
+        store
+            .stage_memory_unit(&mut tx, semantic)
+            .await
+            .expect("stage semantic");
+        store.commit(tx).await.expect("commit");
+
+        let service = MemoryService::new(
+            Arc::new(store.clone()),
+            Arc::new(FixedClock("2026-07-22T00:00:00Z")),
+            Arc::new(NoopEmbedding),
+        );
+        let unrestricted = service
+            .canonical_projection(&context)
+            .await
+            .expect("unrestricted projection");
+        let semantic = &unrestricted.items[0];
+        assert_eq!(semantic.valid_from.as_deref(), Some("2026-07-01T00:00:00Z"));
+        assert_eq!(semantic.valid_to.as_deref(), Some("2026-08-01T00:00:00Z"));
+    }
+
+    #[tokio::test]
+    async fn canonical_projection_respects_resolved_kind_policy() {
+        let store = InMemoryStore::default();
+        let context = context(&store).await;
+        let mut tx = store.begin(&context).await.expect("begin");
+        store
+            .stage_memory_unit(
+                &mut tx,
+                unit(
+                    &context,
+                    MemoryKind::Semantic,
+                    UnitState::Active,
+                    "policy-hidden-semantic",
+                ),
+            )
+            .await
+            .expect("stage semantic");
+        store
+            .stage_memory_unit(
+                &mut tx,
+                unit(
+                    &context,
+                    MemoryKind::Procedural,
+                    UnitState::Validated,
+                    "policy-visible-procedure",
+                ),
+            )
+            .await
+            .expect("stage procedure");
+        store.commit(tx).await.expect("commit");
+
+        let mut restricted = context;
+        restricted
+            .sources_by_kind
+            .get_mut(&MemoryKind::Semantic)
+            .expect("semantic policy entry")
+            .clear();
+        let projected = store
+            .canonical_projection_units(&restricted, "2026-07-22T00:00:00Z")
+            .await
+            .expect("policy-bound projection");
+        assert_eq!(
+            projected.iter().map(|unit| unit.kind).collect::<Vec<_>>(),
+            vec![MemoryKind::Procedural]
+        );
+    }
+
     #[test]
     fn canonical_projection_fingerprint_is_fixed_for_differently_ordered_records() {
         let items = vec![
@@ -810,6 +890,102 @@ mod file_sync_tests {
             .unwrap(),
             "unit and edge duplicates/order do not change the transition digest"
         );
+    }
+
+    #[tokio::test]
+    async fn file_sync_transition_snapshot_is_actor_bound() {
+        let store = InMemoryStore::default();
+        let context = context(&store, "actor-bound-snapshot").await;
+        let own = stored_unit(&context, MemoryKind::Semantic, "profile:own", "Own fact.");
+        let mut foreign = stored_unit(
+            &context,
+            MemoryKind::Semantic,
+            "profile:foreign",
+            "Foreign fact.",
+        );
+        foreign.actor_id = Some(memphant_types::ActorId::new());
+        let cross_actor_edge = StoredMemoryEdge {
+            id: EdgeId::new(),
+            tenant_id: context.tenant_id,
+            scope_id: context.scope_id,
+            src_id: own.id,
+            dst_id: foreign.id,
+            kind: MemoryEdgeKind::SameSubject,
+            transaction_from: Some(CLOCK.0.to_string()),
+            transaction_to: None,
+        };
+        {
+            let mut state = store.inner.lock().unwrap();
+            state
+                .memory_units
+                .entry(context.tenant_id)
+                .or_default()
+                .extend([own.clone(), foreign]);
+            state
+                .memory_edges
+                .entry(context.tenant_id)
+                .or_default()
+                .push(cross_actor_edge);
+        }
+
+        let snapshot = store
+            .fetch_file_sync_transition_snapshot(&context)
+            .await
+            .expect("actor-bound snapshot");
+        assert_eq!(
+            snapshot
+                .units
+                .iter()
+                .map(|unit| unit.id)
+                .collect::<Vec<_>>(),
+            vec![own.id]
+        );
+        assert!(snapshot.edges.is_empty());
+    }
+
+    #[tokio::test]
+    async fn file_sync_retain_requires_semantic_policy_and_trusted_direct_provenance() {
+        for (suffix, restrict_policy, actor_trust) in [
+            ("policy-denied", true, TrustLevel::TrustedUser),
+            ("trust-denied", false, TrustLevel::AgentOutput),
+        ] {
+            let store = InMemoryStore::default();
+            let mut context = context(&store, suffix).await;
+            if restrict_policy {
+                context
+                    .sources_by_kind
+                    .get_mut(&MemoryKind::Semantic)
+                    .expect("semantic policy entry")
+                    .clear();
+            }
+            context.actor_trust = actor_trust;
+            let service = MemoryService::new(
+                Arc::new(store.clone()),
+                Arc::new(CLOCK),
+                Arc::new(NoopEmbedding),
+            );
+            let base = service.canonical_projection(&context).await.unwrap();
+            let sync_request = request(
+                &context,
+                base.fingerprint,
+                vec![FileSyncOperation::Retain {
+                    fact_key: format!("profile:{suffix}"),
+                    predicate: "states".to_string(),
+                    body: "This semantic retain must fail closed.".to_string(),
+                    confidence: 1.0,
+                    valid_from: None,
+                    valid_to: None,
+                }],
+            );
+
+            assert!(matches!(
+                service
+                    .file_sync(&context, &format!("file-sync-{suffix}"), sync_request)
+                    .await,
+                Err(ServiceError::SyncInvalid(_))
+            ));
+            assert!(store.memory_units(context.tenant_id).is_empty());
+        }
     }
 
     #[tokio::test]
@@ -1952,19 +2128,26 @@ fn apply_compiled_write_to_snapshot(
     working.edges.dedup_by_key(|edge| edge.id);
 }
 
-fn projection_items(units: Vec<StoredMemoryUnit>) -> Vec<CanonicalProjectionUnit> {
+fn projection_items(
+    units: Vec<StoredMemoryUnit>,
+) -> Result<Vec<CanonicalProjectionUnit>, ServiceError> {
     units
         .into_iter()
-        .map(|unit| CanonicalProjectionUnit {
-            unit_id: unit.id,
-            kind: unit.kind,
-            fact_key: unit.fact_key,
-            predicate: unit.predicate,
-            body_sha256: format!("{:x}", Sha256::digest(unit.body.as_bytes())),
-            body: unit.body,
-            confidence: unit.confidence,
-            valid_from: unit.valid_from,
-            valid_to: unit.valid_to,
+        .map(|mut unit| {
+            canonicalize_optional_timestamp(&mut unit.valid_from, "projection.valid_from")?;
+            canonicalize_optional_timestamp(&mut unit.valid_to, "projection.valid_to")?;
+            validate_valid_interval(unit.valid_from.as_deref(), unit.valid_to.as_deref())?;
+            Ok(CanonicalProjectionUnit {
+                unit_id: unit.id,
+                kind: unit.kind,
+                fact_key: unit.fact_key,
+                predicate: unit.predicate,
+                body_sha256: format!("{:x}", Sha256::digest(unit.body.as_bytes())),
+                body: unit.body,
+                confidence: unit.confidence,
+                valid_from: unit.valid_from,
+                valid_to: unit.valid_to,
+            })
         })
         .collect()
 }
@@ -3879,6 +4062,23 @@ impl<S: MemoryStore> MemoryService<S> {
                     valid_from,
                     valid_to,
                 } => {
+                    if !context.allows(
+                        MemoryKind::Semantic,
+                        context.scope_id,
+                        context.agent_node_id,
+                    ) {
+                        return Err(ServiceError::SyncInvalid(
+                            "resolved context does not allow semantic memory".to_string(),
+                        ));
+                    }
+                    if !matches!(
+                        context.actor_trust,
+                        TrustLevel::TrustedUser | TrustLevel::TrustedSystem
+                    ) {
+                        return Err(ServiceError::SyncInvalid(
+                            "retain requires trusted direct provenance".to_string(),
+                        ));
+                    }
                     if fact_key.trim().is_empty() || predicate.trim().is_empty() {
                         return Err(ServiceError::SyncInvalid(
                             "retain fact_key and predicate must not be blank".to_string(),
@@ -3978,7 +4178,7 @@ impl<S: MemoryStore> MemoryService<S> {
                 .canonical_projection_units(context, &evaluated_at)
                 .await
                 .map_err(sync_store_error)?,
-        );
+        )?;
         let current_fingerprint = canonical_projection_fingerprint(&current)?;
         if current_fingerprint != request.base_fingerprint {
             return Err(ServiceError::SyncConflict(format!(
@@ -4106,7 +4306,7 @@ impl<S: MemoryStore> MemoryService<S> {
                             compiler_version: COMPILER_VERSION.to_string(),
                             candidates: vec![ReflectCandidate {
                                 source_kind: "direct".to_string(),
-                                trust_level: TrustLevel::TrustedUser,
+                                trust_level: context.actor_trust,
                                 actor_id: context.actor_id,
                                 subject: None,
                                 predicate: Some(predicate.clone()),
@@ -4192,7 +4392,13 @@ impl<S: MemoryStore> MemoryService<S> {
             .canonical_projection_units_in_tx(&mut tx, &evaluated_at)
             .await
         {
-            Ok(units) => projection_items(units),
+            Ok(units) => match projection_items(units) {
+                Ok(items) => items,
+                Err(error) => {
+                    let _ = self.store.rollback(tx).await;
+                    return Err(error);
+                }
+            },
             Err(error) => {
                 let _ = self.store.rollback(tx).await;
                 return Err(sync_store_error(error));
@@ -4300,7 +4506,13 @@ impl<S: MemoryStore> MemoryService<S> {
             .canonical_projection_units_in_tx(&mut tx, &final_evaluated_at)
             .await
         {
-            Ok(units) => projection_items(units),
+            Ok(units) => match projection_items(units) {
+                Ok(items) => items,
+                Err(error) => {
+                    let _ = self.store.rollback(tx).await;
+                    return Err(error);
+                }
+            },
             Err(error) => {
                 let _ = self.store.rollback(tx).await;
                 return Err(sync_store_error(error));
@@ -4451,7 +4663,7 @@ impl<S: MemoryStore> MemoryService<S> {
             self.store
                 .canonical_projection_units(context, &evaluated_at)
                 .await?,
-        );
+        )?;
         canonical_projection_response(context, evaluated_at, items)
     }
 

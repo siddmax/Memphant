@@ -1016,6 +1016,7 @@ impl FileSyncTransitionSnapshot {
             .iter()
             .filter(|unit| {
                 unit.transaction_to.is_none()
+                    && unit.actor_id == Some(context.actor_id)
                     && context.allows(unit.kind, unit.scope_id, unit.agent_node_id)
             })
             .cloned()
@@ -3012,6 +3013,7 @@ fn in_memory_canonical_projection_units(
                 && unit.scope_id == context.scope_id
                 && unit.agent_node_id == context.agent_node_id
                 && unit.actor_id == Some(context.actor_id)
+                && context.allows(unit.kind, unit.scope_id, unit.agent_node_id)
                 && unit.deletion_generation.is_none()
                 && unit.trust_level != TrustLevel::Quarantined
                 && bitemporally_recallable(unit, &time)
@@ -3066,6 +3068,7 @@ fn in_memory_file_sync_transition_snapshot(
                 && unit.subject_generation == context.subject_generation
                 && unit.scope_id == context.scope_id
                 && unit.agent_node_id == context.agent_node_id
+                && unit.actor_id == Some(context.actor_id)
         })
         .cloned()
         .collect::<Vec<_>>();

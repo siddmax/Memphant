@@ -781,6 +781,136 @@ fn active_projection_unit(context: &ResolvedMemoryContext, body: &str) -> NewMem
 
 #[tokio::test]
 #[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn canonical_projection_respects_resolved_kind_policy() {
+    let store = connect().await;
+    let tenant = fresh_tenant(&store).await;
+    let context = fresh_memory_context(&store, tenant).await;
+    let mut tx = store.begin(&context).await.expect("begin projection seed");
+    store
+        .stage_memory_unit(
+            &mut tx,
+            active_projection_unit(&context, "policy-hidden-semantic"),
+        )
+        .await
+        .expect("stage semantic");
+    let mut procedure = active_projection_unit(&context, "policy-visible-procedure");
+    procedure.kind = MemoryKind::Procedural;
+    procedure.state = UnitState::Validated;
+    store
+        .stage_memory_unit(&mut tx, procedure)
+        .await
+        .expect("stage procedure");
+    store.commit(tx).await.expect("commit projection seed");
+
+    let mut restricted = context;
+    restricted
+        .sources_by_kind
+        .get_mut(&MemoryKind::Semantic)
+        .expect("semantic policy entry")
+        .clear();
+    let projected = store
+        .canonical_projection_units(&restricted, CLOCK.0)
+        .await
+        .expect("policy-bound projection");
+    assert_eq!(
+        projected.iter().map(|unit| unit.kind).collect::<Vec<_>>(),
+        vec![MemoryKind::Procedural]
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn file_sync_transition_snapshot_is_actor_bound() {
+    let store = connect().await;
+    let tenant = fresh_tenant(&store).await;
+    let context = fresh_memory_context(&store, tenant).await;
+    let mut tx = store.begin(&context).await.expect("begin snapshot seed");
+    let own_id = store
+        .stage_memory_unit(
+            &mut tx,
+            active_projection_unit(&context, "actor-owned-unit"),
+        )
+        .await
+        .expect("stage owned unit");
+    let foreign_id = store
+        .stage_memory_unit(
+            &mut tx,
+            active_projection_unit(&context, "foreign-actor-unit"),
+        )
+        .await
+        .expect("stage future foreign unit");
+    store
+        .stage_memory_edge(
+            &mut tx,
+            NewMemoryEdge {
+                tenant_id: tenant,
+                scope_id: context.scope_id,
+                src_id: own_id,
+                dst_id: foreign_id,
+                kind: MemoryEdgeKind::SameSubject,
+            },
+        )
+        .await
+        .expect("stage cross-actor edge");
+    store.commit(tx).await.expect("commit snapshot seed");
+
+    let foreign_actor_id = Uuid::now_v7();
+    let mut raw_tx = store
+        .pool()
+        .begin()
+        .await
+        .expect("begin actor reassignment");
+    sqlx::query("select memphant.bind_tenant($1)")
+        .bind(tenant.as_uuid())
+        .execute(&mut *raw_tx)
+        .await
+        .expect("bind tenant");
+    sqlx::query(
+        "insert into memphant.actor
+           (id, tenant_id, data_subject_id, kind, external_ref, trust_level)
+         values ($1, $2, $3, 'user', $4, 'trusted_user')",
+    )
+    .bind(foreign_actor_id)
+    .bind(tenant.as_uuid())
+    .bind(context.data_subject_id.as_uuid())
+    .bind(format!("pg-contract:foreign-actor:{foreign_actor_id}"))
+    .execute(&mut *raw_tx)
+    .await
+    .expect("insert foreign actor");
+    sqlx::query(
+        "update memphant.memory_unit set actor_id = $7
+         where tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+           and scope_id = $4 and agent_node_id = $5 and id = $6",
+    )
+    .bind(tenant.as_uuid())
+    .bind(context.data_subject_id.as_uuid())
+    .bind(context.subject_generation as i64)
+    .bind(context.scope_id.as_uuid())
+    .bind(context.agent_node_id.as_uuid())
+    .bind(foreign_id.as_uuid())
+    .bind(foreign_actor_id)
+    .execute(&mut *raw_tx)
+    .await
+    .expect("reassign unit actor");
+    raw_tx.commit().await.expect("commit actor reassignment");
+
+    let snapshot = store
+        .fetch_file_sync_transition_snapshot(&context)
+        .await
+        .expect("actor-bound snapshot");
+    assert_eq!(
+        snapshot
+            .units
+            .iter()
+            .map(|unit| unit.id)
+            .collect::<Vec<_>>(),
+        vec![own_id]
+    );
+    assert!(snapshot.edges.is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
 async fn canonical_projection_filters_bitemporal_trust_bounds_and_orders_by_uuid() {
     let store = connect().await;
     let tenant = fresh_tenant(&store).await;

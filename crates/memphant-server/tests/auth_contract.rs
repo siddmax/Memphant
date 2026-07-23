@@ -1,11 +1,13 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use memphant_core::ApiKeyRow;
+use memphant_core::service::file_sync_plan_sha256;
+use memphant_core::{ApiKeyRow, MemoryStore};
 use memphant_server::{AppState, api_key_hash};
 use memphant_types::{
-    ActorId, RecallResponse, RetainEpisodeHttpRequest, RetainEpisodeHttpResponse,
-    RetainEpisodePayload, RetainPayload, ScopeId, TenantId, TrustLevel,
+    ActorId, FileSyncOperation, FileSyncRequest, MemoryKind, NewMemoryUnit, RecallResponse,
+    RetainEpisodeHttpRequest, RetainEpisodeHttpResponse, RetainEpisodePayload, RetainPayload,
+    ScopeId, TenantId, TrustLevel, UnitState,
 };
 use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -145,7 +147,12 @@ async fn send(
     }
     if matches!(
         path,
-        "/v1/episodes" | "/v1/reflect" | "/v1/correct" | "/v1/forget" | "/v1/mark"
+        "/v1/episodes"
+            | "/v1/reflect"
+            | "/v1/correct"
+            | "/v1/forget"
+            | "/v1/mark"
+            | "/v1/file-sync"
     ) {
         builder = builder.header(
             "idempotency-key",
@@ -755,6 +762,198 @@ async fn assigned_trust_comes_from_the_bound_actor_and_key_ceiling() {
         Some(TrustLevel::TrustedUser),
         "the bound user actor is trusted_user and cannot exceed the key ceiling"
     );
+}
+
+#[tokio::test]
+async fn file_sync_retain_cannot_exceed_the_api_key_trust_ceiling() {
+    const LOW_TRUST_KEY: &str = "mk_low_trust_file_sync";
+    let tenant_id = tenant(80_550);
+    let state = AppState::new_in_memory();
+    state.store().insert_api_key(key_row(
+        LOW_TRUST_KEY,
+        tenant_id,
+        TrustLevel::AgentOutput,
+        false,
+    ));
+    let store = state.store().clone();
+    let app = memphant_server::app(state);
+    let (_, binding) = send(
+        &app,
+        "PUT",
+        "/v1/context-bindings/low-trust-file-sync",
+        Some(LOW_TRUST_KEY),
+        Some(context_binding_body()),
+    )
+    .await;
+    let projection_path = format!(
+        "/v1/scopes/{}/projection?subject_id={}&actor_id={}&agent_node_id={}&subject_generation={}",
+        binding["scope_id"].as_str().unwrap(),
+        binding["subject_id"].as_str().unwrap(),
+        binding["actor_id"].as_str().unwrap(),
+        binding["agent_node_id"].as_str().unwrap(),
+        binding["subject_generation"].as_u64().unwrap(),
+    );
+    let (projection_status, projection) =
+        send(&app, "GET", &projection_path, Some(LOW_TRUST_KEY), None).await;
+    assert_eq!(projection_status, StatusCode::OK, "{projection}");
+    let operation = FileSyncOperation::Retain {
+        fact_key: "profile:trust-ceiling".to_string(),
+        predicate: "states".to_string(),
+        body: "A low-trust key must not mint trusted direct memory.".to_string(),
+        confidence: 1.0,
+        valid_from: None,
+        valid_to: None,
+    };
+    let request = serde_json::to_value(FileSyncRequest {
+        subject_id: serde_json::from_value(binding["subject_id"].clone()).unwrap(),
+        scope_id: serde_json::from_value(binding["scope_id"].clone()).unwrap(),
+        actor_id: serde_json::from_value(binding["actor_id"].clone()).unwrap(),
+        agent_node_id: serde_json::from_value(binding["agent_node_id"].clone()).unwrap(),
+        subject_generation: binding["subject_generation"].as_u64().unwrap(),
+        base_fingerprint: projection["fingerprint"].as_str().unwrap().to_string(),
+        plan_sha256: file_sync_plan_sha256(std::slice::from_ref(&operation)).unwrap(),
+        observed_at: "2026-07-22T00:00:00Z".to_string(),
+        operations: vec![operation],
+    })
+    .unwrap();
+
+    let (status, response) = send(
+        &app,
+        "POST",
+        "/v1/file-sync",
+        Some(LOW_TRUST_KEY),
+        Some(request),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response}");
+    assert_eq!(response["error"]["code"], "sync_invalid");
+    assert!(store.memory_units(tenant_id).is_empty());
+}
+
+#[tokio::test]
+async fn level_one_file_sync_cannot_read_or_write_semantic_memory() {
+    let tenant_id = tenant(80_575);
+    let state = AppState::new_in_memory();
+    state
+        .store()
+        .insert_api_key(key_row(KEY_A, tenant_id, TrustLevel::TrustedUser, false));
+    let store = state.store().clone();
+    let app = memphant_server::app(state);
+
+    let (_, root) = send(
+        &app,
+        "PUT",
+        "/v1/context-bindings/file-sync-l0",
+        Some(KEY_A),
+        Some(context_binding_body()),
+    )
+    .await;
+    let mut child_body = context_binding_body();
+    child_body["scope"] = serde_json::json!({
+        "external_ref": "syndai:user:user-123:file-sync-workspace",
+        "kind": "agent_workspace",
+        "parent_external_ref": "syndai:user:user-123:root"
+    });
+    child_body["agent_node"] = serde_json::json!({
+        "external_ref": "syndai:user:user-123:file-sync-l1",
+        "parent_external_ref": "syndai:user:user-123:l0"
+    });
+    let (child_status, child) = send(
+        &app,
+        "PUT",
+        "/v1/context-bindings/file-sync-l1",
+        Some(KEY_A),
+        Some(child_body),
+    )
+    .await;
+    assert_eq!(child_status, StatusCode::OK, "{child}");
+    assert_eq!(child["subject_id"], root["subject_id"]);
+    assert_eq!(child["agent_level"], 1);
+
+    let context = store
+        .resolve_memory_context(
+            tenant_id,
+            serde_json::from_value(child["subject_id"].clone()).unwrap(),
+            serde_json::from_value(child["actor_id"].clone()).unwrap(),
+            serde_json::from_value(child["scope_id"].clone()).unwrap(),
+            serde_json::from_value(child["agent_node_id"].clone()).unwrap(),
+        )
+        .await
+        .expect("resolved level-one context");
+    let mut tx = store.begin(&context).await.expect("begin seed transaction");
+    store
+        .stage_memory_unit(
+            &mut tx,
+            NewMemoryUnit {
+                tenant_id,
+                data_subject_id: context.data_subject_id,
+                scope_id: context.scope_id,
+                agent_node_id: context.agent_node_id,
+                subject_generation: context.subject_generation,
+                kind: MemoryKind::Semantic,
+                state: UnitState::Active,
+                fact_key: Some("profile:hidden-at-l1".to_string()),
+                predicate: Some("states".to_string()),
+                body: "A pre-existing semantic row must remain hidden at level one.".to_string(),
+                confidence: Some(1.0),
+                trust_level: TrustLevel::TrustedUser,
+                churn_class: None,
+                freshness_due_at: None,
+                actor_id: Some(context.actor_id),
+                source_kind: Some("direct".to_string()),
+                source_ref: "auth:test:l1-hidden".to_string(),
+                observed_at: "2026-07-22T00:00:00Z".to_string(),
+                source_episode_id: None,
+                source_resource_id: None,
+                deletion_generation: None,
+                contextual_chunks: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+                transaction_from: None,
+                transaction_to: None,
+            },
+        )
+        .await
+        .expect("seed legacy semantic row");
+    store.commit(tx).await.expect("commit seed transaction");
+
+    let projection_path = format!(
+        "/v1/scopes/{}/projection?subject_id={}&actor_id={}&agent_node_id={}&subject_generation={}",
+        child["scope_id"].as_str().unwrap(),
+        child["subject_id"].as_str().unwrap(),
+        child["actor_id"].as_str().unwrap(),
+        child["agent_node_id"].as_str().unwrap(),
+        child["subject_generation"].as_u64().unwrap(),
+    );
+    let (projection_status, projection) =
+        send(&app, "GET", &projection_path, Some(KEY_A), None).await;
+    assert_eq!(projection_status, StatusCode::OK, "{projection}");
+    assert_eq!(projection["items"], serde_json::json!([]));
+
+    let operation = FileSyncOperation::Retain {
+        fact_key: "profile:blocked-at-l1".to_string(),
+        predicate: "states".to_string(),
+        body: "Level one must not create semantic memory.".to_string(),
+        confidence: 1.0,
+        valid_from: None,
+        valid_to: None,
+    };
+    let request = serde_json::to_value(FileSyncRequest {
+        subject_id: context.data_subject_id,
+        scope_id: context.scope_id,
+        actor_id: context.actor_id,
+        agent_node_id: context.agent_node_id,
+        subject_generation: context.subject_generation,
+        base_fingerprint: projection["fingerprint"].as_str().unwrap().to_string(),
+        plan_sha256: file_sync_plan_sha256(std::slice::from_ref(&operation)).unwrap(),
+        observed_at: "2026-07-22T00:00:00Z".to_string(),
+        operations: vec![operation],
+    })
+    .unwrap();
+    let (status, response) = send(&app, "POST", "/v1/file-sync", Some(KEY_A), Some(request)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response}");
+    assert_eq!(response["error"]["code"], "sync_invalid");
+    assert_eq!(store.memory_units(tenant_id).len(), 1);
 }
 
 #[tokio::test]

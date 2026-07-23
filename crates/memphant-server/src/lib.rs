@@ -564,7 +564,7 @@ async fn file_sync_handler<S: MutationLedgerStore + 'static>(
     FileSyncJson(request): FileSyncJson,
 ) -> Result<Response, ApiError> {
     authed.check_principal(request.actor_id, request.scope_id)?;
-    let context = state
+    let mut context = state
         .store()
         .resolve_memory_context(
             authed.tenant,
@@ -581,6 +581,7 @@ async fn file_sync_handler<S: MutationLedgerStore + 'static>(
     if request.subject_generation != context.subject_generation {
         return Err(ApiError::sync_conflict("subject generation is stale"));
     }
+    context.actor_trust = clamp_trust(context.actor_trust, authed.max_trust);
     mutation_http_response(
         state
             .service
