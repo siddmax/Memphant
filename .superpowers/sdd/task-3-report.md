@@ -376,3 +376,46 @@ Fresh proof after the final code change:
 
 The unrelated `.superpowers/sdd/progress.md` modification remains unstaged.
 No Task 4, P1 campaign, paid/model call, push, or deployment work was performed.
+
+## Sixth independent-review fix wave
+
+The final diagnostic review found that `last_known_recovery` conflated three
+states: an output-parent anchor change, an unconfirmed recovery path, and a
+recovery tree that actually contains a moved managed inode. Consequently a
+generic recovery setup or metadata failure falsely claimed both that the parent
+changed and that recovery data had been retained, even when the recovery tree
+was still empty.
+
+Two focused contracts were red before this correction. An injected unchanged-
+parent recovery fsync cause gained false parent-move and retained-data wording,
+and displacing an empty recovery directory before the first managed move was
+not observed because no deterministic pre-move confirmation seam existed.
+
+- `RecoverySession` now records managed-data presence separately from pathname
+  confidence. The bit flips immediately after the atomic move succeeds and
+  before directory fsync, so even a later durability-barrier failure describes
+  the actual inode location truthfully.
+- The deterministic `recovery:created` seam runs after the recovery root and
+  `units/` exist but before the first managed inode moves. Compile reconfirms
+  the retained recovery name after that seam and refuses the move when the name
+  was displaced.
+- Unconfirmed recovery diagnostics preserve the actual fsync, open, metadata,
+  handle, name, or path error and add only
+  `recovery_last_known=<captured path>`. They do not invent `output parent
+  changed`.
+- Retained-data wording is conditional on the explicit moved-inode bit. The
+  existing parent-move-after-first-recovery contract still reports
+  `output parent changed; recovery was retained under that parent`; an empty
+  recovery never makes that claim.
+
+Fresh proof after the final code change:
+
+- `cargo test -p memphant-cli`: 19 unit and 21 integration tests passed,
+  including 10 real-CLI compile contracts.
+- `cargo clippy -p memphant-cli --all-targets --all-features -- -D warnings`,
+  `cargo fmt --all --check`, and `git diff --check`: passed.
+- `python3 scripts/check_spec_drift.py`: skipped, not passed, because the
+  private Syndai specs are absent from this worktree.
+
+The unrelated `.superpowers/sdd/progress.md` modification remains unstaged.
+No Task 4, P1 campaign, paid/model call, push, or deployment work was performed.

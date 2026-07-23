@@ -208,13 +208,15 @@ edits.
 - `compile` reports the scope, snapshot, output root, and entry count.
 - When a compile changed or deleted managed files, success and later errors use
   absolute `recovery=<path>` only while the captured anchor and recovery name
-  still identity-match their retained handles. If either pathname can no
-  longer be confirmed, failure instead reports
-  `recovery_last_known=<captured-path>` and `output parent changed; recovery was
-  retained under that parent`; it never presents the stale path as current. B2
-  never prunes recovery trees; the operator may remove one only after all
-  editors and other processes that could still hold the old files open have
-  closed them.
+  still identity-match their retained handles. If either pathname cannot be
+  confirmed, failure preserves the actual setup or confirmation cause and
+  reports `recovery_last_known=<captured-path>`; it never presents the stale
+  path as current. Only an observed parent-anchor change after at least one
+  managed inode moved adds `output parent changed; recovery was retained under
+  that parent`. An empty or unconfirmed recovery directory is never described
+  as containing retained managed data. B2 never prunes recovery trees; the
+  operator may remove one only after all editors and other processes that could
+  still hold the old files open have closed them.
 - A dirty compile names every changed/missing/unexpected path and tells the user
   to run `sync` or restore it.
 - `sync` defaults to a JSON dry-run plan. Forget operations are labelled

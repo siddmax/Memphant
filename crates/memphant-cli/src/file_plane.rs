@@ -94,6 +94,7 @@ struct RecoveryArea {
 struct RecoverySession {
     anchor: OutputParentAnchor,
     area: Option<RecoveryArea>,
+    contains_managed_data: bool,
 }
 
 #[derive(Debug)]
@@ -2146,6 +2147,7 @@ impl RecoverySession {
         Self {
             anchor: anchor.clone(),
             area: None,
+            contains_managed_data: false,
         }
     }
 
@@ -2176,6 +2178,14 @@ impl RecoverySession {
         }
     }
 
+    fn note_managed_inode_recovered(&mut self) {
+        self.contains_managed_data = true;
+    }
+
+    fn contains_managed_data(&self) -> bool {
+        self.contains_managed_data
+    }
+
     fn annotate(&self, output_parent: &Dir, error: String) -> String {
         match &self.area {
             Some(area) if area.ensure_current(&self.anchor, output_parent).is_ok() => {
@@ -2185,7 +2195,7 @@ impl RecoverySession {
                     format!("{error}; recovery={}", area.path.display())
                 }
             }
-            Some(area) => last_known_recovery(error, &area.path),
+            Some(area) => last_known_recovery(error, &area.path, self.contains_managed_data),
             None => error,
         }
     }
@@ -2217,10 +2227,14 @@ fn ensure_recovery_current(
     root: &Dir,
 ) -> Result<(), String> {
     anchor.ensure_current(output_parent)?;
-    if directory_identity(root)? != identity {
+    let handle_identity = directory_identity(root)
+        .map_err(|error| format!("durable recovery handle could not be confirmed: {error}"))?;
+    if handle_identity != identity {
         return Err("durable recovery handle changed identity".to_string());
     }
-    if directory_identity_at(output_parent, name)? != identity {
+    let name_identity = directory_identity_at(output_parent, name)
+        .map_err(|error| format!("durable recovery name could not be confirmed: {error}"))?;
+    if name_identity != identity {
         return Err("durable recovery name changed identity".to_string());
     }
     let reopened = open_absolute_directory_nofollow(path)
@@ -2232,20 +2246,23 @@ fn ensure_recovery_current(
     Ok(())
 }
 
-fn last_known_recovery(error: String, path: &Path) -> String {
-    let error = if error.contains("output parent changed") {
+fn last_known_recovery(error: String, path: &Path, contains_managed_data: bool) -> String {
+    let parent_changed = error.contains("output parent changed");
+    let mut diagnostic = if error.contains("recovery_last_known=") {
         error
     } else {
-        format!("{error}; output parent changed")
+        format!("{error}; recovery_last_known={}", path.display())
     };
-    if error.contains("recovery_last_known=") {
-        error
-    } else {
-        format!(
-            "{error}; recovery_last_known={}; recovery was retained under that parent",
-            path.display()
-        )
+    if contains_managed_data {
+        if parent_changed {
+            diagnostic.push_str("; recovery was retained under that parent");
+        } else {
+            diagnostic.push_str(
+                "; recovery contains retained managed data, but its current pathname could not be confirmed",
+            );
+        }
     }
+    diagnostic
 }
 
 fn private_dir_builder() -> DirBuilder {
@@ -2275,6 +2292,7 @@ fn create_recovery_area(
                     return Err(last_known_recovery(
                         format!("cannot sync recovery parent: {error}"),
                         &path,
+                        false,
                     ));
                 }
                 let root = match open_directory_at(output_parent, &name) {
@@ -2283,6 +2301,7 @@ fn create_recovery_area(
                         return Err(last_known_recovery(
                             format!("cannot open durable recovery directory: {error}"),
                             &path,
+                            false,
                         ));
                     }
                 };
@@ -2292,17 +2311,18 @@ fn create_recovery_area(
                         return Err(last_known_recovery(
                             format!("cannot identify durable recovery directory: {error}"),
                             &path,
+                            false,
                         ));
                     }
                 };
                 if let Err(error) =
                     ensure_recovery_current(anchor, output_parent, &name, &path, identity, &root)
                 {
-                    return Err(last_known_recovery(error, &path));
+                    return Err(last_known_recovery(error, &path, false));
                 }
                 anchor
                     .ensure_current(output_parent)
-                    .map_err(|error| last_known_recovery(error, &path))?;
+                    .map_err(|error| last_known_recovery(error, &path, false))?;
                 if let Err(error) = root.create_dir_with(UNITS_DIR, &private_dir_builder()) {
                     return Err(
                         if ensure_recovery_current(
@@ -2323,6 +2343,7 @@ fn create_recovery_area(
                             last_known_recovery(
                                 format!("cannot create recovery units directory: {error}"),
                                 &path,
+                                false,
                             )
                         },
                     );
@@ -2347,6 +2368,7 @@ fn create_recovery_area(
                             last_known_recovery(
                                 format!("cannot sync durable recovery directory: {error}"),
                                 &path,
+                                false,
                             )
                         },
                     );
@@ -2373,6 +2395,7 @@ fn create_recovery_area(
                                 last_known_recovery(
                                     format!("cannot open recovery units directory: {error}"),
                                     &path,
+                                    false,
                                 )
                             },
                         );
@@ -2386,7 +2409,7 @@ fn create_recovery_area(
                     units,
                 };
                 area.ensure_current(anchor, output_parent)
-                    .map_err(|error| last_known_recovery(error, &area.path))?;
+                    .map_err(|error| last_known_recovery(error, &area.path, false))?;
                 return Ok(area);
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -2430,6 +2453,7 @@ fn move_to_recovery(
     recovery_directory: &Dir,
     anchor: &OutputParentAnchor,
     anchor_parent: &Dir,
+    recovery: &mut RecoverySession,
 ) -> Result<(), String> {
     anchor.ensure_current(anchor_parent)?;
     rename_noreplace(
@@ -2439,6 +2463,7 @@ fn move_to_recovery(
         source_name,
     )
     .map_err(|error| format!("cannot move {source_name} to durable recovery: {error}"))?;
+    recovery.note_managed_inode_recovered();
     sync_directory(source_directory)
         .map_err(|error| format!("cannot sync source after recovering {source_name}: {error}"))?;
     sync_directory(recovery_directory).map_err(|error| {
@@ -2514,6 +2539,7 @@ fn replace_managed_file(
 
     let (prepared, prepared_identity) = prepare_file(directory, bytes, anchor, output_parent)?;
     let recovered = if let Some(expected) = expected {
+        let recovery_was_empty = !recovery.contains_managed_data();
         let recovery_directory = match recovery.target(output_parent, location) {
             Ok(target) => target,
             Err(error) => {
@@ -2523,9 +2549,23 @@ fn replace_managed_file(
                 return Err(error);
             }
         };
-        if let Err(error) =
-            move_to_recovery(directory, name, &recovery_directory, anchor, output_parent)
-        {
+        if recovery_was_empty {
+            hook("recovery:created");
+            if let Err(error) = recovery.ensure(output_parent) {
+                if anchor.ensure_current(output_parent).is_ok() {
+                    let _ = directory.remove_file(&prepared);
+                }
+                return Err(error);
+            }
+        }
+        if let Err(error) = move_to_recovery(
+            directory,
+            name,
+            &recovery_directory,
+            anchor,
+            output_parent,
+            recovery,
+        ) {
             if anchor.ensure_current(output_parent).is_ok() {
                 let _ = directory.remove_file(&prepared);
             }
@@ -2593,8 +2633,20 @@ fn delete_managed_file(
         name,
         location,
     } = target;
+    let recovery_was_empty = !recovery.contains_managed_data();
     let recovery_directory = recovery.target(output_parent, location)?;
-    move_to_recovery(directory, name, &recovery_directory, anchor, output_parent)?;
+    if recovery_was_empty {
+        hook("recovery:created");
+        recovery.ensure(output_parent)?;
+    }
+    move_to_recovery(
+        directory,
+        name,
+        &recovery_directory,
+        anchor,
+        output_parent,
+        recovery,
+    )?;
     hook(&format!("delete:{name}:detached"));
     if let Err(error) = validate_detached_file(&recovery_directory, name, name, expected) {
         let restoration =
@@ -3358,6 +3410,83 @@ mod tests {
         );
         assert!(recovery_directories(&parent).is_empty());
         assert!(recovery_directories(&displaced_parent).is_empty());
+    }
+
+    #[test]
+    fn unchanged_parent_recovery_setup_failure_preserves_its_true_cause() {
+        let diagnostic = super::last_known_recovery(
+            "cannot sync recovery parent: injected failure".to_string(),
+            std::path::Path::new("/captured-parent/.memphant-recovery-test"),
+            false,
+        );
+
+        assert!(
+            diagnostic.contains("cannot sync recovery parent: injected failure"),
+            "{diagnostic}"
+        );
+        assert!(diagnostic.contains("recovery_last_known="), "{diagnostic}");
+        assert!(
+            !diagnostic.contains("output parent changed"),
+            "{diagnostic}"
+        );
+        assert!(
+            !diagnostic.contains("recovery was retained"),
+            "{diagnostic}"
+        );
+    }
+
+    #[test]
+    fn empty_unconfirmed_recovery_is_not_described_as_retained_data() {
+        let directory = tempfile::tempdir().unwrap();
+        let parent = directory.path().join("output-parent");
+        let displaced_recovery = directory.path().join("empty-recovery");
+        std::fs::create_dir(&parent).unwrap();
+        let output = parent.join("memory");
+        let initial = rendered_projection(&[(1, "alpha before")]);
+        let absent = inspect_output(&output).unwrap();
+        replace_projection(&output, &absent, &initial).unwrap();
+        let existing = inspect_output(&output).unwrap();
+        let original_unit = initial.units.keys().next().unwrap();
+        let original_bytes = std::fs::read(output.join(original_unit)).unwrap();
+        let replacement = rendered_projection(&[(1, "alpha after")]);
+        let mut displaced = false;
+
+        let result = replace_projection_with_hook(&output, &existing, &replacement, |point| {
+            if point == "recovery:created" && !displaced {
+                std::fs::rename(find_recovery(&parent), &displaced_recovery).unwrap();
+                displaced = true;
+            }
+        });
+
+        let error = result.expect_err("an unconfirmed recovery name was accepted");
+        assert!(
+            error.contains("durable recovery name could not be confirmed"),
+            "{error}"
+        );
+        assert!(error.contains("recovery_last_known="), "{error}");
+        assert!(!error.contains("output parent changed"), "{error}");
+        assert!(!error.contains("recovery was retained"), "{error}");
+        assert_eq!(
+            std::fs::read(output.join(original_unit)).unwrap(),
+            original_bytes
+        );
+        assert_eq!(
+            super::directory_names(
+                &cap_std::fs::Dir::open_ambient_dir(
+                    &displaced_recovery,
+                    cap_std::ambient_authority(),
+                )
+                .unwrap()
+            )
+            .unwrap(),
+            [super::UNITS_DIR]
+        );
+        assert!(
+            std::fs::read_dir(displaced_recovery.join(super::UNITS_DIR))
+                .unwrap()
+                .next()
+                .is_none()
+        );
     }
 
     #[test]
