@@ -11,7 +11,7 @@ use memphant_core::{
     EmbeddingProfileRow, EmbeddingRow, ForgetOutcome, ForgetWrite, JOB_DEAD_LETTER_ATTEMPTS,
     JobFilter, MemoryStore, MutationClaim, MutationClaimOutcome, MutationLedgerStore,
     MutationResponse, ReflectJobRow, ResolvedMemoryContext, ReviewEventRow, ScopePage, StoreError,
-    SubjectErasureReceipt, correction_rectangles, deep_unit_is_snapshot_eligible,
+    SubjectErasureReceipt, correction_rectangles_with_ids, deep_unit_is_snapshot_eligible,
 };
 use memphant_types::{
     ActorId, AgentNodeId, CitationSpan, ContextBindingAccessPolicy, ContextBindingPolicyMode,
@@ -1031,6 +1031,63 @@ impl PgTxn {
 }
 
 impl MutationLedgerStore for PgStore {
+    async fn lookup_mutation_replay(
+        &self,
+        context: &ResolvedMemoryContext,
+        claim: &MutationClaim,
+    ) -> Result<Option<MutationResponse>, StoreError> {
+        if claim.tenant_id() != context.tenant_id
+            || claim.data_subject_id() != context.data_subject_id
+            || claim.subject_generation() != context.subject_generation
+        {
+            return Err(StoreError::IdempotencyConflict);
+        }
+        let generation = i64::try_from(claim.subject_generation())
+            .map_err(|_| StoreError::StaleSubjectGeneration)?;
+        let mut tx = self.tenant_tx(context.tenant_id).await?;
+        let row = sqlx::query(
+            "select data_subject_id, subject_generation, request_hash, state,
+                    response_status, response_body
+             from memphant.mutation_ledger
+             where tenant_id = $1 and verb = $2 and idempotency_key = $3
+               and expires_at > statement_timestamp()",
+        )
+        .bind(context.tenant_id.as_uuid())
+        .bind(claim.verb().as_str())
+        .bind(claim.idempotency_key())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(backend)?;
+        let Some(row) = row else {
+            tx.commit().await.map_err(backend)?;
+            return Ok(None);
+        };
+        let stored_subject: Uuid = row.try_get("data_subject_id").map_err(backend)?;
+        let stored_generation: i64 = row.try_get("subject_generation").map_err(backend)?;
+        let stored_hash: Vec<u8> = row.try_get("request_hash").map_err(backend)?;
+        if stored_subject != claim.data_subject_id().as_uuid()
+            || stored_generation != generation
+            || stored_hash.as_slice() != claim.request_hash()
+        {
+            return Err(StoreError::IdempotencyConflict);
+        }
+        let state: String = row.try_get("state").map_err(backend)?;
+        if state != "completed" {
+            tx.commit().await.map_err(backend)?;
+            return Ok(None);
+        }
+        let status: i16 = row.try_get("response_status").map_err(backend)?;
+        let body: Vec<u8> = row.try_get("response_body").map_err(backend)?;
+        let response = MutationResponse::success(
+            u16::try_from(status).map_err(|_| {
+                StoreError::Backend("stored mutation response status is invalid".to_string())
+            })?,
+            body,
+        )?;
+        tx.commit().await.map_err(backend)?;
+        Ok(Some(response))
+    }
+
     async fn stage_mutation_claim(
         &self,
         tx: &mut Self::Txn,
@@ -2845,13 +2902,14 @@ impl MemoryStore for PgStore {
         .await
         .map_err(backend)?;
 
-        let (replacement, remainders) = correction_rectangles(
+        let (replacement, remainders) = correction_rectangles_with_ids(
             &old_unit,
             &correction.correction,
             &correction.source_ref,
             &correction.observed_at,
             context.actor_id,
             &transaction_time,
+            &correction.unit_ids,
         )?;
         let new_id = replacement.id;
         let remainder_ids: Vec<UnitId> = remainders.iter().map(|unit| unit.id).collect();

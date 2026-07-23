@@ -1047,6 +1047,14 @@ impl MemoryStore for AnyStore {
 }
 
 impl MutationLedgerStore for AnyStore {
+    async fn lookup_mutation_replay(
+        &self,
+        context: &ResolvedMemoryContext,
+        claim: &MutationClaim,
+    ) -> Result<Option<MutationResponse>, StoreError> {
+        delegate!(self, store => store.lookup_mutation_replay(context, claim).await)
+    }
+
     async fn stage_mutation_claim(
         &self,
         tx: &mut Self::Txn,

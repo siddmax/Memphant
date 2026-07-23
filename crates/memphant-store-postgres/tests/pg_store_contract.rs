@@ -15,14 +15,15 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use memphant_core::service::{MemoryService, file_sync_plan_sha256};
 use memphant_core::{
-    FixedClock, JobFilter, MemoryStore, NoopEmbedding, StructuredStateOp, StructuredStateOperation,
+    EmbedError, EmbeddingProvider, FixedClock, JobFilter, MemoryStore, MutationClaim,
+    MutationLedgerStore, MutationVerb, NoopEmbedding, StructuredStateOp, StructuredStateOperation,
     StructuredStateProvider, StructuredStateProviderError, StructuredStateProviderIdentity,
-    StructuredStateRequest, derive_fact_key, recall, reflect_recorded, retain_episode,
-    retain_resource,
+    StructuredStateRequest, canonical_mutation_request_hash, derive_fact_key, recall,
+    reflect_recorded, retain_episode, retain_resource,
 };
 use memphant_store_postgres::PgStore;
 use memphant_store_testkit::StoreHarness;
@@ -192,6 +193,118 @@ fn file_sync_metadata(unit: &CanonicalProjectionUnit) -> FileSyncUnitMetadata {
         valid_to: unit.valid_to.clone(),
         body_sha256: unit.body_sha256.clone(),
     }
+}
+
+struct PgAdmissionDriftEmbedding {
+    trigger: tokio::sync::mpsc::UnboundedSender<()>,
+    completed: Mutex<std::sync::mpsc::Receiver<bool>>,
+}
+
+impl EmbeddingProvider for PgAdmissionDriftEmbedding {
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
+        self.trigger
+            .send(())
+            .map_err(|_| EmbedError::Unavailable("admission drift trigger failed".to_string()))?;
+        let inserted = self
+            .completed
+            .lock()
+            .expect("drift completion lock")
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .map_err(|_| EmbedError::Unavailable("admission drift writer timed out".to_string()))?;
+        if !inserted {
+            return Err(EmbedError::Unavailable(
+                "admission drift writer failed".to_string(),
+            ));
+        }
+        Ok(vec![vec![1.0]; texts.len()])
+    }
+
+    fn dimensions(&self) -> usize {
+        1
+    }
+
+    fn id(&self) -> &str {
+        "pg-file-sync-admission-drift"
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn file_sync_rejects_nonprojected_admission_drift_before_claiming() {
+    let store = connect().await;
+    let tenant = fresh_tenant(&store).await;
+    let context = fresh_memory_context(&store, tenant).await;
+    let mut drift = active_projection_unit(&context, "Concurrent belief.");
+    drift.kind = MemoryKind::Belief;
+    drift.fact_key = Some("profile:concurrent-belief".to_string());
+    let (trigger_tx, mut trigger_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+    let writer_store = store.clone();
+    let writer_context = context.clone();
+    let writer = tokio::spawn(async move {
+        trigger_rx.recv().await.expect("drift trigger");
+        let inserted = async {
+            let mut tx = writer_store.begin(&writer_context).await?;
+            writer_store.stage_memory_unit(&mut tx, drift).await?;
+            writer_store.commit(tx).await
+        }
+        .await;
+        completed_tx
+            .send(inserted.is_ok())
+            .expect("drift completion");
+        inserted
+    });
+    let embedder = Arc::new(PgAdmissionDriftEmbedding {
+        trigger: trigger_tx,
+        completed: Mutex::new(completed_rx),
+    });
+    let service = MemoryService::new(Arc::new(store.clone()), Arc::new(CLOCK), embedder);
+    let base = service.canonical_projection(&context).await.unwrap();
+    let request = file_sync_request(
+        &context,
+        base.fingerprint,
+        vec![FileSyncOperation::Retain {
+            fact_key: "profile:requested".to_string(),
+            predicate: "states".to_string(),
+            body: "Requested semantic unit.".to_string(),
+            confidence: 1.0,
+            valid_from: None,
+            valid_to: None,
+        }],
+    );
+    let claim = MutationClaim::new(
+        &context,
+        MutationVerb::FileSync,
+        "pg-file-sync-admission-drift",
+        canonical_mutation_request_hash(MutationVerb::FileSync, &request).unwrap(),
+    )
+    .unwrap();
+
+    let result = service
+        .file_sync(&context, "pg-file-sync-admission-drift", request)
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(memphant_core::service::ServiceError::SyncConflict(_))
+        ),
+        "unexpected drift result: {result:?}"
+    );
+    let open = store.fetch_scope_open_units(&context).await.unwrap();
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].kind, MemoryKind::Belief);
+    assert_eq!(
+        open[0].fact_key.as_deref(),
+        Some("profile:concurrent-belief")
+    );
+    assert!(
+        store
+            .lookup_mutation_replay(&context, &claim)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    writer.await.unwrap().unwrap();
 }
 
 #[tokio::test]
@@ -2381,6 +2494,7 @@ async fn bitemporal_correction_round_trips_through_postgres_and_forget_erases_hi
         observed_at: CLOCK.0.to_string(),
         now: "1900-01-01T00:00:00Z".to_string(),
         embedding: Some((profile.clone(), vec![0.75; profile.dimensions])),
+        unit_ids: Default::default(),
     };
     let mut dropped_correction = store.begin(&context).await.unwrap();
     let dropped_created = store

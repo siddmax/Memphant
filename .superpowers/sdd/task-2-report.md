@@ -161,3 +161,97 @@ The API schema did not change in this follow-up, so the generated OpenAPI file
 was intentionally not regenerated. The prior exact private-spec drift skip and
 non-claim remain unchanged. No paid or network provider calls, Task 3 work,
 push, or deployment were performed.
+
+## Second review follow-up: bounded two-phase execution
+
+This follow-up supersedes the preceding review section's claim-before-provider
+ordering. The final architecture matches the Task 2 brief: provider/compiler
+preparation happens before the short serializable execution transaction, and
+the transaction revalidates every mutable input before staging any operation.
+
+### Red proof
+
+The new regressions were added before their production seams. The focused
+`cargo test -p memphant-core file_sync -- --nocapture` command failed on the
+missing read-only `lookup_mutation_replay`, missing full admission-snapshot
+digest, and missing active-claim observation contract. Once those structural
+seams compiled, the nonprojected-drift test still failed against the old
+transaction shape because the embedding provider ran while the mutation claim
+was active instead of returning the required drift conflict.
+
+### Root-cause architecture
+
+- `MutationLedgerStore` now has a tenant/context-bound, read-only committed
+  replay lookup. Exact receipts return before snapshot or provider work;
+  mismatched request hashes return the static idempotency conflict without
+  including the raw key. In-memory, Postgres, and runtime delegation implement
+  the same contract.
+- File sync fetches the complete open-scope admission unit snapshot outside the
+  execution transaction and hashes the full typed rows, deterministically
+  ordered by unit UUID. This includes nonprojected beliefs and every other unit
+  field the compiler may inspect, rather than only the canonical file view.
+- Correction embeddings and direct-retain compiler writes are prepared outside
+  the database transaction in plan order against a caller-owned evolving
+  snapshot. Correction replacement/remainder UUIDs are allocated during
+  preparation and passed to both store implementations, so later prepared
+  operations reference the same unit identities that persistence creates.
+- The serializable transaction now only stages the whole mutation claim,
+  re-reads both the canonical projection fingerprint and the full admission
+  snapshot fingerprint, stages the already-prepared native writes, records the
+  receipt, and commits. Any drift returns `sync_conflict` and rolls back. No
+  embedding, compiler, or network/provider work runs under the claim.
+- Every fallible path after `begin_serializable` explicitly rolls back,
+  including canonical/admission fingerprint encoding and final receipt
+  serialization. A same-request race may still return the exact committed
+  replay from `stage_mutation_claim`; this path commits a read-only replay
+  transaction and performs no prepared writes.
+- The paired short-body contract is explicit: keyed direct `Hi.`/`Busy.` units
+  remain admitted, while unkeyed one- or two-word extraction candidates remain
+  rejected by the historical noise floor.
+
+### Final verification
+
+- `cargo test -p memphant-core file_sync -- --nocapture` - 12 passed. This
+  includes exact replay and conflicting-hash preflight, stale-base provider
+  bypass, no-active-claim provider execution, nonprojected admission drift with
+  zero requested writes/receipt, full-row digest coverage, ordered mixed plans,
+  operation rollback, native contradiction edges, and the paired short-body
+  cases.
+- `cargo test -p memphant-core --all-targets` - 107 library tests plus every
+  core integration target passed.
+- `cargo test -p memphant-server --test rest_contract file_sync -- --nocapture`
+  - 1 passed; `cargo test -p memphant-server openapi -- --nocapture` - 8 passed.
+- The ignored scratch-Postgres
+  `file_sync_is_atomic_rejects_stale_base_and_serializes_concurrent_batches`
+  contract passed against an ephemeral migrated database, retaining exact
+  replay, mixed native edge semantics, operation-N rollback, stale zero writes,
+  and exactly one same-base concurrent winner.
+- The new ignored scratch-Postgres
+  `file_sync_rejects_nonprojected_admission_drift_before_claiming` contract also
+  passed. A concurrent belief inserted during provider preparation changed no
+  canonical file record but changed the admission digest; file sync returned
+  `sync_conflict`, persisted no requested unit, and left no replay receipt.
+- `cargo test -p memphant-types file_sync -- --nocapture` - 1 passed;
+  `cargo test -p memphant-store-postgres provider_lint -- --nocapture` - 5
+  passed.
+- `python3 scripts/check_memphant_migration_contract.py` - clean;
+  `python3 -m pytest tests/test_wsa_migration_contract.py -q` - 35 passed, 1
+  skipped.
+- Touched-package all-target/all-feature clippy with `-D warnings` passed.
+  Final format and whitespace checks are recorded immediately before commit.
+- `cargo test --doc` passed. An additional workspace-wide diagnostic,
+  `cargo test --all-targets --all-features`, is **not** claimed green: the
+  unrelated existing
+  `memphant-eval::trace_schema_snapshot_is_current` test fails because the
+  generated `RetrievalTrace` schema contains the already-present
+  `CrossRerankGranularity`/`docs_scored` fields while its checked snapshot does
+  not. The exact test also fails under default features. Task 2 changes no
+  `memphant-types` trace shape or eval snapshot, so this unrelated drift was
+  preserved rather than folded into the file-sync change.
+
+The API schema and migration did not change, so generated OpenAPI and migration
+artifacts were intentionally not modified. Private spec drift again reported
+exactly `spec_drift=skipped reason=private_specs_missing`; no drift-clean claim
+is made. The unrelated `.superpowers/sdd/progress.md` modification remains
+preserved and unstaged. No paid/network provider, Task 3, push, or deployment
+work was performed.

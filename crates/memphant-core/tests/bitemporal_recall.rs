@@ -67,6 +67,7 @@ async fn recall_resolves_both_time_axes_across_a_split_update_chain() {
                 observed_at: "2026-07-09T00:00:00Z".to_string(),
                 now: "2025-08-01T00:00:00Z".to_string(),
                 embedding: None,
+                unit_ids: Default::default(),
             },
         )
         .await

@@ -28,12 +28,13 @@ use sha2::{Digest, Sha256};
 
 use crate::deep_recall::DeepRecallProvider;
 use crate::{
-    ClaimMutationOutcome, Clock, CoreError, CorrectionWrite, CrossRerankCandidateSelection,
-    CrossRerankGranularity, CrossReranker, DEFAULT_RECALL_POOL_DEPTH, EmbeddingProvider,
-    ForgetWrite, JobFilter, MemoryStore, MutationClaim, MutationClaimOutcome, MutationLedgerStore,
-    MutationResponse, MutationVerb, PackLevers, PreparedCompiledWrite, ReflectJobRow, ScopePage,
-    StoreError, StructuredStateProvider, StructuredStateRequest, VectorQuery,
-    canonical_mutation_request_hash, derive_episode_dedup_key, embedding_profile_for,
+    ClaimMutationOutcome, Clock, CompiledWrite, CoreError, CorrectionUnitIds, CorrectionWrite,
+    CrossRerankCandidateSelection, CrossRerankGranularity, CrossReranker,
+    DEFAULT_RECALL_POOL_DEPTH, EmbeddingProvider, ForgetWrite, JobFilter, MemoryStore,
+    MutationClaim, MutationClaimOutcome, MutationLedgerStore, MutationResponse, MutationVerb,
+    PackLevers, PreparedCompiledWrite, ReflectJobRow, ScopePage, StoreError,
+    StructuredStateProvider, StructuredStateRequest, VectorQuery, canonical_mutation_request_hash,
+    correction_rectangles_with_ids, derive_episode_dedup_key, embedding_profile_for,
     normalize_component, parse_content_date, prepare_compiled_write,
     prepare_compiled_write_from_snapshot, project_structured_state, recall_scope_admitted,
     recall_with_pool_and_selection_and_deep_started, reflect_recorded_claimed,
@@ -383,8 +384,9 @@ mod file_sync_tests {
     use memphant_types::{
         ContextBindingAgentRef, ContextBindingEntityRef, ContextBindingRequest,
         ContextBindingScopeRef, FileSyncOperation, FileSyncOperationResult, FileSyncRequest,
-        FileSyncResult, FileSyncUnitMetadata, MemoryKind, TenantId, TrustLevel,
+        FileSyncResult, FileSyncUnitMetadata, MemoryKind, StoredMemoryUnit, TenantId, TrustLevel,
     };
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     const CLOCK: FixedClock = FixedClock("2026-07-22T00:00:00Z");
@@ -409,6 +411,49 @@ mod file_sync_tests {
 
         fn id(&self) -> &str {
             "file-sync-one-shot"
+        }
+    }
+
+    struct AdmissionDriftEmbedding {
+        store: InMemoryStore,
+        unit: Mutex<Option<StoredMemoryUnit>>,
+        calls: AtomicUsize,
+    }
+
+    impl EmbeddingProvider for AdmissionDriftEmbedding {
+        fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
+            if self
+                .store
+                .mutation_locks
+                .lock()
+                .unwrap()
+                .values()
+                .any(|lock| lock.strong_count() > 0)
+            {
+                return Err(EmbedError::Unavailable(
+                    "embedding ran while a mutation claim was active".to_string(),
+                ));
+            }
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(unit) = self.unit.lock().unwrap().take() {
+                self.store
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .memory_units
+                    .entry(unit.tenant_id)
+                    .or_default()
+                    .push(unit);
+            }
+            Ok(vec![vec![1.0]; texts.len()])
+        }
+
+        fn dimensions(&self) -> usize {
+            1
+        }
+
+        fn id(&self) -> &str {
+            "file-sync-admission-drift"
         }
     }
 
@@ -557,6 +602,47 @@ mod file_sync_tests {
         serde_json::from_slice(response.body()).unwrap()
     }
 
+    fn stored_unit(
+        context: &ResolvedMemoryContext,
+        kind: MemoryKind,
+        fact_key: &str,
+        body: &str,
+    ) -> StoredMemoryUnit {
+        StoredMemoryUnit {
+            id: UnitId::new(),
+            tenant_id: context.tenant_id,
+            data_subject_id: context.data_subject_id,
+            scope_id: context.scope_id,
+            agent_node_id: context.agent_node_id,
+            subject_generation: context.subject_generation,
+            kind,
+            state: UnitState::Active,
+            fact_key: Some(fact_key.to_string()),
+            predicate: Some("states".to_string()),
+            body: body.to_string(),
+            confidence: Some(1.0),
+            trust_level: TrustLevel::TrustedUser,
+            churn_class: None,
+            freshness_due_at: None,
+            actor_id: Some(context.actor_id),
+            source_kind: Some("test".to_string()),
+            source_ref: format!("test:{fact_key}"),
+            observed_at: CLOCK.0.to_string(),
+            source_episode_id: None,
+            source_resource_id: None,
+            deletion_generation: None,
+            contextual_chunks: Vec::new(),
+            valid_from: None,
+            valid_to: None,
+            transaction_from: Some(CLOCK.0.to_string()),
+            transaction_to: None,
+            difficulty: None,
+            stability_days: None,
+            last_reinforced_at: None,
+            reinforcement_count: 0,
+        }
+    }
+
     #[test]
     fn file_sync_plan_digest_is_a_fixed_typed_contract() {
         let operations = vec![FileSyncOperation::Retain {
@@ -570,6 +656,30 @@ mod file_sync_tests {
         assert_eq!(
             file_sync_plan_sha256(&operations).unwrap(),
             "7c3fc04bc305ea5a0a54deb5c4f96fbd305d6001cb902c82dbff4a80ffda80d9"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_sync_admission_snapshot_digest_is_ordered_and_covers_full_units() {
+        let store = InMemoryStore::default();
+        let context = context(&store, "admission-digest").await;
+        let first = stored_unit(&context, MemoryKind::Belief, "profile:first", "First.");
+        let second = stored_unit(&context, MemoryKind::Semantic, "profile:second", "Second.");
+        let digest = file_sync_admission_snapshot_sha256(&[first.clone(), second.clone()]).unwrap();
+        assert_eq!(
+            digest,
+            file_sync_admission_snapshot_sha256(&[second.clone(), first.clone()]).unwrap()
+        );
+        assert_ne!(
+            digest,
+            file_sync_admission_snapshot_sha256(&[
+                StoredMemoryUnit {
+                    trust_level: TrustLevel::Quarantined,
+                    ..first
+                },
+                second
+            ])
+            .unwrap()
         );
     }
 
@@ -602,10 +712,49 @@ mod file_sync_tests {
             )
             .await
             .unwrap();
+        let claim = MutationClaim::new(
+            &context,
+            MutationVerb::FileSync,
+            "file-sync-replay-before-prepare",
+            canonical_mutation_request_hash(MutationVerb::FileSync, &sync_request).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            store
+                .lookup_mutation_replay(&context, &claim)
+                .await
+                .unwrap()
+                .unwrap()
+                .body(),
+            first.body()
+        );
         let replay = service
-            .file_sync(&context, "file-sync-replay-before-prepare", sync_request)
+            .file_sync(
+                &context,
+                "file-sync-replay-before-prepare",
+                sync_request.clone(),
+            )
             .await
             .unwrap();
+
+        let mut conflicting = sync_request;
+        conflicting.operations = vec![FileSyncOperation::Retain {
+            fact_key: "profile:replay-conflict".to_string(),
+            predicate: "states".to_string(),
+            body: "A different request must conflict before embedding.".to_string(),
+            confidence: 1.0,
+            valid_from: None,
+            valid_to: None,
+        }];
+        conflicting.plan_sha256 = file_sync_plan_sha256(&conflicting.operations).unwrap();
+        assert!(matches!(
+            service
+                .file_sync(&context, "file-sync-replay-before-prepare", conflicting,)
+                .await,
+            Err(ServiceError::Core(CoreError::Store(
+                StoreError::IdempotencyConflict
+            )))
+        ));
 
         let stale = request(
             &context,
@@ -658,6 +807,126 @@ mod file_sync_tests {
         assert_eq!(
             service.canonical_projection(&context).await.unwrap().items[0].body,
             "Hi."
+        );
+    }
+
+    #[tokio::test]
+    async fn unkeyed_short_candidate_remains_rejected() {
+        let store = InMemoryStore::default();
+        let context = context(&store, "unkeyed-short").await;
+        let prepared = prepare_compiled_write_from_snapshot(
+            ReflectInput {
+                tenant_id: context.tenant_id,
+                data_subject_id: context.data_subject_id,
+                scope_id: context.scope_id,
+                agent_node_id: context.agent_node_id,
+                subject_generation: context.subject_generation,
+                actor_id: context.actor_id,
+                source_ref: "test:unkeyed-short".to_string(),
+                observed_at: CLOCK.0.to_string(),
+                source_body: Some("ok".to_string()),
+                episode_id: None,
+                resource_id: None,
+                job_id: memphant_types::JobId::new(),
+                compiler_version: COMPILER_VERSION.to_string(),
+                candidates: vec![ReflectCandidate {
+                    source_kind: "agent".to_string(),
+                    trust_level: TrustLevel::AgentOutput,
+                    actor_id: context.actor_id,
+                    subject: None,
+                    predicate: None,
+                    fact_key: None,
+                    kind: None,
+                    body: "ok".to_string(),
+                    confidence: None,
+                    churn_class: None,
+                    admission_hint: None,
+                    target_unit_ids: None,
+                    contextual_chunks: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                }],
+            },
+            &NoopEmbedding,
+            &CLOCK,
+            &context,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let PreparedCompiledWrite::Write {
+            trace,
+            created_unit_ids,
+            ..
+        } = prepared
+        else {
+            panic!("snapshot compile must produce a write receipt");
+        };
+        assert_eq!(trace.actions, [memphant_types::AdmissionAction::Reject]);
+        assert!(created_unit_ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn admission_drift_after_precompute_conflicts_without_open_claim_provider_work() {
+        let store = InMemoryStore::default();
+        let context = context(&store, "admission-drift").await;
+        let embedder = Arc::new(AdmissionDriftEmbedding {
+            store: store.clone(),
+            unit: Mutex::new(Some(stored_unit(
+                &context,
+                MemoryKind::Belief,
+                "profile:drift",
+                "Concurrent belief.",
+            ))),
+            calls: AtomicUsize::new(0),
+        });
+        let service =
+            MemoryService::new(Arc::new(store.clone()), Arc::new(CLOCK), embedder.clone());
+        let base = service.canonical_projection(&context).await.unwrap();
+        let sync_request = request(
+            &context,
+            base.fingerprint,
+            vec![FileSyncOperation::Retain {
+                fact_key: "profile:requested".to_string(),
+                predicate: "states".to_string(),
+                body: "Requested semantic unit.".to_string(),
+                confidence: 1.0,
+                valid_from: None,
+                valid_to: None,
+            }],
+        );
+        let claim = MutationClaim::new(
+            &context,
+            MutationVerb::FileSync,
+            "file-sync-admission-drift",
+            canonical_mutation_request_hash(MutationVerb::FileSync, &sync_request).unwrap(),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            service
+                .file_sync(&context, "file-sync-admission-drift", sync_request,)
+                .await,
+            Err(ServiceError::SyncConflict(_))
+        ));
+        assert_eq!(embedder.calls.load(Ordering::SeqCst), 1);
+        assert!(
+            service
+                .canonical_projection(&context)
+                .await
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        let open = store.fetch_scope_open_units(&context).await.unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].fact_key.as_deref(), Some("profile:drift"));
+        assert!(
+            store
+                .lookup_mutation_replay(&context, &claim)
+                .await
+                .unwrap()
+                .is_none()
         );
     }
 
@@ -1105,6 +1374,31 @@ pub enum ServiceError {
     ProjectionTooLarge { max_bytes: usize },
 }
 
+enum PreparedFileSyncOperation {
+    Correct {
+        memory_unit_id: UnitId,
+        write: CorrectionWrite,
+    },
+    Retain {
+        created: Vec<UnitId>,
+        write: CompiledWrite,
+    },
+    Forget {
+        memory_unit_id: UnitId,
+        write: ForgetWrite,
+    },
+}
+
+fn apply_compiled_write_to_snapshot(working: &mut Vec<StoredMemoryUnit>, write: &CompiledWrite) {
+    for update in &write.unit_updates {
+        if let Some(unit) = working.iter_mut().find(|unit| unit.id == update.id) {
+            unit.state = update.state;
+            unit.transaction_to = update.transaction_to.clone();
+        }
+    }
+    working.extend(write.new_units.iter().cloned());
+}
+
 fn projection_items(units: Vec<StoredMemoryUnit>) -> Vec<CanonicalProjectionUnit> {
     units
         .into_iter()
@@ -1157,6 +1451,17 @@ pub fn file_sync_plan_sha256(
     operations: &[FileSyncOperation],
 ) -> Result<String, serde_json::Error> {
     serde_json::to_vec(operations).map(|encoded| format!("{:x}", Sha256::digest(encoded)))
+}
+
+/// Stable SHA-256 of the complete open-scope snapshot consumed by admission.
+/// Sorting by unit id makes equivalent store result orderings identical while
+/// serializing the full typed rows keeps every compiler-visible field bound.
+pub fn file_sync_admission_snapshot_sha256(
+    units: &[StoredMemoryUnit],
+) -> Result<String, serde_json::Error> {
+    let mut ordered = units.to_vec();
+    ordered.sort_unstable_by_key(|unit| unit.id.as_uuid());
+    serde_json::to_vec(&ordered).map(|encoded| format!("{:x}", Sha256::digest(encoded)))
 }
 
 fn validate_file_sync_metadata(
@@ -2837,6 +3142,7 @@ impl<S: MemoryStore> MemoryService<S> {
                             correction: request.correction,
                             now: self.clock.now_rfc3339(),
                             embedding,
+                            unit_ids: Default::default(),
                         },
                     )
                     .await
@@ -3063,38 +3369,35 @@ impl<S: MemoryStore> MemoryService<S> {
             idempotency_key,
             canonical_mutation_request_hash(MutationVerb::FileSync, &request)?,
         )?;
-        let mut tx = self
+        if let Some(response) = self
             .store
-            .begin_serializable(context)
+            .lookup_mutation_replay(context, &claim)
             .await
-            .map_err(sync_store_error)?;
-        match self.store.stage_mutation_claim(&mut tx, claim).await {
-            Ok(MutationClaimOutcome::Replay(response)) => {
-                self.store.commit(tx).await.map_err(sync_commit_error)?;
-                return Ok(response);
-            }
-            Ok(MutationClaimOutcome::Execute) => {}
-            Err(error) => {
-                let _ = self.store.rollback(tx).await;
-                return Err(sync_store_error(error));
-            }
+            .map_err(sync_store_error)?
+        {
+            return Ok(response);
         }
 
         let evaluated_at = self.clock.now_rfc3339();
-        let current = match self
+        let initial_admission = self
             .store
-            .canonical_projection_units_in_tx(&mut tx, &evaluated_at)
+            .fetch_scope_open_units(context)
             .await
-        {
-            Ok(units) => projection_items(units),
-            Err(error) => {
-                let _ = self.store.rollback(tx).await;
-                return Err(sync_store_error(error));
-            }
-        };
+            .map_err(sync_store_error)?;
+        let initial_admission_fingerprint = file_sync_admission_snapshot_sha256(&initial_admission)
+            .map_err(|error| {
+                ServiceError::SyncInvalid(format!(
+                    "file sync admission snapshot cannot be encoded: {error}"
+                ))
+            })?;
+        let current = projection_items(
+            self.store
+                .canonical_projection_units(context, &evaluated_at)
+                .await
+                .map_err(sync_store_error)?,
+        );
         let current_fingerprint = canonical_projection_fingerprint(&current)?;
         if current_fingerprint != request.base_fingerprint {
-            let _ = self.store.rollback(tx).await;
             return Err(ServiceError::SyncConflict(format!(
                 "base_fingerprint {} no longer matches canonical projection {current_fingerprint}",
                 request.base_fingerprint
@@ -3113,7 +3416,6 @@ impl<S: MemoryStore> MemoryService<S> {
                     .find(|item| item.unit_id == base.unit_id)
                     .is_none_or(|item| !metadata_matches(base, item))
             {
-                let _ = self.store.rollback(tx).await;
                 return Err(ServiceError::SyncInvalid(
                     "file sync immutable unit metadata does not match the canonical projection"
                         .to_string(),
@@ -3121,161 +3423,265 @@ impl<S: MemoryStore> MemoryService<S> {
             }
         }
 
-        let mut results = Vec::with_capacity(request.operations.len());
+        let mut working = initial_admission.clone();
+        let mut prepared = Vec::with_capacity(request.operations.len());
         for (index, operation) in request.operations.iter().enumerate() {
             let source_ref = format!("file-sync:{}:{index}", request.plan_sha256);
-            let staged: Result<FileSyncOperationResult, ServiceError> = async {
-                match operation {
-                    FileSyncOperation::Correct { base, body } => {
-                        let embedding = if self.embedder.dimensions() > 0 {
-                            self.embedder
-                                .embed(std::slice::from_ref(body))
-                                .map_err(|error| {
-                                    CoreError::Store(StoreError::Backend(format!(
-                                        "embedding failed: {error}"
-                                    )))
-                                })?
-                                .into_iter()
-                                .next()
-                                .filter(|vector| !vector.is_empty())
-                                .map(|vector| {
-                                    (embedding_profile_for(self.embedder.as_ref()), vector)
-                                })
-                        } else {
-                            None
-                        };
-                        let outcome = self
-                            .store
-                            .stage_correction(
-                                &mut tx,
-                                CorrectionWrite {
-                                    selector: memphant_types::CorrectSelector {
-                                        memory_unit_id: base.unit_id,
-                                    },
-                                    correction: CorrectionPayload {
-                                        value: body.clone(),
-                                        reason: "file_sync".to_string(),
-                                        source_ref: source_ref.clone(),
-                                        observed_at: request.observed_at.clone(),
-                                        valid_from: base.valid_from.clone(),
-                                        valid_to: base.valid_to.clone(),
-                                    },
-                                    source_ref,
-                                    observed_at: request.observed_at.clone(),
-                                    now: evaluated_at.clone(),
-                                    embedding,
-                                },
-                            )
-                            .await
-                            .map_err(sync_operation_error)?;
-                        Ok(FileSyncOperationResult::Correct {
-                            memory_unit_id: base.unit_id,
-                            created: outcome.created,
-                        })
-                    }
-                    FileSyncOperation::Retain {
-                        fact_key,
-                        predicate,
-                        body,
-                        confidence,
-                        valid_from,
-                        valid_to,
-                    } => {
-                        let working = self
-                            .store
-                            .fetch_scope_open_units_in_tx(&mut tx)
-                            .await
-                            .map_err(sync_store_error)?;
-                        let compiled = prepare_compiled_write_from_snapshot(
-                            ReflectInput {
-                                tenant_id: context.tenant_id,
-                                data_subject_id: context.data_subject_id,
-                                scope_id: context.scope_id,
-                                agent_node_id: context.agent_node_id,
-                                subject_generation: context.subject_generation,
-                                actor_id: context.actor_id,
-                                source_ref,
-                                observed_at: request.observed_at.clone(),
-                                source_body: Some(body.clone()),
-                                episode_id: None,
-                                resource_id: None,
-                                job_id: memphant_types::JobId::new(),
-                                compiler_version: COMPILER_VERSION.to_string(),
-                                candidates: vec![ReflectCandidate {
-                                    source_kind: "direct".to_string(),
-                                    trust_level: TrustLevel::TrustedUser,
-                                    actor_id: context.actor_id,
-                                    subject: None,
-                                    predicate: Some(predicate.clone()),
-                                    fact_key: Some(fact_key.clone()),
-                                    kind: Some(MemoryKind::Semantic),
-                                    body: body.clone(),
-                                    confidence: Some(*confidence),
-                                    churn_class: None,
-                                    admission_hint: None,
-                                    target_unit_ids: None,
-                                    contextual_chunks: Vec::new(),
-                                    valid_from: valid_from.clone(),
-                                    valid_to: valid_to.clone(),
-                                }],
-                            },
-                            self.embedder.as_ref(),
-                            self.clock.as_ref(),
-                            context,
-                            working,
-                        )
-                        .await?;
-                        let PreparedCompiledWrite::Write {
-                            created_unit_ids,
-                            write,
-                            ..
-                        } = compiled
-                        else {
-                            return Err(ServiceError::SyncInvalid(
-                                "retain operation unexpectedly matched an existing compile"
+            match operation {
+                FileSyncOperation::Correct { base, body } => {
+                    let embedding = if self.embedder.dimensions() > 0 {
+                        self.embedder
+                            .embed(std::slice::from_ref(body))
+                            .map_err(|error| {
+                                CoreError::Store(StoreError::Backend(format!(
+                                    "embedding failed: {error}"
+                                )))
+                            })?
+                            .into_iter()
+                            .next()
+                            .filter(|vector| !vector.is_empty())
+                            .map(|vector| (embedding_profile_for(self.embedder.as_ref()), vector))
+                    } else {
+                        None
+                    };
+                    let unit_ids = CorrectionUnitIds::new();
+                    let correction = CorrectionPayload {
+                        value: body.clone(),
+                        reason: "file_sync".to_string(),
+                        source_ref: source_ref.clone(),
+                        observed_at: request.observed_at.clone(),
+                        valid_from: base.valid_from.clone(),
+                        valid_to: base.valid_to.clone(),
+                    };
+                    let old_index = working
+                        .iter()
+                        .position(|unit| unit.id == base.unit_id)
+                        .ok_or_else(|| {
+                            ServiceError::SyncInvalid(
+                                "file sync correction target is absent from admission snapshot"
                                     .to_string(),
-                            ));
-                        };
-                        if created_unit_ids.is_empty() {
-                            return Err(ServiceError::SyncInvalid(
-                                "retain operation did not create a semantic unit".to_string(),
-                            ));
-                        }
-                        match self
-                            .store
-                            .stage_compiled_units(&mut tx, None, write)
-                            .await
-                            .map_err(sync_operation_error)?
-                        {
-                            ClaimMutationOutcome::Applied => Ok(FileSyncOperationResult::Retain {
-                                created: created_unit_ids,
-                            }),
-                            ClaimMutationOutcome::Stale => Err(ServiceError::SyncConflict(
-                                "serializable transaction conflicted".to_string(),
-                            )),
-                        }
-                    }
-                    FileSyncOperation::Forget { base } => {
-                        let outcome = self
-                            .store
-                            .stage_forget(
-                                &mut tx,
-                                ForgetWrite {
-                                    target: ForgetTarget::MemoryUnit(base.unit_id),
-                                    now: evaluated_at.clone(),
-                                },
                             )
-                            .await
-                            .map_err(sync_operation_error)?;
-                        Ok(FileSyncOperationResult::Forget {
-                            memory_unit_id: base.unit_id,
-                            deletion_generation: outcome.deletion_generation,
-                            invalidated: outcome.invalidated_units,
-                        })
+                        })?;
+                    let old = working.remove(old_index);
+                    let (replacement, remainders) = correction_rectangles_with_ids(
+                        &old,
+                        &correction,
+                        &source_ref,
+                        &request.observed_at,
+                        context.actor_id,
+                        &evaluated_at,
+                        &unit_ids,
+                    )
+                    .map_err(sync_operation_error)?;
+                    working.push(replacement);
+                    working.extend(remainders);
+                    prepared.push(PreparedFileSyncOperation::Correct {
+                        memory_unit_id: base.unit_id,
+                        write: CorrectionWrite {
+                            selector: memphant_types::CorrectSelector {
+                                memory_unit_id: base.unit_id,
+                            },
+                            correction,
+                            source_ref,
+                            observed_at: request.observed_at.clone(),
+                            now: evaluated_at.clone(),
+                            embedding,
+                            unit_ids,
+                        },
+                    });
+                }
+                FileSyncOperation::Retain {
+                    fact_key,
+                    predicate,
+                    body,
+                    confidence,
+                    valid_from,
+                    valid_to,
+                } => {
+                    let compiled = prepare_compiled_write_from_snapshot(
+                        ReflectInput {
+                            tenant_id: context.tenant_id,
+                            data_subject_id: context.data_subject_id,
+                            scope_id: context.scope_id,
+                            agent_node_id: context.agent_node_id,
+                            subject_generation: context.subject_generation,
+                            actor_id: context.actor_id,
+                            source_ref,
+                            observed_at: request.observed_at.clone(),
+                            source_body: Some(body.clone()),
+                            episode_id: None,
+                            resource_id: None,
+                            job_id: memphant_types::JobId::new(),
+                            compiler_version: COMPILER_VERSION.to_string(),
+                            candidates: vec![ReflectCandidate {
+                                source_kind: "direct".to_string(),
+                                trust_level: TrustLevel::TrustedUser,
+                                actor_id: context.actor_id,
+                                subject: None,
+                                predicate: Some(predicate.clone()),
+                                fact_key: Some(fact_key.clone()),
+                                kind: Some(MemoryKind::Semantic),
+                                body: body.clone(),
+                                confidence: Some(*confidence),
+                                churn_class: None,
+                                admission_hint: None,
+                                target_unit_ids: None,
+                                contextual_chunks: Vec::new(),
+                                valid_from: valid_from.clone(),
+                                valid_to: valid_to.clone(),
+                            }],
+                        },
+                        self.embedder.as_ref(),
+                        self.clock.as_ref(),
+                        context,
+                        working.clone(),
+                    )
+                    .await?;
+                    let PreparedCompiledWrite::Write {
+                        created_unit_ids,
+                        write,
+                        ..
+                    } = compiled
+                    else {
+                        return Err(ServiceError::SyncInvalid(
+                            "retain operation unexpectedly matched an existing compile".to_string(),
+                        ));
+                    };
+                    if created_unit_ids.is_empty() {
+                        return Err(ServiceError::SyncInvalid(
+                            "retain operation did not create a semantic unit".to_string(),
+                        ));
                     }
+                    apply_compiled_write_to_snapshot(&mut working, &write);
+                    prepared.push(PreparedFileSyncOperation::Retain {
+                        created: created_unit_ids,
+                        write,
+                    });
+                }
+                FileSyncOperation::Forget { base } => {
+                    working.retain(|unit| unit.id != base.unit_id);
+                    prepared.push(PreparedFileSyncOperation::Forget {
+                        memory_unit_id: base.unit_id,
+                        write: ForgetWrite {
+                            target: ForgetTarget::MemoryUnit(base.unit_id),
+                            now: evaluated_at.clone(),
+                        },
+                    });
                 }
             }
-            .await;
+        }
+
+        let mut tx = self
+            .store
+            .begin_serializable(context)
+            .await
+            .map_err(sync_store_error)?;
+        match self.store.stage_mutation_claim(&mut tx, claim).await {
+            Ok(MutationClaimOutcome::Replay(response)) => {
+                self.store.commit(tx).await.map_err(sync_commit_error)?;
+                return Ok(response);
+            }
+            Ok(MutationClaimOutcome::Execute) => {}
+            Err(error) => {
+                let _ = self.store.rollback(tx).await;
+                return Err(sync_store_error(error));
+            }
+        }
+
+        let current = match self
+            .store
+            .canonical_projection_units_in_tx(&mut tx, &evaluated_at)
+            .await
+        {
+            Ok(units) => projection_items(units),
+            Err(error) => {
+                let _ = self.store.rollback(tx).await;
+                return Err(sync_store_error(error));
+            }
+        };
+        let current_fingerprint = match canonical_projection_fingerprint(&current) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                let _ = self.store.rollback(tx).await;
+                return Err(error);
+            }
+        };
+        if current_fingerprint != request.base_fingerprint {
+            let _ = self.store.rollback(tx).await;
+            return Err(ServiceError::SyncConflict(format!(
+                "base_fingerprint {} no longer matches canonical projection {current_fingerprint}",
+                request.base_fingerprint
+            )));
+        }
+        let transaction_admission = match self.store.fetch_scope_open_units_in_tx(&mut tx).await {
+            Ok(units) => units,
+            Err(error) => {
+                let _ = self.store.rollback(tx).await;
+                return Err(sync_store_error(error));
+            }
+        };
+        let transaction_admission_fingerprint =
+            match file_sync_admission_snapshot_sha256(&transaction_admission).map_err(|error| {
+                ServiceError::SyncInvalid(format!(
+                    "file sync admission snapshot cannot be encoded: {error}"
+                ))
+            }) {
+                Ok(fingerprint) => fingerprint,
+                Err(error) => {
+                    let _ = self.store.rollback(tx).await;
+                    return Err(error);
+                }
+            };
+        if transaction_admission_fingerprint != initial_admission_fingerprint {
+            let _ = self.store.rollback(tx).await;
+            return Err(ServiceError::SyncConflict(
+                "full open-scope admission snapshot changed during file sync preparation"
+                    .to_string(),
+            ));
+        }
+
+        let mut results = Vec::with_capacity(prepared.len());
+        for operation in prepared {
+            let staged = match operation {
+                PreparedFileSyncOperation::Correct {
+                    memory_unit_id,
+                    write,
+                } => self
+                    .store
+                    .stage_correction(&mut tx, write)
+                    .await
+                    .map(|outcome| FileSyncOperationResult::Correct {
+                        memory_unit_id,
+                        created: outcome.created,
+                    })
+                    .map_err(sync_operation_error),
+                PreparedFileSyncOperation::Retain { created, write } => self
+                    .store
+                    .stage_compiled_units(&mut tx, None, write)
+                    .await
+                    .map_err(sync_operation_error)
+                    .and_then(|outcome| match outcome {
+                        ClaimMutationOutcome::Applied => {
+                            Ok(FileSyncOperationResult::Retain { created })
+                        }
+                        ClaimMutationOutcome::Stale => Err(ServiceError::SyncConflict(
+                            "serializable transaction conflicted".to_string(),
+                        )),
+                    }),
+                PreparedFileSyncOperation::Forget {
+                    memory_unit_id,
+                    write,
+                } => self
+                    .store
+                    .stage_forget(&mut tx, write)
+                    .await
+                    .map(|outcome| FileSyncOperationResult::Forget {
+                        memory_unit_id,
+                        deletion_generation: outcome.deletion_generation,
+                        invalidated: outcome.invalidated_units,
+                    })
+                    .map_err(sync_operation_error),
+            };
             match staged {
                 Ok(result) => results.push(result),
                 Err(error) => {
@@ -3297,16 +3703,29 @@ impl<S: MemoryStore> MemoryService<S> {
                 return Err(sync_store_error(error));
             }
         };
-        let response = serialized_mutation_response(
+        let final_fingerprint = match canonical_projection_fingerprint(&final_items) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                let _ = self.store.rollback(tx).await;
+                return Err(error);
+            }
+        };
+        let response = match serialized_mutation_response(
             200,
             &FileSyncResult {
                 base_fingerprint: request.base_fingerprint,
-                fingerprint: canonical_projection_fingerprint(&final_items)?,
+                fingerprint: final_fingerprint,
                 evaluated_at: final_evaluated_at,
                 plan_sha256: request.plan_sha256,
                 operations: results,
             },
-        )?;
+        ) {
+            Ok(response) => response,
+            Err(error) => {
+                let _ = self.store.rollback(tx).await;
+                return Err(error);
+            }
+        };
         if let Err(error) = self
             .store
             .stage_mutation_response(&mut tx, response.clone())

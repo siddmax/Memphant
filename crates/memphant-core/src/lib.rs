@@ -740,6 +740,31 @@ pub struct CorrectionWrite {
     /// Embedding for the replacement unit, computed before the correction
     /// transaction and written inside it so corrected truth is vector-visible.
     pub embedding: Option<(EmbeddingProfileRow, Vec<f32>)>,
+    /// Unit identities allocated while the correction is prepared. Keeping
+    /// them caller-owned lets later operations in the same plan compile
+    /// against the exact units that the transaction will persist.
+    pub unit_ids: CorrectionUnitIds,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CorrectionUnitIds {
+    pub replacement: UnitId,
+    pub remainders: [UnitId; 2],
+}
+
+impl CorrectionUnitIds {
+    pub fn new() -> Self {
+        Self {
+            replacement: UnitId::new(),
+            remainders: [UnitId::new(), UnitId::new()],
+        }
+    }
+}
+
+impl Default for CorrectionUnitIds {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 pub type CorrectOutcome = CorrectResult;
@@ -765,6 +790,26 @@ pub fn correction_rectangles(
     observed_at: &str,
     actor_id: ActorId,
     now: &str,
+) -> Result<(StoredMemoryUnit, Vec<StoredMemoryUnit>), StoreError> {
+    correction_rectangles_with_ids(
+        old,
+        correction,
+        source_ref,
+        observed_at,
+        actor_id,
+        now,
+        &CorrectionUnitIds::new(),
+    )
+}
+
+pub fn correction_rectangles_with_ids(
+    old: &StoredMemoryUnit,
+    correction: &CorrectionPayload,
+    source_ref: &str,
+    observed_at: &str,
+    actor_id: ActorId,
+    now: &str,
+    unit_ids: &CorrectionUnitIds,
 ) -> Result<(StoredMemoryUnit, Vec<StoredMemoryUnit>), StoreError> {
     let current_correction = correction.valid_from.is_none() && correction.valid_to.is_none();
     let start = if current_correction {
@@ -813,7 +858,7 @@ pub fn correction_rectangles(
     };
     let mut replacement = generation(
         old,
-        UnitId::new(),
+        unit_ids.replacement,
         correction.value.clone(),
         start.clone(),
         end.clone(),
@@ -827,7 +872,7 @@ pub fn correction_rectangles(
     if start_lt(old.valid_from.as_deref(), start.as_deref()) {
         remainders.push(generation(
             old,
-            UnitId::new(),
+            unit_ids.remainders[0],
             old.body.clone(),
             old.valid_from.clone(),
             start.clone(),
@@ -836,7 +881,7 @@ pub fn correction_rectangles(
     if end_lt(end.as_deref(), old.valid_to.as_deref()) {
         remainders.push(generation(
             old,
-            UnitId::new(),
+            unit_ids.remainders[remainders.len()],
             old.body.clone(),
             end,
             old.valid_to.clone(),
@@ -1398,6 +1443,13 @@ pub trait MemoryStore: Send + Sync {
 /// Capability seam for stores that can atomically commit an idempotency claim,
 /// its successful response, and the mutation's staged writes.
 pub trait MutationLedgerStore: MemoryStore {
+    /// Looks up an exact, committed mutation receipt without opening an
+    /// execution transaction or acquiring the idempotency claim lock.
+    fn lookup_mutation_replay(
+        &self,
+        context: &ResolvedMemoryContext,
+        claim: &MutationClaim,
+    ) -> impl Future<Output = Result<Option<MutationResponse>, StoreError>> + Send;
     fn stage_mutation_claim(
         &self,
         tx: &mut Self::Txn,
@@ -2524,6 +2576,31 @@ fn mutation_second(value: &str) -> Result<i64, StoreError> {
 }
 
 impl MutationLedgerStore for InMemoryStore {
+    async fn lookup_mutation_replay(
+        &self,
+        context: &ResolvedMemoryContext,
+        claim: &MutationClaim,
+    ) -> Result<Option<MutationResponse>, StoreError> {
+        if claim.tenant_id != context.tenant_id
+            || claim.data_subject_id != context.data_subject_id
+            || claim.subject_generation != context.subject_generation
+        {
+            return Err(StoreError::IdempotencyConflict);
+        }
+        let now_second = SystemClock.now().as_second();
+        let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+        state.validate_context(context)?;
+        match state
+            .mutation_ledger
+            .get(&(claim.tenant_id, claim.verb, claim.idempotency_key.clone()))
+            .filter(|entry| entry.expires_at_second > now_second)
+        {
+            Some(entry) if entry.claim == *claim => Ok(Some(entry.response.clone())),
+            Some(_) => Err(StoreError::IdempotencyConflict),
+            None => Ok(None),
+        }
+    }
+
     async fn stage_mutation_claim(
         &self,
         tx: &mut Self::Txn,
@@ -3885,13 +3962,14 @@ impl MemoryStore for InMemoryStore {
             .cloned()
             .ok_or(StoreError::NotFound("memory_unit"))?;
         let old_id = old_unit.id;
-        let (replacement, remainders) = correction_rectangles(
+        let (replacement, remainders) = correction_rectangles_with_ids(
             &old_unit,
             &correction.correction,
             &correction.source_ref,
             &correction.observed_at,
             context.actor_id,
             &correction.now,
+            &correction.unit_ids,
         )?;
         let new_id = replacement.id;
         let remainder_ids: Vec<UnitId> = remainders.iter().map(|unit| unit.id).collect();
@@ -5275,6 +5353,7 @@ where
                 correction: request.correction,
                 now: clock.now_rfc3339(),
                 embedding,
+                unit_ids: Default::default(),
             },
         )
         .await;
@@ -9928,8 +10007,9 @@ where
 }
 
 /// Runs compiler admission from one caller-owned complete open-scope snapshot.
-/// This function performs no store reads, allowing file sync to source every
-/// mutable admission input from its already-open serializable transaction.
+/// This function performs no store reads, allowing file sync to prepare every
+/// direct-retain write before its short serializable execution transaction and
+/// then reject the plan if the in-transaction snapshot digest has drifted.
 pub(crate) async fn prepare_compiled_write_from_snapshot(
     input: ReflectInput,
     embedder: &dyn EmbeddingProvider,
@@ -11152,6 +11232,7 @@ mod in_memory_mutation_retention_tests {
             },
             now: "2026-07-15T00:00:00Z".to_string(),
             embedding: None,
+            unit_ids: Default::default(),
         }
     }
 
@@ -11467,6 +11548,41 @@ mod temporal_grounding_tests {
             remainders
                 .iter()
                 .all(|unit| unit.transaction_from == replacement.transaction_from)
+        );
+    }
+
+    #[test]
+    fn prepared_correction_rectangles_use_the_caller_owned_unit_ids() {
+        let mut old = temporal_test_unit(903, "old truth", "2025-01-01T00:00:00Z");
+        old.valid_to = Some("2026-01-01T00:00:00Z".to_string());
+        let ids = CorrectionUnitIds {
+            replacement: UnitId::from_u128(904),
+            remainders: [UnitId::from_u128(905), UnitId::from_u128(906)],
+        };
+        let correction = CorrectionPayload {
+            value: "new truth".to_string(),
+            reason: "fix".to_string(),
+            source_ref: "test:prepared".to_string(),
+            observed_at: "2026-02-01T00:00:00Z".to_string(),
+            valid_from: Some("2025-04-01T00:00:00Z".to_string()),
+            valid_to: Some("2025-07-01T00:00:00Z".to_string()),
+        };
+
+        let (replacement, remainders) = correction_rectangles_with_ids(
+            &old,
+            &correction,
+            &correction.source_ref,
+            &correction.observed_at,
+            ActorId::from_u128(2),
+            "2026-02-01T00:00:00Z",
+            &ids,
+        )
+        .unwrap();
+
+        assert_eq!(replacement.id, ids.replacement);
+        assert_eq!(
+            remainders.iter().map(|unit| unit.id).collect::<Vec<_>>(),
+            ids.remainders
         );
     }
 
