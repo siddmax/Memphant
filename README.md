@@ -14,6 +14,57 @@ This repository is the public product boundary. It owns the Rust crates, Postgre
 
 Build state is tracked in `docs/superpowers/specs/memphant/STATUS.md`. WS-0 has an exit artifact, and the R83 Rust-vs-Python two-language spike kept the Rust-first posture: warm no-recompile Rust policy iteration measured at `0.073x` Python.
 
+## File-plane quickstart
+
+The file plane is an editable projection; Postgres remains canonical. Start with
+the UUIDs and subject generation returned by `PUT /v1/context-bindings/{client_ref}`:
+
+```bash
+export MEMPHANT_URL=http://127.0.0.1:8080
+export MEMPHANT_API_KEY=replace-with-a-scoped-key
+export SUBJECT_ID=00000000-0000-0000-0000-000000000001
+export SCOPE_ID=00000000-0000-0000-0000-000000000002
+export ACTOR_ID=00000000-0000-0000-0000-000000000003
+export AGENT_NODE_ID=00000000-0000-0000-0000-000000000004
+export SUBJECT_GENERATION=0
+export MEMORY_DIR=./memory
+
+# Compile the canonical snapshot. This refuses to overwrite local edits.
+memphant compile --subject-id "$SUBJECT_ID" --scope "$SCOPE_ID" \
+  --actor "$ACTOR_ID" --agent-node "$AGENT_NODE_ID" \
+  --subject-generation "$SUBJECT_GENERATION" --out "$MEMORY_DIR"
+
+# Edit units/*.md, add new semantic facts to inbox/*.md, or delete a unit file.
+# Dry-run is the default: this prints the exact JSON plan and changes nothing.
+memphant sync --subject-id "$SUBJECT_ID" --scope "$SCOPE_ID" \
+  --actor "$ACTOR_ID" --agent-node "$AGENT_NODE_ID" \
+  --subject-generation "$SUBJECT_GENERATION" --out "$MEMORY_DIR"
+
+# After reviewing that plan, apply the same local tree atomically.
+memphant sync --subject-id "$SUBJECT_ID" --scope "$SCOPE_ID" \
+  --actor "$ACTOR_ID" --agent-node "$AGENT_NODE_ID" \
+  --subject-generation "$SUBJECT_GENERATION" --out "$MEMORY_DIR" --apply
+
+# Verify the refreshed projection and the binary contract.
+memphant verify --lock memphant.lock --export "$MEMORY_DIR"
+```
+
+`MEMPHANT_HTTP_TIMEOUT_MS` optionally sets the request timeout in milliseconds
+(default `30000`, allowed `1..=300000`). When replacement is needed, compile and
+apply preserve replaced managed files in a reported `.memphant-recovery-*`
+directory; do not delete it until the refreshed projection verifies clean.
+
+Automation may branch on these stable stderr classes:
+
+| Class | Safe response |
+| --- | --- |
+| `compile=dirty`, `sync=invalid` | Inspect or restore the local projection; do not overwrite it. |
+| `sync=conflict` | Recompile the latest canonical snapshot, then recreate and review the edit. |
+| `sync=unavailable` | No commit was reported; preserve the tree and retry the same dry-run. |
+| `sync=outcome_unknown` | The request may have committed; do not construct or apply a different plan until canonical state is checked. |
+| `sync=post_commit_error remote_committed=true` | Canonical memory committed; preserve recovery files and recompile before editing again. |
+| `compile=error`, `sync=error` | Fix the reported configuration or request error, then rerun dry-run. |
+
 ## Local Checks
 
 ```bash

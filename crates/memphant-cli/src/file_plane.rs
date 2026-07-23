@@ -57,6 +57,49 @@ const MAX_MANAGED_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_DIRECTORY_ENTRIES: usize = 100_000;
 const DEFAULT_HTTP_TIMEOUT_MS: u64 = 30_000;
 const MAX_HTTP_TIMEOUT_MS: u64 = 300_000;
+const CONTEXT_HELP: &str = "\
+Context (required):
+  --subject-id <UUID>          Subject identity
+  --scope <UUID>               Scope identity
+  --actor <UUID>               Actor identity
+  --agent-node <UUID>          Agent-node identity
+  --subject-generation <N>     Subject generation
+  --out <DIR>                  Projection directory
+
+";
+const ENVIRONMENT_HELP: &str = "\
+Environment:
+  MEMPHANT_URL                 Server URL (default: http://127.0.0.1:8080)
+  MEMPHANT_API_KEY             Bearer API key (optional for local dev mode)
+  MEMPHANT_HTTP_TIMEOUT_MS     Request timeout, 1..=300000 (default: 30000)
+
+";
+const COMPILE_HELP: &str = "\
+Usage: memphant compile [CONTEXT OPTIONS]
+
+Compile the canonical scope into a deterministic editable projection.
+
+Output:
+  --out <DIR> contains MEMORY.md, units/, inbox/, and memphant-export.json.
+  Refuses to overwrite a dirty projection; no canonical memory is changed.
+
+Next: edit units/*.md or add inbox/*.md, then run `memphant sync` with the same context.
+";
+const SYNC_HELP: &str = "\
+Usage: memphant sync [CONTEXT OPTIONS] [--apply]
+
+Validate local edits and build one digest-bound sync plan.
+
+Options:
+  --apply                      Atomically apply the validated plan
+
+Default: dry-run; prints the JSON plan to stdout and changes nothing.
+
+Safe next steps:
+  Review the plan, then rerun the same command with --apply.
+  outcome_unknown: the request may have committed; do not retry a different plan.
+  After apply: run `memphant verify --lock memphant.lock --export <DIR>`.
+";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileIdentity {
@@ -298,6 +341,10 @@ enum CompileFailure {
 }
 
 pub(crate) fn run_compile(args: &[String]) -> ExitCode {
+    if args == ["--help"] {
+        print!("{COMPILE_HELP}\n{CONTEXT_HELP}{ENVIRONMENT_HELP}");
+        return ExitCode::SUCCESS;
+    }
     match compile(args) {
         Ok((scope, out, snapshot, entries, recovery)) => {
             if let Some(recovery) = recovery {
@@ -331,6 +378,10 @@ pub(crate) fn run_compile(args: &[String]) -> ExitCode {
 }
 
 pub(crate) fn run_sync(args: &[String]) -> ExitCode {
+    if args == ["--help"] {
+        print!("{SYNC_HELP}\n{CONTEXT_HELP}{ENVIRONMENT_HELP}");
+        return ExitCode::SUCCESS;
+    }
     match sync(args) {
         Ok(SyncRun::Plan(plan)) => match serde_json::to_string_pretty(&plan) {
             Ok(json) => {
