@@ -489,22 +489,32 @@ golden.**
   volume-matched adversarial golden is a runnable extract→mine→backfill→reader
   procedure that executes when a corpus exists, and IS the C1 acceptance bar.
   Proof: `docs/build-log/2026-07-21-c3-coding-backfill.md`, commit `4f90ef57`.
-- **C2 — Docs/knowledge slice (LAST, gated)**: blocked first on a free
-  half-day corpus re-pin (Syndai HEAD drifted 109→115 files; the gate
-  currently cannot run at all — tests team), then retrieval-only hit@10
-  head-to-head (~$1–5) before any reader spend, then the full pre-registered
-  bar: **k=10 comparable-volume CI-clean win inside the 1.5 s ceiling** (the
-  +0.142 flip stays asterisked at 14× volume and is not cutover evidence).
-  Rank-compressed rerank (§2.Q4) is the named lever — **but review #8 flags it
-  as likely dead-on-arrival: MemPhant currently loses docs retrieval 0.050 vs
-  Syndai 0.217 (CI excludes zero) and the winning rerank is latency-retired at
-  13 s.** Run the FREE kill-gate first: (a) count retired-run flips reproducible
-  in top-16 (<60 % → don't build), AND (b) does rank-compressed rerank close
-  ≥half the 0.050→0.217 gap on the pinned 4,870-section corpus? If either
-  fails, **drop C2 from the roadmap now** rather than gating it to Week 3+ — the
-  honest base rate is "won't win this quarter." Also implement the four spec-28
-  fixture families as executable `syndai-trace-compare` fixtures (free, 1–2
-  days) — currently spec prose, and the actual cutover-safety net.
+- **C2 — Docs/knowledge slice (LAST, gated): DROPPED 2026-07-22 by the free
+  kill-gate.** The corpus was re-pinned (Syndai docs @ `96a26f1f`: 114 files /
+  4920 sections; gate runnable again, `test_syndai_gate_contract` 28/28 green,
+  runner rebuilt on the strict v1 contract), then the free pre-check fired DROP
+  on its decisive leg: **kill-gate (a) — only 3/26 retired-run rerank flips
+  (11.5%) are reproducible in the top-16 fused pool (bar 60%).** The r15
+  cross-encoder win (+0.158 QA) lived in the 16–64 candidate band that
+  rank-compression to top-16 structurally discards — 23/26 flip golds sit at
+  rank 17–64, unreachable by a top-16-head rerank. Per §8 the rule is OR, so
+  this alone drops C2; kill-gate (b) (chunked MiniLM-int8 rerank on the
+  re-pinned corpus) is corroborating. The plan's "docs lever is latency-dead
+  (13 s)" premise was obsoleted by the 2026-07-22 reranker spike (MiniLM-int8
+  chunk-rerank ~450 ms), but latency was never the binding constraint — the
+  deficit is structural: the golden set is paraphrase-heavy (median question↔span
+  overlap 0.0), a near-pure semantic-match benchmark Syndai's
+  openai-3-small+HNSW/BM25/RRF stack retrieves better on, and the only lever that
+  closed it (full-pool rerank) is the one rank-compression cannot afford. Honest
+  base rate "won't win this quarter." Evidence:
+  `docs/build-log/2026-07-22-c2-docs-slice-killgate.md`,
+  `docs/build-log/artifacts/p1-c2-killgate/`. **The four spec-28 fixture families
+  DID land** as executable `syndai-trace-compare` fixtures (the cutover-safety
+  net, valuable regardless of the verdict): `syndai_arch_decision_honored_001`,
+  `syndai_compaction_rehydrate_001`, `syndai_cross_agent_transfer_001`,
+  `syndai_task_plus_semantic_composite_001` (commits `e090734c`, `9fd23ec2`).
+  The pre-registered full bar (k=10 comparable-volume CI-clean win inside 1.5 s)
+  is moot — C2 does not reach it.
 - **Cost wins on cutover**: Jina API + OpenAI embedding egress eliminated
   (privacy win doubles as cost win); local embeddings free.
 
@@ -593,7 +603,8 @@ Week 2:  B1 observation block (net-new; n=12 gate) ─ B2 file-plane projection
          [only if A1 said depth-bound:] D1 LME-V2 50Q pilot ─ D2 ForgetEval
             (D2 needs mutation-correctness verified first)
 
-Week 3+: C2 docs slice IFF free pre-check passed AND k=10 bar won
+Week 3+: C2 docs slice — DROPPED 2026-07-22 (free pre-check FAILED: kill-gate
+         (a) 11.5% flips reproducible in top-16 « 60%). Spec-28 fixtures landed.
          D3 full-500 + Evalrank re-runs ─ D4 SWE-CB reference (post-C3)
 ```
 
@@ -601,7 +612,8 @@ Kill-switches (cheap, fire early): **A1 ≥70 % present-but-unpacked → Deep go
 diagnostic, D1/D3 DEFERRED, packing becomes the center of gravity;** P0.3 live
 smoke fails → paid lanes stay closed, fix the provider parser first; **C2 free
 pre-check <60 % flips reproducible in top-16 OR rerank doesn't close half the
-0.050→0.217 deficit → drop C2 from the roadmap now, don't gate it;** D1 pilot
+0.050→0.217 deficit → drop C2 from the roadmap now, don't gate it;** — **FIRED
+2026-07-22: kill-gate (a) = 11.5% « 60%, C2 DROPPED (see §5 C2 row);** D1 pilot
 below floors → withdraw submission, keep dev evidence; B-gates failing → delete
 the lever, keep the negative artifact.
 

@@ -1,0 +1,37 @@
+{
+ "flips": 26,
+ "reproducible_in_top16": 3,
+ "fraction": 0.11538461538461539,
+ "threshold": 0.6,
+ "pass": false,
+ "reproducible_qids": [
+  "syndai_docs_s023_root",
+  "syndai_docs_v2_s023_decisions",
+  "syndai_docs_v2_m007"
+ ],
+ "missing_qids": [
+  "syndai_docs_s003_root",
+  "syndai_docs_s010_specs",
+  "syndai_docs_s014_root",
+  "syndai_docs_s019_root",
+  "syndai_docs_s024_specs",
+  "syndai_docs_s029_root",
+  "syndai_docs_s034_root",
+  "syndai_docs_s036_root",
+  "syndai_docs_s037_root",
+  "syndai_docs_s044_root",
+  "syndai_docs_m007",
+  "syndai_docs_m008",
+  "syndai_docs_v2_s002_root",
+  "syndai_docs_v2_s007_runbooks",
+  "syndai_docs_v2_s011_root",
+  "syndai_docs_v2_s014_decisions",
+  "syndai_docs_v2_s020_root",
+  "syndai_docs_v2_s022_specs",
+  "syndai_docs_v2_s034_runbooks",
+  "syndai_docs_v2_s043_runbooks",
+  "syndai_docs_v2_s046_root",
+  "syndai_docs_v2_m001",
+  "syndai_docs_v2_m012"
+ ]
+}
