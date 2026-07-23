@@ -189,6 +189,12 @@ footer input.
   fsync; a successful no-replace restoration decrements it immediately before
   its sync barriers. Diagnostics therefore distinguish an empty recovery from
   one that still owns managed data even when later validation or fsync fails.
+- Restoration is bound to the recovered inode identity captured by the clean
+  snapshot, not merely its recovery name. Compile opens that name without
+  following links, retains the regular-file handle through restoration, and
+  requires both the handle identity and an immediate recovery name lookup to
+  match before the no-replace rename. A missing, renamed, or substituted source
+  is left in recovery without decrementing the retained-inode count.
 - Recovery directories use mode `0700` on Unix. Windows uses the inherited ACL
   of the retained output parent; MemPhant does not claim to narrow an already
   broader parent ACL without a platform ACL policy supplied by the operator.

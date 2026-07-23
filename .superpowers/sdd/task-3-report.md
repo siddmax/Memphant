@@ -463,3 +463,42 @@ Fresh proof after the final code change:
 
 The unrelated `.superpowers/sdd/progress.md` modification remains unstaged.
 No Task 4, P1 campaign, paid/model call, push, or deployment work was performed.
+
+## Eighth independent-review fix wave
+
+The final restoration audit found that successful validation failure cleanup
+still resolved the recovery source only by name. If the recovered original was
+renamed aside and an impostor was planted at its old name, cleanup moved the
+impostor into output and decremented the count for the original inode that
+remained in recovery.
+
+The deterministic contract was red first. At the detached seam it renames the
+original aside, plants a replacement at the recovery source name, and displaces
+the recovery root. Before the fix, compile reported `validated name restored`,
+installed the impostor into output, and omitted retained-data wording from the
+last-known recovery diagnostic.
+
+- Restoration now receives the recovered inode identity from the clean
+  snapshot. It opens the recovery source without following links, retains that
+  regular-file handle through the operation, and requires the handle identity
+  to match the expected recovered inode.
+- Immediately before the no-replace rename, restoration also requires the
+  recovery source name to resolve to the same identity. A missing, renamed,
+  non-regular, symlinked, or substituted source fails without a rename or count
+  decrement.
+- The regression contract proves the impostor remains in the displaced
+  recovery tree, the original remains recoverable under its displaced name,
+  output receives neither file, and the error reports only the last-known path
+  plus truthful retained-managed-data wording.
+
+Fresh proof after the final code change:
+
+- `cargo test -p memphant-cli`: 22 unit and 21 integration tests passed,
+  including 10 real-CLI compile contracts.
+- `cargo clippy -p memphant-cli --all-targets --all-features -- -D warnings`,
+  `cargo fmt --all --check`, and `git diff --check`: passed.
+- `python3 scripts/check_spec_drift.py`: skipped, not passed, because the
+  private Syndai specs are absent from this worktree.
+
+The unrelated `.superpowers/sdd/progress.md` modification remains unstaged.
+No Task 4, P1 campaign, paid/model call, push, or deployment work was performed.

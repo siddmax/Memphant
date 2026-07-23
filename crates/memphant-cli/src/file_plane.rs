@@ -2511,6 +2511,7 @@ fn restore_recovered_file(
     recovery_directory: &Dir,
     source_directory: &Dir,
     name: &str,
+    expected_identity: FileIdentity,
     anchor: &OutputParentAnchor,
     anchor_parent: &Dir,
     recovery: &mut RecoverySession,
@@ -2521,8 +2522,70 @@ fn restore_recovered_file(
             false,
         );
     }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    options.follow(FollowSymlinks::No);
+    options.nonblock(true);
+    let recovered_source = match recovery_directory.open_with(name, &options) {
+        Ok(source) => source,
+        Err(error) => {
+            return (
+                format!(
+                    "durable recovery retained without restore because {name}: recovery source could not be opened without following links: {error}"
+                ),
+                false,
+            );
+        }
+    };
+    let recovered_source_metadata = match recovered_source.metadata() {
+        Ok(metadata) if metadata.is_file() => metadata,
+        Ok(_) => {
+            return (
+                format!(
+                    "durable recovery retained without restore because {name}: recovery source is not a regular file"
+                ),
+                false,
+            );
+        }
+        Err(error) => {
+            return (
+                format!(
+                    "durable recovery retained without restore because {name}: recovery source handle could not be identified: {error}"
+                ),
+                false,
+            );
+        }
+    };
+    if metadata_identity(&recovered_source_metadata) != expected_identity {
+        return (
+            format!(
+                "durable recovery retained without restore because {name}: recovery source handle changed identity"
+            ),
+            false,
+        );
+    }
+    match managed_identity_at(recovery_directory, name) {
+        Ok(Some(identity)) if identity == expected_identity => {}
+        Ok(_) => {
+            return (
+                format!(
+                    "durable recovery retained without restore because {name}: recovery source name changed identity"
+                ),
+                false,
+            );
+        }
+        Err(error) => {
+            return (
+                format!(
+                    "durable recovery retained without restore because {name}: recovery source name could not be confirmed: {error}"
+                ),
+                false,
+            );
+        }
+    }
     match rename_noreplace(recovery_directory, name, source_directory, name) {
         Ok(()) => {
+            drop(recovered_source);
             recovery.note_managed_inode_restored();
             let source_sync = sync_directory(source_directory);
             let recovery_sync = sync_directory(recovery_directory);
@@ -2619,6 +2682,7 @@ fn replace_managed_file(
                 &recovery_directory,
                 directory,
                 name,
+                expected.identity,
                 anchor,
                 output_parent,
                 recovery,
@@ -2704,6 +2768,7 @@ fn delete_managed_file(
             &recovery_directory,
             directory,
             name,
+            expected.identity,
             anchor,
             output_parent,
             recovery,
@@ -3659,6 +3724,75 @@ mod tests {
                 .unwrap()
                 .next()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn replaced_recovery_source_is_never_restored_or_decounted() {
+        let directory = tempfile::tempdir().unwrap();
+        let parent = directory.path().join("output-parent");
+        let displaced_recovery = directory.path().join("recovery-with-original");
+        std::fs::create_dir(&parent).unwrap();
+        let output = parent.join("memory");
+        let initial = rendered_projection(&[(1, "alpha before")]);
+        let absent = inspect_output(&output).unwrap();
+        replace_projection(&output, &absent, &initial).unwrap();
+        let existing = inspect_output(&output).unwrap();
+        let replacement = rendered_projection(&[(1, "alpha after")]);
+        let unit_path = replacement.units.keys().next().unwrap().clone();
+        let unit_name = std::path::Path::new(&unit_path)
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let displaced_name = format!("displaced-{unit_name}");
+        let detached = format!("write:{unit_name}:detached");
+        let mut replaced = false;
+
+        let result = replace_projection_with_hook(&output, &existing, &replacement, |point| {
+            if point == detached && !replaced {
+                let recovery = find_recovery(&parent);
+                let units = recovery.join(super::UNITS_DIR);
+                std::fs::rename(units.join(&unit_name), units.join(&displaced_name)).unwrap();
+                std::fs::write(units.join(&unit_name), "recovery source impostor").unwrap();
+                std::fs::rename(recovery, &displaced_recovery).unwrap();
+                replaced = true;
+            }
+        });
+
+        let error = result.expect_err("a replaced recovery source was restored into output");
+        assert!(error.contains("detached file differs"), "{error}");
+        assert!(
+            error.contains("recovery source handle changed identity"),
+            "{error}"
+        );
+        assert!(error.contains("recovery_last_known="), "{error}");
+        assert!(
+            error.contains("recovery contains retained managed data"),
+            "{error}"
+        );
+        assert!(
+            !error
+                .split(';')
+                .map(str::trim)
+                .any(|part| part.starts_with("recovery=")),
+            "an unconfirmed recovery pathname was reported as current: {error}"
+        );
+        assert!(!output.join(&unit_path).exists());
+        assert!(
+            std::fs::read_to_string(
+                displaced_recovery
+                    .join(super::UNITS_DIR)
+                    .join(&displaced_name)
+            )
+            .unwrap()
+            .contains("alpha before")
+        );
+        assert_eq!(
+            std::fs::read_to_string(displaced_recovery.join(super::UNITS_DIR).join(&unit_name))
+                .unwrap(),
+            "recovery source impostor"
         );
     }
 
