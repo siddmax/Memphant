@@ -91,7 +91,16 @@ not runnable here (named for honesty).
 | V6 ColBERT MaxSim (late-interaction) | BLOCKED | | Jina ColBERT v2 multi-vector endpoint hard-403'd (Cloudflare WAF) at benchmark volume after 13/24 questions — not completable through this API; not chased (lowest-value cell: ColBERT targets top-48 recall, already 1.000) |
 
 **Verdict:** **convex score fusion > RRF** (confirms Bruch et al. — score magnitude separates
-near-duplicates that RRF's rank-only discards). Pre-registered SKIPs held up: **MMR hurts**
+near-duplicates that RRF's rank-only discards). **⚠️ DOES NOT TRANSFER TO PROD AS-IS —
+FOLLOW-UP, NOT A FREE WIN:** this was measured on the harness's **2-channel** fuser (dense
+cosine + BM25), where both channels produce comparable, min-max-normalizable scores. The
+**production fuser is 6-channel** (Exact/Lexical/Semantic/Temporal/Edge/Vector, weights
+1.0/1.0/2.0/0.5–2.5/0.5/2.0 — `channel_weight` at lib.rs:9423) with **heterogeneous,
+non-comparable score scales**; RRF exists precisely because it fuses on rank alone, the only
+thing comparable across those six. Convex-combining six normalized distributions is a different,
+untested operation that could regress. Flipping it needs a **prod-representative 6-channel fusion
+bench** (or a principled reduction to comparable channels) first — do NOT flip the prod fuser on
+this 2-channel evidence. Logged as a follow-up. Pre-registered SKIPs held up: **MMR hurts**
 single-gold recall (unproven→harmful, as the research warned), **instruction-prompting hurts**
 on a non-instruction-tuned embedder, **cheap context-prepend gives nothing** (the real
 contextual-retrieval win needs an LLM pass — deferred). HyDE/SPLADE/MUVERA skipped per research.
