@@ -31,6 +31,7 @@ windows-sys = { version = "0.61.2", features = [
 
 [dev-dependencies]
 axum.workspace = true
+memphant-core = { workspace = true, features = ["test-support"] }
 memphant-server = { path = "../memphant-server" }
 memphant-runtime = { path = "../memphant-runtime" }
 tempfile.workspace = true

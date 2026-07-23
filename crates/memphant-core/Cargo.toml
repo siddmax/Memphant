@@ -6,6 +6,12 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+# In-process fault injection for downstream integration tests. This feature is
+# reserved for dev/test dependencies and exposes no remote/server trigger.
+test-support = []
+
 [dependencies]
 fsrs.workspace = true
 futures.workspace = true

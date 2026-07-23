@@ -20,6 +20,16 @@ Wave 2 review reproduced the canonical-byte gap before the fix:
   manifest hash tampering remain zero-POST and byte-preserving in both dry-run
   and apply modes.
 
+Wave 3 review reproduced two preflight gaps before the fix:
+
+- `aggregate_oversize_inbox_batch_is_rejected_before_post` failed at
+  `apply=false` because dry-run returned success before encoding the request.
+- The invalid-edit table failed with `manifest_file_sha was accepted with
+  apply=false` after a corrected unit and its `file_sha256` were changed
+  together using an in-place same-length canonical manifest edit.
+- Both focused real-CLI tests passed after request preflight moved before the
+  mode branch and sync compared the complete regenerated base manifest.
+
 ## Implementation
 
 - Added sync as a first-class CLI command. It uses the same explicit context
@@ -32,6 +42,10 @@ Wave 2 review reproduced the canonical-byte gap before the fix:
   Every present managed and inbox file retains its no-follow identity and exact
   bytes for revalidation before GET, immediately before POST, after the
   committed receipt/final GET, and again at the namespace mutation.
+- After the canonical preflight GET, sync renders the complete base projection
+  and requires full manifest equality, including generated memory and file
+  hashes. A same-length canonical file-hash substitution therefore cannot be
+  hidden inside an otherwise valid body correction.
 - Canonical operation order is base-manifest UUID order for correct/forget,
   followed by safe inbox-path order for retain. The digest comes from the shared
   typed file_sync_plan_sha256 contract. A fact key cannot be corrected or
@@ -45,15 +59,17 @@ Wave 2 review reproduced the canonical-byte gap before the fix:
 - Apply sends one typed batch after the last exact local preflight. One fresh
   plan-digest-plus-UUID idempotency key is paired with the exact request for
   that invocation; no cross-invocation replay claim is made. The client and
-  route share one exact encoded-request ceiling, and the transaction checks the
-  final encoded projection ceiling before commit. Typed conflicts and
-  validation failures are distinct. Transport and untyped 5xx failures after
-  dispatch are outcome_unknown.
+  route share one exact encoded-request ceiling. Sync builds and serializes one
+  request with the projection's stable `evaluated_at` before the dry-run/apply
+  branch, so both modes reject aggregate overflow, and apply sends those exact
+  preflighted bytes. The transaction checks the final encoded projection
+  ceiling before commit. Typed conflicts and validation failures are distinct.
+  Transport and untyped 5xx failures after dispatch are outcome_unknown.
 - One configurable bounded HTTP agent serves projection GET and file-sync POST
-  (`MEMPHANT_HTTP_TIMEOUT_MS`, default 30 seconds, range 1..300 seconds). GET
-  transport/timeout/5xx failures are unavailable. Only an exact POST 200 can
-  prove commit; any other 2xx, invalid 200 receipt, or receipt mismatch is
-  outcome_unknown.
+  (`MEMPHANT_HTTP_TIMEOUT_MS`, default 30 seconds, range 1 millisecond through
+  300 seconds). GET transport/timeout/5xx failures are unavailable. Only an
+  exact POST 200 can prove commit; any other 2xx, invalid 200 receipt, or receipt
+  mismatch is outcome_unknown.
 - The committed receipt is checked for base, digest, count, operation variants,
   target IDs, and fingerprint before local mutation. A fresh bound canonical
   GET is then compiled. The CLI reports committed and final snapshots
@@ -70,6 +86,10 @@ Wave 2 review reproduced the canonical-byte gap before the fix:
   superseded, forgotten, and newly retained units are then reconciled through
   the existing prepared-file, durable-recovery, manifest-last, double-sweep
   compiler.
+- The late-response rollback fault injector is absent from default
+  `memphant-core` builds. It is hidden behind the non-default `test-support`
+  feature, enabled only through the CLI dev-test dependency, and has no remote
+  trigger.
 
 ## Green proof
 
@@ -83,6 +103,10 @@ Wave 2 review reproduced the canonical-byte gap before the fix:
 - cargo test -p memphant-server --test rest_contract file_sync -- --nocapture:
   2 passed, proving the strict authenticated atomic route, stable error codes,
   and exact request-body ceiling.
+- `cargo check -p memphant-core --no-default-features` passed, and default
+  no-feature rustdoc contained no `fail_next_mutation_response` API. The real
+  CLI rollback test passed with `test-support` enabled only by the CLI dev-test
+  dependency.
 - cargo clippy --all-targets --all-features -- -D warnings; cargo test
   --all-targets --all-features; cargo test --doc: passed after the final code
   change. Guarded network, paid-model, and live-Postgres cases remained skipped

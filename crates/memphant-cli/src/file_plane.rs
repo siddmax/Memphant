@@ -443,14 +443,6 @@ fn sync(args: &[String]) -> Result<SyncRun, SyncFailure> {
     revalidate_sync_state(&state)?;
 
     let plan = sync_plan(&state.snapshot).map_err(SyncFailure::Error)?;
-    if !args.apply {
-        return Ok(SyncRun::Plan(plan));
-    }
-    if plan.operations.is_empty() {
-        return Ok(SyncRun::Noop(plan));
-    }
-
-    revalidate_sync_state(&state)?;
     let request = FileSyncRequest {
         subject_id: projection.subject_id,
         scope_id: projection.scope_id,
@@ -459,11 +451,20 @@ fn sync(args: &[String]) -> Result<SyncRun, SyncFailure> {
         subject_generation: projection.subject_generation,
         base_fingerprint: plan.base_fingerprint.clone(),
         plan_sha256: plan.plan_sha256.clone(),
-        observed_at: jiff::Timestamp::now().to_string(),
+        observed_at: projection.evaluated_at.clone(),
         operations: plan.operations.clone(),
     };
+    let encoded_request = encode_file_sync_request(&request)?;
+    if !args.apply {
+        return Ok(SyncRun::Plan(plan));
+    }
+    if plan.operations.is_empty() {
+        return Ok(SyncRun::Noop(plan));
+    }
+
+    revalidate_sync_state(&state)?;
     let idempotency_key = format!("file-sync:{}:{}", plan.plan_sha256, Uuid::new_v4());
-    let receipt = post_file_sync(&request, &idempotency_key)?;
+    let receipt = post_file_sync(&request, &encoded_request, &idempotency_key)?;
     validate_sync_receipt(&request, &receipt).map_err(|error| {
         SyncFailure::OutcomeUnknown(format!(
             "file-sync returned 200 but the receipt did not prove commit for plan {}: {error}",
@@ -666,7 +667,7 @@ fn http_agent() -> Result<ureq::Agent, String> {
     };
     if !(1..=MAX_HTTP_TIMEOUT_MS).contains(&timeout_ms) {
         return Err(format!(
-            "MEMPHANT_HTTP_TIMEOUT_MS must be between 1 and {MAX_HTTP_TIMEOUT_MS}"
+            "MEMPHANT_HTTP_TIMEOUT_MS must be between 1 and {MAX_HTTP_TIMEOUT_MS} milliseconds"
         ));
     }
     Ok(ureq::Agent::config_builder()
@@ -1051,32 +1052,15 @@ fn validate_sync_base(
             manifest.snapshot_sha256, projection.fingerprint
         )));
     }
-    if manifest.entries.len() != projection.items.len() {
+    let canonical = render_projection(projection).map_err(|error| {
+        SyncFailure::Invalid(vec![format!(
+            "canonical base projection cannot be rendered: {error}"
+        )])
+    })?;
+    if manifest != &canonical.manifest {
         return Err(SyncFailure::Invalid(vec![
-            "manifest entries do not match the canonical base projection".to_string(),
+            "manifest differs from the complete canonical base projection".to_string(),
         ]));
-    }
-    for (entry, item) in manifest.entries.iter().zip(&projection.items) {
-        let unit_id = Uuid::parse_str(&entry.unit_id)
-            .map(|id| UnitId::from_u128(id.as_u128()))
-            .map_err(|_| {
-                SyncFailure::Invalid(vec![format!("{}: invalid canonical unit_id", entry.path)])
-            })?;
-        let base = file_sync_metadata(entry, unit_id);
-        if base.unit_id != item.unit_id
-            || base.kind != item.kind
-            || base.fact_key != item.fact_key
-            || base.predicate != item.predicate
-            || base.confidence != item.confidence
-            || base.valid_from != item.valid_from
-            || base.valid_to != item.valid_to
-            || base.body_sha256 != item.body_sha256
-        {
-            return Err(SyncFailure::Invalid(vec![format!(
-                "{}: immutable manifest metadata differs from the canonical base",
-                entry.path
-            )]));
-        }
     }
     Ok(())
 }
@@ -1110,9 +1094,9 @@ fn sync_plan(snapshot: &SyncSnapshot) -> Result<SyncPlan, String> {
 
 fn post_file_sync(
     request: &FileSyncRequest,
+    encoded: &[u8],
     idempotency_key: &str,
 ) -> Result<FileSyncResult, SyncFailure> {
-    let encoded = encode_file_sync_request(request)?;
     let base = env::var("MEMPHANT_URL")
         .ok()
         .filter(|url| !url.trim().is_empty())
@@ -1128,7 +1112,7 @@ fn post_file_sync(
     {
         outbound = outbound.header("authorization", format!("Bearer {key}"));
     }
-    let mut response = outbound.send(encoded.as_slice()).map_err(|error| {
+    let mut response = outbound.send(encoded).map_err(|error| {
         SyncFailure::OutcomeUnknown(format!(
             "file-sync transport failed for plan {}: {error}",
             request.plan_sha256

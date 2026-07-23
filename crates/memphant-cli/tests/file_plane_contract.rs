@@ -195,15 +195,14 @@ async fn sync_fails_closed_on_immutable_and_inbox_format_edits() {
                     .join(format!("{}.md", id.as_uuid()));
                 replace_body(&unit, "City is Kyoto.");
                 let path = out.path().join("memphant-export.json");
-                let mut manifest: serde_json::Value =
-                    serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-                manifest["entries"][0]["file_sha256"] =
-                    serde_json::json!(sha256(&fs::read(unit).unwrap()));
-                fs::write(
-                    path,
-                    format!("{}\n", serde_json::to_string_pretty(&manifest).unwrap()),
-                )
-                .unwrap();
+                let text = fs::read_to_string(&path).unwrap();
+                let manifest: serde_json::Value = serde_json::from_str(&text).unwrap();
+                let original = manifest["entries"][0]["file_sha256"].as_str().unwrap();
+                let replacement = sha256(&fs::read(unit).unwrap());
+                assert_eq!(original.len(), replacement.len());
+                let changed = text.replacen(original, &replacement, 1);
+                assert_eq!(changed.len(), text.len());
+                fs::write(path, changed).unwrap();
             }
             "manifest_duplicate_key" => {
                 let path = out.path().join("memphant-export.json");
@@ -262,6 +261,18 @@ async fn sync_fails_closed_on_immutable_and_inbox_format_edits() {
             }
             _ => unreachable!(),
         }
+        if mutation == "manifest_file_sha" {
+            let result = verify(out.path());
+            assert!(
+                !result.status.success(),
+                "semantic manifest drift verified clean"
+            );
+            assert!(
+                String::from_utf8_lossy(&result.stderr).contains("body hash differs from manifest"),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
         let before = tree_bytes(out.path());
         let posts_before = posts.load(Ordering::SeqCst);
         for apply in [false, true] {
@@ -304,17 +315,19 @@ async fn aggregate_oversize_inbox_batch_is_rejected_before_post() {
     }
     let before = tree_bytes(out.path());
 
-    let result = sync(&url, &binding, out.path(), true);
+    for apply in [false, true] {
+        let result = sync(&url, &binding, out.path(), apply);
 
-    assert!(!result.status.success());
-    let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(stderr.contains("sync=invalid"), "{stderr}");
-    assert!(
-        stderr.contains("exceeds the 2097152 byte limit"),
-        "{stderr}"
-    );
-    assert_eq!(posts.load(Ordering::SeqCst), 0);
-    assert_eq!(tree_bytes(out.path()), before);
+        assert!(!result.status.success(), "apply={apply}");
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(stderr.contains("sync=invalid"), "apply={apply}: {stderr}");
+        assert!(
+            stderr.contains("exceeds the 2097152 byte limit"),
+            "apply={apply}: {stderr}"
+        );
+        assert_eq!(posts.load(Ordering::SeqCst), 0, "apply={apply}");
+        assert_eq!(tree_bytes(out.path()), before, "apply={apply}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

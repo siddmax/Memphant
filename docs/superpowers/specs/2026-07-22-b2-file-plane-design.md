@@ -123,12 +123,17 @@ could not promise a compile-sync-compile fixed point.
 Before printing or applying a plan, sync validates every path, footer, hash,
 duplicate, symlink, immutable field, body, and context field. It also refetches
 the canonical projection and requires its fingerprint to equal the manifest
-base. Any failure performs zero remote writes.
+base. It renders that complete projection and requires the local manifest to
+equal the generated base manifest, including `memory_sha256` and every
+`file_sha256`; semantic field substitutions cannot hide behind valid canonical
+JSON bytes. Any failure performs zero remote writes.
 
-The dry-run plan is ordered deterministically and includes a plan SHA-256.
-`--apply` recomputes the plan locally and sends the plan digest, base snapshot,
-context binding, observed time, and ordered operations in one request. The
-server:
+The dry-run plan is ordered deterministically and includes a plan SHA-256. Sync
+builds one typed request from the fetched projection and plan, uses the
+projection's `evaluated_at` as its stable observed time, and serializes and
+checks those exact bytes before the dry-run/apply branch. `--apply` sends the
+same preflighted bytes containing the plan digest, base snapshot, context
+binding, observed time, and ordered operations. The server:
 
 1. opens a serializable transaction;
 2. claims the whole batch under one idempotency key;
@@ -142,7 +147,7 @@ server:
 The CLI and route share one exact encoded-JSON request ceiling. The CLI checks
 the bytes it will transmit, and the route bounds the request body to the same
 value. An aggregate batch cannot evade the limit through several individually
-valid inbox files.
+valid inbox files, and dry-run cannot advertise a plan apply would reject.
 
 A serialization failure or stale base is a conflict, never an automatic retry
 against newer truth. Network retry is safe only with the identical
@@ -154,10 +159,16 @@ dry-run projection. A transport or untyped 5xx after POST is reported as
 outcome unknown; the operator reruns preflight rather than constructing a blind
 retry against possibly newer truth. Projection GET and file-sync POST use one
 bounded client configured by `MEMPHANT_HTTP_TIMEOUT_MS` (30-second default,
-1-to-300-second accepted range). GET transport, timeout, and 5xx failures are
-reported as unavailable. Only an exact POST 200 with a matching typed receipt
-proves commit; any other 2xx, malformed 200 body, or receipt mismatch is outcome
-unknown.
+1-millisecond-to-300-second accepted range). GET transport, timeout, and 5xx
+failures are reported as unavailable. Only an exact POST 200 with a matching
+typed receipt proves commit; any other 2xx, malformed 200 body, or receipt
+mismatch is outcome unknown.
+
+The in-memory late-response fault injector used by the real CLI rollback test
+is not part of the default core API. It is doc-hidden and compiled only for
+`cfg(test)` or the non-default `test-support` feature; only the CLI test target
+enables that feature through its dev-test dependency, and no HTTP or other
+remote trigger exists.
 
 After a successful commit the CLI fetches the new projection, replaces managed
 files with same-directory temporary files, syncs them, moves changed and stale
@@ -294,8 +305,9 @@ replacement before the first mutation, parent movement after recovery begins,
 and a component rename during anchor reopening. Real CLI/Axum contracts also
 cover canonical-manifest byte drift, source-path substitution, projection 503
 and timeout classification, committed-response timeout, non-contract 2xx and
-malformed 200 receipts, aggregate request rejection before POST, and late
-transactional rollback after multiple operations were staged.
+malformed 200 receipts, dry-run/apply aggregate request rejection before POST,
+same-representation semantic manifest drift, and late transactional rollback
+after multiple operations were staged.
 The fast gate uses the real CLI binary and in-memory Axum app. A live-Postgres
 ignored contract proves serializable rollback, current-head visibility, and
 concurrent stale-base conflict through the standard ephemeral scratch database.
