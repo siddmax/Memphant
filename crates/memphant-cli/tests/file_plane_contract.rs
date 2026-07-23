@@ -559,6 +559,89 @@ async fn preflight_get_503_is_unavailable_without_post_or_local_mutation() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invalid_projection_evaluated_at_is_rejected_before_plan_or_post() {
+    for (label, evaluated_at) in [
+        ("malformed", "not-a-timestamp"),
+        ("non-utc", "2026-07-23T01:00:00+01:00"),
+    ] {
+        let (binding, state) = bound_state(&format!("b2-evaluated-at-{label}")).await;
+        seed_unit(&state, &binding, "profile:city", "City is Taipei.").await;
+        let tenant = TenantId::from_u128(uuid::Uuid::parse_str(TENANT).unwrap().as_u128());
+        let context = state
+            .store()
+            .resolve_memory_context(
+                tenant,
+                binding.subject_id,
+                binding.actor_id,
+                binding.scope_id,
+                binding.agent_node_id,
+            )
+            .await
+            .unwrap();
+        let mut stub = state
+            .service()
+            .canonical_projection(&context)
+            .await
+            .unwrap();
+        stub.evaluated_at = evaluated_at.to_string();
+        let projections = Arc::new(AtomicUsize::new(0));
+        let posts = Arc::new(AtomicUsize::new(0));
+        let counted_projections = projections.clone();
+        let counted_posts = posts.clone();
+        let app = memphant_server::app(state).layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let projections = counted_projections.clone();
+                let posts = counted_posts.clone();
+                let stub = stub.clone();
+                async move {
+                    if request.uri().path().ends_with("/projection")
+                        && projections.fetch_add(1, Ordering::SeqCst) > 0
+                    {
+                        return axum::Json(stub).into_response();
+                    }
+                    if request.uri().path() == "/v1/file-sync" {
+                        posts.fetch_add(1, Ordering::SeqCst);
+                    }
+                    next.run(request).await
+                }
+            },
+        ));
+        let url = serve(app).await;
+        let out = tempfile::tempdir().unwrap();
+        assert_success(&compile(&url, &binding, out.path()));
+        fs::write(
+            out.path().join("inbox/new.md"),
+            "# decision:new\n\nKeep this local.\n",
+        )
+        .unwrap();
+        let before = tree_bytes(out.path());
+
+        for apply in [false, true] {
+            let result = sync(&url, &binding, out.path(), apply);
+            assert!(!result.status.success(), "{label} apply={apply}");
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            assert!(
+                stderr.contains("sync=invalid"),
+                "{label} apply={apply}: {stderr}"
+            );
+            assert_eq!(posts.load(Ordering::SeqCst), 0, "{label} apply={apply}");
+            assert_eq!(tree_bytes(out.path()), before, "{label} apply={apply}");
+        }
+
+        let compile_out = tempfile::tempdir().unwrap();
+        let result = compile(&url, &binding, compile_out.path());
+        assert!(!result.status.success(), "{label} compile");
+        assert!(
+            String::from_utf8_lossy(&result.stderr)
+                .contains("projection evaluated_at must be RFC3339 UTC"),
+            "{label} compile: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(tree_bytes(compile_out.path()).is_empty(), "{label} compile");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delayed_preflight_get_times_out_without_post_or_local_mutation() {
     let (binding, state) = bound_state("b2-preflight-timeout").await;
     seed_unit(&state, &binding, "profile:city", "City is Taipei.").await;

@@ -1182,11 +1182,7 @@ fn validate_sync_receipt(
         return Err("committed receipt does not match the submitted batch".to_string());
     }
     require_sha256("receipt fingerprint", &receipt.fingerprint)?;
-    if !(receipt.evaluated_at.ends_with('Z') || receipt.evaluated_at.ends_with("+00:00"))
-        || receipt.evaluated_at.parse::<jiff::Timestamp>().is_err()
-    {
-        return Err("committed receipt evaluated_at must be RFC3339 UTC".to_string());
-    }
+    require_rfc3339_utc("committed receipt evaluated_at", &receipt.evaluated_at)?;
     let mut created_ids = BTreeSet::new();
     for (operation, result) in request.operations.iter().zip(&receipt.operations) {
         let matches = match (operation, result) {
@@ -1240,6 +1236,7 @@ fn validate_response_binding(
             args.subject_generation, response.subject_generation
         ));
     }
+    require_rfc3339_utc("projection evaluated_at", &response.evaluated_at)?;
     require_sha256("projection fingerprint", &response.fingerprint)?;
     let actual = canonical_projection_fingerprint(&response.items)
         .map_err(|error| format!("cannot fingerprint projection response: {error}"))?;
@@ -3771,6 +3768,16 @@ fn require_sha256(field: &str, value: &str) -> Result<(), String> {
     }
 }
 
+fn require_rfc3339_utc(field: &str, value: &str) -> Result<(), String> {
+    if (value.ends_with('Z') || value.ends_with("+00:00"))
+        && value.parse::<jiff::Timestamp>().is_ok()
+    {
+        Ok(())
+    } else {
+        Err(format!("{field} must be RFC3339 UTC"))
+    }
+}
+
 fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -3928,6 +3935,19 @@ mod tests {
                 .unwrap_err()
                 .contains("variants")
         );
+        receipt.operations = vec![FileSyncOperationResult::Retain {
+            created: vec![UnitId::new()],
+        }];
+        for invalid in ["not-a-timestamp", "2026-07-23T01:00:00+01:00"] {
+            receipt.evaluated_at = invalid.to_string();
+            assert!(
+                validate_sync_receipt(&request, &receipt)
+                    .unwrap_err()
+                    .contains("evaluated_at must be RFC3339 UTC")
+            );
+        }
+        receipt.evaluated_at = "2026-07-23T00:00:00+00:00".to_string();
+        validate_sync_receipt(&request, &receipt).unwrap();
     }
 
     #[test]

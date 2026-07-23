@@ -131,9 +131,11 @@ JSON bytes. Any failure performs zero remote writes.
 The dry-run plan is ordered deterministically and includes a plan SHA-256. Sync
 builds one typed request from the fetched projection and plan, uses the
 projection's `evaluated_at` as its stable observed time, and serializes and
-checks those exact bytes before the dry-run/apply branch. `--apply` sends the
-same preflighted bytes containing the plan digest, base snapshot, context
-binding, observed time, and ordered operations. The server:
+checks those exact bytes before the dry-run/apply branch. Projection and receipt
+`evaluated_at` fields use the same strict RFC3339-UTC validator; malformed or
+non-UTC projection time fails before compile writes or sync planning. `--apply`
+sends the same preflighted bytes containing the plan digest, base snapshot,
+context binding, observed time, and ordered operations. The server:
 
 1. opens a serializable transaction;
 2. claims the whole batch under one idempotency key;
@@ -306,8 +308,8 @@ and a component rename during anchor reopening. Real CLI/Axum contracts also
 cover canonical-manifest byte drift, source-path substitution, projection 503
 and timeout classification, committed-response timeout, non-contract 2xx and
 malformed 200 receipts, dry-run/apply aggregate request rejection before POST,
-same-representation semantic manifest drift, and late transactional rollback
-after multiple operations were staged.
+malformed and non-UTC projection times, same-representation semantic manifest
+drift, and late transactional rollback after multiple operations were staged.
 The fast gate uses the real CLI binary and in-memory Axum app. A live-Postgres
 ignored contract proves serializable rollback, current-head visibility, and
 concurrent stale-base conflict through the standard ephemeral scratch database.

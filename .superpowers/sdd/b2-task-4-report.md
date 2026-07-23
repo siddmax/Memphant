@@ -30,6 +30,13 @@ Wave 3 review reproduced two preflight gaps before the fix:
 - Both focused real-CLI tests passed after request preflight moved before the
   mode branch and sync compared the complete regenerated base manifest.
 
+Wave 4 review reproduced the unchecked server-time gap before the fix:
+
+- `invalid_projection_evaluated_at_is_rejected_before_plan_or_post` failed at
+  `malformed apply=false` because dry-run accepted a malformed projection time.
+- The real-CLI test passed after one shared RFC3339-UTC validator was applied to
+  projection and committed-receipt `evaluated_at` fields.
+
 ## Implementation
 
 - Added sync as a first-class CLI command. It uses the same explicit context
@@ -75,6 +82,10 @@ Wave 3 review reproduced two preflight gaps before the fix:
   GET is then compiled. The CLI reports committed and final snapshots
   separately so a legitimate later writer is not mistaken for corruption.
   Every post-commit failure includes the proven committed snapshot.
+- Projection and receipt server times share one exact RFC3339-UTC acceptance
+  contract. Malformed or non-UTC projection time fails before compile writes or
+  sync planning in both dry-run and apply, so it can never become an invalid
+  outbound `observed_at`.
 - Consumed inbox inodes are never directly unlinked. The manifest-last writer
   prevalidates each planned path, atomically moves it with no-replace semantics
   into durable recovery/inbox, then validates the detached identity and bytes.
@@ -94,7 +105,7 @@ Wave 3 review reproduced two preflight gaps before the fix:
 ## Green proof
 
 - cargo test -p memphant-cli --all-features --no-fail-fast:
-  64 passed (29 binary unit, 4 bootstrap, 10 compile, 14 file-plane, 4 HTTP,
+  65 passed (29 binary unit, 4 bootstrap, 10 compile, 15 file-plane, 4 HTTP,
   3 verify).
 - cargo test -p memphant-core file_sync -- --nocapture:
   16 passed, including deterministic digest, contradiction order, stale-base
