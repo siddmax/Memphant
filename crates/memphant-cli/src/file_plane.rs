@@ -2186,13 +2186,6 @@ impl RecoverySession {
             .expect("recovery managed-inode count overflowed");
     }
 
-    fn note_managed_inode_restored(&mut self) {
-        self.retained_managed_inodes = self
-            .retained_managed_inodes
-            .checked_sub(1)
-            .expect("restored a managed inode that recovery did not retain");
-    }
-
     fn contains_managed_data(&self) -> bool {
         self.retained_managed_inodes != 0
     }
@@ -2507,100 +2500,6 @@ fn move_to_recovery(
     })
 }
 
-fn restore_recovered_file(
-    recovery_directory: &Dir,
-    source_directory: &Dir,
-    name: &str,
-    expected_identity: FileIdentity,
-    anchor: &OutputParentAnchor,
-    anchor_parent: &Dir,
-    recovery: &mut RecoverySession,
-) -> (String, bool) {
-    if let Err(error) = anchor.ensure_current(anchor_parent) {
-        return (
-            format!("durable recovery retained without restore because {error}"),
-            false,
-        );
-    }
-    let mut options = OpenOptions::new();
-    options.read(true);
-    options.follow(FollowSymlinks::No);
-    options.nonblock(true);
-    let recovered_source = match recovery_directory.open_with(name, &options) {
-        Ok(source) => source,
-        Err(error) => {
-            return (
-                format!(
-                    "durable recovery retained without restore because {name}: recovery source could not be opened without following links: {error}"
-                ),
-                false,
-            );
-        }
-    };
-    let recovered_source_metadata = match recovered_source.metadata() {
-        Ok(metadata) if metadata.is_file() => metadata,
-        Ok(_) => {
-            return (
-                format!(
-                    "durable recovery retained without restore because {name}: recovery source is not a regular file"
-                ),
-                false,
-            );
-        }
-        Err(error) => {
-            return (
-                format!(
-                    "durable recovery retained without restore because {name}: recovery source handle could not be identified: {error}"
-                ),
-                false,
-            );
-        }
-    };
-    if metadata_identity(&recovered_source_metadata) != expected_identity {
-        return (
-            format!(
-                "durable recovery retained without restore because {name}: recovery source handle changed identity"
-            ),
-            false,
-        );
-    }
-    match managed_identity_at(recovery_directory, name) {
-        Ok(Some(identity)) if identity == expected_identity => {}
-        Ok(_) => {
-            return (
-                format!(
-                    "durable recovery retained without restore because {name}: recovery source name changed identity"
-                ),
-                false,
-            );
-        }
-        Err(error) => {
-            return (
-                format!(
-                    "durable recovery retained without restore because {name}: recovery source name could not be confirmed: {error}"
-                ),
-                false,
-            );
-        }
-    }
-    match rename_noreplace(recovery_directory, name, source_directory, name) {
-        Ok(()) => {
-            drop(recovered_source);
-            recovery.note_managed_inode_restored();
-            let source_sync = sync_directory(source_directory);
-            let recovery_sync = sync_directory(recovery_directory);
-            let diagnostic = match (source_sync, recovery_sync) {
-                (Ok(()), Ok(())) => "validated name restored without replacement".to_string(),
-                (source, recovery) => format!(
-                    "validated name restored but directory sync failed: source_sync={source:?} recovery_sync={recovery:?}"
-                ),
-            };
-            (diagnostic, true)
-        }
-        Err(error) => (format!("durable recovery retained: {error}"), false),
-    }
-}
-
 fn validate_current_file(
     directory: &Dir,
     name: &str,
@@ -2678,22 +2577,13 @@ fn replace_managed_file(
         }
         hook(&format!("write:{name}:detached"));
         if let Err(error) = validate_detached_file(&recovery_directory, name, name, expected) {
-            let (restoration, restored) = restore_recovered_file(
-                &recovery_directory,
-                directory,
-                name,
-                expected.identity,
-                anchor,
-                output_parent,
-                recovery,
-            );
-            if restored {
-                hook(&format!("write:{name}:restored"));
-            }
+            hook(&format!("write:{name}:validation_failed"));
             if anchor.ensure_current(output_parent).is_ok() {
                 let _ = directory.remove_file(&prepared);
             }
-            return Err(format!("cannot replace {name}: {error}; {restoration}"));
+            return Err(format!(
+                "cannot replace {name}: {error}; automatic restoration is disabled; recovered original remains in durable recovery"
+            ));
         }
         hook(&format!("write:{name}:recovered"));
         anchor.ensure_current(output_parent)?;
@@ -2764,19 +2654,10 @@ fn delete_managed_file(
     )?;
     hook(&format!("delete:{name}:detached"));
     if let Err(error) = validate_detached_file(&recovery_directory, name, name, expected) {
-        let (restoration, restored) = restore_recovered_file(
-            &recovery_directory,
-            directory,
-            name,
-            expected.identity,
-            anchor,
-            output_parent,
-            recovery,
-        );
-        if restored {
-            hook(&format!("delete:{name}:restored"));
-        }
-        return Err(format!("cannot delete {name}: {error}; {restoration}"));
+        hook(&format!("delete:{name}:validation_failed"));
+        return Err(format!(
+            "cannot delete {name}: {error}; automatic restoration is disabled; recovered original remains in durable recovery"
+        ));
     }
     hook(&format!("delete:{name}:recovered"));
     anchor.ensure_current(output_parent)?;
@@ -3164,6 +3045,11 @@ mod tests {
         let replacement = rendered_projection(&[(1, "alpha after"), (2, "beta after")]);
         let first_path = replacement.units.keys().next().unwrap().clone();
         let second_path = replacement.units.keys().nth(1).unwrap().clone();
+        let second_name = std::path::Path::new(&second_path)
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap();
         let victim = output.join(&second_path);
         let mut swapped = false;
         let result = replace_projection_with_hook(&output, &existing, &replacement, |written| {
@@ -3175,8 +3061,18 @@ mod tests {
 
         let error = result.unwrap_err();
         assert!(error.contains("detached file differs"), "{error}");
+        assert!(
+            error.contains("automatic restoration is disabled"),
+            "{error}"
+        );
+        assert!(!victim.exists());
         assert_eq!(
-            std::fs::read_to_string(victim).unwrap(),
+            std::fs::read_to_string(
+                find_recovery(directory.path())
+                    .join(super::UNITS_DIR)
+                    .join(second_name)
+            )
+            .unwrap(),
             "concurrent sentinel"
         );
     }
@@ -3353,6 +3249,11 @@ mod tests {
 
         let replacement = rendered_projection(&[(1, "alpha after")]);
         let stale_path = initial.units.keys().nth(1).unwrap().clone();
+        let stale_name = std::path::Path::new(&stale_path)
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap();
         let victim = output.join(&stale_path);
         let mut swapped = false;
         let result = replace_projection_with_hook(&output, &existing, &replacement, |written| {
@@ -3364,8 +3265,18 @@ mod tests {
 
         let error = result.unwrap_err();
         assert!(error.contains("detached file differs"), "{error}");
+        assert!(
+            error.contains("automatic restoration is disabled"),
+            "{error}"
+        );
+        assert!(!victim.exists());
         assert_eq!(
-            std::fs::read_to_string(victim).unwrap(),
+            std::fs::read_to_string(
+                find_recovery(directory.path())
+                    .join(super::UNITS_DIR)
+                    .join(stale_name)
+            )
+            .unwrap(),
             "concurrent stale sentinel"
         );
     }
@@ -3670,10 +3581,9 @@ mod tests {
     }
 
     #[test]
-    fn restored_empty_recovery_never_claims_retained_managed_data() {
+    fn validation_failure_keeps_recovery_current_and_retained() {
         let directory = tempfile::tempdir().unwrap();
         let parent = directory.path().join("output-parent");
-        let displaced_recovery = directory.path().join("empty-restored-recovery");
         std::fs::create_dir(&parent).unwrap();
         let output = parent.join("memory");
         let initial = rendered_projection(&[(1, "alpha before")]);
@@ -3689,9 +3599,7 @@ mod tests {
             .unwrap()
             .to_string();
         let detached = format!("write:{unit_name}:detached");
-        let restored = format!("write:{unit_name}:restored");
         let mut corrupted = false;
-        let mut displaced = false;
 
         let result = replace_projection_with_hook(&output, &existing, &replacement, |point| {
             if point == detached && !corrupted {
@@ -3699,36 +3607,36 @@ mod tests {
                     find_recovery(&parent)
                         .join(super::UNITS_DIR)
                         .join(&unit_name),
-                    "restored validation sentinel",
+                    "recovered validation sentinel",
                 )
                 .unwrap();
                 corrupted = true;
-            } else if point == restored && !displaced {
-                std::fs::rename(find_recovery(&parent), &displaced_recovery).unwrap();
-                displaced = true;
             }
         });
 
         let error = result.expect_err("a detached-file validation failure was accepted");
         assert!(error.contains("detached file differs"), "{error}");
-        assert!(error.contains("recovery_last_known="), "{error}");
-        assert!(!error.contains("output parent changed"), "{error}");
-        assert!(!error.contains("recovery was retained"), "{error}");
-        assert!(!error.contains("retained managed data"), "{error}");
-        assert_eq!(
-            std::fs::read_to_string(output.join(&unit_path)).unwrap(),
-            "restored validation sentinel"
-        );
         assert!(
-            std::fs::read_dir(displaced_recovery.join(super::UNITS_DIR))
-                .unwrap()
-                .next()
-                .is_none()
+            error.contains("automatic restoration is disabled"),
+            "{error}"
+        );
+        assert!(error.contains("recovery="), "{error}");
+        assert!(!error.contains("recovery_last_known="), "{error}");
+        assert!(!error.contains("output parent changed"), "{error}");
+        assert!(!output.join(&unit_path).exists());
+        assert_eq!(
+            std::fs::read_to_string(
+                find_recovery(&parent)
+                    .join(super::UNITS_DIR)
+                    .join(&unit_name)
+            )
+            .unwrap(),
+            "recovered validation sentinel"
         );
     }
 
     #[test]
-    fn replaced_recovery_source_is_never_restored_or_decounted() {
+    fn replaced_recovery_source_is_never_restored() {
         let directory = tempfile::tempdir().unwrap();
         let parent = directory.path().join("output-parent");
         let displaced_recovery = directory.path().join("recovery-with-original");
@@ -3764,7 +3672,7 @@ mod tests {
         let error = result.expect_err("a replaced recovery source was restored into output");
         assert!(error.contains("detached file differs"), "{error}");
         assert!(
-            error.contains("recovery source handle changed identity"),
+            error.contains("automatic restoration is disabled"),
             "{error}"
         );
         assert!(error.contains("recovery_last_known="), "{error}");
@@ -3792,6 +3700,70 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(displaced_recovery.join(super::UNITS_DIR).join(&unit_name))
                 .unwrap(),
+            "recovery source impostor"
+        );
+    }
+
+    #[test]
+    fn validation_failure_never_reopens_a_restore_window() {
+        let directory = tempfile::tempdir().unwrap();
+        let parent = directory.path().join("output-parent");
+        std::fs::create_dir(&parent).unwrap();
+        let output = parent.join("memory");
+        let initial = rendered_projection(&[(1, "alpha before")]);
+        let absent = inspect_output(&output).unwrap();
+        replace_projection(&output, &absent, &initial).unwrap();
+        let existing = inspect_output(&output).unwrap();
+        let replacement = rendered_projection(&[(1, "alpha after")]);
+        let unit_path = replacement.units.keys().next().unwrap().clone();
+        let unit_name = std::path::Path::new(&unit_path)
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let displaced_name = format!("displaced-{unit_name}");
+        let detached = format!("write:{unit_name}:detached");
+        let validation_failed = format!("write:{unit_name}:validation_failed");
+        let mut corrupted = false;
+        let mut planted = false;
+
+        let result = replace_projection_with_hook(&output, &existing, &replacement, |point| {
+            if point == detached && !corrupted {
+                std::fs::write(
+                    find_recovery(&parent)
+                        .join(super::UNITS_DIR)
+                        .join(&unit_name),
+                    "recovered original sentinel",
+                )
+                .unwrap();
+                corrupted = true;
+            } else if point == validation_failed && !planted {
+                let recovery = find_recovery(&parent);
+                let units = recovery.join(super::UNITS_DIR);
+                std::fs::rename(units.join(&unit_name), units.join(&displaced_name)).unwrap();
+                std::fs::write(units.join(&unit_name), "recovery source impostor").unwrap();
+                planted = true;
+            }
+        });
+
+        let error = result.expect_err("validation failure reopened automatic restoration");
+        assert!(planted, "the post-validation seam did not run: {error}");
+        assert!(error.contains("detached file differs"), "{error}");
+        assert!(
+            error.contains("automatic restoration is disabled"),
+            "{error}"
+        );
+        assert!(error.contains("recovery="), "{error}");
+        assert!(!error.contains("recovery_last_known="), "{error}");
+        assert!(!output.join(&unit_path).exists());
+        let recovery = find_recovery(&parent);
+        assert_eq!(
+            std::fs::read_to_string(recovery.join(super::UNITS_DIR).join(&displaced_name)).unwrap(),
+            "recovered original sentinel"
+        );
+        assert_eq!(
+            std::fs::read_to_string(recovery.join(super::UNITS_DIR).join(&unit_name)).unwrap(),
             "recovery source impostor"
         );
     }

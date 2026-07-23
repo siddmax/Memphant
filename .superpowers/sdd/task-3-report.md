@@ -334,8 +334,8 @@ opened during pathname traversal but before the reopen completed.
   continue through a detached component and falsely accept it.
 - A parent change before the first mutation now fails with zero writes and no
   recovery. A parent change after recovery begins makes success impossible;
-  cleanup/restoration also refuses further namespace mutation through the
-  detached handles.
+  cleanup also refuses further namespace mutation through the detached handles.
+  Automatic restoration is removed entirely in the ninth review wave.
 - `recovery=<absolute path>` is emitted only after both the captured anchor and
   recovery parent/name still identity-match the retained recovery handle. If
   that cannot be established, the error instead emits
@@ -442,15 +442,12 @@ instead of truthful last-known/empty state.
   displaced and replacement units directories empty, and reports the actual
   units-binding cause without parent-move or retained-data wording.
 - The boolean is replaced by an exact retained-managed-inode count. A successful
-  atomic move increments it before either directory fsync; a successful
-  no-replace restoration decrements it before its sync barriers. Partial
-  recovery and restoration failures therefore preserve the exact ownership
-  state.
+  atomic move increments it before either directory fsync. This wave initially
+  decremented after a successful restoration; the ninth review wave removes
+  restoration and makes the count monotonic for the compile operation.
 - Deterministic `write:<name>:restored` and `delete:<name>:restored` seams fire
-  only after the namespace restoration succeeds. The replacement contract uses
-  that seam to displace a now-empty recovery and proves the error reports only
-  `recovery_last_known=`, never current-path, parent-change, or retained-data
-  claims.
+  only after the intermediate namespace restoration succeeded. Those seams and
+  the restoration path are removed in the ninth review wave.
 
 Fresh proof after the final code change:
 
@@ -491,9 +488,55 @@ last-known recovery diagnostic.
   output receives neither file, and the error reports only the last-known path
   plus truthful retained-managed-data wording.
 
+This intermediate compare-then-rename mitigation is superseded by the ninth
+review wave because it could not bind the path-based rename atomically to the
+retained handle on every supported platform.
+
 Fresh proof after the final code change:
 
 - `cargo test -p memphant-cli`: 22 unit and 21 integration tests passed,
+  including 10 real-CLI compile contracts.
+- `cargo clippy -p memphant-cli --all-targets --all-features -- -D warnings`,
+  `cargo fmt --all --check`, and `git diff --check`: passed.
+- `python3 scripts/check_spec_drift.py`: skipped, not passed, because the
+  private Syndai specs are absent from this worktree.
+
+The unrelated `.superpowers/sdd/progress.md` modification remains unstaged.
+No Task 4, P1 campaign, paid/model call, push, or deployment work was performed.
+
+## Ninth independent-review fix wave
+
+The final restoration review identified a compare/use window left by the eighth
+wave: after the retained handle and recovery name identities matched, another
+process could substitute the name before the path-based rename. The supported
+cross-platform APIs do not provide a portable atomic no-replace move bound to
+the already validated source handle.
+
+The deterministic contract was red first. It corrupts the recovered inode to
+force detached-file validation failure, expects a post-validation seam, then
+renames the recovered original aside and plants an impostor. Before the fix,
+the seam never ran and compile reported `validated name restored without
+replacement`, proving the automatic restore path remained active.
+
+- Automatic restoration on detached-file validation failure is removed. There
+  is no compare-then-path-rename fallback and no recovery-source namespace
+  mutation after validation fails.
+- The retained-managed-inode count is monotonic for a compile operation. It
+  increments immediately after each successful recovery move and is never
+  decremented by validation-failure cleanup.
+- Deterministic `write:<name>:validation_failed` and
+  `delete:<name>:validation_failed` seams expose the former restore boundary.
+  The regression contract plants an impostor there and proves output remains
+  absent while both the displaced original and impostor stay in the confirmed
+  durable recovery tree.
+- Cleanup removes only the unrelated prepared file when the output anchor is
+  still current. The failure reports that automatic restoration is disabled
+  and includes the confirmed recovery path; an unconfirmed path continues to
+  use last-known plus retained-data wording.
+
+Fresh proof after the final code change:
+
+- `cargo test -p memphant-cli`: 23 unit and 21 integration tests passed,
   including 10 real-CLI compile contracts.
 - `cargo clippy -p memphant-cli --all-targets --all-features -- -D warnings`,
   `cargo fmt --all --check`, and `git diff --check`: passed.
