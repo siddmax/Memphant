@@ -31,9 +31,9 @@ use memphant_types::{
     CanonicalProjectionUnit, ContextBindingAccessPolicy, ContextBindingAgentRef,
     ContextBindingEntityRef, ContextBindingRequest, ContextBindingScopeRef, FileSyncOperation,
     FileSyncOperationResult, FileSyncRequest, FileSyncResult, FileSyncUnitMetadata, JobId,
-    MarkOutcome, MemoryEdgeKind, MemoryKind, NewMemoryUnit, RecallHttpRequest, RecallMode,
-    RecallRequest, RecallTime, ReflectCandidate, ReflectInput, ReflectJob, ReflectJobKind,
-    ResolvedMemoryContext, RetainEpisodeHttpRequest, RetainEpisodeHttpResponse,
+    MarkOutcome, MemoryEdgeKind, MemoryKind, NewMemoryEdge, NewMemoryUnit, RecallHttpRequest,
+    RecallMode, RecallRequest, RecallTime, ReflectCandidate, ReflectInput, ReflectJob,
+    ReflectJobKind, ResolvedMemoryContext, RetainEpisodeHttpRequest, RetainEpisodeHttpResponse,
     RetainEpisodePayload, RetainPayload, RetainRequest, RetainResourceRequest, RetainUnitPayload,
     ReviewEvent, TenantId, TrustLevel, UnitState,
 };
@@ -305,6 +305,209 @@ async fn file_sync_rejects_nonprojected_admission_drift_before_claiming() {
             .is_none()
     );
     writer.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires MEMPHANT_TEST_DATABASE_URL"]
+async fn file_sync_ordered_preview_matches_native_correction_and_forget_cascades() {
+    let store = connect().await;
+
+    let correction_tenant = fresh_tenant(&store).await;
+    let correction_context = fresh_memory_context(&store, correction_tenant).await;
+    let mut seed = store.begin(&correction_context).await.unwrap();
+    let mut source = active_projection_unit(&correction_context, "The source fact is current.");
+    source.fact_key = Some("profile:source".to_string());
+    let source_id = store.stage_memory_unit(&mut seed, source).await.unwrap();
+    let mut dependent =
+        active_projection_unit(&correction_context, "The composed dependent is stale.");
+    dependent.fact_key = Some("profile:derived".to_string());
+    dependent.source_kind = Some("composition".to_string());
+    let dependent_id = store.stage_memory_unit(&mut seed, dependent).await.unwrap();
+    store
+        .stage_memory_edge(
+            &mut seed,
+            NewMemoryEdge {
+                tenant_id: correction_context.tenant_id,
+                scope_id: correction_context.scope_id,
+                src_id: dependent_id,
+                dst_id: source_id,
+                kind: MemoryEdgeKind::DerivedFrom,
+            },
+        )
+        .await
+        .unwrap();
+    store.commit(seed).await.unwrap();
+
+    let correction_service = service(store.clone());
+    let base = correction_service
+        .canonical_projection(&correction_context)
+        .await
+        .unwrap();
+    let source_metadata = file_sync_metadata(
+        base.items
+            .iter()
+            .find(|unit| unit.unit_id == source_id)
+            .unwrap(),
+    );
+    correction_service
+        .file_sync(
+            &correction_context,
+            "pg-file-sync-correction-dependent-preview",
+            file_sync_request(
+                &correction_context,
+                base.fingerprint,
+                vec![
+                    FileSyncOperation::Correct {
+                        base: source_metadata,
+                        body: "The source fact is corrected.".to_string(),
+                    },
+                    FileSyncOperation::Retain {
+                        fact_key: "profile:derived".to_string(),
+                        predicate: "states".to_string(),
+                        body: "The replacement derived fact is current.".to_string(),
+                        confidence: 1.0,
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                ],
+            ),
+        )
+        .await
+        .unwrap();
+    let correction_snapshot = store
+        .fetch_file_sync_transition_snapshot(&correction_context)
+        .await
+        .unwrap();
+    let dependent_after = correction_snapshot
+        .units
+        .iter()
+        .find(|unit| unit.id == dependent_id)
+        .unwrap();
+    assert_eq!(dependent_after.state, UnitState::Expired);
+    assert!(dependent_after.transaction_to.is_some());
+    assert!(correction_snapshot.edges.iter().all(|edge| {
+        edge.kind != MemoryEdgeKind::Contradicts
+            || (edge.src_id != dependent_id && edge.dst_id != dependent_id)
+    }));
+
+    let forget_tenant = fresh_tenant(&store).await;
+    let forget_context = fresh_memory_context(&store, forget_tenant).await;
+    let mut seed = store.begin(&forget_context).await.unwrap();
+    let mut target =
+        active_projection_unit(&forget_context, "The selected lineage branch is current.");
+    target.fact_key = Some("profile:forget-target".to_string());
+    let target_id = store.stage_memory_unit(&mut seed, target).await.unwrap();
+    let mut ancestor = active_projection_unit(&forget_context, "The ancestor is historical.");
+    ancestor.fact_key = Some("profile:ancestor".to_string());
+    let ancestor_id = store.stage_memory_unit(&mut seed, ancestor).await.unwrap();
+    let mut sibling = active_projection_unit(&forget_context, "The sibling lineage is stale.");
+    sibling.fact_key = Some("profile:lineage".to_string());
+    let sibling_id = store.stage_memory_unit(&mut seed, sibling).await.unwrap();
+    let mut dependent = active_projection_unit(&forget_context, "The lineage derivative is stale.");
+    dependent.fact_key = Some("profile:lineage-dependent".to_string());
+    dependent.source_kind = Some("composition".to_string());
+    let lineage_dependent_id = store.stage_memory_unit(&mut seed, dependent).await.unwrap();
+    for (src_id, dst_id, kind) in [
+        (target_id, ancestor_id, MemoryEdgeKind::Supersedes),
+        (sibling_id, ancestor_id, MemoryEdgeKind::Supersedes),
+        (
+            lineage_dependent_id,
+            sibling_id,
+            MemoryEdgeKind::DerivedFrom,
+        ),
+    ] {
+        store
+            .stage_memory_edge(
+                &mut seed,
+                NewMemoryEdge {
+                    tenant_id: forget_context.tenant_id,
+                    scope_id: forget_context.scope_id,
+                    src_id,
+                    dst_id,
+                    kind,
+                },
+            )
+            .await
+            .unwrap();
+    }
+    store.commit(seed).await.unwrap();
+    sqlx::query(
+        "update memphant.memory_unit set state = 'superseded', transaction_to = $7::timestamptz
+         where tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+           and scope_id = $4 and agent_node_id = $5 and id = $6",
+    )
+    .bind(forget_context.tenant_id.as_uuid())
+    .bind(forget_context.data_subject_id.as_uuid())
+    .bind(forget_context.subject_generation as i64)
+    .bind(forget_context.scope_id.as_uuid())
+    .bind(forget_context.agent_node_id.as_uuid())
+    .bind(ancestor_id.as_uuid())
+    .bind(CLOCK.0)
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    let forget_service = service(store.clone());
+    let base = forget_service
+        .canonical_projection(&forget_context)
+        .await
+        .unwrap();
+    let target_metadata = file_sync_metadata(
+        base.items
+            .iter()
+            .find(|unit| unit.unit_id == target_id)
+            .unwrap(),
+    );
+    forget_service
+        .file_sync(
+            &forget_context,
+            "pg-file-sync-forget-lineage-preview",
+            file_sync_request(
+                &forget_context,
+                base.fingerprint,
+                vec![
+                    FileSyncOperation::Forget {
+                        base: target_metadata,
+                    },
+                    FileSyncOperation::Retain {
+                        fact_key: "profile:lineage".to_string(),
+                        predicate: "states".to_string(),
+                        body: "The replacement lineage fact is current.".to_string(),
+                        confidence: 1.0,
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                    FileSyncOperation::Retain {
+                        fact_key: "profile:lineage-dependent".to_string(),
+                        predicate: "states".to_string(),
+                        body: "The replacement lineage derivative is current.".to_string(),
+                        confidence: 1.0,
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                ],
+            ),
+        )
+        .await
+        .unwrap();
+    let forget_snapshot = store
+        .fetch_file_sync_transition_snapshot(&forget_context)
+        .await
+        .unwrap();
+    for removed_id in [target_id, ancestor_id, sibling_id, lineage_dependent_id] {
+        let removed = forget_snapshot
+            .units
+            .iter()
+            .find(|unit| unit.id == removed_id)
+            .unwrap();
+        assert_eq!(removed.state, UnitState::Deleted);
+        assert!(removed.transaction_to.is_some());
+    }
+    assert!(forget_snapshot.edges.iter().all(|edge| {
+        edge.kind != MemoryEdgeKind::Contradicts
+            || (![sibling_id, lineage_dependent_id].contains(&edge.src_id)
+                && ![sibling_id, lineage_dependent_id].contains(&edge.dst_id))
+    }));
 }
 
 #[tokio::test]

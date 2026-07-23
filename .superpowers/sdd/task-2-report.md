@@ -255,3 +255,94 @@ exactly `spec_drift=skipped reason=private_specs_missing`; no drift-clean claim
 is made. The unrelated `.superpowers/sdd/progress.md` modification remains
 preserved and unstaged. No paid/network provider, Task 3, push, or deployment
 work was performed.
+
+## Blocking semantic review follow-up: lineage-aware ordered preview
+
+The next independent review found one blocking mismatch in the bounded
+two-phase implementation. The outside-transaction evolving snapshot modeled a
+correction by replacing only its exact target and a unit forget by removing
+only its exact target. Native in-memory and Postgres staging are broader:
+correction expires composition-derived dependents, while unit forget deletes
+the whole bidirectional supersedes lineage and then composition dependents of
+the invalidated lineage. A later retain could therefore compile against a unit
+that an earlier native operation in the same staged batch had already expired
+or deleted, creating invalid contradiction/supersedes admission state.
+
+### Red proof
+
+Three regressions failed before the fix:
+
+- concurrent edge-only drift committed instead of returning `sync_conflict`,
+  proving the protected admission digest bound units but not the cascade edge
+  inputs;
+- correction followed by retain left the composition dependent `superseded`
+  rather than `expired`, because the prepared retain had compiled against the
+  dependent after native correction invalidated it;
+- unit forget followed by retain left a supersedes sibling `superseded` rather
+  than `deleted`, because preparation had not walked the bidirectional lineage.
+
+The focused command was
+`cargo test -p memphant-core file_sync -- --nocapture`: 12 existing cases
+passed and these three new cases failed. The final focused suite is 15/15.
+
+### Root-cause architecture
+
+- `FileSyncTransitionSnapshot` is a dedicated, context-bound unit/edge read
+  implemented by in-memory, Postgres, and runtime delegation both outside and
+  inside the serializable transaction. It deliberately includes historical and
+  deleted unit rows because a live supersedes branch may connect through a
+  closed ancestor, plus every context edge consulted by native cascades.
+- Snapshot construction and hashing sort and deduplicate both full typed
+  collections. The execution transaction re-reads and compares this same
+  unit/edge digest, so a concurrent edge-only mutation conflicts before any
+  prepared write is staged.
+- Shared pure transitions now model correction target supersession plus
+  composition-dependent expiry, and unit-forget bidirectional supersedes
+  closure plus composition-dependent deletion. File-sync preparation and
+  native in-memory staging use the same helpers. The live Postgres contract
+  pins equivalent SQL behavior.
+- The evolving preview adds every `CompiledWrite.new_edge`, not just new units
+  and unit updates. Later operations therefore see lineage introduced by an
+  earlier retain as well as lineage present at batch admission.
+- Every later retain compiles from the open portion derived from the updated
+  transition snapshot. The provider/compiler remains outside the execution
+  transaction; replay lookup, dual canonical/transition revalidation, the
+  short serializable transaction, and explicit rollback paths are unchanged.
+
+### Regression and gate proof
+
+- In-memory mixed-plan regressions prove correction -> retain does not compile
+  against a composition dependent, and forget -> retain -> retain does not
+  compile against either the forgotten supersedes sibling or its composition
+  dependent. No contradiction edge references any invalidated unit.
+- The edge-only drift regression mutates only `memory_edge` during embedding,
+  observes no active mutation claim, returns `sync_conflict`, persists no
+  requested unit, and leaves the concurrent edge intact.
+- `cargo test -p memphant-core --all-targets` passed: 110 library tests and all
+  core integration targets.
+- The ephemeral migrated Postgres `file_sync_` suite passed 3/3: the original
+  atomic/stale/concurrent contract, nonprojected admission drift, and the new
+  ordered correction/forget cascade-parity contract. The new contract proves
+  both historical-lineage traversal and composition-dependent deletion without
+  invalid prepared contradiction edges.
+- REST file-sync passed 1/1; OpenAPI passed 8/8; the types file-sync contract
+  passed 1/1; provider lint passed 5/5.
+- Migration contract was clean; migration pytest passed 35 with 1 skipped.
+  Touched-package all-target/all-feature clippy with `-D warnings`, final
+  format/whitespace checks, and `cargo test --doc` passed.
+- `python3 scripts/check_spec_drift.py` again reported
+  `spec_drift=skipped reason=private_specs_missing`; no drift-clean claim is
+  made.
+
+An additional workspace-wide diagnostic,
+`cargo test --all-targets --all-features`, is **not** claimed green. It passes
+the Task 2/core work and then fails the unrelated existing
+`memphant-mcp --test mcp_schema_contract::artifact_has_camel_case_input_schema_for_all_seven_tools`
+assertion because the generated tools artifact differs from committed
+`mcp/memphant.tools.v1.json`. This Task 2 follow-up changes no MCP/type schema
+and does not modify that generated artifact; MCP regeneration remains separate.
+
+The intervening `ad7b8648` retrieval-trace snapshot cleanup commit was
+preserved unchanged. The unrelated `.superpowers/sdd/progress.md` modification
+remains unstaged. No Task 3, P1, paid/network provider, push, or deployment work
+was performed.

@@ -8,10 +8,11 @@ use std::str::FromStr;
 
 use memphant_core::{
     ApiKeyRow, ClaimMutationOutcome, CompiledWrite, CorrectOutcome, CorrectionWrite,
-    EmbeddingProfileRow, EmbeddingRow, ForgetOutcome, ForgetWrite, JOB_DEAD_LETTER_ATTEMPTS,
-    JobFilter, MemoryStore, MutationClaim, MutationClaimOutcome, MutationLedgerStore,
-    MutationResponse, ReflectJobRow, ResolvedMemoryContext, ReviewEventRow, ScopePage, StoreError,
-    SubjectErasureReceipt, correction_rectangles_with_ids, deep_unit_is_snapshot_eligible,
+    EmbeddingProfileRow, EmbeddingRow, FileSyncTransitionSnapshot, ForgetOutcome, ForgetWrite,
+    JOB_DEAD_LETTER_ATTEMPTS, JobFilter, MemoryStore, MutationClaim, MutationClaimOutcome,
+    MutationLedgerStore, MutationResponse, ReflectJobRow, ResolvedMemoryContext, ReviewEventRow,
+    ScopePage, StoreError, SubjectErasureReceipt, correction_rectangles_with_ids,
+    deep_unit_is_snapshot_eligible,
 };
 use memphant_types::{
     ActorId, AgentNodeId, CitationSpan, ContextBindingAccessPolicy, ContextBindingPolicyMode,
@@ -559,6 +560,27 @@ impl PgStore {
         })
     }
 
+    fn edge_from_row(row: &PgRow) -> Result<StoredMemoryEdge, StoreError> {
+        Ok(StoredMemoryEdge {
+            id: EdgeId::from_u128(row.try_get::<Uuid, _>("id").map_err(backend)?.as_u128()),
+            tenant_id: TenantId::from_u128(
+                row.try_get::<Uuid, _>("tenant_id")
+                    .map_err(backend)?
+                    .as_u128(),
+            ),
+            scope_id: ScopeId::from_u128(
+                row.try_get::<Uuid, _>("scope_id")
+                    .map_err(backend)?
+                    .as_u128(),
+            ),
+            src_id: UnitId::from_u128(row.try_get::<Uuid, _>("src_id").map_err(backend)?.as_u128()),
+            dst_id: UnitId::from_u128(row.try_get::<Uuid, _>("dst_id").map_err(backend)?.as_u128()),
+            kind: enum_from_str(row.try_get::<String, _>("kind").map_err(backend)?.as_str())?,
+            transaction_from: row.try_get("transaction_from").map_err(backend)?,
+            transaction_to: row.try_get("transaction_to").map_err(backend)?,
+        })
+    }
+
     fn episode_from_row(row: &PgRow) -> Result<StoredEpisode, StoreError> {
         Ok(StoredEpisode {
             id: EpisodeId::from_u128(row.try_get::<Uuid, _>("id").map_err(backend)?.as_u128()),
@@ -834,6 +856,48 @@ impl PgStore {
             ],
         )
         .await
+    }
+
+    async fn fetch_file_sync_transition_snapshot_tx(
+        tx: &mut Transaction<'static, Postgres>,
+        context: &ResolvedMemoryContext,
+    ) -> Result<FileSyncTransitionSnapshot, StoreError> {
+        let units = Self::fetch_units_where(
+            tx,
+            "tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+             and scope_id = $4 and agent_node_id = $5",
+            "order by id",
+            vec![
+                Bind::Uuid(context.tenant_id.as_uuid()),
+                Bind::Uuid(context.data_subject_id.as_uuid()),
+                Bind::I64(context.subject_generation as i64),
+                Bind::Uuid(context.scope_id.as_uuid()),
+                Bind::Uuid(context.agent_node_id.as_uuid()),
+            ],
+        )
+        .await?;
+        let rows = sqlx::query(
+            r#"select id, tenant_id, scope_id, src_id, dst_id, kind,
+                      to_char(transaction_from at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as transaction_from,
+                      to_char(transaction_to at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as transaction_to
+               from memphant.memory_edge
+               where tenant_id = $1 and data_subject_id = $2 and subject_generation = $3
+                 and scope_id = $4 and agent_node_id = $5
+               order by id"#,
+        )
+        .bind(context.tenant_id.as_uuid())
+        .bind(context.data_subject_id.as_uuid())
+        .bind(context.subject_generation as i64)
+        .bind(context.scope_id.as_uuid())
+        .bind(context.agent_node_id.as_uuid())
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(backend)?;
+        let edges = rows
+            .iter()
+            .map(Self::edge_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(FileSyncTransitionSnapshot::new(units, edges))
     }
 
     /// Deletes composition-derived dependents of the given source units;
@@ -2282,6 +2346,21 @@ impl MemoryStore for PgStore {
         Self::fetch_scope_open_units_tx(&mut txn.tx, &txn.context).await
     }
 
+    async fn fetch_file_sync_transition_snapshot(
+        &self,
+        context: &ResolvedMemoryContext,
+    ) -> Result<FileSyncTransitionSnapshot, StoreError> {
+        let mut tx = self.tenant_tx(context.tenant_id).await?;
+        Self::fetch_file_sync_transition_snapshot_tx(&mut tx, context).await
+    }
+
+    async fn fetch_file_sync_transition_snapshot_in_tx(
+        &self,
+        txn: &mut Self::Txn,
+    ) -> Result<FileSyncTransitionSnapshot, StoreError> {
+        Self::fetch_file_sync_transition_snapshot_tx(&mut txn.tx, &txn.context).await
+    }
+
     async fn fetch_vector_candidates(
         &self,
         context: &ResolvedMemoryContext,
@@ -2424,32 +2503,7 @@ impl MemoryStore for PgStore {
         .map_err(backend)?;
         let edges: Vec<StoredMemoryEdge> = rows
             .iter()
-            .map(|row| {
-                Ok(StoredMemoryEdge {
-                    id: EdgeId::from_u128(row.try_get::<Uuid, _>("id").map_err(backend)?.as_u128()),
-                    tenant_id: TenantId::from_u128(
-                        row.try_get::<Uuid, _>("tenant_id")
-                            .map_err(backend)?
-                            .as_u128(),
-                    ),
-                    scope_id: ScopeId::from_u128(
-                        row.try_get::<Uuid, _>("scope_id")
-                            .map_err(backend)?
-                            .as_u128(),
-                    ),
-                    src_id: UnitId::from_u128(
-                        row.try_get::<Uuid, _>("src_id").map_err(backend)?.as_u128(),
-                    ),
-                    dst_id: UnitId::from_u128(
-                        row.try_get::<Uuid, _>("dst_id").map_err(backend)?.as_u128(),
-                    ),
-                    kind: enum_from_str(
-                        row.try_get::<String, _>("kind").map_err(backend)?.as_str(),
-                    )?,
-                    transaction_from: row.try_get("transaction_from").map_err(backend)?,
-                    transaction_to: row.try_get("transaction_to").map_err(backend)?,
-                })
-            })
+            .map(Self::edge_from_row)
             .collect::<Result<_, StoreError>>()?;
         let endpoint_ids: Vec<UnitId> = edges
             .iter()

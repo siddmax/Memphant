@@ -16,10 +16,11 @@ use memphant_core::service::{
 use memphant_core::{
     ApiKeyRow, CompiledWrite, CorrectOutcome, CorrectionWrite, CrossRerankCandidateSelection,
     CrossRerankGranularity, CrossReranker, DEFAULT_RECALL_POOL_DEPTH, EmbedError,
-    EmbeddingProfileRow, EmbeddingProvider, EmbeddingRow, ForgetOutcome, ForgetWrite,
-    InMemoryStore, InMemoryTxn, JobFilter, MemoryStore, MutationClaim, MutationClaimOutcome,
-    MutationLedgerStore, MutationResponse, NoopEmbedding, ReflectJobRow, ResolvedMemoryContext,
-    ReviewEventRow, ScopePage, StoreError, SubjectErasureReceipt, SystemClock,
+    EmbeddingProfileRow, EmbeddingProvider, EmbeddingRow, FileSyncTransitionSnapshot,
+    ForgetOutcome, ForgetWrite, InMemoryStore, InMemoryTxn, JobFilter, MemoryStore, MutationClaim,
+    MutationClaimOutcome, MutationLedgerStore, MutationResponse, NoopEmbedding, ReflectJobRow,
+    ResolvedMemoryContext, ReviewEventRow, ScopePage, StoreError, SubjectErasureReceipt,
+    SystemClock,
 };
 use memphant_store_postgres::{PgStore, PgTxn};
 use memphant_types::{
@@ -736,6 +737,28 @@ impl MemoryStore for AnyStore {
         match (self, tx) {
             (Self::Mem(store), AnyTxn::Mem(tx)) => store.fetch_scope_open_units_in_tx(tx).await,
             (Self::Pg(store), AnyTxn::Pg(tx)) => store.fetch_scope_open_units_in_tx(tx).await,
+            _ => txn_mismatch(),
+        }
+    }
+
+    async fn fetch_file_sync_transition_snapshot(
+        &self,
+        context: &ResolvedMemoryContext,
+    ) -> Result<FileSyncTransitionSnapshot, StoreError> {
+        delegate!(self, store => store.fetch_file_sync_transition_snapshot(context).await)
+    }
+
+    async fn fetch_file_sync_transition_snapshot_in_tx(
+        &self,
+        tx: &mut Self::Txn,
+    ) -> Result<FileSyncTransitionSnapshot, StoreError> {
+        match (self, tx) {
+            (Self::Mem(store), AnyTxn::Mem(tx)) => {
+                store.fetch_file_sync_transition_snapshot_in_tx(tx).await
+            }
+            (Self::Pg(store), AnyTxn::Pg(tx)) => {
+                store.fetch_file_sync_transition_snapshot_in_tx(tx).await
+            }
             _ => txn_mismatch(),
         }
     }

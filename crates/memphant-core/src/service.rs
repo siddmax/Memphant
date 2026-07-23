@@ -30,10 +30,11 @@ use crate::deep_recall::DeepRecallProvider;
 use crate::{
     ClaimMutationOutcome, Clock, CompiledWrite, CoreError, CorrectionUnitIds, CorrectionWrite,
     CrossRerankCandidateSelection, CrossRerankGranularity, CrossReranker,
-    DEFAULT_RECALL_POOL_DEPTH, EmbeddingProvider, ForgetWrite, JobFilter, MemoryStore,
-    MutationClaim, MutationClaimOutcome, MutationLedgerStore, MutationResponse, MutationVerb,
-    PackLevers, PreparedCompiledWrite, ReflectJobRow, ScopePage, StoreError,
-    StructuredStateProvider, StructuredStateRequest, VectorQuery, canonical_mutation_request_hash,
+    DEFAULT_RECALL_POOL_DEPTH, EmbeddingProvider, FileSyncTransitionSnapshot, ForgetWrite,
+    JobFilter, MemoryStore, MutationClaim, MutationClaimOutcome, MutationLedgerStore,
+    MutationResponse, MutationVerb, PackLevers, PreparedCompiledWrite, ReflectJobRow, ScopePage,
+    StoreError, StructuredStateProvider, StructuredStateRequest, VectorQuery,
+    apply_correction_transition, apply_unit_forget_transition, canonical_mutation_request_hash,
     correction_rectangles_with_ids, derive_episode_dedup_key, embedding_profile_for,
     normalize_component, parse_content_date, prepare_compiled_write,
     prepare_compiled_write_from_snapshot, project_structured_state, recall_scope_admitted,
@@ -383,8 +384,9 @@ mod file_sync_tests {
     };
     use memphant_types::{
         ContextBindingAgentRef, ContextBindingEntityRef, ContextBindingRequest,
-        ContextBindingScopeRef, FileSyncOperation, FileSyncOperationResult, FileSyncRequest,
-        FileSyncResult, FileSyncUnitMetadata, MemoryKind, StoredMemoryUnit, TenantId, TrustLevel,
+        ContextBindingScopeRef, EdgeId, FileSyncOperation, FileSyncOperationResult,
+        FileSyncRequest, FileSyncResult, FileSyncUnitMetadata, MemoryEdgeKind, MemoryKind,
+        StoredMemoryEdge, StoredMemoryUnit, TenantId, TrustLevel,
     };
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -418,6 +420,47 @@ mod file_sync_tests {
         store: InMemoryStore,
         unit: Mutex<Option<StoredMemoryUnit>>,
         calls: AtomicUsize,
+    }
+
+    struct EdgeDriftEmbedding {
+        store: InMemoryStore,
+        edge: Mutex<Option<StoredMemoryEdge>>,
+    }
+
+    impl EmbeddingProvider for EdgeDriftEmbedding {
+        fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
+            if self
+                .store
+                .mutation_locks
+                .lock()
+                .unwrap()
+                .values()
+                .any(|lock| lock.strong_count() > 0)
+            {
+                return Err(EmbedError::Unavailable(
+                    "embedding ran while a mutation claim was active".to_string(),
+                ));
+            }
+            if let Some(edge) = self.edge.lock().unwrap().take() {
+                self.store
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .memory_edges
+                    .entry(edge.tenant_id)
+                    .or_default()
+                    .push(edge);
+            }
+            Ok(vec![vec![1.0]; texts.len()])
+        }
+
+        fn dimensions(&self) -> usize {
+            1
+        }
+
+        fn id(&self) -> &str {
+            "file-sync-edge-drift"
+        }
     }
 
     impl EmbeddingProvider for AdmissionDriftEmbedding {
@@ -660,26 +703,70 @@ mod file_sync_tests {
     }
 
     #[tokio::test]
-    async fn file_sync_admission_snapshot_digest_is_ordered_and_covers_full_units() {
+    async fn file_sync_admission_snapshot_digest_is_ordered_and_covers_full_units_and_edges() {
         let store = InMemoryStore::default();
         let context = context(&store, "admission-digest").await;
         let first = stored_unit(&context, MemoryKind::Belief, "profile:first", "First.");
         let second = stored_unit(&context, MemoryKind::Semantic, "profile:second", "Second.");
-        let digest = file_sync_admission_snapshot_sha256(&[first.clone(), second.clone()]).unwrap();
+        let snapshot =
+            FileSyncTransitionSnapshot::new(vec![first.clone(), second.clone()], Vec::new());
+        let digest = file_sync_admission_snapshot_sha256(&snapshot).unwrap();
         assert_eq!(
             digest,
-            file_sync_admission_snapshot_sha256(&[second.clone(), first.clone()]).unwrap()
+            file_sync_admission_snapshot_sha256(&FileSyncTransitionSnapshot::new(
+                vec![second.clone(), first.clone()],
+                Vec::new(),
+            ))
+            .unwrap()
         );
         assert_ne!(
             digest,
-            file_sync_admission_snapshot_sha256(&[
-                StoredMemoryUnit {
-                    trust_level: TrustLevel::Quarantined,
-                    ..first
-                },
-                second
-            ])
+            file_sync_admission_snapshot_sha256(&FileSyncTransitionSnapshot::new(
+                vec![
+                    StoredMemoryUnit {
+                        trust_level: TrustLevel::Quarantined,
+                        ..first.clone()
+                    },
+                    second.clone()
+                ],
+                Vec::new(),
+            ))
             .unwrap()
+        );
+        let edge = StoredMemoryEdge {
+            id: EdgeId::new(),
+            tenant_id: context.tenant_id,
+            scope_id: context.scope_id,
+            src_id: first.id,
+            dst_id: second.id,
+            kind: MemoryEdgeKind::DerivedFrom,
+            transaction_from: Some(CLOCK.0.to_string()),
+            transaction_to: None,
+        };
+        let reverse_edge = StoredMemoryEdge {
+            id: EdgeId::new(),
+            tenant_id: context.tenant_id,
+            scope_id: context.scope_id,
+            src_id: second.id,
+            dst_id: first.id,
+            kind: MemoryEdgeKind::Supersedes,
+            transaction_from: Some(CLOCK.0.to_string()),
+            transaction_to: None,
+        };
+        let edge_digest = file_sync_admission_snapshot_sha256(&FileSyncTransitionSnapshot::new(
+            vec![first.clone(), second.clone()],
+            vec![edge.clone(), reverse_edge.clone()],
+        ))
+        .unwrap();
+        assert_ne!(digest, edge_digest);
+        assert_eq!(
+            edge_digest,
+            file_sync_admission_snapshot_sha256(&FileSyncTransitionSnapshot::new(
+                vec![second.clone(), first.clone(), first],
+                vec![reverse_edge, edge.clone(), edge],
+            ))
+            .unwrap(),
+            "unit and edge duplicates/order do not change the transition digest"
         );
     }
 
@@ -931,6 +1018,68 @@ mod file_sync_tests {
     }
 
     #[tokio::test]
+    async fn edge_only_drift_after_precompute_conflicts_without_staging_writes() {
+        let store = InMemoryStore::default();
+        let context = context(&store, "edge-drift").await;
+        let source = seed_unit(
+            &store,
+            &context,
+            "profile:edge-source",
+            "The edge source remains stable.",
+            None,
+            None,
+        )
+        .await;
+        let dependent = seed_unit(
+            &store,
+            &context,
+            "profile:edge-dependent",
+            "The edge dependent remains stable.",
+            None,
+            None,
+        )
+        .await;
+        let edge = StoredMemoryEdge {
+            id: EdgeId::new(),
+            tenant_id: context.tenant_id,
+            scope_id: context.scope_id,
+            src_id: dependent,
+            dst_id: source,
+            kind: MemoryEdgeKind::DerivedFrom,
+            transaction_from: Some(CLOCK.0.to_string()),
+            transaction_to: None,
+        };
+        let embedder = Arc::new(EdgeDriftEmbedding {
+            store: store.clone(),
+            edge: Mutex::new(Some(edge.clone())),
+        });
+        let service = MemoryService::new(Arc::new(store.clone()), Arc::new(CLOCK), embedder);
+        let base = service.canonical_projection(&context).await.unwrap();
+        let before_count = store.memory_units(context.tenant_id).len();
+        let sync_request = request(
+            &context,
+            base.fingerprint,
+            vec![FileSyncOperation::Retain {
+                fact_key: "profile:edge-requested".to_string(),
+                predicate: "states".to_string(),
+                body: "The requested unit must not land after edge drift.".to_string(),
+                confidence: 1.0,
+                valid_from: None,
+                valid_to: None,
+            }],
+        );
+
+        assert!(matches!(
+            service
+                .file_sync(&context, "file-sync-edge-drift", sync_request)
+                .await,
+            Err(ServiceError::SyncConflict(_))
+        ));
+        assert_eq!(store.memory_units(context.tenant_id).len(), before_count);
+        assert_eq!(store.memory_edges(context.tenant_id), vec![edge]);
+    }
+
+    #[tokio::test]
     async fn file_sync_admission_uses_the_serializable_full_open_scope_snapshot() {
         let store = InMemoryStore::default();
         let context = context(&store, "open-snapshot").await;
@@ -1107,6 +1256,241 @@ mod file_sync_tests {
             .collect::<Vec<_>>();
         bodies.sort_unstable();
         assert_eq!(bodies, vec!["I live in Lima.", "I speak English fluently."]);
+    }
+
+    #[tokio::test]
+    async fn later_retain_does_not_compile_against_a_corrected_units_composition_dependent() {
+        let store = InMemoryStore::default();
+        let context = context(&store, "correct-dependent-plan").await;
+        let source = seed_unit(
+            &store,
+            &context,
+            "profile:source",
+            "The source fact is current.",
+            None,
+            None,
+        )
+        .await;
+        let dependent = seed_unit(
+            &store,
+            &context,
+            "profile:derived",
+            "The composed dependent is stale.",
+            None,
+            None,
+        )
+        .await;
+        {
+            let mut state = store.inner.lock().unwrap();
+            state
+                .memory_units
+                .get_mut(&context.tenant_id)
+                .unwrap()
+                .iter_mut()
+                .find(|unit| unit.id == dependent)
+                .unwrap()
+                .source_kind = Some("composition".to_string());
+            state
+                .memory_edges
+                .entry(context.tenant_id)
+                .or_default()
+                .push(StoredMemoryEdge {
+                    id: EdgeId::new(),
+                    tenant_id: context.tenant_id,
+                    scope_id: context.scope_id,
+                    src_id: dependent,
+                    dst_id: source,
+                    kind: MemoryEdgeKind::DerivedFrom,
+                    transaction_from: Some(CLOCK.0.to_string()),
+                    transaction_to: None,
+                });
+        }
+        let service = MemoryService::new(
+            Arc::new(store.clone()),
+            Arc::new(CLOCK),
+            Arc::new(NoopEmbedding),
+        );
+        let base = service.canonical_projection(&context).await.unwrap();
+        let source_meta = metadata(
+            base.items
+                .iter()
+                .find(|item| item.unit_id == source)
+                .unwrap(),
+        );
+        let sync_request = request(
+            &context,
+            base.fingerprint,
+            vec![
+                FileSyncOperation::Correct {
+                    base: source_meta,
+                    body: "The source fact is corrected.".to_string(),
+                },
+                FileSyncOperation::Retain {
+                    fact_key: "profile:derived".to_string(),
+                    predicate: "states".to_string(),
+                    body: "The replacement derived fact is current.".to_string(),
+                    confidence: 1.0,
+                    valid_from: None,
+                    valid_to: None,
+                },
+            ],
+        );
+
+        service
+            .file_sync(&context, "file-sync-correct-dependent-plan", sync_request)
+            .await
+            .unwrap();
+
+        let units = store.memory_units(context.tenant_id);
+        let dependent_after = units.iter().find(|unit| unit.id == dependent).unwrap();
+        assert_eq!(dependent_after.state, UnitState::Expired);
+        assert!(dependent_after.transaction_to.is_some());
+        assert!(store.memory_edges(context.tenant_id).iter().all(|edge| {
+            edge.kind != MemoryEdgeKind::Contradicts
+                || (edge.src_id != dependent && edge.dst_id != dependent)
+        }));
+    }
+
+    #[tokio::test]
+    async fn later_retain_does_not_compile_against_a_forgotten_supersedes_lineage() {
+        let store = InMemoryStore::default();
+        let context = context(&store, "forget-lineage-plan").await;
+        let target = seed_unit(
+            &store,
+            &context,
+            "profile:forget-target",
+            "The selected lineage branch is current.",
+            None,
+            None,
+        )
+        .await;
+        let ancestor = seed_unit(
+            &store,
+            &context,
+            "profile:ancestor",
+            "The shared ancestor is historical.",
+            None,
+            None,
+        )
+        .await;
+        let sibling = seed_unit(
+            &store,
+            &context,
+            "profile:lineage",
+            "The sibling lineage branch is stale.",
+            None,
+            None,
+        )
+        .await;
+        let dependent = seed_unit(
+            &store,
+            &context,
+            "profile:lineage-dependent",
+            "The lineage derivative is stale.",
+            None,
+            None,
+        )
+        .await;
+        {
+            let mut state = store.inner.lock().unwrap();
+            let units = state.memory_units.get_mut(&context.tenant_id).unwrap();
+            let ancestor_unit = units.iter_mut().find(|unit| unit.id == ancestor).unwrap();
+            ancestor_unit.state = UnitState::Superseded;
+            ancestor_unit.transaction_to = Some(CLOCK.0.to_string());
+            units
+                .iter_mut()
+                .find(|unit| unit.id == dependent)
+                .unwrap()
+                .source_kind = Some("composition".to_string());
+            state
+                .memory_edges
+                .entry(context.tenant_id)
+                .or_default()
+                .extend([
+                    StoredMemoryEdge {
+                        id: EdgeId::new(),
+                        tenant_id: context.tenant_id,
+                        scope_id: context.scope_id,
+                        src_id: target,
+                        dst_id: ancestor,
+                        kind: MemoryEdgeKind::Supersedes,
+                        transaction_from: Some(CLOCK.0.to_string()),
+                        transaction_to: None,
+                    },
+                    StoredMemoryEdge {
+                        id: EdgeId::new(),
+                        tenant_id: context.tenant_id,
+                        scope_id: context.scope_id,
+                        src_id: sibling,
+                        dst_id: ancestor,
+                        kind: MemoryEdgeKind::Supersedes,
+                        transaction_from: Some(CLOCK.0.to_string()),
+                        transaction_to: None,
+                    },
+                    StoredMemoryEdge {
+                        id: EdgeId::new(),
+                        tenant_id: context.tenant_id,
+                        scope_id: context.scope_id,
+                        src_id: dependent,
+                        dst_id: sibling,
+                        kind: MemoryEdgeKind::DerivedFrom,
+                        transaction_from: Some(CLOCK.0.to_string()),
+                        transaction_to: None,
+                    },
+                ]);
+        }
+        let service = MemoryService::new(
+            Arc::new(store.clone()),
+            Arc::new(CLOCK),
+            Arc::new(NoopEmbedding),
+        );
+        let base = service.canonical_projection(&context).await.unwrap();
+        let target_meta = metadata(
+            base.items
+                .iter()
+                .find(|item| item.unit_id == target)
+                .unwrap(),
+        );
+        let sync_request = request(
+            &context,
+            base.fingerprint,
+            vec![
+                FileSyncOperation::Forget { base: target_meta },
+                FileSyncOperation::Retain {
+                    fact_key: "profile:lineage".to_string(),
+                    predicate: "states".to_string(),
+                    body: "The replacement lineage fact is current.".to_string(),
+                    confidence: 1.0,
+                    valid_from: None,
+                    valid_to: None,
+                },
+                FileSyncOperation::Retain {
+                    fact_key: "profile:lineage-dependent".to_string(),
+                    predicate: "states".to_string(),
+                    body: "The replacement lineage derivative is current.".to_string(),
+                    confidence: 1.0,
+                    valid_from: None,
+                    valid_to: None,
+                },
+            ],
+        );
+
+        service
+            .file_sync(&context, "file-sync-forget-lineage-plan", sync_request)
+            .await
+            .unwrap();
+
+        let units = store.memory_units(context.tenant_id);
+        for removed in [target, ancestor, sibling, dependent] {
+            let removed = units.iter().find(|unit| unit.id == removed).unwrap();
+            assert_eq!(removed.state, UnitState::Deleted);
+            assert!(removed.transaction_to.is_some());
+        }
+        assert!(store.memory_edges(context.tenant_id).iter().all(|edge| {
+            edge.kind != MemoryEdgeKind::Contradicts
+                || (![sibling, dependent].contains(&edge.src_id)
+                    && ![sibling, dependent].contains(&edge.dst_id))
+        }));
     }
 
     #[tokio::test]
@@ -1389,14 +1773,22 @@ enum PreparedFileSyncOperation {
     },
 }
 
-fn apply_compiled_write_to_snapshot(working: &mut Vec<StoredMemoryUnit>, write: &CompiledWrite) {
+fn apply_compiled_write_to_snapshot(
+    working: &mut FileSyncTransitionSnapshot,
+    write: &CompiledWrite,
+) {
     for update in &write.unit_updates {
-        if let Some(unit) = working.iter_mut().find(|unit| unit.id == update.id) {
+        if let Some(unit) = working.units.iter_mut().find(|unit| unit.id == update.id) {
             unit.state = update.state;
             unit.transaction_to = update.transaction_to.clone();
         }
     }
-    working.extend(write.new_units.iter().cloned());
+    working.units.extend(write.new_units.iter().cloned());
+    working.edges.extend(write.new_edges.iter().cloned());
+    working.units.sort_unstable_by_key(|unit| unit.id.as_uuid());
+    working.units.dedup_by_key(|unit| unit.id);
+    working.edges.sort_unstable_by_key(|edge| edge.id.as_uuid());
+    working.edges.dedup_by_key(|edge| edge.id);
 }
 
 fn projection_items(units: Vec<StoredMemoryUnit>) -> Vec<CanonicalProjectionUnit> {
@@ -1453,15 +1845,15 @@ pub fn file_sync_plan_sha256(
     serde_json::to_vec(operations).map(|encoded| format!("{:x}", Sha256::digest(encoded)))
 }
 
-/// Stable SHA-256 of the complete open-scope snapshot consumed by admission.
-/// Sorting by unit id makes equivalent store result orderings identical while
-/// serializing the full typed rows keeps every compiler-visible field bound.
+/// Stable SHA-256 of every unit and edge that can affect ordered file-sync
+/// admission or native correction/forget cascades. Historical/deleted units
+/// remain in the digest because supersedes closure can traverse them.
 pub fn file_sync_admission_snapshot_sha256(
-    units: &[StoredMemoryUnit],
+    snapshot: &FileSyncTransitionSnapshot,
 ) -> Result<String, serde_json::Error> {
-    let mut ordered = units.to_vec();
-    ordered.sort_unstable_by_key(|unit| unit.id.as_uuid());
-    serde_json::to_vec(&ordered).map(|encoded| format!("{:x}", Sha256::digest(encoded)))
+    let ordered = FileSyncTransitionSnapshot::new(snapshot.units.clone(), snapshot.edges.clone());
+    serde_json::to_vec(&(ordered.units, ordered.edges))
+        .map(|encoded| format!("{:x}", Sha256::digest(encoded)))
 }
 
 fn validate_file_sync_metadata(
@@ -3381,7 +3773,7 @@ impl<S: MemoryStore> MemoryService<S> {
         let evaluated_at = self.clock.now_rfc3339();
         let initial_admission = self
             .store
-            .fetch_scope_open_units(context)
+            .fetch_file_sync_transition_snapshot(context)
             .await
             .map_err(sync_store_error)?;
         let initial_admission_fingerprint = file_sync_admission_snapshot_sha256(&initial_admission)
@@ -3453,16 +3845,16 @@ impl<S: MemoryStore> MemoryService<S> {
                         valid_from: base.valid_from.clone(),
                         valid_to: base.valid_to.clone(),
                     };
-                    let old_index = working
-                        .iter()
-                        .position(|unit| unit.id == base.unit_id)
+                    let old = working
+                        .open_units(context)
+                        .into_iter()
+                        .find(|unit| unit.id == base.unit_id)
                         .ok_or_else(|| {
                             ServiceError::SyncInvalid(
                                 "file sync correction target is absent from admission snapshot"
                                     .to_string(),
                             )
                         })?;
-                    let old = working.remove(old_index);
                     let (replacement, remainders) = correction_rectangles_with_ids(
                         &old,
                         &correction,
@@ -3473,8 +3865,16 @@ impl<S: MemoryStore> MemoryService<S> {
                         &unit_ids,
                     )
                     .map_err(sync_operation_error)?;
-                    working.push(replacement);
-                    working.extend(remainders);
+                    apply_correction_transition(
+                        &mut working.units,
+                        &mut working.edges,
+                        context,
+                        base.unit_id,
+                        replacement,
+                        remainders,
+                        &evaluated_at,
+                    )
+                    .map_err(sync_operation_error)?;
                     prepared.push(PreparedFileSyncOperation::Correct {
                         memory_unit_id: base.unit_id,
                         write: CorrectionWrite {
@@ -3534,7 +3934,7 @@ impl<S: MemoryStore> MemoryService<S> {
                         self.embedder.as_ref(),
                         self.clock.as_ref(),
                         context,
-                        working.clone(),
+                        working.open_units(context),
                     )
                     .await?;
                     let PreparedCompiledWrite::Write {
@@ -3559,7 +3959,15 @@ impl<S: MemoryStore> MemoryService<S> {
                     });
                 }
                 FileSyncOperation::Forget { base } => {
-                    working.retain(|unit| unit.id != base.unit_id);
+                    apply_unit_forget_transition(
+                        &mut working.units,
+                        &working.edges,
+                        context,
+                        base.unit_id,
+                        &evaluated_at,
+                        None,
+                    )
+                    .map_err(sync_operation_error)?;
                     prepared.push(PreparedFileSyncOperation::Forget {
                         memory_unit_id: base.unit_id,
                         write: ForgetWrite {
@@ -3613,8 +4021,12 @@ impl<S: MemoryStore> MemoryService<S> {
                 request.base_fingerprint
             )));
         }
-        let transaction_admission = match self.store.fetch_scope_open_units_in_tx(&mut tx).await {
-            Ok(units) => units,
+        let transaction_admission = match self
+            .store
+            .fetch_file_sync_transition_snapshot_in_tx(&mut tx)
+            .await
+        {
+            Ok(snapshot) => snapshot,
             Err(error) => {
                 let _ = self.store.rollback(tx).await;
                 return Err(sync_store_error(error));
@@ -3635,7 +4047,7 @@ impl<S: MemoryStore> MemoryService<S> {
         if transaction_admission_fingerprint != initial_admission_fingerprint {
             let _ = self.store.rollback(tx).await;
             return Err(ServiceError::SyncConflict(
-                "full open-scope admission snapshot changed during file sync preparation"
+                "full unit/edge transition snapshot changed during file sync preparation"
                     .to_string(),
             ));
         }

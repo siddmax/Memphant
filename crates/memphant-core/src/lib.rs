@@ -985,6 +985,209 @@ pub struct CompiledWrite {
     pub embeddings: Vec<EmbeddingRow>,
 }
 
+/// The complete unit/edge state that can affect an ordered file-sync plan.
+///
+/// `units` deliberately includes historical and deleted rows. A current unit's
+/// bidirectional supersedes lineage can pass through a closed ancestor before
+/// reaching another open branch, and native forget staging uses the state of
+/// those historical endpoints when deciding which composition dependents to
+/// delete. `edges` therefore includes the whole bound context rather than the
+/// recall-time subset adjacent to the current projection.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileSyncTransitionSnapshot {
+    pub units: Vec<StoredMemoryUnit>,
+    pub edges: Vec<StoredMemoryEdge>,
+}
+
+impl FileSyncTransitionSnapshot {
+    pub fn new(mut units: Vec<StoredMemoryUnit>, mut edges: Vec<StoredMemoryEdge>) -> Self {
+        units.sort_unstable_by_key(|unit| unit.id.as_uuid());
+        units.dedup_by_key(|unit| unit.id);
+        edges.sort_unstable_by_key(|edge| edge.id.as_uuid());
+        edges.dedup_by_key(|edge| edge.id);
+        Self { units, edges }
+    }
+
+    /// The compiler-visible portion of the transition snapshot. Store reads
+    /// bind the context identity; this final filter preserves access-policy
+    /// kind restrictions while retaining historical rows for cascade preview.
+    pub fn open_units(&self, context: &ResolvedMemoryContext) -> Vec<StoredMemoryUnit> {
+        self.units
+            .iter()
+            .filter(|unit| {
+                unit.transaction_to.is_none()
+                    && context.allows(unit.kind, unit.scope_id, unit.agent_node_id)
+            })
+            .cloned()
+            .collect()
+    }
+}
+
+/// Apply the unit-state portion of native correction staging without I/O.
+/// Both file-sync preview and the in-memory native store use this transition;
+/// Postgres parity is pinned by the live store contract.
+fn apply_correction_unit_transition(
+    units: &mut [StoredMemoryUnit],
+    edges: &[StoredMemoryEdge],
+    context: &ResolvedMemoryContext,
+    old_id: UnitId,
+    now: &str,
+) -> Result<(), StoreError> {
+    let old = units
+        .iter_mut()
+        .find(|unit| {
+            unit.id == old_id
+                && unit.data_subject_id == context.data_subject_id
+                && unit.subject_generation == context.subject_generation
+                && unit.scope_id == context.scope_id
+                && unit.agent_node_id == context.agent_node_id
+                && unit.actor_id == Some(context.actor_id)
+                && unit.state != UnitState::Deleted
+                && unit.transaction_to.is_none()
+        })
+        .ok_or(StoreError::NotFound("memory_unit"))?;
+    old.state = UnitState::Superseded;
+    old.transaction_to = Some(now.to_string());
+
+    let dependent_ids: HashSet<_> = edges
+        .iter()
+        .filter(|edge| edge.kind == MemoryEdgeKind::DerivedFrom && edge.dst_id == old_id)
+        .map(|edge| edge.src_id)
+        .collect();
+    for unit in units.iter_mut().filter(|unit| {
+        dependent_ids.contains(&unit.id)
+            && unit.data_subject_id == context.data_subject_id
+            && unit.subject_generation == context.subject_generation
+            && unit.scope_id == context.scope_id
+            && unit.agent_node_id == context.agent_node_id
+            && unit.actor_id == Some(context.actor_id)
+            && unit.source_kind.as_deref() == Some("composition")
+            && unit.state != UnitState::Deleted
+            && unit.transaction_to.is_none()
+    }) {
+        unit.state = UnitState::Expired;
+        unit.transaction_to = Some(now.to_string());
+    }
+    Ok(())
+}
+
+/// Apply the complete native correction transition to a caller-owned unit and
+/// edge snapshot, including the supersedes edges later operations must see.
+pub(crate) fn apply_correction_transition(
+    units: &mut Vec<StoredMemoryUnit>,
+    edges: &mut Vec<StoredMemoryEdge>,
+    context: &ResolvedMemoryContext,
+    old_id: UnitId,
+    replacement: StoredMemoryUnit,
+    remainders: Vec<StoredMemoryUnit>,
+    now: &str,
+) -> Result<(), StoreError> {
+    apply_correction_unit_transition(units, edges, context, old_id, now)?;
+    let created_ids = std::iter::once(replacement.id)
+        .chain(remainders.iter().map(|unit| unit.id))
+        .collect::<Vec<_>>();
+    units.push(replacement);
+    units.extend(remainders);
+    edges.extend(created_ids.into_iter().map(|created_id| StoredMemoryEdge {
+        id: EdgeId::new(),
+        tenant_id: context.tenant_id,
+        scope_id: context.scope_id,
+        src_id: created_id,
+        dst_id: old_id,
+        kind: MemoryEdgeKind::Supersedes,
+        transaction_from: Some(now.to_string()),
+        transaction_to: None,
+    }));
+    Ok(())
+}
+
+/// Apply native unit-forget semantics without I/O: delete the whole
+/// bidirectional supersedes lineage, then every composition unit derived from
+/// a nondeleted member of that lineage.
+pub(crate) fn apply_unit_forget_transition(
+    units: &mut [StoredMemoryUnit],
+    edges: &[StoredMemoryEdge],
+    context: &ResolvedMemoryContext,
+    target: UnitId,
+    now: &str,
+    deletion_generation: Option<u64>,
+) -> Result<Vec<UnitId>, StoreError> {
+    if !units.iter().any(|unit| {
+        unit.id == target
+            && unit.data_subject_id == context.data_subject_id
+            && unit.subject_generation == context.subject_generation
+            && unit.scope_id == context.scope_id
+            && unit.agent_node_id == context.agent_node_id
+            && unit.actor_id == Some(context.actor_id)
+    }) {
+        return Err(StoreError::NotFound("forget target"));
+    }
+
+    let mut lineage = HashSet::from([target]);
+    loop {
+        let before = lineage.len();
+        for edge in edges
+            .iter()
+            .filter(|edge| edge.kind == MemoryEdgeKind::Supersedes)
+        {
+            if lineage.contains(&edge.src_id) {
+                lineage.insert(edge.dst_id);
+            }
+            if lineage.contains(&edge.dst_id) {
+                lineage.insert(edge.src_id);
+            }
+        }
+        if lineage.len() == before {
+            break;
+        }
+    }
+
+    let mut invalidated = Vec::new();
+    for unit in units.iter_mut().filter(|unit| {
+        lineage.contains(&unit.id)
+            && unit.data_subject_id == context.data_subject_id
+            && unit.subject_generation == context.subject_generation
+            && unit.scope_id == context.scope_id
+            && unit.agent_node_id == context.agent_node_id
+            && unit.actor_id == Some(context.actor_id)
+            && unit.state != UnitState::Deleted
+    }) {
+        unit.state = UnitState::Deleted;
+        if let Some(generation) = deletion_generation {
+            unit.deletion_generation = Some(generation);
+        }
+        unit.transaction_to = Some(now.to_string());
+        invalidated.push(unit.id);
+    }
+
+    let invalidated_set: HashSet<_> = invalidated.iter().copied().collect();
+    let dependent_ids: HashSet<_> = edges
+        .iter()
+        .filter(|edge| {
+            edge.kind == MemoryEdgeKind::DerivedFrom && invalidated_set.contains(&edge.dst_id)
+        })
+        .map(|edge| edge.src_id)
+        .collect();
+    for unit in units.iter_mut().filter(|unit| {
+        dependent_ids.contains(&unit.id)
+            && unit.data_subject_id == context.data_subject_id
+            && unit.subject_generation == context.subject_generation
+            && unit.scope_id == context.scope_id
+            && unit.agent_node_id == context.agent_node_id
+            && unit.actor_id == Some(context.actor_id)
+            && unit.source_kind.as_deref() == Some("composition")
+            && unit.state != UnitState::Deleted
+    }) {
+        unit.state = UnitState::Deleted;
+        if let Some(generation) = deletion_generation {
+            unit.deletion_generation = Some(generation);
+        }
+        unit.transaction_to = Some(now.to_string());
+        invalidated.push(unit.id);
+    }
+    Ok(invalidated)
+}
+
 /// One page of a tenant-bound scope memory export.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScopePage {
@@ -1183,12 +1386,23 @@ pub trait MemoryStore: Send + Sync {
         context: &ResolvedMemoryContext,
     ) -> impl Future<Output = Result<Vec<StoredMemoryUnit>, StoreError>> + Send;
     /// Transaction-scoped form of the complete open-scope compiler snapshot.
-    /// File sync uses this after its whole-batch serializable claim so every
-    /// admission decision is protected by the same database snapshot.
     fn fetch_scope_open_units_in_tx(
         &self,
         tx: &mut Self::Txn,
     ) -> impl Future<Output = Result<Vec<StoredMemoryUnit>, StoreError>> + Send;
+    /// Complete context-bound file-sync transition state. Historical/deleted
+    /// unit endpoints and the full edge set are required to preview native
+    /// correction/forget cascades exactly.
+    fn fetch_file_sync_transition_snapshot(
+        &self,
+        context: &ResolvedMemoryContext,
+    ) -> impl Future<Output = Result<FileSyncTransitionSnapshot, StoreError>> + Send;
+    /// Transaction-scoped re-read of the exact state protected by file-sync's
+    /// transition fingerprint.
+    fn fetch_file_sync_transition_snapshot_in_tx(
+        &self,
+        tx: &mut Self::Txn,
+    ) -> impl Future<Output = Result<FileSyncTransitionSnapshot, StoreError>> + Send;
     /// The recall vector family: the nearest units to `query_vec` under the
     /// ACTIVE embedding profile, each with its cosine DISTANCE (pgvector `<=>`;
     /// the in-memory store returns `1 - cosine`). Core scores the vector
@@ -2833,6 +3047,35 @@ fn in_memory_scope_open_units(
     units
 }
 
+fn in_memory_file_sync_transition_snapshot(
+    state: &InMemoryState,
+    context: &ResolvedMemoryContext,
+) -> FileSyncTransitionSnapshot {
+    let units = state
+        .memory_units
+        .get(&context.tenant_id)
+        .into_iter()
+        .flatten()
+        .filter(|unit| {
+            unit.data_subject_id == context.data_subject_id
+                && unit.subject_generation == context.subject_generation
+                && unit.scope_id == context.scope_id
+                && unit.agent_node_id == context.agent_node_id
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let unit_ids: HashSet<_> = units.iter().map(|unit| unit.id).collect();
+    let edges = state
+        .memory_edges
+        .get(&context.tenant_id)
+        .into_iter()
+        .flatten()
+        .filter(|edge| unit_ids.contains(&edge.src_id) && unit_ids.contains(&edge.dst_id))
+        .cloned()
+        .collect();
+    FileSyncTransitionSnapshot::new(units, edges)
+}
+
 impl MemoryStore for InMemoryStore {
     type Txn = InMemoryTxn;
 
@@ -3553,6 +3796,24 @@ impl MemoryStore for InMemoryStore {
         Ok(in_memory_scope_open_units(state, &context))
     }
 
+    async fn fetch_file_sync_transition_snapshot(
+        &self,
+        context: &ResolvedMemoryContext,
+    ) -> Result<FileSyncTransitionSnapshot, StoreError> {
+        let state = self.inner.lock().map_err(|_| StoreError::Poisoned)?;
+        state.validate_context(context)?;
+        Ok(in_memory_file_sync_transition_snapshot(&state, context))
+    }
+
+    async fn fetch_file_sync_transition_snapshot_in_tx(
+        &self,
+        tx: &mut Self::Txn,
+    ) -> Result<FileSyncTransitionSnapshot, StoreError> {
+        let context = tx.context.clone();
+        let state = self.staged_state(tx)?;
+        Ok(in_memory_file_sync_transition_snapshot(state, &context))
+    }
+
     async fn fetch_vector_candidates(
         &self,
         context: &ResolvedMemoryContext,
@@ -3984,27 +4245,24 @@ impl MemoryStore for InMemoryStore {
         let is_retroactive =
             correction.correction.valid_from.is_some() || correction.correction.valid_to.is_some();
 
-        let units = state.memory_units.entry(context.tenant_id).or_default();
-        let old_index = units.iter().position(|unit| unit.id == old_id).unwrap();
-        units[old_index].state = UnitState::Superseded;
-        units[old_index].transaction_to = Some(correction.now.clone());
-        units.push(replacement);
-        units.extend(remainders);
-
-        let edges = state.memory_edges.entry(context.tenant_id).or_default();
-        for created_id in std::iter::once(new_id).chain(remainder_ids.iter().copied()) {
-            edges.push(StoredMemoryEdge {
-                id: EdgeId::new(),
-                tenant_id: context.tenant_id,
-                scope_id: context.scope_id,
-                src_id: created_id,
-                dst_id: old_id,
-                kind: MemoryEdgeKind::Supersedes,
-                transaction_from: Some(correction.now.clone()),
-                transaction_to: None,
-            });
+        {
+            let InMemoryState {
+                memory_units,
+                memory_edges,
+                ..
+            } = state;
+            let units = memory_units.entry(context.tenant_id).or_default();
+            let edges = memory_edges.entry(context.tenant_id).or_default();
+            apply_correction_transition(
+                units,
+                edges,
+                &context,
+                old_id,
+                replacement,
+                remainders,
+                &correction.now,
+            )?;
         }
-        expire_composed_dependents(state, &context, &[old_id], &correction.now);
 
         // Embed the replacement unit under the same lock as its supersedes edge
         // so corrected truth is vector-visible — mirrors the Postgres path.
@@ -4136,9 +4394,35 @@ impl MemoryStore for InMemoryStore {
             });
         }
 
-        // Seed the sweep set. Unit forget erases the whole fact lineage
-        // (bidirectional supersedes closure); episode/resource forget seeds
-        // from the source columns, then must still cascade to supersedes
+        if let ForgetTarget::MemoryUnit(id) = forget.target {
+            let invalidated_units = {
+                let InMemoryState {
+                    memory_units,
+                    memory_edges,
+                    ..
+                } = state;
+                let units = memory_units.entry(context.tenant_id).or_default();
+                let edges = memory_edges.entry(context.tenant_id).or_default();
+                apply_unit_forget_transition(
+                    units,
+                    edges,
+                    &context,
+                    id,
+                    &forget.now,
+                    Some(deletion_generation),
+                )?
+            };
+            if let Some(embeddings) = state.embeddings.get_mut(&context.tenant_id) {
+                embeddings.retain(|row| !invalidated_units.contains(&row.memory_unit_id));
+            }
+            return Ok(ForgetOutcome {
+                deletion_generation,
+                invalidated_units,
+            });
+        }
+
+        // Episode/resource forget seeds from the source columns, then must
+        // still cascade to supersedes
         // DESCENDANTS: a correction replacement carries correction provenance
         // (source_episode_id = None, pinned by correction_provenance.rs), so
         // the source-column match alone lets corrected content survive the
@@ -4147,9 +4431,7 @@ impl MemoryStore for InMemoryStore {
         // content.
         let mut memory_lineage = HashSet::new();
         match forget.target {
-            ForgetTarget::MemoryUnit(id) => {
-                memory_lineage.insert(id);
-            }
+            ForgetTarget::MemoryUnit(_) => unreachable!(),
             ForgetTarget::Episode(_) | ForgetTarget::Resource(_) => {
                 for unit in state
                     .memory_units
@@ -4173,7 +4455,6 @@ impl MemoryStore for InMemoryStore {
                 }
             }
         }
-        let bidirectional = matches!(forget.target, ForgetTarget::MemoryUnit(_));
         if let Some(edges) = state.memory_edges.get(&context.tenant_id) {
             loop {
                 let before = memory_lineage.len();
@@ -4183,9 +4464,6 @@ impl MemoryStore for InMemoryStore {
                 {
                     if memory_lineage.contains(&edge.dst_id) {
                         memory_lineage.insert(edge.src_id);
-                    }
-                    if bidirectional && memory_lineage.contains(&edge.src_id) {
-                        memory_lineage.insert(edge.dst_id);
                     }
                 }
                 if memory_lineage.len() == before {
@@ -10971,30 +11249,6 @@ fn derived_by_for_unit(unit: &StoredMemoryUnit) -> &'static str {
         "artifact_bundle"
     } else {
         "extraction"
-    }
-}
-
-fn expire_composed_dependents(
-    state: &mut InMemoryState,
-    context: &ResolvedMemoryContext,
-    source_ids: &[UnitId],
-    now: &str,
-) {
-    let dependent_ids = composed_dependent_ids(state, context.tenant_id, source_ids);
-    if let Some(units) = state.memory_units.get_mut(&context.tenant_id) {
-        for unit in units.iter_mut().filter(|unit| {
-            dependent_ids.contains(&unit.id)
-                && unit.data_subject_id == context.data_subject_id
-                && unit.subject_generation == context.subject_generation
-                && unit.scope_id == context.scope_id
-                && unit.agent_node_id == context.agent_node_id
-                && unit.actor_id == Some(context.actor_id)
-        }) {
-            if unit.state != UnitState::Deleted && unit.transaction_to.is_none() {
-                unit.state = UnitState::Expired;
-                unit.transaction_to = Some(now.to_string());
-            }
-        }
     }
 }
 
