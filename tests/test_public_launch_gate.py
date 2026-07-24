@@ -76,6 +76,13 @@ def test_python_lineage_contracts_run_with_full_git_history() -> None:
     )
 
 
+def test_ci_cache_action_uses_node24_runtime() -> None:
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+    assert "uses: actions/cache@v5" in workflow
+    assert "uses: actions/cache@v4" not in workflow
+
+
 def test_public_benchmark_profile_kept_as_audit_trail_never_promotion_evidence() -> None:
     scorecard = load_scorecard()
     profile_path = ROOT / scorecard["profile"]["path"]
